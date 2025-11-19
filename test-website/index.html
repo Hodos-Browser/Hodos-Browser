@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BRC-100 Test Website</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #fafafa;
+        }
+        .test-section h2 {
+            color: #555;
+            margin-top: 0;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .success {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .error {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .info {
+            color: #17a2b8;
+            font-weight: bold;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            background: #f8f9fa;
+            border-left: 4px solid #007bff;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .status.available {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.unavailable {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .wallet-info {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 BRC-100 Test Website</h1>
+
+        <div id="status" class="status unavailable">
+            Checking BRC-100 availability...
+        </div>
+
+        <div class="test-section">
+            <h2>🔍 Wallet Detection</h2>
+            <button onclick="testClick()">Test JavaScript</button>
+            <button onclick="checkWalletStatus()">Check Wallet Status</button>
+            <button onclick="checkBRC100Status()">Check BRC-100 Status</button>
+            <div id="walletResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>🔑 Authentication Flow</h2>
+            <button onclick="testAuthentication()">Request Authentication</button>
+            <button onclick="testSessionManagement()">Test Session Management</button>
+            <div id="authResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>💳 BEEF Transactions</h2>
+            <button onclick="testBEEFCreation()">Create BEEF Transaction</button>
+            <button onclick="testBEEFBroadcast()">Broadcast BEEF Transaction</button>
+            <button onclick="testSPVVerification()">Test SPV Verification</button>
+            <div id="beefResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>🔄 Complete Workflow</h2>
+            <button onclick="testCompleteWorkflow()">Run Complete Test</button>
+            <div id="workflowResult" class="result"></div>
+        </div>
+
+        <div class="wallet-info">
+            <h3>📋 Instructions</h3>
+            <ol>
+                <li>Make sure the Babbage Browser is running</li>
+                <li>Ensure the Go wallet daemon is running on port 8080</li>
+                <li>Click "Check Wallet Status" to verify connection</li>
+                <li>Try the authentication flow to test user approval modals</li>
+                <li>Test BEEF transactions to verify blockchain integration</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        // Test if JavaScript is working
+        console.log('🚀 Test website JavaScript loaded!');
+
+        // Test button click
+        function testClick() {
+            alert('Button clicked!');
+            console.log('Button clicked!');
+        }
+
+        // Global variables for test results
+        let walletStatus = null;
+        let brc100Status = null;
+        let currentSession = null;
+
+        // Utility function to log results
+        function logResult(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            const timestamp = new Date().toLocaleTimeString();
+            const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            element.textContent += `[${timestamp}] ${prefix} ${message}\n`;
+            element.scrollTop = element.scrollHeight;
+        }
+
+        // Check wallet status
+        async function checkWalletStatus() {
+            console.log('🔍 checkWalletStatus called!');
+            const resultElement = document.getElementById('walletResult');
+            resultElement.textContent = '';
+
+            try {
+                logResult('walletResult', 'Checking wallet status via HTTP...');
+                console.log('🔍 About to make HTTP request to http://localhost:8080/wallet/status');
+
+                // Make HTTP request to wallet status endpoint
+                const response = await fetch('http://localhost:8080/wallet/status', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                console.log('🔍 HTTP response received:', response.status, response.statusText);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const status = await response.json();
+                walletStatus = status;
+
+                logResult('walletResult', `Wallet status: ${JSON.stringify(status, null, 2)}`, 'success');
+
+                // Update main status
+                const statusElement = document.getElementById('status');
+                statusElement.className = 'status available';
+                statusElement.textContent = '✅ Babbage Browser Connected';
+
+            } catch (error) {
+                logResult('walletResult', `Error: ${error.message}`, 'error');
+
+                const statusElement = document.getElementById('status');
+                statusElement.className = 'status unavailable';
+                statusElement.textContent = '❌ Babbage Browser Not Connected';
+            }
+        }
+
+        // Check BRC-100 status
+        async function checkBRC100Status() {
+            console.log('🔍 checkBRC100Status called!');
+            const resultElement = document.getElementById('walletResult');
+
+            try {
+                logResult('walletResult', 'Checking BRC-100 status via HTTP...');
+
+                // Make HTTP request to BRC-100 status endpoint
+                const response = await fetch('http://localhost:8080/brc100/status', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const status = await response.json();
+                brc100Status = status;
+
+                logResult('walletResult', `BRC-100 status: ${JSON.stringify(status, null, 2)}`, 'success');
+
+            } catch (error) {
+                logResult('walletResult', `BRC-100 Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test authentication flow
+        async function testAuthentication() {
+            const resultElement = document.getElementById('authResult');
+            resultElement.textContent = '';
+
+            try {
+                logResult('authResult', 'Starting authentication test...');
+
+                if (!window.bitcoinBrowser?.brc100) {
+                    throw new Error('BRC-100 API not available');
+                }
+
+                // Generate challenge
+                logResult('authResult', 'Generating authentication challenge...');
+                const challengeResponse = await window.bitcoinBrowser.brc100.generateChallenge({
+                    appId: 'test-website.com',
+                    purpose: 'Test authentication flow',
+                    timestamp: new Date().toISOString()
+                });
+
+                logResult('authResult', `Challenge generated: ${JSON.stringify(challengeResponse, null, 2)}`, 'success');
+
+                // Authenticate
+                logResult('authResult', 'Authenticating...');
+                const authResponse = await window.bitcoinBrowser.brc100.authenticate({
+                    challenge: challengeResponse.data?.challenge || challengeResponse.challenge,
+                    response: 'approved'
+                });
+
+                logResult('authResult', `Authentication result: ${JSON.stringify(authResponse, null, 2)}`, 'success');
+
+                currentSession = authResponse.data?.sessionId || authResponse.sessionId;
+
+            } catch (error) {
+                logResult('authResult', `Authentication Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test session management
+        async function testSessionManagement() {
+            const resultElement = document.getElementById('authResult');
+
+            try {
+                if (!currentSession) {
+                    throw new Error('No active session. Please run authentication test first.');
+                }
+
+                logResult('authResult', 'Testing session validation...');
+
+                const validationResponse = await window.bitcoinBrowser.brc100.validateSession({
+                    sessionId: currentSession
+                });
+
+                logResult('authResult', `Session validation: ${JSON.stringify(validationResponse, null, 2)}`, 'success');
+
+            } catch (error) {
+                logResult('authResult', `Session Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test BEEF creation
+        async function testBEEFCreation() {
+            const resultElement = document.getElementById('beefResult');
+            resultElement.textContent = '';
+
+            try {
+                logResult('beefResult', 'Creating BEEF transaction...');
+
+                if (!window.bitcoinBrowser?.brc100) {
+                    throw new Error('BRC-100 API not available');
+                }
+
+                const beefResponse = await window.bitcoinBrowser.brc100.createBEEF({
+                    actions: [{
+                        type: 'payment',
+                        data: {
+                            recipient: '1MBdcYaWTB3dYByNV3dBoLxkz6ibgv6Hmv',
+                            amount: 1000,
+                            feeRate: 5
+                        },
+                        timestamp: new Date().toISOString()
+                    }],
+                    sessionId: `test_session_${Date.now()}`,
+                    appDomain: 'test-website.com',
+                    includeSPVData: true
+                });
+
+                logResult('beefResult', `BEEF created: ${JSON.stringify(beefResponse, null, 2)}`, 'success');
+
+            } catch (error) {
+                logResult('beefResult', `BEEF Creation Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test BEEF broadcasting
+        async function testBEEFBroadcast() {
+            const resultElement = document.getElementById('beefResult');
+
+            try {
+                logResult('beefResult', 'Creating and broadcasting BEEF transaction...');
+
+                // First create a BEEF transaction
+                const beefResponse = await window.bitcoinBrowser.brc100.createBEEF({
+                    actions: [{
+                        type: 'payment',
+                        data: {
+                            recipient: '1MBdcYaWTB3dYByNV3dBoLxkz6ibgv6Hmv',
+                            amount: 1000,
+                            feeRate: 5
+                        },
+                        timestamp: new Date().toISOString()
+                    }],
+                    sessionId: `broadcast_test_${Date.now()}`,
+                    appDomain: 'test-website.com',
+                    includeSPVData: true
+                });
+
+                if (!beefResponse.success && !beefResponse.data) {
+                    throw new Error('Failed to create BEEF transaction');
+                }
+
+                // Broadcast the BEEF transaction
+                const broadcastResponse = await window.bitcoinBrowser.brc100.broadcastBEEF({
+                    beefTransaction: beefResponse.data || beefResponse
+                });
+
+                logResult('beefResult', `BEEF broadcast result: ${JSON.stringify(broadcastResponse, null, 2)}`, 'success');
+
+            } catch (error) {
+                logResult('beefResult', `BEEF Broadcast Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test SPV verification
+        async function testSPVVerification() {
+            const resultElement = document.getElementById('beefResult');
+
+            try {
+                logResult('beefResult', 'Testing SPV verification...');
+
+                const spvResponse = await window.bitcoinBrowser.brc100.verifySPV({
+                    issuer: 'Babbage-Browser-Wallet',
+                    subject: '1MBdcYaWTB3dYByNV3dBoLxkz6ibgv6Hmv',
+                    transactionId: 'd447c985c31de08f8e65059f4f3849da5cb02542b6f2c36cf7e1c0ca4a17272f',
+                    purpose: 'Test SPV verification',
+                    timestamp: new Date().toISOString()
+                });
+
+                logResult('beefResult', `SPV verification: ${JSON.stringify(spvResponse, null, 2)}`, 'success');
+
+            } catch (error) {
+                logResult('beefResult', `SPV Verification Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Test complete workflow
+        async function testCompleteWorkflow() {
+            const resultElement = document.getElementById('workflowResult');
+            resultElement.textContent = '';
+
+            try {
+                logResult('workflowResult', '🚀 Starting complete BRC-100 workflow test...');
+
+                // Step 1: Check availability
+                logResult('workflowResult', 'Step 1: Checking BRC-100 availability...');
+                const isAvailable = await window.bitcoinBrowser.brc100.isAvailable();
+                if (!isAvailable) {
+                    throw new Error('BRC-100 not available');
+                }
+                logResult('workflowResult', '✅ BRC-100 is available', 'success');
+
+                // Step 2: Authentication
+                logResult('workflowResult', 'Step 2: Testing authentication...');
+                const challengeResponse = await window.bitcoinBrowser.brc100.generateChallenge({
+                    appId: 'test-website.com',
+                    purpose: 'Complete workflow test',
+                    timestamp: new Date().toISOString()
+                });
+
+                const authResponse = await window.bitcoinBrowser.brc100.authenticate({
+                    challenge: challengeResponse.data?.challenge || challengeResponse.challenge,
+                    response: 'approved'
+                });
+                logResult('workflowResult', '✅ Authentication successful', 'success');
+
+                // Step 3: Create BEEF transaction
+                logResult('workflowResult', 'Step 3: Creating BEEF transaction...');
+                const beefResponse = await window.bitcoinBrowser.brc100.createBEEF({
+                    actions: [{
+                        type: 'payment',
+                        data: {
+                            recipient: '1MBdcYaWTB3dYByNV3dBoLxkz6ibgv6Hmv',
+                            amount: 1000,
+                            feeRate: 5
+                        },
+                        timestamp: new Date().toISOString()
+                    }],
+                    sessionId: `workflow_test_${Date.now()}`,
+                    appDomain: 'test-website.com',
+                    includeSPVData: true
+                });
+                logResult('workflowResult', '✅ BEEF transaction created', 'success');
+
+                // Step 4: Verify BEEF
+                logResult('workflowResult', 'Step 4: Verifying BEEF transaction...');
+                const verifyResponse = await window.bitcoinBrowser.brc100.verifyBEEF({
+                    beefTransaction: beefResponse.data || beefResponse
+                });
+                logResult('workflowResult', '✅ BEEF transaction verified', 'success');
+
+                // Step 5: Test SPV
+                logResult('workflowResult', 'Step 5: Testing SPV verification...');
+                const spvResponse = await window.bitcoinBrowser.brc100.verifySPV({
+                    issuer: 'Babbage-Browser-Wallet',
+                    subject: '1MBdcYaWTB3dYByNV3dBoLxkz6ibgv6Hmv',
+                    transactionId: 'd447c985c31de08f8e65059f4f3849da5cb02542b6f2c36cf7e1c0ca4a17272f',
+                    purpose: 'Complete workflow test',
+                    timestamp: new Date().toISOString()
+                });
+                logResult('workflowResult', '✅ SPV verification completed', 'success');
+
+                logResult('workflowResult', '🎉 Complete workflow test successful!', 'success');
+
+            } catch (error) {
+                logResult('workflowResult', `❌ Workflow Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', () => {
+            checkWalletStatus();
+            checkBRC100Status();
+        });
+    </script>
+</body>
+</html>

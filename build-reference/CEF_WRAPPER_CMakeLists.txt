@@ -1,0 +1,69 @@
+# =============================
+# libcef_dll/wrapper/CMakeLists.txt
+# Reference copy for build documentation
+# =============================
+#
+# This is a reference copy of the CMakeLists.txt file used to build the CEF wrapper library.
+# The actual file is located at: cef-binaries/libcef_dll/wrapper/CMakeLists.txt
+#
+# This file is provided as a reference so developers can see what the wrapper build
+# configuration looks like before downloading the CEF binaries (which are gitignored).
+#
+# When you download CEF binaries, this file will already exist at:
+#   cef-binaries/libcef_dll/wrapper/CMakeLists.txt
+#
+# IMPORTANT: This CMakeLists.txt builds in-place within the cef-binaries directory.
+# Each developer must build their own wrapper library as the build output contains
+# paths specific to each system.
+
+cmake_minimum_required(VERSION 3.15)
+project(libcef_dll_wrapper)
+
+# Use modern C++
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
+# Collect all wrapper source files
+file(GLOB WRAPPER_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../base/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ctocpp/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ctocpp/views/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cpptoc/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cpptoc/views/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../transfer_util.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shutdown_checker.cc"
+)
+
+list(APPEND WRAPPER_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/cef_message_router.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cef_message_router_utils.cc"
+)
+
+# Build a static library from the wrapper sources
+add_library(libcef_dll_wrapper STATIC ${WRAPPER_SOURCES})
+
+# Match runtime linkage with CEF prebuilt binaries
+set_target_properties(libcef_dll_wrapper PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
+
+# Define macro required to compile wrapper-side code
+target_compile_definitions(libcef_dll_wrapper PRIVATE
+    WRAPPING_CEF_SHARED
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+
+
+# Include directories
+target_include_directories(libcef_dll_wrapper PRIVATE
+  ${PROJECT_ROOT}
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
+  ${CMAKE_CURRENT_SOURCE_DIR}/../base
+  ${CMAKE_CURRENT_SOURCE_DIR}/../cpptoc
+  ${CMAKE_CURRENT_SOURCE_DIR}/../ctocpp
+)

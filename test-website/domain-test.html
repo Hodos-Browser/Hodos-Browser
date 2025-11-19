@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Domain Verification Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .domain-info {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 Domain Verification Test</h1>
+
+        <div class="domain-info">
+            <strong>Current Domain:</strong> <span id="currentDomain"></span><br>
+            <strong>Purpose:</strong> Test domain verification and whitelist functionality<br>
+            <strong>Expected Behavior:</strong> First request should trigger domain approval modal
+        </div>
+
+        <div class="test-section">
+            <h3>1. Test Domain Whitelist Check</h3>
+            <p>Check if this domain is currently whitelisted:</p>
+            <button onclick="checkDomainWhitelist()">Check Domain Status</button>
+            <div id="whitelistResult" class="result" style="display: none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2. Test BRC-100 Authentication Request</h3>
+            <p>This should trigger the domain approval modal if not whitelisted:</p>
+            <button onclick="testAuthRequest()">Request Authentication</button>
+            <div id="authResult" class="result" style="display: none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3. Test BRC-100 BEEF Transaction</h3>
+            <p>This should trigger the domain approval modal if not whitelisted:</p>
+            <button onclick="testBEEFRequest()">Create BEEF Transaction</button>
+            <div id="beefResult" class="result" style="display: none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>4. Test Domain Whitelist Management</h3>
+            <p>Add this domain to whitelist (for testing):</p>
+            <button onclick="addToWhitelist(true)">Add to Whitelist (Permanent)</button>
+            <button onclick="addToWhitelist(false)">Add to Whitelist (One-time)</button>
+            <button onclick="removeFromWhitelist()">Remove from Whitelist</button>
+            <div id="whitelistManageResult" class="result" style="display: none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>5. List All Whitelisted Domains</h3>
+            <p>View all domains currently in the whitelist:</p>
+            <button onclick="listWhitelist()">List Whitelist</button>
+            <div id="whitelistListResult" class="result" style="display: none;"></div>
+        </div>
+    </div>
+
+    <script>
+        // Display current domain
+        document.getElementById('currentDomain').textContent = window.location.hostname;
+
+        // Helper function to display results
+        function showResult(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            element.style.display = 'block';
+            element.className = `result ${type}`;
+            element.textContent = message;
+        }
+
+        // Test domain whitelist check
+        async function checkDomainWhitelist() {
+            try {
+                const domain = window.location.hostname;
+                const response = await fetch(`http://localhost:8080/domain/whitelist/check?domain=${encodeURIComponent(domain)}`);
+                const result = await response.json();
+
+                if (result.whitelisted) {
+                    showResult('whitelistResult', `✅ Domain "${domain}" is WHITELISTED`, 'success');
+                } else {
+                    showResult('whitelistResult', `❌ Domain "${domain}" is NOT whitelisted`, 'error');
+                }
+            } catch (error) {
+                showResult('whitelistResult', `❌ Error checking domain: ${error.message}`, 'error');
+            }
+        }
+
+        // Test authentication request
+        async function testAuthRequest() {
+            try {
+                const response = await fetch('http://localhost:8080/brc100/auth/challenge', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        appId: window.location.hostname
+                    })
+                });
+
+                const result = await response.json();
+                showResult('authResult', `Authentication request result:\n${JSON.stringify(result, null, 2)}`, 'info');
+            } catch (error) {
+                showResult('authResult', `❌ Error with authentication request: ${error.message}`, 'error');
+            }
+        }
+
+        // Test BEEF transaction request
+        async function testBEEFRequest() {
+            try {
+                const response = await fetch('http://localhost:8080/brc100/beef/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        actions: [{
+                            type: 'test',
+                            data: { message: 'Test BEEF transaction' },
+                            timestamp: new Date().toISOString()
+                        }],
+                        appDomain: window.location.hostname
+                    })
+                });
+
+                const result = await response.json();
+                showResult('beefResult', `BEEF transaction result:\n${JSON.stringify(result, null, 2)}`, 'info');
+            } catch (error) {
+                showResult('beefResult', `❌ Error with BEEF request: ${error.message}`, 'error');
+            }
+        }
+
+        // Add domain to whitelist
+        async function addToWhitelist(isPermanent) {
+            try {
+                const response = await fetch('http://localhost:8080/domain/whitelist/add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        domain: window.location.hostname,
+                        isPermanent: isPermanent
+                    })
+                });
+
+                const result = await response.json();
+                const type = isPermanent ? 'permanent' : 'one-time';
+                showResult('whitelistManageResult', `✅ Domain added to whitelist (${type}):\n${JSON.stringify(result, null, 2)}`, 'success');
+            } catch (error) {
+                showResult('whitelistManageResult', `❌ Error adding domain to whitelist: ${error.message}`, 'error');
+            }
+        }
+
+        // Remove domain from whitelist
+        async function removeFromWhitelist() {
+            try {
+                const response = await fetch('http://localhost:8080/domain/whitelist/remove', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        domain: window.location.hostname
+                    })
+                });
+
+                const result = await response.json();
+                showResult('whitelistManageResult', `✅ Domain removed from whitelist:\n${JSON.stringify(result, null, 2)}`, 'success');
+            } catch (error) {
+                showResult('whitelistManageResult', `❌ Error removing domain from whitelist: ${error.message}`, 'error');
+            }
+        }
+
+        // List all whitelisted domains
+        async function listWhitelist() {
+            try {
+                const response = await fetch('http://localhost:8080/domain/whitelist/list');
+                const result = await response.json();
+                showResult('whitelistListResult', `Current whitelist:\n${JSON.stringify(result, null, 2)}`, 'info');
+            } catch (error) {
+                showResult('whitelistListResult', `❌ Error listing whitelist: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-check domain status on page load
+        window.addEventListener('load', () => {
+            setTimeout(checkDomainWhitelist, 1000);
+        });
+    </script>
+</body>
+</html>

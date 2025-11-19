@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BRC-100 WebSocket Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .connecting { background-color: #fff3cd; color: #856404; }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+
+        .message-log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        .message {
+            margin: 5px 0;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        .message.sent { background-color: #e3f2fd; }
+        .message.received { background-color: #f3e5f5; }
+        .message.error { background-color: #ffebee; }
+
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        .form-group {
+            margin: 10px 0;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 BRC-100 WebSocket Test Client</h1>
+
+        <div id="status" class="status disconnected">Disconnected</div>
+
+        <div class="form-group">
+            <button id="connectBtn" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+            <button id="pingBtn" onclick="sendPing()" disabled>Send Ping</button>
+        </div>
+
+        <div class="form-group">
+            <label for="appDomain">App Domain:</label>
+            <input type="text" id="appDomain" value="test-app.example.com" placeholder="Enter app domain">
+        </div>
+
+        <div class="form-group">
+            <label for="purpose">Purpose:</label>
+            <input type="text" id="purpose" value="Testing BRC-100 authentication" placeholder="Enter authentication purpose">
+        </div>
+
+        <div class="form-group">
+            <button id="authBtn" onclick="sendAuthRequest()" disabled>Send Auth Request</button>
+            <button id="statusBtn" onclick="sendSessionStatus()" disabled>Get Session Status</button>
+        </div>
+
+        <div class="form-group">
+            <label for="customMessage">Custom Message (JSON):</label>
+            <textarea id="customMessage" rows="3" placeholder='{"type": "custom", "data": {"message": "Hello!"}}'></textarea>
+            <button id="customBtn" onclick="sendCustomMessage()" disabled>Send Custom Message</button>
+        </div>
+
+        <h3>Message Log:</h3>
+        <div id="messageLog" class="message-log"></div>
+
+        <div class="form-group">
+            <button onclick="clearLog()">Clear Log</button>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        let clientId = null;
+
+        function updateStatus(status, className) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = status;
+            statusEl.className = `status ${className}`;
+        }
+
+        function updateButtons(connected) {
+            document.getElementById('connectBtn').disabled = connected;
+            document.getElementById('disconnectBtn').disabled = !connected;
+            document.getElementById('pingBtn').disabled = !connected;
+            document.getElementById('authBtn').disabled = !connected;
+            document.getElementById('statusBtn').disabled = !connected;
+            document.getElementById('customBtn').disabled = !connected;
+        }
+
+        function addMessage(message, type = 'received') {
+            const log = document.getElementById('messageLog');
+            const messageEl = document.createElement('div');
+            messageEl.className = `message ${type}`;
+
+            const timestamp = new Date().toLocaleTimeString();
+            const formattedMessage = typeof message === 'string' ? message : JSON.stringify(message, null, 2);
+
+            messageEl.innerHTML = `<strong>[${timestamp}]</strong> ${formattedMessage}`;
+            log.appendChild(messageEl);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function connect() {
+            if (socket) {
+                addMessage('Already connected', 'error');
+                return;
+            }
+
+            updateStatus('Connecting...', 'connecting');
+
+            socket = new WebSocket('ws://localhost:8080/brc100/ws');
+
+            socket.onopen = function(event) {
+                updateStatus('Connected', 'connected');
+                updateButtons(true);
+                addMessage('WebSocket connection established', 'received');
+            };
+
+            socket.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    addMessage(message, 'received');
+
+                    // Store client ID if provided
+                    if (message.sessionId && message.type === 'welcome') {
+                        clientId = message.sessionId;
+                    }
+                } catch (e) {
+                    addMessage(event.data, 'received');
+                }
+            };
+
+            socket.onclose = function(event) {
+                updateStatus('Disconnected', 'disconnected');
+                updateButtons(false);
+                addMessage(`WebSocket connection closed: ${event.code} - ${event.reason}`, 'error');
+                socket = null;
+                clientId = null;
+            };
+
+            socket.onerror = function(error) {
+                addMessage(`WebSocket error: ${error}`, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.close();
+            }
+        }
+
+        function sendPing() {
+            if (!socket) return;
+
+            const message = {
+                type: 'ping',
+                sessionId: clientId,
+                timestamp: new Date().toISOString()
+            };
+
+            socket.send(JSON.stringify(message));
+            addMessage(message, 'sent');
+        }
+
+        function sendAuthRequest() {
+            if (!socket) return;
+
+            const appDomain = document.getElementById('appDomain').value;
+            const purpose = document.getElementById('purpose').value;
+
+            if (!appDomain) {
+                addMessage('App domain is required', 'error');
+                return;
+            }
+
+            const message = {
+                type: 'auth_request',
+                sessionId: clientId,
+                data: {
+                    authRequest: {
+                        appDomain: appDomain,
+                        purpose: purpose
+                    }
+                },
+                timestamp: new Date().toISOString()
+            };
+
+            socket.send(JSON.stringify(message));
+            addMessage(message, 'sent');
+        }
+
+        function sendSessionStatus() {
+            if (!socket) return;
+
+            const message = {
+                type: 'session_status',
+                sessionId: clientId,
+                timestamp: new Date().toISOString()
+            };
+
+            socket.send(JSON.stringify(message));
+            addMessage(message, 'sent');
+        }
+
+        function sendCustomMessage() {
+            if (!socket) return;
+
+            const customMessageText = document.getElementById('customMessage').value;
+            if (!customMessageText) {
+                addMessage('Custom message is required', 'error');
+                return;
+            }
+
+            try {
+                const message = JSON.parse(customMessageText);
+                message.sessionId = clientId;
+                message.timestamp = new Date().toISOString();
+
+                socket.send(JSON.stringify(message));
+                addMessage(message, 'sent');
+            } catch (e) {
+                addMessage(`Invalid JSON: ${e.message}`, 'error');
+            }
+        }
+
+        function clearLog() {
+            document.getElementById('messageLog').innerHTML = '';
+        }
+
+        // Initialize
+        updateButtons(false);
+    </script>
+</body>
+</html>
