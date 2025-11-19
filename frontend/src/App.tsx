@@ -38,6 +38,11 @@ const App = () => {
 
     console.log('🔐 Global showBRC100AuthApprovalModal function registered');
 
+    // COMMENTED OUT: Wallet status check and wallet creation/backup prompt on startup
+    // This was previously used to create wallet.json and prompt users to save mnemonic
+    // We have changed how wallet.json is created, so this check is disabled for now
+    // TODO: Re-implement wallet initialization check in the future with new wallet creation flow
+    /*
     const checkWalletStatus = async () => {
       console.log("🔍 checkWalletStatus started");
 
@@ -101,6 +106,7 @@ const App = () => {
     };
 
     checkWalletStatus();
+    */
 
     // Initialize BRC-100 API integration
     const initializeBRC100 = async () => {

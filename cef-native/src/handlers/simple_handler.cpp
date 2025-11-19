@@ -373,6 +373,12 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "wallet_status_check") {
         LOG_DEBUG_BROWSER("🔍 Wallet status check requested");
 
+        // NOTE: This handler only responds to wallet status check requests.
+        // It does NOT shut down the application based on wallet status.
+        // The application should continue running regardless of wallet status.
+        // Previous code that checked wallet status on startup and shut down
+        // if wallet status was false has been removed/disabled.
+
         nlohmann::json response;
         response["exists"] = false;
         response["needsBackup"] = true;
@@ -406,6 +412,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         // Always send a response, even if it's just the default "no wallet" state
+        // This allows the app to continue running regardless of wallet status
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("wallet_status_check_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
         responseArgs->SetString(0, response.dump());

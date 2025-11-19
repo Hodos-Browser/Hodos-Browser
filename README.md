@@ -26,8 +26,6 @@ A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native
 
 **Storage:** `%APPDATA%/HodosBrowser/wallet/wallet.json`
 
-**See:** `SESSION_SUMMARY_2025-10-27.md` for latest session details
-
 ---
 
 ## 🔧 Project Structure
