@@ -1,9 +1,9 @@
 
 // Safely define the shell → native message bridge
-if (!window.bitcoinBrowser) window.bitcoinBrowser = {} as any;
+if (!window.hodosBrowser) window.hodosBrowser = {} as any;
 
-if (!window.bitcoinBrowser.navigation) {
-  window.bitcoinBrowser.navigation = {
+if (!window.hodosBrowser.navigation) {
+  window.hodosBrowser.navigation = {
     navigate: (url: string) => {
       if (window.cefMessage?.send) {
         window.cefMessage.send('navigate', [url]);
@@ -14,17 +14,17 @@ if (!window.bitcoinBrowser.navigation) {
   };
 }
 
-// Debug: Check what bitcoinBrowser.overlay looks like
-console.log("🔍 Bridge: window.bitcoinBrowser:", window.bitcoinBrowser);
-console.log("🔍 Bridge: window.bitcoinBrowser.overlay:", window.bitcoinBrowser?.overlay);
-console.log("🔍 Bridge: typeof overlay:", typeof window.bitcoinBrowser?.overlay);
+// Debug: Check what hodosBrowser.overlay looks like
+console.log("🔍 Bridge: window.hodosBrowser:", window.hodosBrowser);
+console.log("🔍 Bridge: window.hodosBrowser.overlay:", window.hodosBrowser?.overlay);
+console.log("🔍 Bridge: typeof overlay:", typeof window.hodosBrowser?.overlay);
 
 // Only set methods if they don't already exist (don't override injected methods)
-if (!window.bitcoinBrowser.overlay?.show) {
-  if (!window.bitcoinBrowser.overlay) {
-    (window.bitcoinBrowser as any).overlay = {};
+if (!window.hodosBrowser.overlay?.show) {
+  if (!window.hodosBrowser.overlay) {
+    (window.hodosBrowser as any).overlay = {};
   }
-  window.bitcoinBrowser.overlay.show = () => {
+  window.hodosBrowser.overlay.show = () => {
     console.log("🧠 JS: Sending overlay_show to native");
     console.log("Bridge is executing from URL:", window.location.href);
 
@@ -46,14 +46,14 @@ if (!window.bitcoinBrowser.overlay?.show) {
     }
   };
 
-  window.bitcoinBrowser.overlay.close = () => {
+  window.hodosBrowser.overlay.close = () => {
     console.log("🧠 JS: Sending overlay_close to native");
     window.cefMessage?.send('overlay_close', []);
   };
 
 } else {
   // Check if this is our injected method (uses chrome.runtime.sendMessage)
-  const methodString = window.bitcoinBrowser.overlay.show.toString();
+  const methodString = window.hodosBrowser.overlay.show.toString();
   if (methodString.includes('chrome.runtime.sendMessage') && methodString.includes('test_overlay')) {
     console.log("🔍 Bridge: overlay.show is our injected method, not overriding");
   } else {
@@ -61,37 +61,37 @@ if (!window.bitcoinBrowser.overlay?.show) {
   }
 }
 
-if (!window.bitcoinBrowser.overlay?.hide) {
-  if (!window.bitcoinBrowser.overlay) {
-    (window.bitcoinBrowser as any).overlay = {};
+if (!window.hodosBrowser.overlay?.hide) {
+  if (!window.hodosBrowser.overlay) {
+    (window.hodosBrowser as any).overlay = {};
   }
-  window.bitcoinBrowser.overlay.hide = () => window.cefMessage?.send?.('overlay_hide', []);
+  window.hodosBrowser.overlay.hide = () => window.cefMessage?.send?.('overlay_hide', []);
 }
 
-if (!window.bitcoinBrowser.overlay?.toggleInput) {
-  if (!window.bitcoinBrowser.overlay) {
-    (window.bitcoinBrowser as any).overlay = {};
+if (!window.hodosBrowser.overlay?.toggleInput) {
+  if (!window.hodosBrowser.overlay) {
+    (window.hodosBrowser as any).overlay = {};
   }
-  window.bitcoinBrowser.overlay.toggleInput = (enable: boolean) =>
+  window.hodosBrowser.overlay.toggleInput = (enable: boolean) =>
     window.cefMessage?.send?.('overlay_input', [enable]);
 }
 
-if (!window.bitcoinBrowser.overlay?.close) {
-  if (!window.bitcoinBrowser.overlay) {
-    (window.bitcoinBrowser as any).overlay = {};
+if (!window.hodosBrowser.overlay?.close) {
+  if (!window.hodosBrowser.overlay) {
+    (window.hodosBrowser as any).overlay = {};
   }
-  window.bitcoinBrowser.overlay.close = () => {
+  window.hodosBrowser.overlay.close = () => {
     console.log("🧠 JS: Sending overlay_close to native");
     window.cefMessage?.send?.('overlay_close', []);
   };
 }
 
-console.log("🔍 initWindowBridge: Setting up bitcoinBrowser.address");
-console.log("🔍 initWindowBridge: window.bitcoinBrowser.address exists:", !!window.bitcoinBrowser.address);
+console.log("🔍 initWindowBridge: Setting up hodosBrowser.address");
+console.log("🔍 initWindowBridge: window.hodosBrowser.address exists:", !!window.hodosBrowser.address);
 
 // Force override the existing function
 console.log("🔍 initWindowBridge: Forcing override of address.generate function");
-window.bitcoinBrowser.address.generate = () => {
+window.hodosBrowser.address.generate = () => {
   console.log("🔑 JS: Sending address_generate to native");
   return new Promise((resolve, reject) => {
     // Set up response handlers
@@ -116,8 +116,8 @@ window.bitcoinBrowser.address.generate = () => {
 
 
 // Wallet methods
-if (!window.bitcoinBrowser.wallet) {
-  window.bitcoinBrowser.wallet = {
+if (!window.hodosBrowser.wallet) {
+  window.hodosBrowser.wallet = {
     getStatus: () => {
       console.log("🔍 JS: Sending wallet_status_check to native");
       return new Promise((resolve, reject) => {

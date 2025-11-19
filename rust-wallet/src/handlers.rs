@@ -38,7 +38,7 @@ pub async fn brc100_status() -> HttpResponse {
 pub async fn get_version() -> HttpResponse {
     log::info!("📋 /getVersion called");
     HttpResponse::Ok().json(serde_json::json!({
-        "version": "BitcoinBrowserWallet-Rust v0.0.1",
+        "version": "HodosWallet-Rust v0.0.1",
         "capabilities": [
             "getVersion",
             "getPublicKey",

@@ -12,7 +12,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 // Settings panel now rendered in separate overlay process
-import { useBitcoinBrowser } from '../hooks/useBitcoinBrowser';
+import { useHodosBrowser } from '../hooks/useHodosBrowser';
 
 
 const MainBrowserView: React.FC = () => {
@@ -27,7 +27,7 @@ const MainBrowserView: React.FC = () => {
     // Settings panel state now managed in separate overlay process
     const [address, setAddress] = useState('https://metanetapps.com/');
 
-    const { navigate, goBack, goForward, reload } = useBitcoinBrowser();
+    const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
     const handleNavigate = () => {
         console.log('🧭 Navigating to:', address);
@@ -103,7 +103,7 @@ const MainBrowserView: React.FC = () => {
                     onClick={() => {
                         console.log("🟢 Wallet button clicked");
                         window.cefMessage?.send('overlay_show_wallet', []);
-                        window.bitcoinBrowser.overlay.toggleInput(true);
+                        window.hodosBrowser.overlay.toggleInput(true);
                     }}
                     sx={{
                         ml: 1,
@@ -120,12 +120,12 @@ const MainBrowserView: React.FC = () => {
                 <IconButton
                     onClick={() => {
                         console.log("🔧 Settings button clicked");
-                        console.log("🔧 bitcoinBrowser:", window.bitcoinBrowser);
-                        // console.log("🔧 overlayPanel:", window.bitcoinBrowser?.overlayPanel);
-                        // console.log("🔧 overlayPanel.toggleInput:", window.bitcoinBrowser?.overlayPanel?.toggleInput);
+                        console.log("🔧 hodosBrowser:", window.hodosBrowser);
+                        // console.log("🔧 overlayPanel:", window.hodosBrowser?.overlayPanel);
+                        // console.log("🔧 overlayPanel.toggleInput:", window.hodosBrowser?.overlayPanel?.toggleInput);
                         window.cefMessage?.send('overlay_show_settings', []);
                         console.log("🔧 Settings overlay will open in separate process");
-                        window.bitcoinBrowser.overlay.toggleInput(true);
+                        window.hodosBrowser.overlay.toggleInput(true);
                     }}
                     sx={{
                         ml: 1,

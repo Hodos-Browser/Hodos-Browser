@@ -47,7 +47,7 @@ async fn main() -> std::io::Result<()> {
         });
 
     let wallet_path = PathBuf::from(appdata)
-        .join("BabbageBrowser")
+        .join("HodosBrowser")
         .join("wallet")
         .join("wallet.json");
 

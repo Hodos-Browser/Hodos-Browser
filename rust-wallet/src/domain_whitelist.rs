@@ -42,7 +42,7 @@ impl DomainWhitelistManager {
         home_dir
             .join("AppData")
             .join("Roaming")
-            .join("BabbageBrowser")
+            .join("HodosBrowser")
             .join("wallet")
             .join("domainWhitelist.json")
     }

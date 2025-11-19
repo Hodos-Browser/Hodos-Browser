@@ -56,8 +56,8 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       }
 
       // Close overlay window
-      if (window.bitcoinBrowser && window.bitcoinBrowser.overlay && window.bitcoinBrowser.overlay.close) {
-        window.bitcoinBrowser.overlay.close();
+      if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.close) {
+        window.hodosBrowser.overlay.close();
       }
     } catch (error) {
       console.error('🔐 Error handling auth approval:', error);
@@ -79,8 +79,8 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       }
 
       // Close overlay window
-      if (window.bitcoinBrowser && window.bitcoinBrowser.overlay && window.bitcoinBrowser.overlay.close) {
-        window.bitcoinBrowser.overlay.close();
+      if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.close) {
+        window.hodosBrowser.overlay.close();
       }
     } catch (error) {
       console.error('🔐 Error handling auth rejection:', error);

@@ -156,7 +156,7 @@ void SimpleApp::OnContextInitialized() {
 
 
 // Chrome-style approach: Inject JavaScript directly into the overlay browser
-void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser) {
+void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     if (!browser || !browser->GetMainFrame()) {
         std::cout << "❌ Cannot inject API - browser or frame not available" << std::endl;
         std::ofstream debugLog("debug_output.log", std::ios::app);
@@ -165,14 +165,14 @@ void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser) {
         return;
     }
 
-    std::cout << "🔧 Injecting bitcoinBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
+    std::cout << "🔧 Injecting hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
     std::ofstream debugLog1("debug_output.log", std::ios::app);
-    debugLog1 << "🔧 Injecting bitcoinBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
+    debugLog1 << "🔧 Injecting hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
     debugLog1.close();
 
     std::string jsCode = R"(
-                 // Create bitcoinBrowser object using CEF's built-in V8 integration
-                 window.bitcoinBrowser = {
+                 // Create hodosBrowser object using CEF's built-in V8 integration
+                 window.hodosBrowser = {
                      address: {
                          generate: function() {
                              console.log('🔑 Address generation requested via injected JavaScript');
@@ -249,7 +249,7 @@ void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser) {
                      },
                      overlay: {
                          show: function() {
-                             console.log('🧪 Test overlay requested via bitcoinBrowser API');
+                             console.log('🧪 Test overlay requested via hodosBrowser API');
                              // Send process message for test overlay
                              if (window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage) {
                                  window.chrome.runtime.sendMessage({
@@ -268,15 +268,15 @@ void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser) {
                 // No need to set it up here as a stub
 
 
-        console.log('✅ bitcoinBrowser API injected successfully');
+        console.log('✅ hodosBrowser API injected successfully');
     )";
 
     browser->GetMainFrame()->ExecuteJavaScript(jsCode, "", 0);
-    std::cout << "🔧 Injected bitcoinBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
+    std::cout << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
 
     // Also log to file
     std::ofstream debugLog2("debug_output.log", std::ios::app);
-    debugLog2 << "🔧 Injected bitcoinBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
+    debugLog2 << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
     debugLog2.close();
 }
 

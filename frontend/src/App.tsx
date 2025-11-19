@@ -70,18 +70,18 @@ const App = () => {
       console.log("🔍 Current pathname:", window.location.pathname);
 
       // Only check on main page
-      if (window.location.pathname === '/' && window.bitcoinBrowser?.wallet) {
+      if (window.location.pathname === '/' && window.hodosBrowser?.wallet) {
         console.log("🔍 Running wallet status check via API");
 
         try {
-          const walletStatus = await window.bitcoinBrowser.wallet.getStatus();
+          const walletStatus = await window.hodosBrowser.wallet.getStatus();
           console.log("🔍 Wallet status response:", walletStatus);
 
           if (walletStatus.needsBackup) {
             // Wallet needs backup - create wallet first, then show modal
             console.log("🔍 Wallet needs backup, creating wallet first...");
             try {
-              await window.bitcoinBrowser.wallet.create();
+              await window.hodosBrowser.wallet.create();
               console.log("🔍 Wallet created successfully, showing backup modal");
               window.cefMessage?.send('overlay_show_backup', []);
             } catch (error) {
@@ -96,7 +96,7 @@ const App = () => {
         }
 
       } else {
-        console.log("🔍 Skipping wallet check - path:", window.location.pathname, "wallet API ready:", !!window.bitcoinBrowser?.wallet);
+        console.log("🔍 Skipping wallet check - path:", window.location.pathname, "wallet API ready:", !!window.hodosBrowser?.wallet);
       }
     };
 

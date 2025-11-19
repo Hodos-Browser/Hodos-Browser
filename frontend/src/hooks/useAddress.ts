@@ -11,13 +11,13 @@ export const useAddress = () => {
     setError(null);
 
     try {
-      if (!window.bitcoinBrowser?.address) {
+      if (!window.hodosBrowser?.address) {
         console.error('❌ useAddress: Bitcoin Browser API not available');
         throw new Error('Bitcoin Browser API not available');
       }
 
-      console.log('🔄 useAddress: Calling window.bitcoinBrowser.address.generate()');
-      const response = await window.bitcoinBrowser.address.generate();
+      console.log('🔄 useAddress: Calling window.hodosBrowser.address.generate()');
+      const response = await window.hodosBrowser.address.generate();
       console.log('✅ useAddress: Response received:', response);
       console.log('🔍 useAddress: Response type:', typeof response);
       console.log('🔍 useAddress: Response is null/undefined:', response === null || response === undefined);

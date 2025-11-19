@@ -368,36 +368,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-browser-wallet"
-version = "0.1.0"
-dependencies = [
- "actix-cors",
- "actix-web",
- "base64 0.22.1",
- "bip32",
- "bip39",
- "bs58",
- "chrono",
- "dirs",
- "env_logger",
- "hex",
- "hmac",
- "log",
- "once_cell",
- "rand 0.8.5",
- "regex",
- "reqwest",
- "ripemd",
- "secp256k1 0.28.2",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "bitcoin-internals"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -963,6 +933,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "hodos-wallet"
+version = "0.1.0"
+dependencies = [
+ "actix-cors",
+ "actix-web",
+ "base64 0.22.1",
+ "bip32",
+ "bip39",
+ "bs58",
+ "chrono",
+ "dirs",
+ "env_logger",
+ "hex",
+ "hmac",
+ "log",
+ "once_cell",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "ripemd",
+ "secp256k1 0.28.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

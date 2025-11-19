@@ -41,7 +41,7 @@ bool IdentityHandler::Execute(const CefString& name,
     // For identity.get(), first check if local identity file exists
     if (name == "get") {
         const char* homeDir = std::getenv("USERPROFILE");
-        std::string identityPath = std::string(homeDir) + "\\AppData\\Roaming\\BabbageBrowser\\identity.json";
+        std::string identityPath = std::string(homeDir) + "\\AppData\\Roaming\\HodosBrowser\\identity.json";
         std::ifstream identityFile(identityPath);
         if (identityFile.good()) {
             std::cout << "📁 Local identity file exists, reading from file" << std::endl;

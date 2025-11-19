@@ -1,10 +1,10 @@
-# Bitcoin-Browser Project Overview
+# HodosBrowser Project Overview
 
 ## 🚀 **The First CEF-Based Browser with Native BRC-100 Support**
 
 ## 🎯 Project Mission
 
-Bitcoin-Browser is a custom Web3 browser built on Chromium Embedded Framework (CEF) focused on the Web3 experience through **native control and seamless user experience**. Unlike traditional Web3 approaches that rely on browser plugins, external wallet tabs, or complex authentication flows, Bitcoin-Browser provides:
+HodosBrowser is a custom Web3 browser built on Chromium Embedded Framework (CEF) focused on the Web3 experience through **native control and seamless user experience**. Unlike traditional Web3 approaches that rely on browser plugins, external wallet tabs, or complex authentication flows, Bitcoin-Browser provides:
 
 - **Native Wallet Integration**: Built-in **production-ready Go-based wallet backend** that operates independently of web content, eliminating the need for external plugins or separate wallet applications
 - **Seamless Authentication**: **Complete BRC-100 standard implementation** enables frictionless authentication and transaction signing without interrupting the user's browsing experience
@@ -65,7 +65,7 @@ Traditional browser wallets face significant security challenges because they op
    - Signing operations happen in isolated, controlled Go daemon environments
 
 5. **Controlled API Exposure**
-   - Only safe, high-level functions are exposed through `window.bitcoinBrowser`
+   - Only safe, high-level functions are exposed through `window.hodosBrowser`
    - The bridge API is carefully designed to prevent sensitive data leakage
    - Process-per-overlay architecture ensures API isolation between different overlay contexts
    - All cryptographic operations remain in the isolated Go backend
@@ -94,7 +94,7 @@ Traditional browser wallets face significant security challenges because they op
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                JS ↔ Native Bridge Layer                    │
-│              • window.bitcoinBrowser API                   │
+│              • window.hodosBrowser API                   │
 │              • Controlled Function Exposure                │
 │              • No Sensitive Data Transfer                  │
 └─────────────────────┬───────────────────────────────────────┘
@@ -131,7 +131,7 @@ Traditional browser wallets face significant security challenges because they op
                       │
                       ▼
          Shared wallet.json Storage
-      (%APPDATA%/BabbageBrowser/wallet/)
+      (%APPDATA%/HodosBrowser/wallet/)
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -392,7 +392,7 @@ App.tsx useEffect → Check identity.get() → Set walletExists → Route accord
 
 **Overlay Panel Flow**
 ```
-Button Click → window.bitcoinBrowser.overlay.show() → Backend creates overlay_hwnd → React renders in overlay
+Button Click → window.hodosBrowser.overlay.show() → Backend creates overlay_hwnd → React renders in overlay
 ```
 
 **Backup Modal Flow**
@@ -402,15 +402,15 @@ Identity Check → Show backup modal → User confirms → Call markBackedUp() �
 
 ### API Integration & Hooks
 
-**useBitcoinBrowser Hook**
+**useHodosBrowser Hook**
 - `getIdentity()` - Retrieves wallet identity from backend
 - `markBackedUp()` - Updates backend backup status
 - `navigate()` - Sends navigation commands to webview
 
 **Window Bridge Integration**
-- `window.bitcoinBrowser.identity.*` - Backend identity operations
-- `window.bitcoinBrowser.overlay.*` - Overlay window management
-- `window.bitcoinBrowser.navigation.*` - Browser navigation control
+- `window.hodosBrowser.identity.*` - Backend identity operations
+- `window.hodosBrowser.overlay.*` - Overlay window management
+- `window.hodosBrowser.navigation.*` - Browser navigation control
 - `window.cefMessage.send()` - Direct CEF message passing
 
 ### Type System
@@ -420,7 +420,7 @@ Identity Check → Show backup modal → User confirms → Call markBackedUp() �
 - `BackupCheck` - Simple backup status confirmation
 - `IdentityResult` - Union type for identity operations
 
-**BitcoinBrowser API Types**
+**HodosBrowser API Types**
 - Complete type definitions for all backend API functions
 - Overlay management interface types
 - Navigation and message passing types
@@ -448,9 +448,9 @@ Identity Check → Show backup modal → User confirms → Call markBackedUp() �
 ### Communication Patterns
 
 **Frontend → Backend**
-1. **Direct API Calls**: `window.bitcoinBrowser.identity.get()`
+1. **Direct API Calls**: `window.hodosBrowser.identity.get()`
 2. **Message Passing**: `window.cefMessage.send('overlay_hide', [])`
-3. **Overlay Triggers**: `window.bitcoinBrowser.overlay.show()`
+3. **Overlay Triggers**: `window.hodosBrowser.overlay.show()`
 
 **Backend → Frontend**
 1. **JavaScript Execution**: `ExecuteJavaScript()` calls
@@ -502,7 +502,7 @@ The backend implements a modular handler system that exposes native functionalit
 ### Identity Management System
 
 **WalletManager Class**
-- **File Location**: `%APPDATA%/BabbageBrowser/identity.json`
+- **File Location**: `%APPDATA%/HodosBrowser/identity.json`
 - **Encryption**: AES-256-CBC with hardcoded key (temporary implementation)
 - **Key Generation**: ECDSA secp256k1 key pairs
 - **Address Format**: Bitcoin-style Base58Check encoding
@@ -561,7 +561,7 @@ The backend implements a modular handler system that exposes native functionalit
 
 **AppData Directory Structure**
 ```
-%APPDATA%/BabbageBrowser/
+%APPDATA%/HodosBrowser/
 └── identity.json          # Encrypted wallet identity
 ```
 

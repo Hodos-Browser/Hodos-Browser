@@ -172,35 +172,35 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
     if (!isLoading) {
         if (role_ == "overlay") {
             // Log that we're about to inject the API
-            LOG_DEBUG_BROWSER("🔧 OVERLAY LOADED - About to inject bitcoinBrowser API");
+            LOG_DEBUG_BROWSER("🔧 OVERLAY LOADED - About to inject hodosBrowser API");
 
-            // Inject the bitcoinBrowser API when overlay finishes loading
-            extern void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectBitcoinBrowserAPI(browser);
+            // Inject the hodosBrowser API when overlay finishes loading
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         } else if (role_ == "webview") {
-            // Inject the bitcoinBrowser API into webview browser as well
-            LOG_DEBUG_BROWSER("🔧 WEBVIEW BROWSER LOADED - Injecting bitcoinBrowser API");
+            // Inject the hodosBrowser API into webview browser as well
+            LOG_DEBUG_BROWSER("🔧 WEBVIEW BROWSER LOADED - Injecting hodosBrowser API");
 
-            extern void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectBitcoinBrowserAPI(browser);
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
-            // Inject the bitcoinBrowser API into header browser (where React app runs)
-            LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting bitcoinBrowser API");
+            // Inject the hodosBrowser API into header browser (where React app runs)
+            LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
 
-            extern void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectBitcoinBrowserAPI(browser);
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         } else if (role_ == "settings") {
-            // Inject the bitcoinBrowser API into settings browser
-            LOG_DEBUG_BROWSER("🔧 SETTINGS BROWSER LOADED - Injecting bitcoinBrowser API");
+            // Inject the hodosBrowser API into settings browser
+            LOG_DEBUG_BROWSER("🔧 SETTINGS BROWSER LOADED - Injecting hodosBrowser API");
 
-            extern void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectBitcoinBrowserAPI(browser);
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         } else if (role_ == "brc100auth") {
-            // Inject the bitcoinBrowser API into BRC-100 auth browser
-            LOG_DEBUG_BROWSER("🔧 BRC-100 AUTH BROWSER LOADED - Injecting bitcoinBrowser API");
+            // Inject the hodosBrowser API into BRC-100 auth browser
+            LOG_DEBUG_BROWSER("🔧 BRC-100 AUTH BROWSER LOADED - Injecting hodosBrowser API");
 
-            extern void InjectBitcoinBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectBitcoinBrowserAPI(browser);
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
 
             // Send pending auth request data to the overlay after React app loads
             // Add a small delay to ensure React is fully mounted

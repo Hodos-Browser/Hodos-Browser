@@ -1,4 +1,4 @@
-# Babbage-Browser/BitcoinBrowser
+# HodosBrowser
 
 A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native BitcoinSV wallet for secure authentication, micropayments, and Electronic Data Interchange (EDI- smart contracts).
 
@@ -38,7 +38,7 @@ A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native
 - Comparing BSV SDK vs custom implementation
 - Will choose one for production
 
-**Shared Storage:** Both use `%APPDATA%/BabbageBrowser/wallet/wallet.json`
+**Shared Storage:** Both use `%APPDATA%/HodosBrowser/wallet/wallet.json`
 
 **See:** `SESSION_SUMMARY_2025-10-27.md` for latest session details
 
@@ -134,7 +134,7 @@ npm run dev
 ```bash
 cd cef-native/build
 cmake --build . --config Release
-./bin/Release/BitcoinBrowserShell.exe
+./bin/Release/HodosBrowserShell.exe
 ```
 
 See `BUILD_INSTRUCTIONS.md` for detailed build steps.
@@ -146,7 +146,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build steps.
     - The wrapper is built as a standalone static library (libcef_dll_wrapper.lib)
     - Your native shell links to that static lib manually
 
-    BABBAGE-BROWSER (BitcoinBrowser)/
+    BABBAGE-BROWSER (HodosBrowser)/
     ├── .vscode/                     → VSCode workspace configs
     │
     ├── cef-binaries/               → CEF binaries and libcef_dll wrapper source (not tracked by Git)
@@ -190,7 +190,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build steps.
     │   ├── public/                 → Static assets served by Vite
     │   ├── src/
     │   │   ├── components/panels/  → Wallet UI, tabs, settings panels
-    │   │   ├── hooks/              → Shared logic (e.g. `useBitcoinBrowser`)
+    │   │   ├── hooks/              → Shared logic (e.g. `useHodosBrowser`)
     │   │   ├── pages/              → Page-level views like Browser and Welcome screens
     │   │   └── types/              → TypeScript types (identity, API contracts)
     │   ├── index.html              → App entrypoint (served by Vite)
@@ -231,7 +231,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build steps.
 | 🟡 *PoC: Will migrate to Rust for production* |
 
 **Architecture Security:**
-- **Controlled Bridge API**: Only safe, high-level functions are exposed through `window.bitcoinBrowser`
+- **Controlled Bridge API**: Only safe, high-level functions are exposed through `window.hodosBrowser`
 - **Multi-Process CEF**: Leverages Chromium's natural security boundaries between processes
 - **Go Daemon Isolation**: Private keys never leave the isolated Go wallet process
 - **Real Financial Security**: Built for production use where real money is at stake, not just development/testing
@@ -248,10 +248,10 @@ This project is being built to support apps that follow the **BRC-100 authentica
 - **SPV-based identity and transaction verification**
 - **Browser-side API injection for identity access**, e.g.:
   ```js
-  window.bitcoinBrowser.identity.get()
-  window.bitcoinBrowser.brc100.getPublicKey()
-  window.bitcoinBrowser.brc100.signMessage(...)
-  window.bitcoinBrowser.brc100.getCertificate()
+  window.hodosBrowser.identity.get()
+  window.hodosBrowser.brc100.getPublicKey()
+  window.hodosBrowser.brc100.signMessage(...)
+  window.hodosBrowser.brc100.getCertificate()
 
 ---
 

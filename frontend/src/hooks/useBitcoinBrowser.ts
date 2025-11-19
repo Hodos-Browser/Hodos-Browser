@@ -2,33 +2,33 @@ import { useCallback } from 'react';
 import type { IdentityResult } from '../types/identity';
 import type { AddressData } from '../types/address';
 
-export function useBitcoinBrowser() {
+export function useHodosBrowser() {
   const getIdentity = useCallback(async (): Promise<IdentityResult> => {
-    if (!window.bitcoinBrowser?.identity?.get) {
-      throw new Error('bitcoinBrowser.identity.get not available');
+    if (!window.hodosBrowser?.identity?.get) {
+      throw new Error('hodosBrowser.identity.get not available');
     }
-    const result = await window.bitcoinBrowser.identity.get();
+    const result = await window.hodosBrowser.identity.get();
     return result;
   }, []);
 
   const markBackedUp = useCallback(async (): Promise<string> => {
-    if (!window.bitcoinBrowser?.identity?.markBackedUp) {
-      throw new Error('bitcoinBrowser.identity.markBackedUp not available');
+    if (!window.hodosBrowser?.identity?.markBackedUp) {
+      throw new Error('hodosBrowser.identity.markBackedUp not available');
     }
-    const result = await window.bitcoinBrowser.identity.markBackedUp();
+    const result = await window.hodosBrowser.identity.markBackedUp();
     return result;
   }, []);
 
   const generateAddress = useCallback(async (): Promise<AddressData> => {
-    if (!window.bitcoinBrowser?.address?.generate) {
-      throw new Error('bitcoinBrowser.address.generate not available');
+    if (!window.hodosBrowser?.address?.generate) {
+      throw new Error('hodosBrowser.address.generate not available');
     }
 
     // Check if we're in an overlay (wallet, settings, backup) - direct V8 call
     const currentPath = window.location.pathname;
     if (currentPath.includes('/wallet') || currentPath.includes('/settings') || currentPath.includes('/backup')) {
       console.log('🔑 Direct V8 call for overlay browser');
-      const result = await window.bitcoinBrowser.address.generate();
+      const result = await window.hodosBrowser.address.generate();
       return result;
     }
 
@@ -55,7 +55,7 @@ export function useBitcoinBrowser() {
       window.addEventListener('cefMessageResponse', handleResponse);
 
       // Call the V8 function which will send a message for main browser
-      window.bitcoinBrowser.address.generate().catch(reject);
+      window.hodosBrowser.address.generate().catch(reject);
 
       // Timeout after 10 seconds
       setTimeout(() => {
@@ -66,12 +66,12 @@ export function useBitcoinBrowser() {
   }, []);
 
   const navigate = useCallback((path: string): void => {
-    if (!window.bitcoinBrowser?.navigation?.navigate) {
-      console.warn('bitcoinBrowser.navigation.navigate not available');
+    if (!window.hodosBrowser?.navigation?.navigate) {
+      console.warn('hodosBrowser.navigation.navigate not available');
       return;
     }
     try {
-      window.bitcoinBrowser.navigation.navigate(path);
+      window.hodosBrowser.navigation.navigate(path);
     } catch (err) {
       console.error("Navigation error:", err);
     }

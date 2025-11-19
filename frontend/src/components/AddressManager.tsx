@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { useBitcoinBrowser } from '../hooks/useBitcoinBrowser';
+import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import type { AddressData } from '../types/address';
 
 const AddressManager: React.FC = () => {
-  const { generateAddress } = useBitcoinBrowser();
+  const { generateAddress } = useHodosBrowser();
   const [addresses, setAddresses] = useState<AddressData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,19 +21,19 @@ const AddressManager: React.FC = () => {
         debugDiv.innerHTML += '🔍 Frontend: Starting address generation<br>';
       }
 
-      // Check if bitcoinBrowser is available
-      if (!window.bitcoinBrowser) {
-        throw new Error('bitcoinBrowser not available');
+      // Check if hodosBrowser is available
+      if (!window.hodosBrowser) {
+        throw new Error('hodosBrowser not available');
       }
-      if (!window.bitcoinBrowser.address) {
-        throw new Error('bitcoinBrowser.address not available');
+      if (!window.hodosBrowser.address) {
+        throw new Error('hodosBrowser.address not available');
       }
-      if (!window.bitcoinBrowser.address.generate) {
-        throw new Error('bitcoinBrowser.address.generate not available');
+      if (!window.hodosBrowser.address.generate) {
+        throw new Error('hodosBrowser.address.generate not available');
       }
 
       if (debugDiv) {
-        debugDiv.innerHTML += '🔍 Frontend: Calling bitcoinBrowser.address.generate()<br>';
+        debugDiv.innerHTML += '🔍 Frontend: Calling hodosBrowser.address.generate()<br>';
       }
 
       const newAddress = await generateAddress();

@@ -60,11 +60,11 @@ bool BRC100Handler::Execute(const CefString& name,
 void BRC100Handler::RegisterBRC100API(CefRefPtr<CefV8Context> context) {
     CefRefPtr<CefV8Value> global = context->GetGlobal();
 
-    // Create bitcoinBrowser object if it doesn't exist
-    CefRefPtr<CefV8Value> bitcoinBrowser = global->GetValue("bitcoinBrowser");
-    if (bitcoinBrowser->IsUndefined()) {
-        bitcoinBrowser = CefV8Value::CreateObject(nullptr, nullptr);
-        global->SetValue("bitcoinBrowser", bitcoinBrowser, V8_PROPERTY_ATTRIBUTE_NONE);
+    // Create hodosBrowser object if it doesn't exist
+    CefRefPtr<CefV8Value> hodosBrowser = global->GetValue("hodosBrowser");
+    if (hodosBrowser->IsUndefined()) {
+        hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
+        global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_NONE);
     }
 
     // Create brc100 object
@@ -99,8 +99,8 @@ void BRC100Handler::RegisterBRC100API(CefRefPtr<CefV8Context> context) {
     brc100->SetValue("verifySPV", CefV8Value::CreateFunction("verifySPV", handler), V8_PROPERTY_ATTRIBUTE_NONE);
     brc100->SetValue("createSPVProof", CefV8Value::CreateFunction("createSPVProof", handler), V8_PROPERTY_ATTRIBUTE_NONE);
 
-    // Add brc100 to bitcoinBrowser
-    bitcoinBrowser->SetValue("brc100", brc100, V8_PROPERTY_ATTRIBUTE_NONE);
+    // Add brc100 to hodosBrowser
+    hodosBrowser->SetValue("brc100", brc100, V8_PROPERTY_ATTRIBUTE_NONE);
 
     std::cout << "BRC-100 API registered successfully" << std::endl;
 }

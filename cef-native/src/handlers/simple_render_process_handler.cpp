@@ -186,18 +186,18 @@ void SimpleRenderProcessHandler::OnContextCreated(
     if (isOverlayBrowser) {
         LOG_DEBUG_RENDER("🎯 OVERLAY BROWSER V8 CONTEXT CREATED!");
         LOG_DEBUG_RENDER("🎯 URL: " + url);
-        LOG_DEBUG_RENDER("🎯 Setting up bitcoinBrowser for overlay browser");
+        LOG_DEBUG_RENDER("🎯 Setting up hodosBrowser for overlay browser");
     }
 
     CefRefPtr<CefV8Value> global = context->GetGlobal();
 
-    // Create the bitcoinBrowser object
-    CefRefPtr<CefV8Value> bitcoinBrowser = CefV8Value::CreateObject(nullptr, nullptr);
-    global->SetValue("bitcoinBrowser", bitcoinBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Create the hodosBrowser object
+    CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
+    global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-    // Create the identity object inside bitcoinBrowser
+    // Create the identity object inside hodosBrowser
     CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
-    bitcoinBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
     // Bind the IdentityHandler instance
     CefRefPtr<IdentityHandler> identityHandler = new IdentityHandler();
@@ -210,9 +210,9 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("markBackedUp", identityHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 
-    // Create the navigation object inside bitcoinBrowser
+    // Create the navigation object inside hodosBrowser
     CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
-    bitcoinBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
     // Bind the NavigationHandler instance
     CefRefPtr<NavigationHandler> navigationHandler = new NavigationHandler();
@@ -228,7 +228,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         LOG_DEBUG_RENDER("🎯 Creating overlay object for URL: " + url);
 
         CefRefPtr<CefV8Value> overlayObject = CefV8Value::CreateObject(nullptr, nullptr);
-        bitcoinBrowser->SetValue("overlay", overlayObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+        hodosBrowser->SetValue("overlay", overlayObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
         // Add close method for overlay browsers - uses cefMessage internally
         overlayObject->SetValue("close",
@@ -243,7 +243,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     // Create the address object
     CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
-    bitcoinBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
     // Bind AddressHandler
     CefRefPtr<AddressHandler> addressHandler = new AddressHandler();

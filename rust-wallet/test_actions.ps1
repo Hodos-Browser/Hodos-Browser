@@ -17,7 +17,7 @@ Write-Host ""
 
 # Test 2: Manually add a test action (using direct file manipulation)
 Write-Host "Test 2: Adding a test action manually..." -ForegroundColor Yellow
-$actionsPath = "$env:APPDATA\BabbageBrowser\wallet\actions.json"
+$actionsPath = "$env:APPDATA\HodosBrowser\wallet\actions.json"
 Write-Host "Actions file: $actionsPath" -ForegroundColor Cyan
 
 # Create test action

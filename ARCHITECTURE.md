@@ -9,7 +9,7 @@
             ↓
 +----------------------------+
 |   JS ↔ Native Bridge Layer |
-|  - window.bitcoinBrowser   |
+|  - window.hodosBrowser   |
 |  - window.cefMessage       |
 |  - Process Communication   |
 +----------------------------+
@@ -46,7 +46,7 @@
                          |
                          v
               Shared wallet.json
-           (%APPDATA%/BabbageBrowser/wallet/)
+           (%APPDATA%/HodosBrowser/wallet/)
             ↓
 +----------------------------+
 | Bitcoin SV Blockchain      |
@@ -77,7 +77,7 @@ Process-Per-Overlay Communication Architecture
 │ • Wallet APIs   │                     │ • window.bitcoinAPI.sendTransaction() │
 │ • Address Mgmt  │                     │ • window.bitcoinAPI.getBalance() │
 │ • Overlay Mgmt  │                     │ • window.cefMessage.send() │
-│ • Message Handlers│                   │ • window.bitcoinBrowser.address.* │
+│ • Message Handlers│                   │ • window.hodosBrowser.address.* │
 └─────────────────┘                     └─────────────────┘
          │                                        │
          │ Process Messages                       │ JavaScript Execution
@@ -282,7 +282,7 @@ React UI → C++ Bridge → Go Daemon → Blockchain
 
 
 flowchart TD
-    A["Babbage-Browser (BitcoinBrowser)"]
+    A["Babbage-Browser (HodosBrowser)"]
 
     A --> B["Backend (C++ Shell)"]
     A --> C["Frontend (React + Vite)"]
@@ -331,7 +331,7 @@ flowchart TD
     B4 --> B4d["Window Message Handlers (WndProc)"]
 
     B5 --> B5a["Context Creation (OnContextCreated)"]
-    B5 --> B5b["Native API Injection (window.bitcoinBrowser)"]
+    B5 --> B5b["Native API Injection (window.hodosBrowser)"]
     B5 --> B5c["Function Binding (CefV8Value::CreateFunction)"]
 
     C --> C1["Application Structure"]

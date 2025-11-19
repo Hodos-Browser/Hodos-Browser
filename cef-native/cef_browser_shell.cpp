@@ -970,7 +970,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
-    wc.lpszClassName = L"BitcoinBrowserWndClass"; RegisterClass(&wc);
+    wc.lpszClassName = L"HodosBrowserWndClass"; RegisterClass(&wc);
 
     WNDCLASS browserClass = {}; browserClass.lpfnWndProc = DefWindowProc; browserClass.hInstance = hInstance;
     browserClass.lpszClassName = L"CEFHostWindow"; RegisterClass(&browserClass);
@@ -1014,7 +1014,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("❌ Failed to register BRC-100 auth overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
-    HWND hwnd = CreateWindow(L"BitcoinBrowserWndClass", L"Bitcoin Browser / Babbage Browser",
+    HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
 

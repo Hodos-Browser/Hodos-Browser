@@ -19,11 +19,11 @@ export const useWallet = () => {
 
   const checkWalletStatus = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const status = await window.bitcoinBrowser.wallet.getStatus();
+      const status = await window.hodosBrowser.wallet.getStatus();
       return status;
     } catch (error) {
       console.error('❌ Failed to check wallet status:', error);
@@ -33,11 +33,11 @@ export const useWallet = () => {
 
   const createWallet = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const walletData = await window.bitcoinBrowser.wallet.create();
+      const walletData = await window.hodosBrowser.wallet.create();
 
       setWalletState({
         address: walletData.address,
@@ -57,11 +57,11 @@ export const useWallet = () => {
 
   const loadWallet = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const walletData = await window.bitcoinBrowser.wallet.load();
+      const walletData = await window.hodosBrowser.wallet.load();
 
       setWalletState({
         address: walletData.address,
@@ -81,11 +81,11 @@ export const useWallet = () => {
 
   const getWalletInfo = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const walletInfo = await window.bitcoinBrowser.wallet.getInfo();
+      const walletInfo = await window.hodosBrowser.wallet.getInfo();
       return walletInfo;
     } catch (error) {
       console.error('❌ Failed to get wallet info:', error);
@@ -95,11 +95,11 @@ export const useWallet = () => {
 
   const generateAddress = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const addressData = await window.bitcoinBrowser.wallet.generateAddress();
+      const addressData = await window.hodosBrowser.wallet.generateAddress();
 
       setWalletState(prev => ({
         ...prev,
@@ -116,11 +116,11 @@ export const useWallet = () => {
 
   const getCurrentAddress = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const addressData = await window.bitcoinBrowser.wallet.getCurrentAddress();
+      const addressData = await window.hodosBrowser.wallet.getCurrentAddress();
       return addressData;
     } catch (error) {
       console.error('❌ Failed to get current address:', error);
@@ -130,11 +130,11 @@ export const useWallet = () => {
 
   const markBackedUp = useCallback(async () => {
     try {
-      if (!window.bitcoinBrowser?.wallet) {
+      if (!window.hodosBrowser?.wallet) {
         throw new Error('Bitcoin Browser API not available');
       }
 
-      const result = await window.bitcoinBrowser.wallet.markBackedUp();
+      const result = await window.hodosBrowser.wallet.markBackedUp();
 
       setWalletState(prev => ({
         ...prev,

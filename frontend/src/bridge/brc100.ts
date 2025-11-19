@@ -157,7 +157,7 @@ export class BRC100Bridge {
   private static instance: BRC100Bridge;
 
   private constructor() {
-    // Ensure the global bitcoinBrowser.brc100 object exists
+    // Ensure the global hodosBrowser.brc100 object exists
     if (typeof window !== 'undefined') {
       this.initializeGlobalObject();
     }
@@ -171,18 +171,18 @@ export class BRC100Bridge {
   }
 
   private initializeGlobalObject() {
-    if (!window.bitcoinBrowser) {
-      (window as any).bitcoinBrowser = {};
+    if (!window.hodosBrowser) {
+      (window as any).hodosBrowser = {};
     }
-    if (!window.bitcoinBrowser.brc100) {
-      console.warn('BRC-100 API not available in bitcoinBrowser.brc100');
+    if (!window.hodosBrowser.brc100) {
+      console.warn('BRC-100 API not available in hodosBrowser.brc100');
     }
   }
 
   // Status & Detection
   async status(): Promise<BRC100Status> {
     try {
-      if (!window.bitcoinBrowser?.brc100) {
+      if (!window.hodosBrowser?.brc100) {
         throw new Error('BRC-100 API not available');
       }
 
@@ -196,7 +196,7 @@ export class BRC100Bridge {
 
   async isAvailable(): Promise<boolean> {
     try {
-      if (!window.bitcoinBrowser?.brc100) {
+      if (!window.hodosBrowser?.brc100) {
         return false;
       }
 
@@ -290,11 +290,11 @@ export class BRC100Bridge {
 
   // Helper method to call native C++ methods
   private async callNativeMethod(methodName: string, data?: any): Promise<any> {
-    if (!window.bitcoinBrowser?.brc100) {
+    if (!window.hodosBrowser?.brc100) {
       throw new Error('BRC-100 API not available');
     }
 
-    const brc100Api = window.bitcoinBrowser.brc100 as any;
+    const brc100Api = window.hodosBrowser.brc100 as any;
     if (!brc100Api[methodName]) {
       throw new Error(`BRC-100 method '${methodName}' not available`);
     }
@@ -418,7 +418,7 @@ export class BRC100Bridge {
 // Global type declarations
 declare global {
   interface Window {
-    bitcoinBrowser: {
+    hodosBrowser: {
       brc100: {
         status(): Promise<BRC100Status>;
         isAvailable(): Promise<boolean>;

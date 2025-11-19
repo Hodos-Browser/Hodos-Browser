@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(BitcoinBrowserShell)
+project(HodosBrowserShell)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ set(CEF_ROOT "../cef-binaries")
 set(WRAPPER_LIB_PATH "${CEF_ROOT}/libcef_dll/wrapper/build/Release")
 set(RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
-set(OUTPUT_DIR "$<TARGET_FILE_DIR:BitcoinBrowserShell>")
+set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
 set(CMAKE_TOOLCHAIN_FILE "C:/Users/archb/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 # set(OPENSSL_MSVC_STATIC_RT TRUE)
@@ -45,14 +45,14 @@ set(SOURCES
 )
 
 # Create executable
-add_executable(BitcoinBrowserShell WIN32 ${SOURCES})
+add_executable(HodosBrowserShell WIN32 ${SOURCES})
 
-set_target_properties(BitcoinBrowserShell PROPERTIES
+set_target_properties(HodosBrowserShell PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
 # Include CEF headers
-target_include_directories(BitcoinBrowserShell PRIVATE
+target_include_directories(HodosBrowserShell PRIVATE
     ${CEF_ROOT}
     ${CEF_ROOT}/include
     ${CEF_ROOT}/include/base
@@ -66,12 +66,12 @@ target_include_directories(BitcoinBrowserShell PRIVATE
 )
 
 # Link libs
-target_link_directories(BitcoinBrowserShell PRIVATE
+target_link_directories(HodosBrowserShell PRIVATE
     "${CEF_ROOT}/Release"
     "${WRAPPER_LIB_PATH}"
 )
 
-target_link_libraries(BitcoinBrowserShell PRIVATE
+target_link_libraries(HodosBrowserShell PRIVATE
     libcef
     libcef_dll_wrapper.lib
     cef_sandbox
@@ -96,13 +96,13 @@ target_link_libraries(BitcoinBrowserShell PRIVATE
 )
 
 # Delay-load
-set_property(TARGET BitcoinBrowserShell PROPERTY LINK_FLAGS "/DELAYLOAD:libcef.dll")
+set_property(TARGET HodosBrowserShell PROPERTY LINK_FLAGS "/DELAYLOAD:libcef.dll")
 
 # Required macros
 add_definitions(-DUNICODE -D_UNICODE)
 
 # Copy all runtime files after building
-add_custom_command(TARGET BitcoinBrowserShell POST_BUILD
+add_custom_command(TARGET HodosBrowserShell POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E echo "Copying CEF runtime files..."
 
     # Copy everything from Release/

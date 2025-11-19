@@ -82,7 +82,7 @@ cargo build --release
 
 # Run the wallet server
 cargo run --release
-# Or run directly: ./target/release/bitcoin-browser-wallet.exe
+# Or run directly: ./target/release/hodos-wallet.exe
 
 # Server starts on http://127.0.0.1:3301
 ```
@@ -96,7 +96,7 @@ cargo run --release
 
 #### Wallet Storage
 
-The wallet data is stored at: `%APPDATA%/BabbageBrowser/wallet/wallet.json`
+The wallet data is stored at: `%APPDATA%/HodosBrowser/wallet/wallet.json`
 
 #### Test the Wallet API
 
@@ -184,7 +184,7 @@ cmake --build . --config Debug
 ```
 
 **Output**: The executable will be at:
-- `cef-native/build/bin/Release/BitcoinBrowserShell.exe` (or Debug for debug builds)
+- `cef-native/build/bin/Release/HodosBrowserShell.exe` (or Debug for debug builds)
 
 The build process automatically copies required CEF runtime files (DLLs, resources) to the output directory.
 
@@ -202,7 +202,7 @@ cargo run --release
 
 ```bash
 # From cef-native/build/bin/Release/
-./BitcoinBrowserShell.exe
+./HodosBrowserShell.exe
 ```
 
 ## 🚨 Known Issues & TODOs

@@ -99,7 +99,7 @@ public:
     DomainVerifier() {
         // Set path to domainWhitelist.json
         char* homeDir = std::getenv("USERPROFILE");
-        whitelistFilePath = std::string(homeDir) + "\\AppData\\Roaming\\BabbageBrowser\\wallet\\domainWhitelist.json";
+        whitelistFilePath = std::string(homeDir) + "\\AppData\\Roaming\\HodosBrowser\\wallet\\domainWhitelist.json";
     }
 
     bool isDomainWhitelisted(const std::string& domain) {
@@ -392,9 +392,9 @@ public:
                 };
                 console.log('🔒 Set pending BRC-100 auth request for domain approval:', window.pendingBRC100AuthRequest);
                 // Create the settings overlay (which will show the BRC-100 auth modal)
-                if (window.bitcoinBrowser && window.bitcoinBrowser.overlay && window.bitcoinBrowser.overlay.show) {
+                if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.show) {
                     console.log('🔒 Creating overlay for domain approval modal');
-                    window.bitcoinBrowser.overlay.show();
+                    window.hodosBrowser.overlay.show();
                 } else {
                     console.error('🔒 Overlay show function not available');
                 }
@@ -444,9 +444,9 @@ void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string
             };
             console.log('🔐 Set pending auth request:', window.pendingBRC100AuthRequest);
             // Create the settings overlay (which will show the BRC-100 auth modal)
-            if (window.bitcoinBrowser && window.bitcoinBrowser.overlay && window.bitcoinBrowser.overlay.show) {
+            if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.show) {
                 console.log('🔐 Creating overlay for BRC-100 auth modal');
-                window.bitcoinBrowser.overlay.show();
+                window.hodosBrowser.overlay.show();
             } else {
                 console.error('🔐 Overlay show function not available');
             }

@@ -28,7 +28,7 @@ const BackupOverlayRoot: React.FC = () => {
     setShowBackupModal(true);
 
     try {
-      await window.bitcoinBrowser.wallet.setBackupModalState(true);
+      await window.hodosBrowser.wallet.setBackupModalState(true);
       console.log("💾 Backup modal state saved to C++ backend");
     } catch (error) {
       console.error("💾 Failed to save backup modal state:", error);
@@ -40,7 +40,7 @@ const BackupOverlayRoot: React.FC = () => {
     setShowBackupModal(false);
 
     try {
-      await window.bitcoinBrowser.wallet.setBackupModalState(false);
+      await window.hodosBrowser.wallet.setBackupModalState(false);
       console.log("💾 Backup modal state cleared in C++ backend");
     } catch (error) {
       console.error("💾 Failed to clear backup modal state:", error);
@@ -84,7 +84,7 @@ const BackupOverlayRoot: React.FC = () => {
 
       try {
         // Load existing wallet (should already be created by main app)
-        const walletInfo = await window.bitcoinBrowser.wallet.getInfo();
+        const walletInfo = await window.hodosBrowser.wallet.getInfo();
         console.log("💾 Loaded wallet:", walletInfo);
 
         setWallet({
@@ -321,7 +321,7 @@ const BackupOverlayRoot: React.FC = () => {
                 if (e.target.checked) {
                   try {
                     console.log("💾 Marking wallet as backed up...");
-                    const result = await window.bitcoinBrowser?.wallet?.markBackedUp?.();
+                    const result = await window.hodosBrowser?.wallet?.markBackedUp?.();
                     console.log("💾 Mark backed up result:", result);
 
                     if (result?.success) {
