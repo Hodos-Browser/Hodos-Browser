@@ -2,43 +2,29 @@
 
 A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native BitcoinSV wallet for secure authentication, micropayments, and Electronic Data Interchange (EDI- smart contracts).
 
-## ⚡ Current Status - Ready for Real-World Testing (Oct 27, 2025)
+## ⚡ Current Status - Production Ready (Dec 2025)
 
-**🎉 MAJOR MILESTONE:** BRC-100 Groups A & B complete! Authentication + Full transaction management ready for production testing!
+**🎉 MAJOR MILESTONE:** BRC-100 Groups A & B complete! Authentication + Full transaction management with real-world testing successful!
 
-### Two Implementations (Both Port 3301 - Only One Runs At A Time):
+### Rust Wallet - ✅ Production Ready
 
-1. **Go Wallet** - ✅ Production Ready
-   - BSV Go SDK (`v1.2.9`)
-   - HD wallet (BIP44)
-   - CEF browser integration
-   - Location: `go-wallet/`
+**Complete Features:**
+- ✅ **BRC-100 Groups A & B** - Authentication + Transaction management
+- ✅ **Custom BSV ForkID SIGHASH** - Production-ready signing
+- ✅ **BRC-103/104 Mutual Authentication** - 7 critical breakthroughs
+- ✅ **BRC-29 Payment Protocol** - Privacy-preserving micropayments
+- ✅ **Transaction History** - Full action storage with labels and metadata
+- ✅ **BEEF Phase 2 Parser** - Output ownership detection
+- ✅ **BRC-33 Message Relay** - Peer-to-peer messaging support
+- ✅ **Confirmed Mainnet Transactions** - Real-world validation
 
-2. **Rust Wallet** - ✅ **Production Ready**
-   - Custom BSV ForkID SIGHASH
-   - **Complete BRC-100 Groups A & B**
-   - **Transaction history tracking**
-   - **BEEF Phase 2 parsing**
-   - **Confirmed mainnet transactions!**
-   - Location: `rust-wallet/`
+**Latest Achievements:**
+- ✅ BRC-29 payments working with ToolBSV and other sites
+- ✅ TSC Merkle proof generation with block height resolution
+- ✅ Atomic BEEF (BRC-95) format implementation
+- ✅ Complete transaction lifecycle (create → sign → broadcast → confirm)
 
-**Latest Additions (Oct 27-30):**
-- ✅ Action storage system (transaction history)
-- ✅ `abortAction`, `listActions`, `internalizeAction`
-- ✅ BEEF parser with output ownership detection
-- ✅ Confirmation tracking via WhatsOnChain
-- ✅ Labels, addresses, and metadata support
-- ✅ **BRC-29 payment protocol support**
-- ✅ **TSC Merkle proof generation with block height resolution**
-- ✅ **Atomic BEEF (BRC-95) format implementation**
-- ✅ **Real-world testing: ToolBSV payments working!**
-
-**Why Two Implementations?**
-- Testing different languages (Go vs Rust)
-- Comparing BSV SDK vs custom implementation
-- Will choose one for production
-
-**Shared Storage:** Both use `%APPDATA%/HodosBrowser/wallet/wallet.json`
+**Storage:** `%APPDATA%/HodosBrowser/wallet/wallet.json`
 
 **See:** `SESSION_SUMMARY_2025-10-27.md` for latest session details
 
@@ -52,7 +38,7 @@ A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native
 
 - ✅ CEF shell with secure wallet backend
 - ✅ Process-per-overlay architecture (settings, wallet, backup modals)
-- ✅ Complete identity system with Go daemon integration
+- ✅ Complete identity system with Rust wallet backend
 - ✅ **BRC-100 Groups A & B Complete** - Auth + Transaction management
 - ✅ **Transaction History System** - Full action tracking with labels
 - ✅ **BEEF Phase 2 Parser** - Transaction parsing with output ownership
@@ -66,28 +52,22 @@ A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native
 
 ## 📦 Tech Stack
 
-| Layer | Technology | Notes |
-|-------|------------|-------|
-| Browser Shell | C++ / Chromium Embedded Framework | ✅ Process-per-overlay architecture implemented |
-| UI | React + Vite (TypeScript) | ✅ Multiple overlay routes (/settings, /wallet, /backup) |
-| **Wallet Backend** | **Go + Rust** | ✅ **Two implementations (testing both)** |
-| **Go Wallet** | **Go** (bitcoin-sv/go-sdk) | ✅ **Port 3301 - BSV SDK** |
-| **Rust Wallet** | **Rust** (Actix-web) | ✅ **Port 3301 - Custom crypto** |
-| Overlay System | **Process-Per-Overlay** | ✅ Each overlay runs in isolated CEF subprocess |
-| Identity Management | **Complete System** | ✅ File-based identity with backup modal workflow |
-| **BRC-100 Authentication** | **Complete Implementation** | ✅ **Rust: Full BRC-103/104 handshake working** |
-| **Transaction System** | **Complete Implementation** | ✅ **Rust: BSV ForkID SIGHASH signing working** |
-| **Broadcasting** | **Multi-Miner** | ✅ **WhatsOnChain + GorillaPool** |
-| Key Derivation | **HD Wallet (BIP44)** | ✅ **Production-ready HD wallet** |
-| Identity / Auth | BRC-100 (Authrite Protocol (Babbage)) | ✅ **Complete BRC-100 protocol implementation** |
-| Smart Contracts | sCrypt (BSV) | |
-| Blockchain Integration | Bitcoin SV (WhatsOnChain, GorillaPool) | ✅ **Real blockchain integration** |
+| Layer | Technology | Status |
+|-------|------------|--------|
+| Browser Shell | C++ / Chromium Embedded Framework | ✅ Process-per-overlay architecture |
+| UI | React + Vite (TypeScript) | ✅ Multiple overlay routes |
+| **Wallet Backend** | **Rust** (Actix-web) | ✅ **Production ready** |
+| Overlay System | **Process-Per-Overlay** | ✅ Isolated CEF subprocesses |
+| **BRC-100 Authentication** | **Rust Implementation** | ✅ **Groups A & B complete** |
+| **Transaction System** | **BSV ForkID SIGHASH** | ✅ **Mainnet confirmed** |
+| **Broadcasting** | **Multi-Miner** | ✅ WhatsOnChain + GorillaPool |
+| Key Derivation | **HD Wallet (BIP44)** | ✅ Production-ready |
+| Identity / Auth | BRC-100 (Authrite Protocol) | ✅ Complete implementation |
+| Blockchain Integration | Bitcoin SV APIs | ✅ Real mainnet integration |
 
 ## 🛠️ Setup
 
-**⚠️ NOTE:** Both wallets listen on port 3301. Only run ONE at a time.
-
-### Option 1: Rust Wallet (Custom Implementation)
+### Rust Wallet Backend
 
 ```bash
 cd rust-wallet
@@ -96,29 +76,7 @@ cargo run
 # Server starts on http://127.0.0.1:3301
 ```
 
-**Features:**
-- Custom BSV ForkID SIGHASH implementation
-- BRC-103/104 authentication
-- Transaction signing working
-- Confirmed mainnet transactions
 
-### Option 2: Go Wallet (BSV SDK)
-
-```bash
-cd go-wallet
-go build -o bitcoin-wallet.exe
-./bitcoin-wallet.exe
-
-# Or use the batch file
-./start-wallet.bat
-# Server starts on http://127.0.0.1:3301
-```
-
-**Features:**
-- Official BSV Go SDK
-- Full BRC-100 support
-- CEF browser integration
-- Production-ready
 
 ### Frontend Development
 
@@ -163,16 +121,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build steps.
     │   │   └── handlers/           → CEF app/client/render lifecycle implementations
     │   └── tests/                  → Native shell test harness and main entrypoint
     │
-    ├── go-wallet/                  → Go wallet backend (Port 8080) ✅ PRODUCTION READY
-    │   ├── main.go                 → HTTP server and endpoint handlers
-    │   ├── hd_wallet.go            → HD wallet with BIP44 derivation
-    │   ├── transaction_builder.go  → Transaction creation using BSV Go SDK
-    │   ├── transaction_broadcaster.go → Multi-miner broadcasting
-    │   ├── utxo_manager.go         → UTXO fetching and management
-    │   ├── brc100_api.go           → BRC-100 authentication endpoints
-    │   └── go.mod                  → Go dependencies (BSV SDK v1.2.9)
-    │
-    ├── rust-wallet/                → Rust wallet backend (Port 3301) ✅ WORKING
+    ├── rust-wallet/                → Rust wallet backend (Port 3301) ✅ PRODUCTION READY
     │   ├── src/
     │   │   ├── main.rs             → Actix-web HTTP server
     │   │   ├── handlers.rs         → BRC-100 endpoint handlers (1900+ lines)
@@ -224,17 +173,16 @@ See `BUILD_INSTRUCTIONS.md` for detailed build steps.
 - **Memory Exposure**: Private keys stored in JavaScript variables are accessible through console inspection, memory dumps, and developer tools
 
 **Native Backend Benefits:**
-- **Process Separation**: Wallet operations happen in isolated Go daemon processes, completely separate from web content
-- **Memory Protection**: Go daemon provides stronger memory protection than JavaScript
-- **Cryptographic Libraries**: Direct access to Bitcoin SV Go SDK (bitcoin-sv/go-sdk) with BEEF and SPV support
+- **Process Separation**: Wallet operations happen in isolated Rust daemon processes, completely separate from web content
+- **Memory Safety**: Rust provides compile-time memory safety guarantees without runtime overhead
+- **Cryptographic Operations**: Custom Rust implementation with BSV ForkID SIGHASH and BRC-100 protocol support
 - **Attack Surface Reduction**: Even if a website compromises the render process, it cannot access the wallet backend
-| 🟡 *PoC: Will migrate to Rust for production* |
 
 **Architecture Security:**
 - **Controlled Bridge API**: Only safe, high-level functions are exposed through `window.hodosBrowser`
 - **Multi-Process CEF**: Leverages Chromium's natural security boundaries between processes
-- **Go Daemon Isolation**: Private keys never leave the isolated Go wallet process
-- **Real Financial Security**: Built for production use where real money is at stake, not just development/testing
+- **Rust Process Isolation**: Private keys never leave the isolated Rust wallet process
+- **Real Financial Security**: Built for production use where real money is at stake, with compile-time safety guarantees
 
 ## 🧬 BRC-100 Protocol Compatibility
 

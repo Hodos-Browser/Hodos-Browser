@@ -26,27 +26,20 @@
             ↓
 +----------------------------+
 |   Wallet Backend Layer     |
-|  DUAL IMPLEMENTATION:      |
+|   Rust Wallet (Port 3301)  ||
+|  - Actix-web HTTP server   ||
+|  - BRC-100 Groups A & B    ||
+|  - BSV ForkID SIGHASH      ||
+|  - BRC-103/104 auth        ||
+|  - BRC-29 payments         ||
+|  - Transaction history     ||
+|  - BEEF Phase 2 parser     ||
+|  - BRC-33 message relay    ||
 +----------------------------+
             |
-   +--------+--------+
-   |                 |
-   v                 v
-+----------------------------+  +----------------------------+
-|   Go Wallet (Port 3301)    |  | Rust Wallet (Port 3301)    |
-|  - bitcoin-sv/go-sdk       |  | - Actix-web HTTP server    |
-|  - HD Wallet (BIP44)       |  | - BRC-103/104 auth         |
-|  - BSV SDK tx signing      |  | - BSV ForkID SIGHASH       |
-|  - Transaction handling    |  | - Custom crypto impl       |
-|  - UTXO Management         |  | - Confirmed mainnet txs    |
-+----------------------------+  +----------------------------+
-            |                            |
-            | (Only ONE runs at a time)  |
-            +------------+---------------+
-                         |
-                         v
-              Shared wallet.json
-           (%APPDATA%/HodosBrowser/wallet/)
+            v
+    wallet.json Storage
+(%APPDATA%/HodosBrowser/wallet/)
             ↓
 +----------------------------+
 | Bitcoin SV Blockchain      |
@@ -97,7 +90,7 @@ Process-Per-Overlay Communication Architecture
 
 ### Async CEF HTTP Client System
 ```
-External Website → HTTP Request → CEF Interceptor → UI Thread Task → Go Daemon → Response → Frontend
+External Website → HTTP Request → CEF Interceptor → UI Thread Task → Rust Wallet → Response → Frontend
 ```
 
 ### Key Components:
@@ -114,7 +107,7 @@ External Website → HTTP Request → CEF Interceptor → UI Thread Task → Go 
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
 │           │                    │                    │                      │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │ URLRequest      │  │ CEF Task System │  │ Go Wallet Daemon            │  │
+│  │ URLRequest      │  │ CEF Task System │  │ Rust Wallet Daemon          │  │
 │  │ CreationTask    │  │ - CefPostTask   │  │ - HTTP API Endpoints        │  │
 │  │ - UI Thread Post│  │ - Thread Safety │  │ - BRC-100 Services         │  │
 │  │ - CefURLRequest │  │ - Async Handling│  │ - Real Blockchain APIs      │  │
@@ -126,7 +119,7 @@ External Website → HTTP Request → CEF Interceptor → UI Thread Task → Go 
 ### Thread-Safe Communication Flow:
 1. **IO Thread**: `HttpRequestInterceptor` receives HTTP request from external website
 2. **UI Thread**: `URLRequestCreationTask` posts `CefURLRequest::Create` to UI thread
-3. **HTTP Request**: `AsyncHTTPClient` makes async request to Go daemon
+3. **HTTP Request**: `AsyncHTTPClient` makes async request to Rust wallet
 4. **Response**: `AsyncWalletResourceHandler` streams response back to frontend
 5. **Frontend**: External website receives response data
 
@@ -241,7 +234,7 @@ Status:
 
 ### Complete Transaction Pipeline
 ```
-React UI → C++ Bridge → Go Daemon → Blockchain
+React UI → C++ Bridge → Rust Wallet → Blockchain
     ↓           ↓           ↓           ↓
 1. User Input  2. Message   3. Create    4. Broadcast
    (Amount)    Routing      Transaction  to Miners
@@ -363,15 +356,15 @@ flowchart TD
 ### ✅ Completed Components
 - **React UI Layer**: Complete with transaction forms, balance display, address management
 - **C++ Bridge Layer**: Full message handling and API injection
-- **Go Wallet Daemon**: Complete HD wallet with transaction processing
-- **Rust Wallet**: Groups A & B complete (14/31 BRC-100 methods)
-- **BRC-100 Authentication**: Complete BRC-100 protocol implementation
-- **Transaction Management**: Full lifecycle with history tracking
-- **Action Storage**: JSON-based transaction history
+- **Rust Wallet**: Production-ready with BRC-100 Groups A & B complete
+- **BRC-100 Authentication**: Complete BRC-103/104 mutual authentication (7 breakthroughs)
+- **Transaction Management**: Full lifecycle with history tracking and BRC-29 support
+- **Action Storage**: JSON-based transaction history with labels and metadata
 - **BEEF Parser**: Phase 2 with output ownership detection
 - **BEEF/SPV Integration**: Real blockchain transactions with SPV verification
+- **BRC-33 Message Relay**: Peer-to-peer messaging support
 - **Process Isolation**: Each overlay runs in dedicated CEF subprocess
-- **Blockchain Integration**: Working with real Bitcoin SV network
+- **Blockchain Integration**: Working with real Bitcoin SV mainnet
 
 ### 🚧 In Development
 - **Window Management**: Keyboard commands and overlay HWND movement

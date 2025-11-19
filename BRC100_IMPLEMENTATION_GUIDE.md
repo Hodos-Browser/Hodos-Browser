@@ -329,11 +329,10 @@ Apps like Coinflip and Thryll use message boxes to:
    - ❓ Is WebSocket (port 3302) for real-time notifications?
    - ❓ Do apps poll `/listMessages` or get push notifications?
 
-6. **Go vs Rust Implementation**:
-   - ✅ **CLARIFIED**: `go-wallet/brc100/websocket/` is **NOT BRC-33** - it's a custom WebSocket for real-time notifications
+6. **Implementation**:
    - ✅ BRC-33 uses **HTTP POST**, not WebSocket
    - ✅ **Decision**: Implement BRC-33 in Rust wallet (port 3301) as HTTP POST endpoints
-   - ❓ Use Go WebSocket (port 3302?) for real-time push notifications (optional enhancement)
+   - ❓ WebSocket (port 3302?) for real-time push notifications (optional enhancement)
 
 ---
 
@@ -379,13 +378,6 @@ App → HTTP POST → Rust Wallet (3301)
 **Pros**: Simple, all in one place, Rust performance
 **Cons**: Need to implement storage system
 
-### Option 2: Delegate to Go Wallet
-```
-App → HTTP POST → Rust Wallet (3301) → Forward → Go Wallet (WebSocket?)
-```
-
-**Pros**: Reuse Go SDK's message relay
-**Cons**: Complex routing, two processes
 
 ### Option 3: CEF C++ Backend (Port 3302)
 ```
@@ -633,10 +625,6 @@ mod tests {
 - Real-world testing with multiple apps
 - Documentation complete
 
-### Milestone 5: Go Wallet Sync (Week 6)
-- Port working Rust implementations to Go
-- Maintain feature parity
-- Choose primary implementation
 
 ---
 

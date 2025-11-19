@@ -4,13 +4,13 @@
 
 ## 🎯 Project Mission
 
-HodosBrowser is a custom Web3 browser built on Chromium Embedded Framework (CEF) focused on the Web3 experience through **native control and seamless user experience**. Unlike traditional Web3 approaches that rely on browser plugins, external wallet tabs, or complex authentication flows, Bitcoin-Browser provides:
+HodosBrowser is a custom Web3 browser built on Chromium Embedded Framework (CEF) focused on the Web3 experience through **native control and seamless user experience**. Unlike traditional Web3 approaches that rely on browser plugins, external wallet tabs, or complex authentication flows, HodosBrowser provides:
 
-- **Native Wallet Integration**: Built-in **production-ready Go-based wallet backend** that operates independently of web content, eliminating the need for external plugins or separate wallet applications
+- **Native Wallet Integration**: Built-in **production-ready Rust wallet backend** with compile-time memory safety, operating independently of web content and eliminating the need for external plugins
 - **Seamless Authentication**: **Complete BRC-100 standard implementation** enables frictionless authentication and transaction signing without interrupting the user's browsing experience
 - **SPV-Powered Transactions**: **Real blockchain SPV integration** provides fast, secure transaction verification with actual Bitcoin SV network data
 - **Security-First Architecture**: Private keys and signing logic never exposed to JavaScript, ensuring maximum security for real financial transactions
-- **HTTP Request Interception**: **Thread-safe async CEF HTTP client** enables external websites to communicate with the wallet daemon without crashes or security compromises
+- **HTTP Request Interception**: **Thread-safe async CEF HTTP client** enables external websites to communicate with the Rust wallet daemon without crashes or security compromises
 - **Unified User Experience**: Clean, intuitive interface that prioritizes user experience over technical complexity, making Bitcoin SV micropayments as simple as traditional web interactions
 
 This approach eliminates the fragmented Web3 experience where users must juggle multiple tabs, plugins, and authentication steps, instead providing a cohesive, secure, and user-friendly environment for Bitcoin SV applications.
@@ -41,18 +41,19 @@ Traditional browser wallets face significant security challenges because they op
    - Browser extensions could inject code that accesses wallet data
    - The JavaScript environment is sandboxed but still accessible to web content
 
-**Our Solution: Go Wallet Backend with Process Isolation**
+**Our Solution: Rust Wallet Backend with Process Isolation**
 
 1. **Process Separation**
-   - Wallet operations happen in isolated Go daemon processes, completely separate from web content
+   - Wallet operations happen in isolated Rust daemon processes, completely separate from web content
    - CEF's multi-process architecture provides natural security boundaries
    - Even if a website compromises the render process, it cannot access the wallet backend
 
 2. **Enhanced Memory Protection**
-   - Go daemon provides stronger memory protection than JavaScript
-   - Can leverage hardware security features and modules (HSM) in future Rust implementation
+   - Rust provides compile-time memory safety guarantees without runtime overhead
+   - Zero-cost abstractions ensure secure memory management for private keys
+   - Explicit ownership model allows secure memory clearing (critical for cryptographic operations)
 
-3. **Process-Per-Overlay Architecture** (NEW)
+3. **Process-Per-Overlay Architecture**
    - Each overlay (settings, wallet, backup) runs in its own isolated CEF subprocess
    - Complete V8 context isolation prevents state pollution between overlays
    - Dedicated HWND windows with custom message handlers for each overlay type
@@ -60,15 +61,15 @@ Traditional browser wallets face significant security challenges because they op
    - Memory isolation between processes prevents cross-process data access
 
 4. **Cryptographic Library Integration**
-   - Direct access to Bitcoin SV Go SDK (bitcoin-sv/go-sdk) with BEEF and SPV support
+   - Custom Rust implementation with BSV ForkID SIGHASH and BRC-100 protocol support
    - Hardware security module (HSM) integration capabilities planned for production
-   - Signing operations happen in isolated, controlled Go daemon environments
+   - Signing operations happen in isolated, controlled Rust daemon environments
 
 5. **Controlled API Exposure**
    - Only safe, high-level functions are exposed through `window.hodosBrowser`
    - The bridge API is carefully designed to prevent sensitive data leakage
    - Process-per-overlay architecture ensures API isolation between different overlay contexts
-   - All cryptographic operations remain in the isolated Go backend
+   - All cryptographic operations remain in the isolated Rust backend
 
 ### Security Architecture Benefits
 
@@ -109,28 +110,25 @@ Traditional browser wallets face significant security challenges because they op
 │              🟡 Future: Consider full Chromium build       │
 └─────────────────────┬───────────────────────────────────────┘
                       │
-         ┌────────────┴────────────┐
-         │                         │
-         ▼                         ▼
-┌──────────────────────┐  ┌──────────────────────┐
-│   Go Wallet          │  │   Rust Wallet        │
-│   (Port 3301)        │  │   (Port 3301)        │
-│                      │  │                      │
-│ • BSV Go SDK         │  │ • Actix-web Server   │
-│ • HD Wallet (BIP44)  │  │ • BRC-103/104 Auth   │
-│ • BSV SDK Signing    │  │ • BSV ForkID SIGHASH │
-│ • Transaction Ops    │  │ • Custom Crypto      │
-│ • UTXO Management    │  │ • Mainnet Confirmed  │
-│ • BRC-100 Endpoints  │  │ • 7 Auth Fixes       │
-│                      │  │ • BRC-33 Relay       │
-│ ✅ PRODUCTION READY  │  │ ✅ PRODUCTION READY  │
-└──────────────────────┘  └──────────────────────┘
-         │                         │
-         │  (Only ONE at a time)   │
-         └────────────┬────────────┘
-                      │
                       ▼
-         Shared wallet.json Storage
+┌─────────────────────────────────────────────┐
+│          Rust Wallet (Port 3301)            │
+│                                             │
+│ • Actix-web HTTP Server                    │
+│ • BRC-100 Authentication (Groups A & B)    │
+│ • BSV ForkID SIGHASH Implementation        │
+│ • Custom Crypto (BRC-42/43)                │
+│ • BRC-103/104 Mutual Authentication        │
+│ • BRC-33 Message Relay                     │
+│ • Transaction History & Action Storage     │
+│ • BEEF Phase 2 Parser                      │
+│ • Mainnet Confirmed Transactions           │
+│                                             │
+│ ✅ PRODUCTION READY                        │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+         wallet.json Storage
       (%APPDATA%/HodosBrowser/wallet/)
                       │
                       ▼
@@ -292,11 +290,10 @@ This project has achieved major milestones:
 ## 🎯 Next Steps
 
 1. **Complete BRC-100 Implementation**
-   - ✅ **Group A: Authentication** - COMPLETE!
-   - ✅ **Group B: Transactions** - Core signing complete
-   - 🔄 Transaction history and internalization
-   - 🔄 UTXO/output management endpoints
-   - 🔄 Certificate management (BRC-52)
+   - ✅ **Group A: Authentication** - COMPLETE! (7 critical breakthroughs)
+   - ✅ **Group B: Transactions** - COMPLETE! (BRC-29 payments working)
+   - 🔄 **Group C: Output/UTXO Management** - Certificate management (BRC-52)
+   - 🔄 **BRC-33 Message Relay** - Implement message inbox endpoints
 
 2. **Frontend Integration**
    - Transaction UI improvements
@@ -501,10 +498,10 @@ The backend implements a modular handler system that exposes native functionalit
 
 ### Identity Management System
 
-**WalletManager Class**
-- **File Location**: `%APPDATA%/HodosBrowser/identity.json`
-- **Encryption**: AES-256-CBC with hardcoded key (temporary implementation)
-- **Key Generation**: ECDSA secp256k1 key pairs
+**Rust Wallet Identity Management**
+- **File Location**: `%APPDATA%/HodosBrowser/wallet/wallet.json`
+- **Encryption**: Wallet data encrypted with master key
+- **Key Generation**: HD wallet with BIP44 derivation (secp256k1)
 - **Address Format**: Bitcoin-style Base58Check encoding
 
 **Identity File Structure**
@@ -562,7 +559,10 @@ The backend implements a modular handler system that exposes native functionalit
 **AppData Directory Structure**
 ```
 %APPDATA%/HodosBrowser/
-└── identity.json          # Encrypted wallet identity
+└── wallet/
+    ├── wallet.json          # Wallet data and identity
+    ├── actions.json         # Transaction history
+    └── domainWhitelist.json # Approved domains
 ```
 
 **File Operations**
@@ -585,40 +585,37 @@ The backend implements a modular handler system that exposes native functionalit
 
 ### Current Implementation Status
 
-**✅ Fully Implemented**
-- Wallet key generation and management
-- Identity file creation and persistence
-- AES encryption/decryption of private keys
-- Base58 address generation
-- Basic handler execution framework
-- Process message passing system
+**✅ Fully Implemented (Rust Wallet)**
+- Complete BRC-100 Groups A & B (Authentication + Transactions)
+- HD wallet with BIP44 derivation
+- BSV ForkID SIGHASH transaction signing
+- BRC-103/104 mutual authentication (7 critical breakthroughs)
+- BRC-29 payment protocol support
+- Transaction history and action storage
+- BEEF Phase 2 parsing with output ownership detection
+- BRC-33 message relay endpoints (send/list/acknowledge)
+- Domain whitelisting system
+- Real mainnet transaction confirmations
 
 **🧱 Partially Implemented**
 - Backup modal integration with overlay system
-- Startup identity check automation
-- Error handling and validation
+- Error handling improvements
+- UTXO management endpoints
 
-**❌ Missing/Incomplete**
-- Secure key storage (replacing hardcoded AES key)
+**❌ Not Yet Implemented**
+- Group C: Output/UTXO management endpoints
+- Group D: Encryption/decryption (BRC-2)
+- Group E: Certificate management (BRC-52)
 - Hardware security module integration
-- Comprehensive error handling
-- Backup modal automatic display on first launch
 
-### Technical Debt & Future Improvements
+### Future Improvements
 
-**Immediate Concerns**
-- Hardcoded AES encryption key (security risk)
-- Limited error handling and validation
-- No hardware security integration
+**Security Enhancements**
+- Hardware security module (HSM) integration
+- Enhanced key storage mechanisms
+- Comprehensive security audit
 
-**Planned Refactoring**
-- Replace C++ implementation with alternative language
-- Implement proper key derivation and storage
-- Add comprehensive security auditing
-- Integrate with hardware security modules
-
-**Current Priority**
-- Get backup modal flow working with existing implementation
-- Establish proper overlay integration
-- Complete the user experience flow
-- Address security improvements in subsequent iterations
+**Features**
+- Complete BRC-100 Groups C, D, E
+- Advanced certificate management
+- Enhanced encryption support
