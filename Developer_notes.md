@@ -4,6 +4,54 @@
 
 ---
 
+## 🗄️ **Database Migration Planning Complete!** (2025-01-XX)
+
+### **Latest Achievement: Complete Database Architecture & Migration Plan**
+
+After comprehensive research and alignment with course notes and metanet-desktop reference implementation, we've finalized a complete database migration plan.
+
+### **What We Planned:**
+
+#### **1. Database Architecture** ✅
+- **Technology**: SQLite (embedded, single-file, ACID-compliant)
+- **Location**: `%APPDATA%/HodosBrowser/wallet/wallet.db`
+- **Library**: `rusqlite` with migrations feature
+- **Schema**: 15 tables covering all wallet data
+
+#### **2. Key Schema Additions** ✅
+- **Baskets Table**: Token organization (required for token management)
+- **Certificates Table**: BRC-52 support (prevents migration issues later)
+- **Messages Table**: BRC-33 persistence (currently in-memory only)
+- **Custom Instructions**: BRC-29 storage in transactions (delete after confirmation)
+- **UTXO Caching**: Eliminate API calls during transactions
+- **BEEF/SPV Caching**: Cache parent transactions and Merkle proofs
+
+#### **3. Implementation Phases** ✅
+1. Database Foundation (Current)
+2. Data Migration (JSON → SQLite)
+3. Core Functionality Migration
+4. UTXO Management & Caching
+5. BEEF/SPV Caching
+6. Basket Implementation
+7. Additional Features
+
+**Key Decisions**:
+- ✅ Add baskets now (easier than retrofitting)
+- ✅ Add certificates table now (no migration risk)
+- ✅ Add messages table now (BRC-33 persistence)
+- ✅ Store custom instructions (delete after confirmation)
+- ⏳ Caching implementation (separate phase after migration)
+
+**Documentation Created**:
+- `development-docs/DATABASE_MIGRATION_IMPLEMENTATION_GUIDE.md` - Complete step-by-step guide
+- `development-docs/BASKET_IMPLEMENTATION_PLAN.md` - Basket design details
+- `development-docs/DATABASE_SCHEMA_DECISIONS.md` - All schema decisions
+- `development-docs/COURSE_NOTES_ALIGNMENT_ANALYSIS.md` - Alignment with course notes
+
+**Next Steps**: Begin Phase 1 - Database Foundation implementation
+
+---
+
 ## 🎉 **Wallet Panel UI Enhancements & USD Conversion Complete!** (2025-12-XX)
 
 ### **Latest Achievement: Enhanced User Experience in Wallet Panel**

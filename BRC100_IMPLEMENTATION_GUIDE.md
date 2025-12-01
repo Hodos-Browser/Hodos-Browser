@@ -3,10 +3,39 @@
 > **Official Specification**: [BRC-100 Wallet Interface](https://bsv.brc.dev/wallet/0100)
 > **Full Spec Document**: `reference/BRC100_spec.md`
 
-## 🎯 Current Status: BRC-29 Payments Working! 🎉
+## 🎯 Current Status: Database Migration Planning Complete! 🎉
 
-**Latest Achievement**: Successfully completed BRC-29 payment protocol implementation with ToolBSV!
-**Status**: Real-world testing complete - payments working with actual sites
+**Latest Achievement**: Complete database migration plan finalized with baskets, certificates, and message persistence!
+**Previous Achievement**: BRC-29 payments working with ToolBSV - real-world tested ✅
+
+**Current Focus**: Database migration from JSON to SQLite (Phase 1 starting)
+
+---
+
+## 🗄️ **NEW: Database Migration Initiative**
+
+**Status**: Planning complete, ready for implementation
+
+**Goal**: Migrate from JSON file storage to SQLite database for improved performance, UTXO caching, and token management.
+
+**Key Additions**:
+- ✅ **Baskets** - Token organization (required for token management)
+- ✅ **Certificates** - BRC-52 support (prevent migration issues)
+- ✅ **Messages** - BRC-33 persistence (currently in-memory only)
+- ✅ **Custom Instructions** - BRC-29 storage (delete after confirmation)
+- ✅ **UTXO Caching** - Eliminate API calls during transactions
+- ✅ **BEEF/SPV Caching** - Cache parent transactions and Merkle proofs
+
+**Implementation Guide**: See `development-docs/DATABASE_MIGRATION_IMPLEMENTATION_GUIDE.md` for complete step-by-step plan.
+
+**Phases**:
+1. ⏳ Database Foundation (Current)
+2. ⏳ Data Migration (JSON → SQLite)
+3. ⏳ Core Functionality Migration
+4. ⏳ UTXO Management & Caching
+5. ⏳ BEEF/SPV Caching
+6. ⏳ Basket Implementation
+7. ⏳ Additional Features
 
 ---
 
@@ -121,18 +150,20 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 
 | Call Code | Method | Status | Internal Test | Real-World Test | Notes |
 |-----------|--------|--------|---------------|-----------------|-------|
-| 6 | `listOutputs` | ❌ | ❌ | ❌ | List available UTXOs |
+| 6 | `listOutputs` | ⏳ | ❌ | ❌ | **Database schema ready** - Will support basket filtering |
 | 7 | `relinquishOutput` | ❌ | ❌ | ❌ | Release UTXO control |
-| 17 | `acquireCertificate` | ❌ | ❌ | ❌ | BRC-52 certificate acquisition |
-| 18 | `listCertificates` | ❌ | ❌ | ❌ | List identity certificates |
-| 19 | `proveCertificate` | ❌ | ❌ | ❌ | Prove certificate ownership |
-| 20 | `relinquishCertificate` | ❌ | ❌ | ❌ | Release certificate |
-| 21 | `discoverByIdentityKey` | ❌ | ❌ | ❌ | Discover certificates by identity |
-| 22 | `discoverByAttributes` | ❌ | ❌ | ❌ | Discover certificates by attributes |
+| 17 | `acquireCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
+| 18 | `listCertificates` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
+| 19 | `proveCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
+| 20 | `relinquishCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
+| 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
+| 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
 | 24 | `waitForAuthentication` | ❌ | ❌ | ❌ | Async auth wait |
 | 25 | `getHeight` | ❌ | ❌ | ❌ | Get blockchain height |
-| 26 | `getHeaderForHeight` | ❌ | ❌ | ❌ | Get block header |
+| 26 | `getHeaderForHeight` | ⏳ | ❌ | ❌ | **Database schema ready** - `block_headers` table added |
 | 27 | `getNetwork` | ❌ | ❌ | ❌ | Return "mainnet" or "testnet" |
+
+**Database Support**: ✅ Schema includes `baskets`, `certificates`, `utxos`, `block_headers` tables - ready for implementation after database migration.
 
 #### **Group D: Encryption & Advanced Crypto (Priority 4)**
 Privacy features and advanced cryptography.
@@ -194,19 +225,33 @@ Advanced wallet features for specific use cases.
 - ✅ BRC-29 payment protocol working
 - ✅ Real-world testing: ToolBSV payments complete successfully!
 
-### Phase 3: Output & UTXO Management (Week 3)
-**Goal**: Complete UTXO and output tracking.
+### Phase 3: Database Migration & UTXO Management (Current Priority)
+**Goal**: Migrate to SQLite database and implement UTXO caching.
 
-**Methods to Implement**:
-- `listOutputs` - List available UTXOs
-- `relinquishOutput` - Release UTXO control
-- `getHeight` / `getHeaderForHeight` - Blockchain queries
-- `getNetwork` - Network identification
+**Database Migration**:
+- ✅ Complete database schema design (15 tables)
+- ⏳ Database foundation implementation
+- ⏳ JSON → SQLite data migration
+- ⏳ Core functionality migration
+
+**UTXO Management**:
+- ⏳ UTXO caching and sync service
+- ⏳ `listOutputs` - List available UTXOs (with basket filtering)
+- ⏳ `relinquishOutput` - Release UTXO control
+- ⏳ BEEF/SPV caching (parent transactions, Merkle proofs)
+
+**Basket Implementation**:
+- ✅ Database schema ready (`baskets` table, `basket_id` in `utxos`)
+- ⏳ Basket assignment logic
+- ⏳ Basket queries and filtering
 
 **Success Criteria**:
-- ✅ Complete UTXO tracking and management
-- ✅ Blockchain state queries working
-- ✅ Output basket system functioning
+- ✅ Database migration complete
+- ✅ UTXO caching working (no API calls during transactions)
+- ✅ BEEF building uses cached data
+- ✅ Baskets functional for token organization
+
+**See**: `development-docs/DATABASE_MIGRATION_IMPLEMENTATION_GUIDE.md` for complete implementation plan.
 
 ### Phase 4: Certificates & Identity (Week 4)
 **Goal**: Complete identity certificate system.

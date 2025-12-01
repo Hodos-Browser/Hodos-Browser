@@ -38,3 +38,6 @@ rust-wallet/target/
 
 # Reference libraries and external dependencies
 reference/
+
+# Archived documentation (already in repo, no longer tracking changes)
+archived-docs/

@@ -125,10 +125,15 @@ Traditional browser wallets face significant security challenges because they op
 │ • Mainnet Confirmed Transactions           │
 │                                             │
 │ ✅ PRODUCTION READY                        │
+│ ⏳ Database Migration (Planning Complete) │
 └──────────────────┬──────────────────────────┘
                    │
                    ▼
-         wallet.json Storage
+         wallet.json Storage (Legacy)
+      (%APPDATA%/HodosBrowser/wallet/)
+                   │
+                   ▼
+         wallet.db (SQLite) ⏳ Coming Soon
       (%APPDATA%/HodosBrowser/wallet/)
                       │
                       ▼
@@ -289,17 +294,44 @@ This project has achieved major milestones:
 
 ## 🎯 Next Steps
 
+### **Current Priority: Database Migration** 🗄️
+
+**Status**: Planning complete, ready for implementation
+
+**Goal**: Migrate from JSON file storage to SQLite database for improved performance, UTXO caching, and token management.
+
+**Key Features**:
+- ✅ **Baskets** - Token organization (required for token management)
+- ✅ **Certificates** - BRC-52 support (database schema ready)
+- ✅ **Messages** - BRC-33 persistence (database schema ready)
+- ✅ **UTXO Caching** - Eliminate API calls during transactions
+- ✅ **BEEF/SPV Caching** - Cache parent transactions and Merkle proofs
+
+**Implementation Guide**: `development-docs/DATABASE_MIGRATION_IMPLEMENTATION_GUIDE.md`
+
+**Phases**:
+1. ⏳ Database Foundation (Current)
+2. ⏳ Data Migration (JSON → SQLite)
+3. ⏳ Core Functionality Migration
+4. ⏳ UTXO Management & Caching
+5. ⏳ BEEF/SPV Caching
+6. ⏳ Basket Implementation
+7. ⏳ Additional Features
+
+### **BRC-100 Implementation** (After Database Migration)
+
 1. **Complete BRC-100 Implementation**
    - ✅ **Group A: Authentication** - COMPLETE! (7 critical breakthroughs)
    - ✅ **Group B: Transactions** - COMPLETE! (BRC-29 payments working)
-   - 🔄 **Group C: Output/UTXO Management** - Certificate management (BRC-52)
-   - 🔄 **BRC-33 Message Relay** - Implement message inbox endpoints
+   - 🔄 **Group C: Output/UTXO Management** - Database schema ready, implementation after migration
+   - ✅ **BRC-33 Message Relay** - Endpoints implemented, database persistence planned
 
 2. **Frontend Integration**
    - Transaction UI improvements
    - Balance display and history
    - Domain approval modal system
    - User experience refinements
+   - Basket UI (after database migration)
 
 3. **Testing & Deployment**
    - Comprehensive security audit
