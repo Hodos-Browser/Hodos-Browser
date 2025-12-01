@@ -96,6 +96,108 @@ impl WalletDatabase {
         &self.conn
     }
 
+    /// Create a new wallet with its first address
+    ///
+    /// This generates a mnemonic, creates the wallet in the database,
+    /// derives the first address using BRC-42, and saves it to the database.
+    ///
+    /// Returns: (wallet_id, mnemonic_phrase, first_address)
+    pub fn create_wallet_with_first_address(&self) -> Result<(i64, String, String)> {
+        use super::{WalletRepository, AddressRepository};
+        use crate::crypto::brc42::derive_child_public_key;
+        use bip39::{Mnemonic, Language};
+        use bip32::XPrv;
+        use secp256k1::{Secp256k1, SecretKey, PublicKey};
+        use sha2::{Sha256, Digest};
+        use ripemd::Ripemd160;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use hex;
+        use bs58;
+
+        info!("🔑 Creating new wallet with first address...");
+
+        // Create repositories
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let address_repo = AddressRepository::new(&self.conn);
+
+        // Create wallet (generates mnemonic)
+        let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet()?;
+
+        // Parse mnemonic and derive master keys
+        let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_phrase)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid mnemonic: {}", e))
+            ))?;
+
+        let seed = mnemonic.to_seed("");
+        let master_key = XPrv::new(&seed)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Failed to create master key: {}", e))
+            ))?;
+
+        let master_privkey = master_key.private_key().to_bytes();
+
+        // Get master public key
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&master_privkey)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid private key: {}", e))
+            ))?;
+        let master_pubkey = PublicKey::from_secret_key(&secp, &secret_key).serialize().to_vec();
+
+        // Create BRC-43 invoice number for first address: "2-receive address-0"
+        let invoice_number = "2-receive address-0";
+        info!("   Invoice number: {}", invoice_number);
+
+        // Derive child public key using BRC-42 (self-derivation)
+        let derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, invoice_number)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 derivation failed: {}", e))
+            ))?;
+
+        info!("   ✅ Derived pubkey: {}", hex::encode(&derived_pubkey));
+
+        // Convert derived public key to Bitcoin address
+        let sha_hash = Sha256::digest(&derived_pubkey);
+        let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+        let mut addr_bytes = vec![0x00]; // Mainnet prefix
+        addr_bytes.extend_from_slice(pubkey_hash.as_slice());
+
+        let checksum_full = Sha256::digest(&Sha256::digest(&addr_bytes));
+        let checksum = &checksum_full[0..4];
+        addr_bytes.extend_from_slice(checksum);
+
+        let address = bs58::encode(&addr_bytes).into_string();
+        info!("   ✅ Generated address: {}", address);
+
+        // Create address in database
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: 0,
+            address: address.clone(),
+            public_key: hex::encode(&derived_pubkey),
+            used: false,
+            balance: 0,
+            created_at,
+        };
+
+        address_repo.create(&address_model)?;
+
+        info!("   ✅ Wallet created successfully with first address");
+        Ok((wallet_id, mnemonic_phrase, address))
+    }
+
     /// Get the database file path
     pub fn path(&self) -> &PathBuf {
         &self.db_path

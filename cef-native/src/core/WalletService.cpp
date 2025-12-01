@@ -377,7 +377,7 @@ nlohmann::json WalletService::getWalletInfo() {
 }
 
 nlohmann::json WalletService::createWallet() {
-    std::cout << "🔍 Creating new wallet via Go daemon..." << std::endl;
+    std::cout << "🔍 Creating new wallet via Rust wallet..." << std::endl;
 
     auto response = makeHttpRequest("POST", "/wallet/create");
 
@@ -386,7 +386,7 @@ nlohmann::json WalletService::createWallet() {
         std::cout << "🔑 Mnemonic: " << response["mnemonic"].get<std::string>() << std::endl;
         return response;
     } else {
-        std::cerr << "❌ Failed to create wallet from Go daemon" << std::endl;
+        std::cerr << "❌ Failed to create wallet from Rust wallet" << std::endl;
         return nlohmann::json::object();
     }
 }

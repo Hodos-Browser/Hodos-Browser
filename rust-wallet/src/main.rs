@@ -113,7 +113,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize database (Phase 1: Foundation)
     let db_path = wallet_path.parent().unwrap().join("wallet.db");
-    let _database = match WalletDatabase::new(db_path.clone()) {
+    let database = match WalletDatabase::new(db_path.clone()) {
         Ok(db) => {
             println!("✅ Database initialized");
             println!("   Database path: {}", db_path.display());
@@ -122,6 +122,59 @@ async fn main() -> std::io::Result<()> {
             if let Err(e) = db.test_connection() {
                 eprintln!("⚠️  Database connection test failed: {}", e);
             }
+
+            // Check if wallet exists in database
+            use database::{WalletRepository, AddressRepository};
+            let wallet_repo = WalletRepository::new(db.connection());
+            match wallet_repo.get_primary_wallet() {
+                Ok(Some(wallet)) => {
+                    println!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
+                    println!("   Addresses: {}", wallet.current_index + 1);
+                }
+                Ok(None) => {
+                    // No wallet in database - check if wallet.json exists to migrate
+                    if wallet_path.exists() {
+                        println!("🔑 No wallet in database, but wallet.json exists");
+                        println!("   To migrate your existing wallet.json to the database:");
+                        println!("   1. Uncomment the migration code in main.rs (around line 135)");
+                        println!("   2. Or run the migration manually");
+                        println!();
+                        println!("   For now, creating a new wallet...");
+                        match db.create_wallet_with_first_address() {
+                            Ok((wallet_id, mnemonic, address)) => {
+                                println!("   ✅ New wallet created!");
+                                println!("   Wallet ID: {}", wallet_id);
+                                println!("   First address: {}", address);
+                                println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
+                                println!();
+                                println!("   ⚠️  NOTE: This is a NEW wallet. Your wallet.json is still intact.");
+                                println!("   ⚠️  To migrate wallet.json, uncomment migration code in main.rs");
+                            }
+                            Err(e) => {
+                                eprintln!("   ❌ Failed to create wallet: {}", e);
+                            }
+                        }
+                    } else {
+                        // No wallet.json either - create new wallet
+                        println!("🔑 No wallet in database - creating new wallet...");
+                        match db.create_wallet_with_first_address() {
+                            Ok((wallet_id, mnemonic, address)) => {
+                                println!("   ✅ Wallet created!");
+                                println!("   Wallet ID: {}", wallet_id);
+                                println!("   First address: {}", address);
+                                println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
+                            }
+                            Err(e) => {
+                                eprintln!("   ❌ Failed to create wallet: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("   ⚠️  Error checking for wallet: {}", e);
+                }
+            }
+
 
             Arc::new(Mutex::new(db))
         }
