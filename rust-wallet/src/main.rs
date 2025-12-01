@@ -13,12 +13,14 @@ mod domain_whitelist;
 mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
+mod database;  // NEW: Database module
 
 use json_storage::JsonStorage;
 use action_storage::ActionStorage;  // NEW: Import ActionStorage
 use domain_whitelist::DomainWhitelistManager;
 use message_relay::MessageStore;
 use auth_session::AuthSessionManager;
+use database::WalletDatabase;  // NEW: Import WalletDatabase
 use std::sync::Arc;
 
 // Global app state
@@ -46,11 +48,18 @@ async fn main() -> std::io::Result<()> {
             ".".to_string()
         });
 
-    let wallet_path = PathBuf::from(appdata)
+    let wallet_dir = PathBuf::from(appdata)
         .join("HodosBrowser")
-        .join("wallet")
-        .join("wallet.json");
+        .join("wallet");
 
+    // Ensure wallet directory exists (needed for both JSON and database)
+    if let Err(e) = std::fs::create_dir_all(&wallet_dir) {
+        eprintln!("❌ Failed to create wallet directory: {}", e);
+        eprintln!("   Path: {}", wallet_dir.display());
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e));
+    }
+
+    let wallet_path = wallet_dir.join("wallet.json");
     println!("📁 Wallet path: {}", wallet_path.display());
 
     // Load wallet
@@ -101,6 +110,29 @@ async fn main() -> std::io::Result<()> {
     // Initialize BRC-103/104 auth session manager
     let auth_sessions = Arc::new(AuthSessionManager::new());
     println!("✅ Auth session manager initialized");
+
+    // Initialize database (Phase 1: Foundation)
+    let db_path = wallet_path.parent().unwrap().join("wallet.db");
+    let _database = match WalletDatabase::new(db_path.clone()) {
+        Ok(db) => {
+            println!("✅ Database initialized");
+            println!("   Database path: {}", db_path.display());
+
+            // Test connection
+            if let Err(e) = db.test_connection() {
+                eprintln!("⚠️  Database connection test failed: {}", e);
+            }
+
+            Arc::new(Mutex::new(db))
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to initialize database: {}", e);
+            eprintln!("   Database path: {}", db_path.display());
+            eprintln!("   Continuing with JSON storage only...");
+            // Continue without database for now (backward compatibility)
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Database init failed: {}", e)));
+        }
+    };
 
     // Create app state
     let app_state = web::Data::new(AppState {

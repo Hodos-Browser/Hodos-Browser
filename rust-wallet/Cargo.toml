@@ -49,3 +49,6 @@ reqwest = { version = "0.11", features = ["json"] }
 
 # Regex for JSON fixing
 regex = "1"
+
+# Database (SQLite)
+rusqlite = { version = "0.30", features = ["bundled"] }
