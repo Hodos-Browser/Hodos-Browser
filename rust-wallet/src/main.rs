@@ -25,8 +25,9 @@ use std::sync::Arc;
 
 // Global app state
 pub struct AppState {
-    pub storage: Mutex<JsonStorage>,
-    pub action_storage: Mutex<ActionStorage>,  // NEW: Transaction action storage
+    pub storage: Mutex<JsonStorage>,  // Keep for backward compatibility during transition
+    pub action_storage: Mutex<ActionStorage>,  // Keep for backward compatibility during transition
+    pub database: Arc<Mutex<WalletDatabase>>,  // NEW: Database storage (primary)
     pub whitelist: Arc<DomainWhitelistManager>,
     pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
@@ -189,8 +190,9 @@ async fn main() -> std::io::Result<()> {
 
     // Create app state
     let app_state = web::Data::new(AppState {
-        storage: Mutex::new(storage),
-        action_storage: Mutex::new(action_storage),  // NEW: Add action storage
+        storage: Mutex::new(storage),  // Keep for backward compatibility during transition
+        action_storage: Mutex::new(action_storage),  // Keep for backward compatibility during transition
+        database,  // Database is primary storage now
         whitelist: whitelist_manager,
         message_store,
         auth_sessions,

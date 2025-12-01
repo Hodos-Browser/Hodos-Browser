@@ -58,35 +58,20 @@ pub async fn get_version() -> HttpResponse {
 pub async fn get_public_key(state: web::Data<AppState>) -> HttpResponse {
     log::info!("📋 /getPublicKey called - returning MASTER identity key");
 
-    let storage = state.storage.lock().unwrap();
-
-    // Get master private key
-    let master_privkey = match storage.get_master_private_key() {
+    // Get master public key from database
+    let db = state.database.lock().unwrap();
+    let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
         Ok(key) => key,
         Err(e) => {
-            log::error!("   Failed to get master private key: {}", e);
-            drop(storage);
+            log::error!("   Failed to get master public key: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to get master key: {}", e)
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
-    // Derive master public key
-    use secp256k1::{Secp256k1, SecretKey, PublicKey};
-    let secp = Secp256k1::new();
-    let master_seckey = match SecretKey::from_slice(&master_privkey) {
-        Ok(key) => key,
-        Err(e) => {
-            log::error!("   Invalid master private key: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Invalid master private key"
-            }));
-        }
-    };
-    let master_pubkey = PublicKey::from_secret_key(&secp, &master_seckey);
-    let master_pubkey_hex = hex::encode(master_pubkey.serialize());
+    let master_pubkey_hex = hex::encode(master_pubkey);
 
     log::info!("   Master public key: {}", master_pubkey_hex);
 
@@ -135,18 +120,17 @@ pub async fn well_known_auth(
 
     // Get MASTER private key (m) for signing
     // BRC-42 requires the master key, not m/0 or any child derivation
-    let storage = state.storage.lock().unwrap();
-    let master_privkey = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => key,
         Err(e) => {
             log::error!("   Failed to get master private key: {}", e);
-            drop(storage);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Key derivation error: {}", e)
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     // Get master public key for identity and BRC-42 key derivation
     use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
@@ -902,8 +886,15 @@ pub async fn verify_hmac(
 
 // Wallet status endpoint
 pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
-    let storage = state.storage.lock().unwrap();
-    let exists = storage.get_wallet().is_ok();
+    use crate::database::WalletRepository;
+
+    // Check database first (primary storage)
+    let db = state.database.lock().unwrap();
+    let wallet_repo = WalletRepository::new(db.connection());
+    let exists = wallet_repo.get_primary_wallet()
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    drop(db);
 
     log::info!("📋 Wallet status: exists={}", exists);
 
@@ -916,15 +907,42 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
-    // Get all addresses from storage
+    // Get all addresses from database
     let addresses = {
-        let storage = state.storage.lock().unwrap();
-        match storage.get_all_addresses() {
-            Ok(addrs) => addrs.to_vec(), // Convert to owned Vec for async operation
+        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+
+        // Get primary wallet
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                log::error!("   No wallet found in database");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "No wallet found"
+                }));
+            }
+            Err(e) => {
+                log::error!("   Failed to get wallet: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        };
+
+        // Get all addresses for this wallet
+        let address_repo = AddressRepository::new(db.connection());
+        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
+            Ok(db_addresses) => {
+                db_addresses.iter()
+                    .map(|addr| address_to_address_info(addr))
+                    .collect::<Vec<_>>()
+            }
             Err(e) => {
                 log::error!("   Failed to get addresses: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": format!("Failed to get addresses: {}", e)
                 }));
             }
         }
@@ -1338,8 +1356,8 @@ pub async fn create_signature(
 
     // Get our wallet's identity key for comparison
     let our_identity_key = {
-        let storage = state.storage.lock().unwrap();
-        match storage.get_master_public_key() {
+        let db = state.database.lock().unwrap();
+        match crate::database::get_master_public_key_from_db(&db) {
             Ok(pubkey_bytes) => hex::encode(pubkey_bytes),
             Err(_) => String::new(),
         }
@@ -1678,19 +1696,44 @@ pub async fn create_action(
     log::info!("   Estimated fee: {} satoshis", estimated_fee);
     log::info!("   Total needed: {} satoshis", total_needed);
 
-    // Fetch UTXOs from WhatsOnChain
-    let storage = state.storage.lock().unwrap();
-    let addresses = match storage.get_all_addresses() {
-        Ok(addrs) => addrs.to_vec(),
-        Err(e) => {
-            drop(storage);
-            log::error!("   Failed to get addresses: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to get addresses"
-            }));
+    // Fetch UTXOs from WhatsOnChain - get addresses from database
+    let addresses = {
+        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                log::error!("   No wallet found in database");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "No wallet found"
+                }));
+            }
+            Err(e) => {
+                log::error!("   Failed to get wallet: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        };
+
+        let address_repo = AddressRepository::new(db.connection());
+        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
+            Ok(db_addresses) => {
+                db_addresses.iter()
+                    .map(|addr| address_to_address_info(addr))
+                    .collect::<Vec<_>>()
+            }
+            Err(e) => {
+                log::error!("   Failed to get addresses: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get addresses: {}", e)
+                }));
+            }
         }
     };
-    drop(storage);
 
     log::info!("   Checking {} addresses for UTXOs...", addresses.len());
 
@@ -1898,15 +1941,28 @@ pub async fn create_action(
     if change > 546 { // Dust limit
         // Get first address for change
         let storage = state.storage.lock().unwrap();
-        let change_addr = match storage.get_current_address() {
-            Ok(addr) => addr.clone(),
-            Err(e) => {
-                drop(storage);
+        // Get change address from database (first address, index 0)
+        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) | Err(_) => {
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to get change address: {}", e)
+                    "error": "No wallet found"
                 }));
             }
         };
+        let address_repo = AddressRepository::new(db.connection());
+        let change_addr = match address_repo.get_by_wallet_and_index(wallet.id.unwrap(), 0) {
+            Ok(Some(addr)) => address_to_address_info(&addr),
+            Ok(None) | Err(_) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to get change address"
+                }));
+            }
+        };
+        drop(db);
         drop(storage);
 
         // Build P2PKH script for change
@@ -2006,13 +2062,18 @@ pub async fn create_action(
         }).collect(),
     };
 
-    // Store the action
+    // Store the action in database
     {
-        let mut action_storage = state.action_storage.lock().unwrap();
-        if let Err(e) = action_storage.add_action(stored_action) {
-            log::warn!("   ⚠️  Failed to store action: {}", e);
-        } else {
-            log::info!("   💾 Action stored with status: created");
+        use crate::database::TransactionRepository;
+        let db = state.database.lock().unwrap();
+        let tx_repo = TransactionRepository::new(db.connection());
+        match tx_repo.add_transaction(&stored_action) {
+            Ok(_) => {
+                log::info!("   💾 Action stored in database with status: created");
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to store action in database: {}", e);
+            }
         }
     }
 
@@ -2187,24 +2248,34 @@ async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), Strin
 pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, String> {
     let mut updated_count = 0;
 
-    // Get all actions that need confirmation updates
-    let actions_to_update: Vec<(String, String)> = {
-        let storage = state.action_storage.lock().unwrap();
-        storage.list_actions(None, None)
-            .iter()
-            .filter(|a| matches!(a.status, crate::action_storage::ActionStatus::Unconfirmed))
-            .map(|a| (a.txid.clone(), a.status.to_string()))
-            .collect()
+    // Get all actions that need confirmation updates from database
+    use crate::database::TransactionRepository;
+    let db = state.database.lock().unwrap();
+    let tx_repo = TransactionRepository::new(db.connection());
+
+    let actions_to_update = match tx_repo.list_transactions(None, None) {
+        Ok(actions) => {
+            actions.into_iter()
+                .filter(|a| matches!(a.status, crate::action_storage::ActionStatus::Unconfirmed))
+                .map(|a| a.txid.clone())
+                .collect::<Vec<_>>()
+        }
+        Err(e) => {
+            log::error!("   Failed to get transactions: {}", e);
+            return Err(format!("Failed to get transactions: {}", e));
+        }
     };
+    drop(db);
 
     log::info!("📊 Checking confirmations for {} transactions...", actions_to_update.len());
 
     // Query each transaction
-    for (txid, _status) in actions_to_update {
+    for txid in actions_to_update {
         match get_confirmation_status(&txid).await {
             Ok((confirmations, block_height)) => {
-                let mut storage = state.action_storage.lock().unwrap();
-                if let Err(e) = storage.update_confirmations(&txid, confirmations, block_height) {
+                let db = state.database.lock().unwrap();
+                let tx_repo = TransactionRepository::new(db.connection());
+                if let Err(e) = tx_repo.update_confirmations(&txid, confirmations, block_height) {
                     log::warn!("   Failed to update {}: {}", txid, e);
                 } else {
                     log::info!("   ✅ {} - {} confirmations", &txid[..16], confirmations);
@@ -2431,17 +2502,17 @@ pub async fn sign_action(
 
         // Get the private key for THIS specific address (not always index 0!)
         let storage = state.storage.lock().unwrap();
-        let private_key_bytes = match storage.derive_private_key(input_utxo.address_index) {
+        let db = state.database.lock().unwrap();
+        let private_key_bytes = match crate::database::derive_private_key_from_db(&db, input_utxo.address_index as u32) {
             Ok(key) => key,
             Err(e) => {
-                drop(storage);
                 log::error!("   Failed to derive private key for address index {}: {}", input_utxo.address_index, e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to derive private key for address {}", input_utxo.address_index)
+                    "error": format!("Failed to derive private key for address {}: {}", input_utxo.address_index, e)
                 }));
             }
         };
-        drop(storage);
+        drop(db);
 
         // Decode prev script
         let prev_script = match hex::decode(&input_utxo.script) {
@@ -2821,18 +2892,19 @@ pub async fn sign_action(
 
     // Update action with new TXID and status
     {
-        let mut action_storage = state.action_storage.lock().unwrap();
-
         // Update TXID (signing changes the transaction, so TXID changes)
-        if let Err(e) = action_storage.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone()) {
+        use crate::database::TransactionRepository;
+        let db = state.database.lock().unwrap();
+        let tx_repo = TransactionRepository::new(db.connection());
+        if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone()) {
             log::warn!("   ⚠️  Failed to update TXID: {}", e);
         } else {
             log::info!("   💾 TXID updated after signing");
         }
 
-        // Update status to signed
+        // Update status to "signed"
         use crate::action_storage::ActionStatus;
-        if let Err(e) = action_storage.update_status(&txid, ActionStatus::Signed) {
+        if let Err(e) = tx_repo.update_status(&txid, ActionStatus::Signed) {
             log::warn!("   ⚠️  Failed to update action status: {}", e);
         } else {
             log::info!("   💾 Action status updated: created → signed");
@@ -2969,9 +3041,11 @@ pub async fn process_action(
 
                 // Update action status to "unconfirmed"
                 {
-                    let mut action_storage = state.action_storage.lock().unwrap();
+                    use crate::database::TransactionRepository;
                     use crate::action_storage::ActionStatus;
-                    if let Err(e) = action_storage.update_status(&txid, ActionStatus::Unconfirmed) {
+                    let db = state.database.lock().unwrap();
+                    let tx_repo = TransactionRepository::new(db.connection());
+                    if let Err(e) = tx_repo.update_status(&txid, ActionStatus::Unconfirmed) {
                         log::warn!("   ⚠️  Failed to update action status: {}", e);
                     } else {
                         log::info!("   💾 Action status updated: signed → unconfirmed");
@@ -2985,9 +3059,11 @@ pub async fn process_action(
 
                 // Update action status to "failed"
                 {
-                    let mut action_storage = state.action_storage.lock().unwrap();
+                    use crate::database::TransactionRepository;
                     use crate::action_storage::ActionStatus;
-                    if let Err(e) = action_storage.update_status(&txid, ActionStatus::Failed) {
+                    let db = state.database.lock().unwrap();
+                    let tx_repo = TransactionRepository::new(db.connection());
+                    if let Err(e) = tx_repo.update_status(&txid, ActionStatus::Failed) {
                         log::warn!("   ⚠️  Failed to update action status: {}", e);
                     } else {
                         log::info!("   💾 Action status updated: signed → failed");
@@ -3127,43 +3203,54 @@ fn pubkey_to_address(pubkey: &[u8]) -> Result<String, String> {
 pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
     log::info!("🔑 /wallet/address/generate called");
 
-    // Get current index and master keys (release lock quickly)
-    let (current_index, master_privkey, master_pubkey) = {
-        let storage = state.storage.lock().unwrap();
+    // Get current index and master keys from database
+    let (wallet_id, current_index, master_privkey, master_pubkey) = {
+        use crate::database::{WalletRepository, get_master_private_key_from_db, get_master_public_key_from_db};
 
-        let wallet = match storage.get_wallet() {
-            Ok(w) => w,
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                log::error!("   No wallet found in database");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "No wallet found"
+                }));
+            }
             Err(e) => {
                 log::error!("   Failed to get wallet: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": format!("Database error: {}", e)
                 }));
             }
         };
 
+        let wallet_id = wallet.id.unwrap();
         let index = wallet.current_index;
 
-        let privkey = match storage.get_master_private_key() {
+        let privkey = match get_master_private_key_from_db(&db) {
             Ok(k) => k,
             Err(e) => {
                 log::error!("   Failed to get master private key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": format!("Failed to get master key: {}", e)
                 }));
             }
         };
 
-        let pubkey = match storage.get_master_public_key() {
+        let pubkey = match get_master_public_key_from_db(&db) {
             Ok(k) => k,
             Err(e) => {
                 log::error!("   Failed to get master public key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": format!("Failed to get master public key: {}", e)
                 }));
             }
         };
 
-        (index, privkey, pubkey)
+        drop(db);
+        (wallet_id, index, privkey, pubkey)
     };
 
     // Create BRC-43 invoice number: "2-receive address-{index}"
@@ -3197,22 +3284,39 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
 
     log::info!("   ✅ Generated address: {}", address);
 
-    // Create AddressInfo
-    let address_info = crate::json_storage::AddressInfo {
-        index: current_index,
-        address: address.clone(),
-        public_key: hex::encode(&derived_pubkey),
-        used: false,
-        balance: 0,
-    };
-
-    // Add address to wallet and save (acquire lock again)
+    // Save address to database and update wallet index
     {
-        let mut storage = state.storage.lock().unwrap();
-        match storage.add_address(address_info) {
+        use crate::database::{AddressRepository, WalletRepository, Address};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let wallet_repo = WalletRepository::new(db.connection());
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let address_model = Address {
+            id: None,
+            wallet_id,
+            index: current_index,
+            address: address.clone(),
+            public_key: hex::encode(&derived_pubkey),
+            used: false,
+            balance: 0,
+            created_at,
+        };
+
+        match address_repo.create(&address_model) {
             Ok(_) => {
-                log::info!("   ✅ Address saved to wallet.json");
-            },
+                // Update wallet's current_index
+                if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
+                    log::warn!("   Failed to update wallet index: {}", e);
+                }
+                log::info!("   ✅ Address saved to database");
+            }
             Err(e) => {
                 log::error!("   Failed to save address: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -3809,19 +3913,28 @@ pub async fn abort_action(
     log::info!("📋 /abortAction called");
     log::info!("   Reference number: {}", req.reference_number);
 
-    // Load action storage
-    let mut storage = state.action_storage.lock().unwrap();
+    // Load action from database
+    use crate::database::TransactionRepository;
+    let db = state.database.lock().unwrap();
+    let tx_repo = TransactionRepository::new(db.connection());
 
     // Find action by reference number
-    let action = match storage.get_action_by_reference(&req.reference_number) {
-        Some(a) => a.clone(), // Clone to avoid borrow issues
-        None => {
+    let action = match tx_repo.get_by_reference(&req.reference_number) {
+        Ok(Some(a)) => a,
+        Ok(None) => {
             log::warn!("   ⚠️  Action not found: {}", req.reference_number);
-            drop(storage);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "status": "error",
                 "code": "ERR_ACTION_NOT_FOUND",
                 "description": format!("Action not found: {}", req.reference_number)
+            }));
+        }
+        Err(e) => {
+            log::error!("   Failed to get action: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "code": "ERR_DATABASE",
+                "description": format!("Database error: {}", e)
             }));
         }
     };
@@ -3834,7 +3947,6 @@ pub async fn abort_action(
     match action.status {
         ActionStatus::Confirmed => {
             log::warn!("   ⚠️  Cannot abort confirmed transaction");
-            drop(storage);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "status": "error",
                 "code": "ERR_CANNOT_ABORT_CONFIRMED",
@@ -3843,22 +3955,19 @@ pub async fn abort_action(
         }
         ActionStatus::Aborted => {
             log::info!("   ℹ️  Transaction already aborted");
-            drop(storage);
             return HttpResponse::Ok().json(AbortActionResponse { aborted: true });
         }
         _ => {}
     }
 
     // Update status to aborted
-    match storage.update_status(&action.txid, ActionStatus::Aborted) {
+    match tx_repo.update_status(&action.txid, ActionStatus::Aborted) {
         Ok(_) => {
             log::info!("✅ Action aborted successfully: {}", action.txid);
-            drop(storage);
             HttpResponse::Ok().json(AbortActionResponse { aborted: true })
         }
         Err(e) => {
             log::error!("   ❌ Failed to abort action: {}", e);
-            drop(storage);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": "error",
                 "code": "ERR_ABORT_FAILED",
@@ -4249,18 +4358,24 @@ pub async fn internalize_action(
         }).collect(),
     };
 
-    // Store the action
+    // Store the action in database
     {
-        let mut action_storage = state.action_storage.lock().unwrap();
-        if let Err(e) = action_storage.add_action(stored_action) {
-            log::error!("   Failed to store action: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": "error",
-                "code": "ERR_STORAGE",
-                "description": format!("Failed to store action: {}", e)
-            }));
+        use crate::database::TransactionRepository;
+        let db = state.database.lock().unwrap();
+        let tx_repo = TransactionRepository::new(db.connection());
+        match tx_repo.add_transaction(&stored_action) {
+            Ok(_) => {
+                log::info!("   💾 Action stored in database with status: unconfirmed");
+            }
+            Err(e) => {
+                log::error!("   Failed to store action in database: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": "error",
+                    "code": "ERR_STORAGE",
+                    "description": format!("Failed to store action: {}", e)
+                }));
+            }
         }
-        log::info!("   💾 Action stored with status: unconfirmed");
     }
 
     log::info!("✅ Incoming transaction internalized: {}", txid);
@@ -4332,14 +4447,24 @@ pub async fn list_actions(
 ) -> HttpResponse {
     log::info!("📋 /listActions called");
 
-    // Load action storage
-    let storage = state.action_storage.lock().unwrap();
+    // Load actions from database
+    use crate::database::TransactionRepository;
+    let db = state.database.lock().unwrap();
+    let tx_repo = TransactionRepository::new(db.connection());
 
     // Get label filter mode
     let label_mode = req.label_query_mode.as_deref();
 
     // List actions with optional label filter
-    let actions = storage.list_actions(req.labels.as_ref(), label_mode);
+    let actions = match tx_repo.list_transactions(req.labels.as_ref(), label_mode) {
+        Ok(actions) => actions,
+        Err(e) => {
+            log::error!("   Failed to list transactions: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to list transactions: {}", e)
+            }));
+        }
+    };
 
     let total = actions.len();
     log::info!("   Found {} actions (before pagination)", total);
@@ -4393,8 +4518,6 @@ pub async fn list_actions(
             obj
         })
         .collect();
-
-    drop(storage);
 
     HttpResponse::Ok().json(ListActionsResponse {
         total_actions: total,
