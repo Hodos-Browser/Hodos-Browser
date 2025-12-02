@@ -296,3 +296,28 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
     info!("   ✅ All tables created successfully");
     Ok(())
 }
+
+/// Create schema version 2 (add pending_utxo_check to addresses)
+///
+/// Adds `pending_utxo_check` column to the `addresses` table to track
+/// newly created addresses that need UTXO checking.
+pub fn create_schema_v2(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 2...");
+
+    // Add pending_utxo_check column to addresses table
+    info!("   Adding pending_utxo_check column to addresses table...");
+    conn.execute(
+        "ALTER TABLE addresses ADD COLUMN pending_utxo_check BOOLEAN NOT NULL DEFAULT 0",
+        [],
+    )?;
+
+    // Create index for faster queries of pending addresses
+    info!("   Creating index for pending_utxo_check...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_addresses_pending_utxo_check ON addresses(pending_utxo_check) WHERE pending_utxo_check = 1",
+        [],
+    )?;
+
+    info!("   ✅ Schema version 2 migration complete");
+    Ok(())
+}

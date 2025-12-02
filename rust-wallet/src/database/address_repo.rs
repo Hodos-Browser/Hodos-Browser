@@ -31,8 +31,8 @@ impl<'a> AddressRepository<'a> {
         };
 
         self.conn.execute(
-            "INSERT INTO addresses (wallet_id, \"index\", address, public_key, used, balance, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO addresses (wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 address.wallet_id,
                 address.index,
@@ -40,6 +40,7 @@ impl<'a> AddressRepository<'a> {
                 address.public_key,
                 address.used,
                 address.balance,
+                address.pending_utxo_check,
                 created_at,
             ],
         )?;
@@ -53,7 +54,7 @@ impl<'a> AddressRepository<'a> {
     /// Get address by wallet ID and index
     pub fn get_by_wallet_and_index(&self, wallet_id: i64, index: i32) -> Result<Option<Address>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, created_at
+            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
              FROM addresses
              WHERE wallet_id = ?1 AND \"index\" = ?2"
         )?;
@@ -69,7 +70,8 @@ impl<'a> AddressRepository<'a> {
                     public_key: row.get(4)?,
                     used: row.get(5)?,
                     balance: row.get(6)?,
-                    created_at: row.get(7)?,
+                    pending_utxo_check: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         );
@@ -84,7 +86,7 @@ impl<'a> AddressRepository<'a> {
     /// Get address by address string
     pub fn get_by_address(&self, address_str: &str) -> Result<Option<Address>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, created_at
+            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
              FROM addresses
              WHERE address = ?1"
         )?;
@@ -100,7 +102,8 @@ impl<'a> AddressRepository<'a> {
                     public_key: row.get(4)?,
                     used: row.get(5)?,
                     balance: row.get(6)?,
-                    created_at: row.get(7)?,
+                    pending_utxo_check: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         );
@@ -115,7 +118,7 @@ impl<'a> AddressRepository<'a> {
     /// Get all addresses for a wallet
     pub fn get_all_by_wallet(&self, wallet_id: i64) -> Result<Vec<Address>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, created_at
+            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
              FROM addresses
              WHERE wallet_id = ?1
              ORDER BY \"index\" ASC"
@@ -132,7 +135,8 @@ impl<'a> AddressRepository<'a> {
                     public_key: row.get(4)?,
                     used: row.get(5)?,
                     balance: row.get(6)?,
-                    created_at: row.get(7)?,
+                    pending_utxo_check: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         )?;
@@ -160,6 +164,67 @@ impl<'a> AddressRepository<'a> {
             "UPDATE addresses SET used = 1 WHERE id = ?1",
             rusqlite::params![address_id],
         )?;
+        Ok(())
+    }
+
+    /// Get all addresses that need UTXO checking (pending_utxo_check = 1)
+    pub fn get_pending_utxo_check(&self, wallet_id: i64) -> Result<Vec<Address>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
+             FROM addresses
+             WHERE wallet_id = ?1 AND pending_utxo_check = 1
+             ORDER BY \"index\" ASC"
+        )?;
+
+        let address_iter = stmt.query_map(
+            rusqlite::params![wallet_id],
+            |row| {
+                Ok(Address {
+                    id: Some(row.get(0)?),
+                    wallet_id: row.get(1)?,
+                    index: row.get(2)?,
+                    address: row.get(3)?,
+                    public_key: row.get(4)?,
+                    used: row.get(5)?,
+                    balance: row.get(6)?,
+                    pending_utxo_check: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )?;
+
+        let mut addresses = Vec::new();
+        for addr_result in address_iter {
+            addresses.push(addr_result?);
+        }
+
+        Ok(addresses)
+    }
+
+    /// Clear pending_utxo_check flag for an address (after checking UTXOs)
+    pub fn clear_pending_utxo_check(&self, address_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE addresses SET pending_utxo_check = 0 WHERE id = ?1",
+            rusqlite::params![address_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear pending_utxo_check flag for multiple addresses
+    pub fn clear_pending_utxo_check_batch(&self, address_ids: &[i64]) -> Result<()> {
+        if address_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Use a transaction for batch update
+        let tx = self.conn.unchecked_transaction()?;
+        for &address_id in address_ids {
+            tx.execute(
+                "UPDATE addresses SET pending_utxo_check = 0 WHERE id = ?1",
+                rusqlite::params![address_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 }

@@ -28,56 +28,85 @@ struct WhatsOnChainUTXO {
 /// Fetch UTXOs for a Bitcoin address from WhatsOnChain
 ///
 /// API: https://api.whatsonchain.com/v1/bsv/main/address/{address}/unspent
+///
+/// Retries on 500 errors (server errors) with exponential backoff.
 pub async fn fetch_utxos_for_address(address: &str, address_index: u32) -> Result<Vec<UTXO>, String> {
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_DELAY_MS: u64 = 1000; // 1 second
+
     let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent", address);
 
     log::info!("   Fetching UTXOs for address: {}", address);
     log::debug!("   WhatsOnChain URL: {}", url);
 
     let client = reqwest::Client::new();
-    let response = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return Err(format!("WhatsOnChain API request failed: {}", e));
-        }
-    };
 
-    // Check status
-    if !response.status().is_success() {
-        if response.status().as_u16() == 404 {
-            // Address never used or no UTXOs
+    // Retry loop for server errors (500, 502, 503, 504)
+    for attempt in 0..=MAX_RETRIES {
+        let response = match client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                if attempt < MAX_RETRIES {
+                    let delay_ms = INITIAL_DELAY_MS * (1 << attempt); // Exponential backoff
+                    log::warn!("   Request failed (attempt {}/{}): {}. Retrying in {}ms...",
+                              attempt + 1, MAX_RETRIES + 1, e, delay_ms);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                return Err(format!("WhatsOnChain API request failed after {} attempts: {}", MAX_RETRIES + 1, e));
+            }
+        };
+
+        let status = response.status();
+
+        // Check status
+        if status.is_success() {
+            // Success - parse and return
+            // Parse response
+            let api_utxos: Vec<WhatsOnChainUTXO> = match response.json().await {
+                Ok(utxos) => utxos,
+                Err(e) => {
+                    return Err(format!("Failed to parse WhatsOnChain response: {}", e));
+                }
+            };
+
+            // Convert to our UTXO format
+            // Generate P2PKH locking script from address (WhatsOnChain doesn't return it)
+            let p2pkh_script = generate_p2pkh_script_from_address(address)?;
+
+            let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
+                txid: u.tx_hash,
+                vout: u.tx_pos,
+                satoshis: u.value,
+                script: p2pkh_script.clone(), // Use generated P2PKH script
+                address_index, // Track which address owns this UTXO
+            }).collect();
+
+            log::info!("   ✅ Fetched {} UTXOs ({} satoshis total)",
+                utxos.len(),
+                utxos.iter().map(|u| u.satoshis).sum::<i64>()
+            );
+
+            return Ok(utxos);
+        } else if status.as_u16() == 404 {
+            // Address never used or no UTXOs - not an error
             log::info!("   No UTXOs found (address unused or spent)");
             return Ok(Vec::new());
+        } else if status.is_server_error() && attempt < MAX_RETRIES {
+            // Server error (500, 502, 503, 504) - retry with exponential backoff
+            let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
+            log::warn!("   Server error {} (attempt {}/{}). Retrying in {}ms...",
+                      status, attempt + 1, MAX_RETRIES + 1, delay_ms);
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        } else {
+            // Client error (4xx) or max retries reached - don't retry
+            return Err(format!("WhatsOnChain API returned status {}", status));
         }
-        return Err(format!("WhatsOnChain API returned status {}", response.status()));
     }
 
-    // Parse response
-    let api_utxos: Vec<WhatsOnChainUTXO> = match response.json().await {
-        Ok(utxos) => utxos,
-        Err(e) => {
-            return Err(format!("Failed to parse WhatsOnChain response: {}", e));
-        }
-    };
-
-    // Convert to our UTXO format
-    // Generate P2PKH locking script from address (WhatsOnChain doesn't return it)
-    let p2pkh_script = generate_p2pkh_script_from_address(address)?;
-
-    let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
-        txid: u.tx_hash,
-        vout: u.tx_pos,
-        satoshis: u.value,
-        script: p2pkh_script.clone(), // Use generated P2PKH script
-        address_index, // Track which address owns this UTXO
-    }).collect();
-
-    log::info!("   ✅ Fetched {} UTXOs ({} satoshis total)",
-        utxos.len(),
-        utxos.iter().map(|u| u.satoshis).sum::<i64>()
-    );
-
-    Ok(utxos)
+    // Should never reach here, but just in case
+    Err(format!("WhatsOnChain API request failed after {} attempts", MAX_RETRIES + 1))
 }
 
 /// Generate P2PKH locking script from a Bitcoin address
@@ -123,7 +152,7 @@ fn generate_p2pkh_script_from_address(address: &str) -> Result<String, String> {
 pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
     let mut all_utxos = Vec::new();
 
-    for addr in addresses {
+    for (idx, addr) in addresses.iter().enumerate() {
         // Always check all addresses - balance cache may be stale
         match fetch_utxos_for_address(&addr.address, addr.index as u32).await {
             Ok(mut utxos) => {
@@ -133,6 +162,12 @@ pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> 
                 log::warn!("   Failed to fetch UTXOs for {}: {}", addr.address, e);
                 // Continue with other addresses
             }
+        }
+
+        // Add small delay between requests to avoid rate limiting
+        // (only if not the last address)
+        if idx < addresses.len() - 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
 

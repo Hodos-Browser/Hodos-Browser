@@ -93,15 +93,22 @@ cargo run --release
 - Custom BSV ForkID SIGHASH implementation
 - Transaction creation, signing, broadcasting
 - Confirmed mainnet transactions
+- SQLite database storage (replaces JSON files)
+- UTXO caching and management
+- Background UTXO sync service
 
 #### Wallet Storage
 
-The wallet data is stored at: `%APPDATA%/HodosBrowser/wallet/wallet.json`
+The wallet data is stored in a SQLite database at: `%APPDATA%/HodosBrowser/wallet/wallet.db`
+
+**Note**: The wallet has been migrated from JSON file storage (`wallet.json`, `actions.json`) to a SQLite database. The database is automatically created and initialized on first run. If you have existing JSON files, they will be automatically migrated to the database.
 
 #### Test the Wallet API
 
 **Rust Wallet Endpoints:**
 - `GET http://localhost:3301/wallet/status` - Wallet status
+- `GET http://localhost:3301/wallet/balance` - Get wallet balance (from database cache)
+- `POST http://localhost:3301/wallet/address/generate` - Generate new address
 - `POST http://localhost:3301/getVersion` - Get wallet version
 - `POST http://localhost:3301/getPublicKey` - Get public key
 - `POST http://localhost:3301/createHmac` - Create HMAC for authentication
@@ -109,9 +116,10 @@ The wallet data is stored at: `%APPDATA%/HodosBrowser/wallet/wallet.json`
 - `POST http://localhost:3301/createSignature` - Create message signature
 - `POST http://localhost:3301/verifySignature` - Verify message signature
 - `POST http://localhost:3301/.well-known/auth` - BRC-104 authentication
-- `POST http://localhost:3301/createAction` - Create transaction
-- `POST http://localhost:3301/signAction` - Sign transaction
+- `POST http://localhost:3301/createAction` - Create transaction (uses database UTXOs)
+- `POST http://localhost:3301/signAction` - Sign transaction (marks UTXOs as spent)
 - `POST http://localhost:3301/processAction` - Process and broadcast transaction
+- `POST http://localhost:3301/transaction/send` - Send transaction (with error handling)
 
 **Test with PowerShell:**
 ```powershell

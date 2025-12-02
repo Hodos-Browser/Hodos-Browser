@@ -14,6 +14,7 @@ mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
 mod database;  // NEW: Database module
+mod utxo_sync;  // NEW: Background UTXO sync service
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -124,6 +125,9 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // Clone database for background sync (before moving into app_state)
+    let database_for_sync = database.clone();
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
@@ -156,6 +160,12 @@ async fn main() -> std::io::Result<()> {
     println!("   POST /acknowledgeMessage");
     println!();
     println!("✅ Server ready - CEF browser can now connect!");
+    println!();
+
+    // Start background UTXO sync task
+    println!("🔄 Starting background UTXO sync service...");
+    utxo_sync::start_background_sync(database_for_sync);
+    println!("   ✅ Background sync will run every {} seconds", utxo_sync::SYNC_INTERVAL_SECONDS);
     println!();
 
     // Start HTTP server

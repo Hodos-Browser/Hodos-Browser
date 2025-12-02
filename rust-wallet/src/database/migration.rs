@@ -87,6 +87,7 @@ pub fn migrate_json_to_database(
             public_key: addr_info.public_key.clone(),
             used: addr_info.used,
             balance: addr_info.balance,
+            pending_utxo_check: false, // Migrated addresses don't need immediate check
             created_at: now, // Use current time since we don't have original timestamp
         };
 

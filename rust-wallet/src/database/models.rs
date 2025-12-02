@@ -24,6 +24,7 @@ pub struct Address {
     pub public_key: String,
     pub used: bool,
     pub balance: i64,
+    pub pending_utxo_check: bool,  // True if address needs UTXO check (newly created)
     pub created_at: i64,  // Unix timestamp
 }
 

@@ -976,42 +976,43 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     };
     drop(db);
 
-    // Always fetch from API to get latest UTXOs (including new addresses and new transactions)
-    // This ensures we catch new UTXOs on recently generated addresses
-    log::info!("   Fetching latest UTXOs from API to update cache...");
+    // Use cached balance from database (Phase 4: primary source)
+    // Only fetch from API if cache is empty (first time setup)
+    // Background sync will update the cache periodically
+    if cached_balance == 0 && address_ids.len() > 0 {
+        // Cache is empty - fetch from API to populate cache
+        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
 
-    // Fetch from API
-    let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
-        Ok(utxos) => utxos,
-        Err(e) => {
-            log::error!("   Failed to fetch UTXOs from API: {}", e);
-            // Fall back to cached balance if API fails
-            log::warn!("   Using cached balance due to API error");
-            return HttpResponse::Ok().json(serde_json::json!({
-                "balance": cached_balance
-            }));
-        }
-    };
+        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                log::error!("   Failed to fetch UTXOs from API: {}", e);
+                // Return cached balance (0) if API fails
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": cached_balance
+                }));
+            }
+        };
 
-    // Cache UTXOs to database (updates existing, adds new)
-    let db = state.database.lock().unwrap();
-    let address_repo = AddressRepository::new(db.connection());
-    let utxo_repo = UtxoRepository::new(db.connection());
+        // Cache UTXOs to database
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let utxo_repo = UtxoRepository::new(db.connection());
 
-    for addr in &addresses {
-        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-            if let Some(addr_id) = db_addr.id {
-                // Get UTXOs for this address (clone to get owned values)
-                let addr_utxos: Vec<_> = api_utxos.iter()
-                    .filter(|u| u.address_index == addr.index as u32)
-                    .cloned()
-                    .collect();
+        for addr in &addresses {
+            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+                if let Some(addr_id) = db_addr.id {
+                    // Get UTXOs for this address (clone to get owned values)
+                    let addr_utxos: Vec<_> = api_utxos.iter()
+                        .filter(|u| u.address_index == addr.index as u32)
+                        .cloned()
+                        .collect();
 
-                if !addr_utxos.is_empty() {
-                    if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                        log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
-                    } else {
-                        // Mark address as used if it has UTXOs
+                    if !addr_utxos.is_empty() {
+                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                        } else {
+                            // Mark address as used if it has UTXOs
                         let _ = address_repo.mark_used(addr_id);
                     }
                 }
@@ -1023,13 +1024,144 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     }
     drop(db);
 
-    // Calculate balance from fetched UTXOs
-    let total_balance: i64 = api_utxos.iter().map(|u| u.satoshis).sum();
-    log::info!("   ✅ Total balance (from API, cache updated): {} satoshis ({} UTXOs)", total_balance, api_utxos.len());
+        // Calculate balance from fetched UTXOs
+        let total_balance: i64 = api_utxos.iter().map(|u| u.satoshis).sum();
+        log::info!("   ✅ Total balance (from API, cache updated): {} satoshis ({} UTXOs)", total_balance, api_utxos.len());
+
+        // Return response in Go wallet format: { "balance": number }
+        return HttpResponse::Ok().json(serde_json::json!({
+            "balance": total_balance
+        }));
+    }
+
+    // Check for pending addresses (newly created addresses that need UTXO checking)
+    let db = state.database.lock().unwrap();
+    let wallet_repo = crate::database::WalletRepository::new(db.connection());
+    let wallet = match wallet_repo.get_primary_wallet() {
+        Ok(Some(w)) => w,
+        Ok(None) | Err(_) => {
+            drop(db);
+            // No wallet found, return cached balance
+            return HttpResponse::Ok().json(serde_json::json!({
+                "balance": cached_balance
+            }));
+        }
+    };
+
+    let address_repo = AddressRepository::new(db.connection());
+    let pending_addresses = match address_repo.get_pending_utxo_check(wallet.id.unwrap()) {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            log::warn!("   Failed to get pending addresses: {}", e);
+            drop(db);
+            return HttpResponse::Ok().json(serde_json::json!({
+                "balance": cached_balance
+            }));
+        }
+    };
+    drop(db);
+
+    // If there are pending addresses, fetch their UTXOs
+    if !pending_addresses.is_empty() {
+        log::info!("   🔍 Found {} pending address(es) to check for new UTXOs", pending_addresses.len());
+
+        // Convert to AddressInfo format for API call
+        let pending_address_infos: Vec<crate::json_storage::AddressInfo> = pending_addresses.iter()
+            .map(|addr| crate::json_storage::AddressInfo {
+                address: addr.address.clone(),
+                index: addr.index,  // Already i32, no conversion needed
+                public_key: addr.public_key.clone(),
+                used: addr.used,
+                balance: addr.balance,
+            })
+            .collect();
+
+        // Fetch UTXOs for pending addresses
+        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&pending_address_infos).await {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                log::warn!("   Failed to fetch UTXOs for pending addresses: {}", e);
+                log::warn!("   ⚠️  Keeping addresses marked as pending - will retry on next balance check");
+                // Return cached balance but DON'T clear pending flags - retry next time
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": cached_balance
+                }));
+            }
+        };
+
+        // Cache UTXOs to database and clear pending flags (only if fetch succeeded)
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let utxo_repo = UtxoRepository::new(db.connection());
+        let mut cleared_ids = Vec::new();
+
+        for addr in &pending_addresses {
+            if let Some(addr_id) = addr.id {
+                // Get UTXOs for this address
+                let addr_utxos: Vec<_> = api_utxos.iter()
+                    .filter(|u| u.address_index == addr.index as u32)
+                    .cloned()
+                    .collect();
+
+                if !addr_utxos.is_empty() {
+                    if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                        log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                        // Continue to clear pending flag even if caching failed - we successfully checked the address
+                    } else {
+                        // Mark address as used if it has UTXOs
+                        let _ = address_repo.mark_used(addr_id);
+                    }
+                }
+
+                // Clear pending flag - fetch succeeded, so we've checked this address
+                // (even if no UTXOs were found or caching failed, we at least tried)
+                if let Err(e) = address_repo.clear_pending_utxo_check(addr_id) {
+                    log::warn!("   Failed to clear pending flag for address {}: {}", addr.address, e);
+                } else {
+                    cleared_ids.push(addr_id);
+                }
+            }
+        }
+        drop(db);
+
+        if !cleared_ids.is_empty() {
+            log::info!("   ✅ Checked {} pending address(es) and cleared flags", cleared_ids.len());
+        }
+
+        // Recalculate balance including new UTXOs
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let address_ids: Vec<i64> = addresses.iter()
+            .filter_map(|addr| {
+                match address_repo.get_by_address(&addr.address) {
+                    Ok(Some(db_addr)) => db_addr.id,
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let utxo_repo = UtxoRepository::new(db.connection());
+        let updated_balance = match utxo_repo.calculate_balance(&address_ids) {
+            Ok(balance) => balance,
+            Err(e) => {
+                log::warn!("   Failed to recalculate balance: {}, using cached", e);
+                cached_balance
+            }
+        };
+        drop(db);
+
+        log::info!("   ✅ Updated balance after checking pending addresses: {} satoshis", updated_balance);
+        return HttpResponse::Ok().json(serde_json::json!({
+            "balance": updated_balance
+        }));
+    }
+
+    // Cache has balance - use it (fast!)
+    log::info!("   ✅ Using cached balance from database: {} satoshis", cached_balance);
 
     // Return response in Go wallet format: { "balance": number }
     HttpResponse::Ok().json(serde_json::json!({
-        "balance": total_balance
+        "balance": cached_balance
     }))
 }
 
@@ -1593,7 +1725,7 @@ pub async fn create_signature(
 // ============================================================================
 
 use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint};
-use crate::utxo_fetcher::{fetch_all_utxos, UTXO};
+use crate::utxo_fetcher::UTXO;
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use once_cell::sync::Lazy;
@@ -1835,10 +1967,18 @@ pub async fn create_action(
 
     drop(db);
 
-    // If database cache is empty or insufficient, fetch from API and cache
+    // Phase 4: Use cached UTXOs from database (primary source)
+    // Only fetch from API if cache is empty OR if we don't have enough balance
     let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
+    if all_utxos.is_empty() {
+        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
+    } else if cached_balance < total_needed {
+        log::info!("   Insufficient cached balance ({} < {}), fetching from API to check for new UTXOs...", cached_balance, total_needed);
+    } else {
+        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
+    }
+
     if all_utxos.is_empty() || cached_balance < total_needed {
-        log::info!("   Cache miss or insufficient balance ({} < {}), fetching from API...", cached_balance, total_needed);
 
         // Fetch from API
         let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
@@ -1877,8 +2017,6 @@ pub async fn create_action(
 
         // Use API UTXOs (they're more up-to-date)
         all_utxos = api_utxos;
-    } else {
-        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
     }
 
     if all_utxos.is_empty() {
@@ -2153,6 +2291,7 @@ pub async fn create_action(
             public_key: hex::encode(&derived_pubkey),
             used: true, // Mark as used since it's receiving change
             balance: 0,
+            pending_utxo_check: false, // Change addresses don't need immediate check
             created_at,
         };
 
@@ -3642,6 +3781,7 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
             public_key: hex::encode(&derived_pubkey),
             used: false,
             balance: 0,
+            pending_utxo_check: true,  // Mark as pending - needs UTXO check
             created_at,
         };
 

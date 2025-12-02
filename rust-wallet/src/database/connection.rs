@@ -189,6 +189,7 @@ impl WalletDatabase {
             public_key: hex::encode(&derived_pubkey),
             used: false,
             balance: 0,
+            pending_utxo_check: false,  // First address will be checked when cache is empty
             created_at,
         };
 
@@ -306,6 +307,33 @@ impl WalletDatabase {
                 }
                 Err(e) => {
                     error!("❌ Migration to version 1 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 2
+        if current_version < 2 {
+            info!("   Applying migration to version 2...");
+            match migrations::create_schema_v2(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 2...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (2)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 2 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 2 failed: {}", e);
                     error!("   Error details: {:?}", e);
                     return Err(e);
                 }
