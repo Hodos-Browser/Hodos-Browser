@@ -62,9 +62,45 @@ pub fn get_master_public_key_from_db(db: &WalletDatabase) -> Result<Vec<u8>> {
 
 /// Derive private key for a specific address index
 ///
-/// Uses BIP39 to convert mnemonic → seed, then BIP32 to derive child key at index.
-/// This matches the behavior of JsonStorage::derive_private_key.
+/// Automatically detects whether to use BRC-42 or BIP32 based on the address index.
+/// 
+/// - Addresses with index < 15: Uses BIP32 (migrated from old JSON storage)
+/// - Addresses with index >= 15: Uses BRC-42 (created after database migration)
+/// 
+/// This threshold (15) corresponds to the addresses that were migrated from wallet.json
+/// during the initial database migration. All addresses created after migration use BRC-42.
 pub fn derive_private_key_from_db(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
+    // Addresses 0-14 were migrated from JSON (created with BIP32)
+    // Addresses 15+ are new addresses created with BRC-42
+    if index < 15 {
+        // Old addresses - use BIP32
+        derive_private_key_bip32(db, index)
+    } else {
+        // New addresses - use BRC-42
+        derive_private_key_brc42(db, index)
+    }
+}
+
+/// Derive private key using BRC-42 (for addresses created with BRC-42)
+fn derive_private_key_brc42(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
+    use crate::crypto::brc42::derive_child_private_key;
+    
+    let master_privkey = get_master_private_key_from_db(db)?;
+    let master_pubkey = get_master_public_key_from_db(db)?;
+    
+    // Create BRC-43 invoice number: "2-receive address-{index}"
+    let invoice_number = format!("2-receive address-{}", index);
+    
+    // Derive child private key using BRC-42
+    derive_child_private_key(&master_privkey, &master_pubkey, &invoice_number)
+        .map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(format!("BRC-42 derivation failed for index {}: {}", index, e))
+        ))
+}
+
+/// Derive private key using BIP32 (for old addresses migrated from JSON)
+fn derive_private_key_bip32(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
     let wallet_repo = WalletRepository::new(db.connection());
     let wallet = wallet_repo.get_primary_wallet()?
         .ok_or_else(|| rusqlite::Error::SqliteFailure(
@@ -109,5 +145,16 @@ pub fn address_to_address_info(addr: &super::Address) -> crate::json_storage::Ad
         public_key: addr.public_key.clone(),
         used: addr.used,
         balance: addr.balance,
+    }
+}
+
+/// Convert database Utxo to utxo_fetcher::UTXO (for compatibility with existing code)
+pub fn utxo_to_fetcher_utxo(utxo: &super::Utxo, address_index: u32) -> crate::utxo_fetcher::UTXO {
+    crate::utxo_fetcher::UTXO {
+        txid: utxo.txid.clone(),
+        vout: utxo.vout as u32,
+        satoshis: utxo.satoshis,
+        script: utxo.script.clone(),
+        address_index,
     }
 }

@@ -497,6 +497,32 @@
   font-weight: 500;
 }
 
+.error-message {
+  background: #dc2626;
+  color: var(--wallet-text-light);
+  padding: 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.5;
+  border: 2px solid #991b1b;
+  font-weight: 500;
+}
+
+.error-message h3 {
+  color: var(--wallet-text-light);
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.error-message .transaction-details {
+  margin-bottom: 16px;
+}
+
+.error-message .transaction-details p {
+  margin: 8px 0;
+  word-break: break-word;
+}
+
 /* Address Display */
 .receive-address-container {
   background: var(--wallet-text-light);

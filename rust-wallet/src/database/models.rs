@@ -26,3 +26,20 @@ pub struct Address {
     pub balance: i64,
     pub created_at: i64,  // Unix timestamp
 }
+
+/// UTXO model matching the `utxos` table
+#[derive(Debug, Clone)]
+pub struct Utxo {
+    pub id: Option<i64>,  // None for new UTXOs, Some(id) for existing
+    pub address_id: i64,  // References addresses(id)
+    pub basket_id: Option<i64>,  // References baskets(id), nullable
+    pub txid: String,
+    pub vout: i32,
+    pub satoshis: i64,
+    pub script: String,  // Hex-encoded locking script
+    pub first_seen: i64,  // Unix timestamp
+    pub last_updated: i64,  // Unix timestamp
+    pub is_spent: bool,
+    pub spent_txid: Option<String>,
+    pub spent_at: Option<i64>,  // Unix timestamp
+}

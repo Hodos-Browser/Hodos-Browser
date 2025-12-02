@@ -1345,17 +1345,117 @@ bool SimpleHandler::OnProcessMessageReceived(
                 nlohmann::json transactionData = nlohmann::json::parse(transactionDataJson);
 
                 // Call WalletService to send transaction
+                LOG_DEBUG_BROWSER("🔍 About to call WalletService::sendTransaction");
                 WalletService walletService;
-                nlohmann::json result = walletService.sendTransaction(transactionData);
 
-                LOG_DEBUG_BROWSER("✅ Transaction result: " + result.dump());
+                LOG_DEBUG_BROWSER("🔍 Calling sendTransaction...");
+                std::cout.flush();
+                std::cerr.flush();
+
+                nlohmann::json result;
+                try {
+                    LOG_DEBUG_BROWSER("🔍 About to call walletService.sendTransaction()...");
+                    std::cout.flush();
+                    result = walletService.sendTransaction(transactionData);
+                    LOG_DEBUG_BROWSER("✅ sendTransaction returned successfully");
+                    std::cout.flush();
+                } catch (const std::exception& e) {
+                    LOG_DEBUG_BROWSER("❌ Exception in sendTransaction: " + std::string(e.what()));
+                    std::cout.flush();
+                    throw;
+                } catch (...) {
+                    LOG_DEBUG_BROWSER("❌ Unknown exception in sendTransaction");
+                    std::cout.flush();
+                    throw;
+                }
+
+                LOG_DEBUG_BROWSER("🔍 About to dump result...");
+                std::string resultStr;
+                try {
+                    // Check if result is valid before dumping
+                    if (result.is_null() || result.empty()) {
+                        LOG_DEBUG_BROWSER("⚠️ Result is null or empty, using default error");
+                        resultStr = "{\"success\":false,\"error\":\"Invalid response from wallet\"}";
+                    } else {
+                        resultStr = result.dump();
+                        LOG_DEBUG_BROWSER("✅ Result dumped, length: " + std::to_string(resultStr.length()));
+
+                        // Truncate if too long (CEF has message size limits)
+                        const size_t MAX_MESSAGE_SIZE = 512; // Keep it small
+                        if (resultStr.length() > MAX_MESSAGE_SIZE) {
+                            LOG_DEBUG_BROWSER("⚠️ Result too long (" + std::to_string(resultStr.length()) + "), truncating");
+                            // Try to preserve the error message if it exists
+                            if (result.contains("error") && result["error"].is_string()) {
+                                std::string errorMsg = result["error"].get<std::string>();
+                                if (errorMsg.length() > 100) {
+                                    errorMsg = errorMsg.substr(0, 100) + "...";
+                                }
+                                resultStr = "{\"success\":false,\"error\":\"" + errorMsg + "\",\"status\":\"failed\"}";
+                            } else {
+                                resultStr = resultStr.substr(0, MAX_MESSAGE_SIZE) + "...(truncated)";
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOG_DEBUG_BROWSER("❌ Exception dumping result: " + std::string(e.what()));
+                    resultStr = "{\"success\":false,\"error\":\"Failed to serialize response\"}";
+                } catch (...) {
+                    LOG_DEBUG_BROWSER("❌ Unknown exception dumping result");
+                    resultStr = "{\"success\":false,\"error\":\"Unknown error\"}";
+                }
+
+                LOG_DEBUG_BROWSER("✅ Transaction result received, length: " + std::to_string(resultStr.length()));
 
                 // Send result back to the requesting browser
+                LOG_DEBUG_BROWSER("🔍 Creating process message");
                 CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_response");
-                CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-                responseArgs->SetString(0, result.dump());
+                if (!response) {
+                    LOG_DEBUG_BROWSER("❌ Failed to create process message");
+                    throw std::runtime_error("Failed to create process message");
+                }
 
-                browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+                LOG_DEBUG_BROWSER("🔍 Getting argument list");
+                CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
+                if (!responseArgs) {
+                    LOG_DEBUG_BROWSER("❌ Failed to get argument list");
+                    throw std::runtime_error("Failed to get argument list");
+                }
+
+                LOG_DEBUG_BROWSER("🔍 Setting string argument (length: " + std::to_string(resultStr.length()) + ")");
+                std::cout.flush();
+
+                // Check if string is too large (CEF has limits)
+                if (resultStr.length() > 1000000) { // 1MB limit
+                    LOG_DEBUG_BROWSER("⚠️ Response too large, truncating error message");
+                    nlohmann::json truncated = result;
+                    if (truncated.contains("error") && truncated["error"].is_string()) {
+                        std::string error = truncated["error"].get<std::string>();
+                        if (error.length() > 500) {
+                            error = error.substr(0, 500) + "... (truncated)";
+                            truncated["error"] = error;
+                        }
+                    }
+                    resultStr = truncated.dump();
+                }
+
+                try {
+                    responseArgs->SetString(0, resultStr);
+                    LOG_DEBUG_BROWSER("✅ String argument set successfully");
+                } catch (const std::exception& e) {
+                    LOG_DEBUG_BROWSER("❌ Failed to set string argument: " + std::string(e.what()));
+                    throw;
+                }
+                std::cout.flush();
+
+                LOG_DEBUG_BROWSER("🔍 Getting main frame");
+                CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
+                if (!mainFrame) {
+                    LOG_DEBUG_BROWSER("❌ Failed to get main frame");
+                    throw std::runtime_error("Failed to get main frame");
+                }
+
+                LOG_DEBUG_BROWSER("🔍 Sending process message to renderer");
+                mainFrame->SendProcessMessage(PID_RENDERER, response);
                 LOG_DEBUG_BROWSER("📤 Transaction response sent back to browser");
             } else {
                 LOG_DEBUG_BROWSER("❌ send_transaction: No arguments provided, args->GetSize() = " + std::to_string(args->GetSize()));

@@ -15,8 +15,7 @@ mod auth_session;
 mod beef;  // NEW: BEEF parser module
 mod database;  // NEW: Database module
 
-use json_storage::JsonStorage;
-use action_storage::ActionStorage;  // NEW: Import ActionStorage
+// JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
 use message_relay::MessageStore;
 use auth_session::AuthSessionManager;
@@ -25,9 +24,7 @@ use std::sync::Arc;
 
 // Global app state
 pub struct AppState {
-    pub storage: Mutex<JsonStorage>,  // Keep for backward compatibility during transition
-    pub action_storage: Mutex<ActionStorage>,  // Keep for backward compatibility during transition
-    pub database: Arc<Mutex<WalletDatabase>>,  // NEW: Database storage (primary)
+    pub database: Arc<Mutex<WalletDatabase>>,  // Database storage (primary)
     pub whitelist: Arc<DomainWhitelistManager>,
     pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
@@ -60,45 +57,8 @@ async fn main() -> std::io::Result<()> {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e));
     }
 
-    let wallet_path = wallet_dir.join("wallet.json");
-    println!("📁 Wallet path: {}", wallet_path.display());
-
-    // Load wallet
-    let storage = match JsonStorage::new(wallet_path.clone()) {
-        Ok(s) => {
-            let wallet = s.get_wallet().unwrap();
-            println!("✅ Wallet loaded successfully");
-            println!("   Addresses: {}", wallet.addresses.len());
-            println!("   Current index: {}", wallet.current_index);
-            println!("   Backed up: {}", wallet.backed_up);
-
-            if let Ok(addr) = s.get_current_address() {
-                println!("   Current address: {}", addr.address);
-                println!("   Current pubkey: {}", addr.public_key);
-            }
-            s
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to load wallet: {}", e);
-            eprintln!("   Expected path: {}", wallet_path.display());
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, e));
-        }
-    };
-
-    // Initialize action storage (transaction history)
-    let actions_path = wallet_path.parent().unwrap().join("actions.json");
-    let action_storage = match ActionStorage::new(actions_path.clone()) {
-        Ok(s) => {
-            println!("✅ Action storage initialized");
-            println!("   Actions path: {}", actions_path.display());
-            println!("   Total actions: {}", s.count());
-            s
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to initialize action storage: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-        }
-    };
+    // Database is now the primary storage - no JSON files needed
+    println!("📁 Wallet directory: {}", wallet_dir.display());
 
     // Initialize domain whitelist manager
     let whitelist_manager = Arc::new(DomainWhitelistManager::new());
@@ -112,8 +72,8 @@ async fn main() -> std::io::Result<()> {
     let auth_sessions = Arc::new(AuthSessionManager::new());
     println!("✅ Auth session manager initialized");
 
-    // Initialize database (Phase 1: Foundation)
-    let db_path = wallet_path.parent().unwrap().join("wallet.db");
+    // Initialize database (primary storage)
+    let db_path = wallet_dir.join("wallet.db");
     let database = match WalletDatabase::new(db_path.clone()) {
         Ok(db) => {
             println!("✅ Database initialized");
@@ -133,41 +93,17 @@ async fn main() -> std::io::Result<()> {
                     println!("   Addresses: {}", wallet.current_index + 1);
                 }
                 Ok(None) => {
-                    // No wallet in database - check if wallet.json exists to migrate
-                    if wallet_path.exists() {
-                        println!("🔑 No wallet in database, but wallet.json exists");
-                        println!("   To migrate your existing wallet.json to the database:");
-                        println!("   1. Uncomment the migration code in main.rs (around line 135)");
-                        println!("   2. Or run the migration manually");
-                        println!();
-                        println!("   For now, creating a new wallet...");
-                        match db.create_wallet_with_first_address() {
-                            Ok((wallet_id, mnemonic, address)) => {
-                                println!("   ✅ New wallet created!");
-                                println!("   Wallet ID: {}", wallet_id);
-                                println!("   First address: {}", address);
-                                println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
-                                println!();
-                                println!("   ⚠️  NOTE: This is a NEW wallet. Your wallet.json is still intact.");
-                                println!("   ⚠️  To migrate wallet.json, uncomment migration code in main.rs");
-                            }
-                            Err(e) => {
-                                eprintln!("   ❌ Failed to create wallet: {}", e);
-                            }
+                    // No wallet in database - create new wallet
+                    println!("🔑 No wallet in database - creating new wallet...");
+                    match db.create_wallet_with_first_address() {
+                        Ok((wallet_id, mnemonic, address)) => {
+                            println!("   ✅ Wallet created!");
+                            println!("   Wallet ID: {}", wallet_id);
+                            println!("   First address: {}", address);
+                            println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
                         }
-                    } else {
-                        // No wallet.json either - create new wallet
-                        println!("🔑 No wallet in database - creating new wallet...");
-                        match db.create_wallet_with_first_address() {
-                            Ok((wallet_id, mnemonic, address)) => {
-                                println!("   ✅ Wallet created!");
-                                println!("   Wallet ID: {}", wallet_id);
-                                println!("   First address: {}", address);
-                                println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
-                            }
-                            Err(e) => {
-                                eprintln!("   ❌ Failed to create wallet: {}", e);
-                            }
+                        Err(e) => {
+                            eprintln!("   ❌ Failed to create wallet: {}", e);
                         }
                     }
                 }
@@ -190,9 +126,7 @@ async fn main() -> std::io::Result<()> {
 
     // Create app state
     let app_state = web::Data::new(AppState {
-        storage: Mutex::new(storage),  // Keep for backward compatibility during transition
-        action_storage: Mutex::new(action_storage),  // Keep for backward compatibility during transition
-        database,  // Database is primary storage now
+        database,  // Database is the only storage now
         whitelist: whitelist_manager,
         message_store,
         auth_sessions,

@@ -108,8 +108,11 @@ const WalletPanel = () => {
     // Set the transaction result and close the form
     setTransactionResult(result);
     setShowSendForm(false);
-    // Refresh balance after successful transaction
-    refreshBalance();
+
+    // Only refresh balance if transaction was successful
+    if (result.success !== false && result.status !== 'failed') {
+      refreshBalance();
+    }
   };
 
 
@@ -276,47 +279,68 @@ const WalletPanel = () => {
           )}
 
 
-          {/* Success Modal */}
+          {/* Success/Error Modal */}
           {transactionResult && (
-            <div className="success-message">
-              <h3>✅ Transaction Sent!</h3>
-              <div className="transaction-details">
-                <p><strong>TxID:</strong> {transactionResult.txid}</p>
-                <p><strong>Status:</strong> {transactionResult.message}</p>
-              </div>
-              {transactionResult.whatsOnChainUrl && (
-                <div className="whatsonchain-container">
-                  <a
-                    href={transactionResult.whatsOnChainUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="whatsonchain-link"
-                    style={{ color: 'var(--wallet-text-light)', textDecoration: 'underline' }}
-                  >
-                    View on WhatsOnChain
-                  </a>
-                  <button
-                    onClick={handleCopyLink}
-                    className="copy-link-button"
-                    style={{
-                      marginLeft: '10px',
-                      padding: '4px 8px',
-                      backgroundColor: copyLinkClicked ? 'var(--wallet-dark-green)' : 'var(--wallet-gold-accent)',
-                      color: copyLinkClicked ? 'var(--wallet-text-light)' : 'var(--wallet-text-dark)',
-                      border: '1px solid var(--wallet-text-light)',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    {copyLinkClicked ? '✓ Copied!' : 'Copy Link'}
+            <div className={transactionResult.success === false || transactionResult.status === 'failed' ? 'error-message' : 'success-message'}>
+              {transactionResult.success === false || transactionResult.status === 'failed' ? (
+                <>
+                  <h3>❌ Transaction Failed</h3>
+                  <div className="transaction-details">
+                    <p><strong>Error:</strong> {transactionResult.error || transactionResult.message || 'Transaction broadcast failed'}</p>
+                    {transactionResult.txid && (
+                      <p><strong>TxID:</strong> {transactionResult.txid}</p>
+                    )}
+                  </div>
+                  <button onClick={() => setTransactionResult(null)} className="close-button">
+                    Close
                   </button>
-                </div>
+                </>
+              ) : (
+                <>
+                  <h3>✅ Transaction Sent!</h3>
+                  <div className="transaction-details">
+                    {transactionResult.txid && (
+                      <p><strong>TxID:</strong> {transactionResult.txid}</p>
+                    )}
+                    {transactionResult.message && (
+                      <p><strong>Status:</strong> {transactionResult.message}</p>
+                    )}
+                  </div>
+                  {transactionResult.whatsOnChainUrl && (
+                    <div className="whatsonchain-container">
+                      <a
+                        href={transactionResult.whatsOnChainUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="whatsonchain-link"
+                        style={{ color: 'var(--wallet-text-light)', textDecoration: 'underline' }}
+                      >
+                        View on WhatsOnChain
+                      </a>
+                      <button
+                        onClick={handleCopyLink}
+                        className="copy-link-button"
+                        style={{
+                          marginLeft: '10px',
+                          padding: '4px 8px',
+                          backgroundColor: copyLinkClicked ? 'var(--wallet-dark-green)' : 'var(--wallet-gold-accent)',
+                          color: copyLinkClicked ? 'var(--wallet-text-light)' : 'var(--wallet-text-dark)',
+                          border: '1px solid var(--wallet-text-light)',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '12px',
+                          transition: 'all 0.2s ease'
+                        }}
+                      >
+                        {copyLinkClicked ? '✓ Copied!' : 'Copy Link'}
+                      </button>
+                    </div>
+                  )}
+                  <button onClick={() => setTransactionResult(null)} className="close-button">
+                    Close
+                  </button>
+                </>
               )}
-              <button onClick={() => setTransactionResult(null)} className="close-button">
-                Close
-              </button>
             </div>
           )}
 

@@ -8,6 +8,8 @@
 #include "include/cef_v8.h"
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <iomanip>
 
 // Forward declaration of Logger class from main shell
 class Logger {
@@ -20,6 +22,39 @@ public:
 #define LOG_INFO_RENDER(msg) Logger::Log(msg, 1, 1)
 #define LOG_WARNING_RENDER(msg) Logger::Log(msg, 2, 1)
 #define LOG_ERROR_RENDER(msg) Logger::Log(msg, 3, 1)
+
+// Helper function to escape JSON string for safe insertion into JavaScript
+// Uses a simple approach: escape only the critical characters for single-quoted strings
+static std::string escapeJsonForJs(const std::string& json) {
+    std::string escaped;
+    escaped.reserve(json.length() * 2); // Reserve space for worst case
+
+    for (char c : json) {
+        switch (c) {
+            case '\\': escaped += "\\\\"; break;
+            case '\'': escaped += "\\'"; break;  // Critical for single-quoted strings
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            case '\0': escaped += "\\0"; break;
+            default:
+                // For most characters, just append them
+                // JSON should only contain valid UTF-8, so this should be safe
+                if (static_cast<unsigned char>(c) >= 32 || c == '\t' || c == '\n' || c == '\r') {
+                    escaped += c;
+                } else {
+                    // Escape other control characters as \xXX using stringstream
+                    std::ostringstream oss;
+                    oss << "\\x" << std::hex << std::setfill('0') << std::setw(2)
+                        << static_cast<unsigned int>(static_cast<unsigned char>(c));
+                    escaped += oss.str();
+                }
+                break;
+        }
+    }
+
+    return escaped;
+}
 
 // Handler for cefMessage.send() function
 class CefMessageSendHandler : public CefV8Handler {
@@ -524,17 +559,52 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "send_transaction_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
+        try {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            if (!args || args->GetSize() == 0) {
+                std::cerr << "❌ send_transaction_response: No arguments" << std::endl;
+                return true;
+            }
 
-        std::cout << "✅ Send transaction response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Send transaction response received: " << responseJson << std::endl;
-        debugLog.close();
+            std::string responseJson = args->GetString(0);
+            std::cout << "✅ Send transaction response received (length: " << responseJson.length() << ")" << std::endl;
+            std::ofstream debugLog("debug_output.log", std::ios::app);
+            debugLog << "✅ Send transaction response received (length: " << responseJson.length() << "): " << responseJson << std::endl;
+            debugLog.close();
 
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onSendTransactionResponse) { window.onSendTransactionResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            // Execute JavaScript to call the callback function directly
+            // Use JSON.parse() to safely parse the JSON string and avoid injection issues
+            // Escape the JSON string to prevent JavaScript injection
+            try {
+                std::string escapedJson = escapeJsonForJs(responseJson);
+                std::cout << "🔍 Escaped JSON (length: " << escapedJson.length() << ")" << std::endl;
+
+                std::string js = "if (window.onSendTransactionResponse) { try { window.onSendTransactionResponse(JSON.parse('" +
+                                 escapedJson + "')); } catch(e) { console.error('Failed to parse transaction response:', e); } }";
+
+                std::cout << "🔍 Executing JavaScript (length: " << js.length() << ")" << std::endl;
+                debugLog.open("debug_output.log", std::ios::app);
+                debugLog << "🔍 Executing JavaScript (length: " << js.length() << ")" << std::endl;
+                debugLog.close();
+
+                if (frame) {
+                    frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+                    std::cout << "✅ JavaScript executed successfully" << std::endl;
+                } else {
+                    std::cerr << "❌ Frame is null, cannot execute JavaScript" << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "❌ Failed to execute JavaScript for send_transaction_response: " << e.what() << std::endl;
+                std::ofstream debugLog("debug_output.log", std::ios::app);
+                debugLog << "❌ Failed to execute JavaScript: " << e.what() << std::endl;
+                debugLog.close();
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "❌ Exception in send_transaction_response handler: " << e.what() << std::endl;
+            std::ofstream debugLog("debug_output.log", std::ios::app);
+            debugLog << "❌ Exception in send_transaction_response handler: " << e.what() << std::endl;
+            debugLog.close();
+        }
 
         return true;
     }

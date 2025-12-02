@@ -192,21 +192,20 @@ pub async fn well_known_auth(
 
     // Get MASTER private key (m) for BRC-42 signing
     // Must use the same master key that we use for nonce HMAC
-    let storage = state.storage.lock().unwrap();
-    let private_key_bytes = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let private_key_bytes = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => {
             log::info!("   ✅ MASTER private key retrieved for BRC-42 signing");
             key
         },
         Err(e) => {
             log::error!("   Failed to get master private key: {}", e);
-            drop(storage);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Key derivation error: {}", e)
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     // Decode counterparty public key (identity key)
     let counterparty_pubkey_bytes = match hex::decode(&req.identity_key) {
@@ -495,21 +494,20 @@ pub async fn create_hmac(
     };
 
     // Get MASTER private key (m) first - needed for "self" counterparty resolution
-    let storage = state.storage.lock().unwrap();
-    let private_key_bytes = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let private_key_bytes = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => {
             log::info!("   ✅ MASTER private key retrieved for HMAC (createHmac)");
             key
         },
         Err(e) => {
             log::error!("   Failed to get master private key: {}", e);
-            drop(storage);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Key derivation error: {}", e)
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     // Parse counterparty (can be "self" or hex public key)
     // For HMAC operations with "self", use RAW master key (no BRC-42)
@@ -790,21 +788,20 @@ pub async fn verify_hmac(
     };
 
     // Get MASTER private key (m) first - needed for "self" counterparty resolution
-    let storage = state.storage.lock().unwrap();
-    let private_key_bytes = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let private_key_bytes = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => {
             log::info!("   ✅ MASTER private key retrieved for HMAC (verifyHmac)");
             key
         },
         Err(e) => {
             log::error!("   Failed to get master private key: {}", e);
-            drop(storage);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Key derivation error: {}", e)
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     // Parse counterparty (can be "self" or hex public key)
     // For HMAC operations with "self", use RAW master key (no BRC-42)
@@ -873,7 +870,7 @@ pub async fn verify_hmac(
     } else {
         // For "self" counterparty, use raw master key (no BRC-42 derivation)
         log::info!("   Using raw master key for HMAC verification (counterparty='self')");
-        private_key_bytes
+        private_key_bytes.clone()
     };
 
     // Verify HMAC
@@ -950,25 +947,90 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
 
     log::info!("   Checking balance for {} addresses", addresses.len());
 
-    // Fetch UTXOs for all addresses
-    match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
-        Ok(utxos) => {
-            let total_balance: i64 = utxos.iter().map(|u| u.satoshis).sum();
+    // Calculate balance from database cache
+    use crate::database::{UtxoRepository, AddressRepository};
+    let db = state.database.lock().unwrap();
+    let address_repo = AddressRepository::new(db.connection());
 
-            log::info!("   ✅ Total balance: {} satoshis ({} UTXOs)", total_balance, utxos.len());
+    // Get address IDs
+    let address_ids: Vec<i64> = addresses.iter()
+        .filter_map(|addr| {
+            // Find address ID by address string
+            match address_repo.get_by_address(&addr.address) {
+                Ok(Some(db_addr)) => db_addr.id,
+                _ => None,
+            }
+        })
+        .collect();
 
-            // Return response in Go wallet format: { "balance": number }
-            HttpResponse::Ok().json(serde_json::json!({
-                "balance": total_balance
-            }))
-        }
+    let utxo_repo = UtxoRepository::new(db.connection());
+    let cached_balance = match utxo_repo.calculate_balance(&address_ids) {
+        Ok(balance) => balance,
         Err(e) => {
-            log::error!("   Failed to fetch UTXOs: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": e
-            }))
+            log::error!("   Failed to calculate balance from database: {}", e);
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+    drop(db);
+
+    // Always fetch from API to get latest UTXOs (including new addresses and new transactions)
+    // This ensures we catch new UTXOs on recently generated addresses
+    log::info!("   Fetching latest UTXOs from API to update cache...");
+
+    // Fetch from API
+    let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
+        Ok(utxos) => utxos,
+        Err(e) => {
+            log::error!("   Failed to fetch UTXOs from API: {}", e);
+            // Fall back to cached balance if API fails
+            log::warn!("   Using cached balance due to API error");
+            return HttpResponse::Ok().json(serde_json::json!({
+                "balance": cached_balance
+            }));
+        }
+    };
+
+    // Cache UTXOs to database (updates existing, adds new)
+    let db = state.database.lock().unwrap();
+    let address_repo = AddressRepository::new(db.connection());
+    let utxo_repo = UtxoRepository::new(db.connection());
+
+    for addr in &addresses {
+        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+            if let Some(addr_id) = db_addr.id {
+                // Get UTXOs for this address (clone to get owned values)
+                let addr_utxos: Vec<_> = api_utxos.iter()
+                    .filter(|u| u.address_index == addr.index as u32)
+                    .cloned()
+                    .collect();
+
+                if !addr_utxos.is_empty() {
+                    if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                        log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                    } else {
+                        // Mark address as used if it has UTXOs
+                        let _ = address_repo.mark_used(addr_id);
+                    }
+                }
+            }
+        } else {
+            // Address not in database - this shouldn't happen if generate_address worked
+            log::warn!("   Address {} not found in database (index {})", addr.address, addr.index);
         }
     }
+    drop(db);
+
+    // Calculate balance from fetched UTXOs
+    let total_balance: i64 = api_utxos.iter().map(|u| u.satoshis).sum();
+    log::info!("   ✅ Total balance (from API, cache updated): {} satoshis ({} UTXOs)", total_balance, api_utxos.len());
+
+    // Return response in Go wallet format: { "balance": number }
+    HttpResponse::Ok().json(serde_json::json!({
+        "balance": total_balance
+    }))
 }
 
 // Request structure for /verifySignature
@@ -1135,21 +1197,20 @@ pub async fn verify_signature(
     // Get our MASTER private key (needed for BRC-42 key derivation)
     // The counterparty field contains the SIGNER's public key
     // In this case, ToolBSV is asking us to verify OUR signature, so counterparty = our master pubkey
-    let storage = state.storage.lock().unwrap();
-    let our_master_privkey = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let our_master_privkey = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => {
             log::info!("   ✅ Master private key retrieved for verification");
             key
         },
         Err(e) => {
-            drop(storage);
             log::error!("   Failed to get master private key: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to get master private key"
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     // BRC-3 Verification Logic:
     // When ToolBSV asks us to verify a signature that WE created:
@@ -1451,18 +1512,17 @@ pub async fn create_signature(
 
     // Get MASTER private key (m) for signature operations
     // CRITICAL: Must use the same master key for both auth and signature operations!
-    let storage = state.storage.lock().unwrap();
-    let private_key_bytes = match storage.get_master_private_key() {
+    let db = state.database.lock().unwrap();
+    let private_key_bytes = match crate::database::get_master_private_key_from_db(&db) {
         Ok(key) => key,
         Err(e) => {
-            drop(storage);
             log::error!("   Failed to get master private key: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to get master private key"
             }));
         }
     };
-    drop(storage);
+    drop(db);
 
     log::info!("   ✅ MASTER private key retrieved for signature (createSignature)");
 
@@ -1737,15 +1797,89 @@ pub async fn create_action(
 
     log::info!("   Checking {} addresses for UTXOs...", addresses.len());
 
-    let all_utxos = match fetch_all_utxos(&addresses).await {
-        Ok(utxos) => utxos,
+    // Try to get UTXOs from database cache first
+    use crate::database::{UtxoRepository, AddressRepository, utxo_to_fetcher_utxo};
+    let db = state.database.lock().unwrap();
+    let address_repo = AddressRepository::new(db.connection());
+    let utxo_repo = UtxoRepository::new(db.connection());
+
+    // Get address IDs and create address index map
+    let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+    let mut address_ids = Vec::new();
+
+    for addr in &addresses {
+        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+            if let Some(addr_id) = db_addr.id {
+                address_ids.push(addr_id);
+                address_id_map.insert(addr_id, addr.index as u32);
+            }
+        }
+    }
+
+    // Get UTXOs from database
+    let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
+        Ok(db_utxos) => {
+            // Convert database UTXOs to fetcher format
+            db_utxos.iter()
+                .filter_map(|db_utxo| {
+                    address_id_map.get(&db_utxo.address_id)
+                        .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
+                })
+                .collect::<Vec<_>>()
+        }
         Err(e) => {
-            log::error!("   Failed to fetch UTXOs: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch UTXOs: {}", e)
-            }));
+            log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
+            Vec::new()
         }
     };
+
+    drop(db);
+
+    // If database cache is empty or insufficient, fetch from API and cache
+    let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
+    if all_utxos.is_empty() || cached_balance < total_needed {
+        log::info!("   Cache miss or insufficient balance ({} < {}), fetching from API...", cached_balance, total_needed);
+
+        // Fetch from API
+        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                log::error!("   Failed to fetch UTXOs from API: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to fetch UTXOs: {}", e)
+                }));
+            }
+        };
+
+        // Cache UTXOs to database
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let utxo_repo = UtxoRepository::new(db.connection());
+
+        for addr in &addresses {
+            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+                if let Some(addr_id) = db_addr.id {
+                    // Get UTXOs for this address (clone to get owned values)
+                    let addr_utxos: Vec<_> = api_utxos.iter()
+                        .filter(|u| u.address_index == addr.index as u32)
+                        .cloned()
+                        .collect();
+
+                    if !addr_utxos.is_empty() {
+                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                        }
+                    }
+                }
+            }
+        }
+        drop(db);
+
+        // Use API UTXOs (they're more up-to-date)
+        all_utxos = api_utxos;
+    } else {
+        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
+    }
 
     if all_utxos.is_empty() {
         log::error!("   No UTXOs available");
@@ -1807,18 +1941,17 @@ pub async fn create_action(
                         });
 
                         // Get our master private key for BRC-42 derivation
-                        let storage = state.storage.lock().unwrap();
-                        let master_key_bytes = match storage.get_master_private_key() {
+                        let db = state.database.lock().unwrap();
+                        let master_key_bytes = match crate::database::get_master_private_key_from_db(&db) {
                             Ok(key) => key,
                             Err(e) => {
-                                drop(storage);
                                 log::error!("   Failed to get master key: {}", e);
                                 return HttpResponse::InternalServerError().json(serde_json::json!({
                                     "error": "Failed to get master key"
                                 }));
                             }
                         };
-                        drop(storage);
+                        drop(db);
 
                         // Parse recipient's public key (payee)
                         let payee_bytes = match hex::decode(payee) {
@@ -1940,9 +2073,11 @@ pub async fn create_action(
 
     if change > 546 { // Dust limit
         // Get first address for change
-        let storage = state.storage.lock().unwrap();
-        // Get change address from database (first address, index 0)
-        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+        // Generate NEW change address (privacy: don't reuse addresses)
+        use crate::database::{WalletRepository, AddressRepository, get_master_private_key_from_db, get_master_public_key_from_db};
+        // derive_child_public_key is already imported at top of file from crate::crypto::brc42
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let db = state.database.lock().unwrap();
         let wallet_repo = WalletRepository::new(db.connection());
         let wallet = match wallet_repo.get_primary_wallet() {
@@ -1953,17 +2088,97 @@ pub async fn create_action(
                 }));
             }
         };
-        let address_repo = AddressRepository::new(db.connection());
-        let change_addr = match address_repo.get_by_wallet_and_index(wallet.id.unwrap(), 0) {
-            Ok(Some(addr)) => address_to_address_info(&addr),
-            Ok(None) | Err(_) => {
+
+        let wallet_id = wallet.id.unwrap();
+        let current_index = wallet.current_index;
+
+        // Derive new address for change
+        let master_privkey = match get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("   Failed to get master private key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to get change address"
+                    "error": format!("Failed to get master key: {}", e)
                 }));
             }
         };
+
+        let master_pubkey = match get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("   Failed to get master public key: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get master public key: {}", e)
+                }));
+            }
+        };
+
+        // Create BRC-43 invoice number for change address
+        let invoice_number = format!("2-receive address-{}", current_index);
+
+        // Derive child public key using BRC-42
+        let derived_pubkey = match derive_child_public_key(&master_privkey, &master_pubkey, &invoice_number) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                log::error!("   BRC-42 derivation failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("BRC-42 derivation failed: {}", e)
+                }));
+            }
+        };
+
+        // Convert to Bitcoin address
+        let change_address = match pubkey_to_address(&derived_pubkey) {
+            Ok(addr) => addr,
+            Err(e) => {
+                log::error!("   Failed to create change address: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to create change address: {}", e)
+                }));
+            }
+        };
+
+        // Save new change address to database
+        let address_repo = AddressRepository::new(db.connection());
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let address_model = crate::database::Address {
+            id: None,
+            wallet_id,
+            index: current_index,
+            address: change_address.clone(),
+            public_key: hex::encode(&derived_pubkey),
+            used: true, // Mark as used since it's receiving change
+            balance: 0,
+            created_at,
+        };
+
+        match address_repo.create(&address_model) {
+            Ok(_) => {
+                // Update wallet's current_index
+                if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
+                    log::warn!("   Failed to update wallet index: {}", e);
+                }
+                log::info!("   ✅ Generated new change address: {} (index {})", change_address, current_index);
+            }
+            Err(e) => {
+                log::warn!("   Failed to save change address to database: {} (continuing anyway)", e);
+            }
+        }
+
         drop(db);
-        drop(storage);
+
+        // Create AddressInfo for change address
+        let change_addr = crate::json_storage::AddressInfo {
+            index: current_index,
+            address: change_address,
+            public_key: hex::encode(&derived_pubkey),
+            used: true,
+            balance: 0,
+        };
 
         // Build P2PKH script for change
         use crate::transaction::Script;
@@ -2501,7 +2716,6 @@ pub async fn sign_action(
             i, input_utxo.txid, input_utxo.vout, input_utxo.address_index);
 
         // Get the private key for THIS specific address (not always index 0!)
-        let storage = state.storage.lock().unwrap();
         let db = state.database.lock().unwrap();
         let private_key_bytes = match crate::database::derive_private_key_from_db(&db, input_utxo.address_index as u32) {
             Ok(key) => key,
@@ -2909,6 +3123,22 @@ pub async fn sign_action(
         } else {
             log::info!("   💾 Action status updated: created → signed");
         }
+
+        // Mark UTXOs as spent in database
+        use crate::database::UtxoRepository;
+        let utxo_repo = UtxoRepository::new(db.connection());
+        let utxos_to_mark: Vec<_> = input_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+
+        match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
+            Ok(count) => {
+                log::info!("   ✅ Marked {} UTXOs as spent in database", count);
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to mark UTXOs as spent: {}", e);
+            }
+        }
     }
 
     // Note: BRC-29 payments are detected in create_action and handled there by deriving
@@ -3095,12 +3325,16 @@ async fn broadcast_transaction(raw_tx_hex: &str) -> Result<String, String> {
     log::info!("   📡 Broadcasting to GorillaPool...");
     match broadcast_to_gorillapool(&client, raw_tx_hex).await {
         Ok(response) => {
-            log::info!("   ✅ GorillaPool accepted: {}", response);
+            log::info!("   ✅ GorillaPool: {}", response);
             success_count += 1;
         }
         Err(e) => {
             log::warn!("   ⚠️ GorillaPool failed: {}", e);
-            last_error = e;
+            if last_error.is_empty() {
+                last_error = format!("GorillaPool: {}", e);
+            } else {
+                last_error = format!("{}; GorillaPool: {}", last_error, e);
+            }
         }
     }
 
@@ -3108,12 +3342,16 @@ async fn broadcast_transaction(raw_tx_hex: &str) -> Result<String, String> {
     log::info!("   📡 Broadcasting to WhatsOnChain...");
     match broadcast_to_whatsonchain(&client, raw_tx_hex).await {
         Ok(response) => {
-            log::info!("   ✅ WhatsOnChain accepted: {}", response);
+            log::info!("   ✅ WhatsOnChain: {}", response);
             success_count += 1;
         }
         Err(e) => {
             log::warn!("   ⚠️ WhatsOnChain failed: {}", e);
-            last_error = e;
+            if last_error.is_empty() {
+                last_error = format!("WhatsOnChain: {}", e);
+            } else {
+                last_error = format!("{}; WhatsOnChain: {}", last_error, e);
+            }
         }
     }
 
@@ -3122,7 +3360,45 @@ async fn broadcast_transaction(raw_tx_hex: &str) -> Result<String, String> {
         Ok(format!("Broadcast to {} service(s)", success_count))
     } else {
         log::error!("   ❌ All broadcasters failed!");
-        Err(format!("All broadcasters failed. Last error: {}", last_error))
+        // Extract a clean, user-friendly error message
+        let clean_error = extract_core_error(&last_error);
+        Err(clean_error)
+    }
+}
+
+// Helper function to extract a clean, user-friendly error message from broadcast errors
+fn extract_core_error(error: &str) -> String {
+    // Look for "ERROR: 16:" pattern (script verification errors)
+    if let Some(start) = error.find("ERROR: 16:") {
+        // Extract from "ERROR: 16:" to the end of the error description
+        let error_part = &error[start..];
+        // Find the end of the error description (usually ends with a closing paren or newline)
+        let end = error_part.find('\n')
+            .or_else(|| error_part.find(';'))
+            .unwrap_or(error_part.len());
+        let core_error = error_part[..end].trim();
+        format!("Transaction broadcast failed: {}", core_error)
+    } else if error.contains("OP_EQUALVERIFY") {
+        // Fallback: if we see OP_EQUALVERIFY but not the ERROR: 16 pattern
+        if let Some(start) = error.find("mandatory-script-verify") {
+            let error_part = &error[start..];
+            let end = error_part.find('\n')
+                .or_else(|| error_part.find(';'))
+                .unwrap_or(error_part.len().min(100));
+            let core_error = error_part[..end].trim();
+            format!("Transaction broadcast failed: ERROR: 16: {}", core_error)
+        } else {
+            "Transaction broadcast failed: ERROR: 16: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)".to_string()
+        }
+    } else {
+        // For other errors, try to extract a meaningful part
+        // Limit to first 200 characters to keep it manageable
+        let truncated = if error.len() > 200 {
+            format!("{}...", &error[..200])
+        } else {
+            error.to_string()
+        };
+        format!("Transaction broadcast failed: {}", truncated)
     }
 }
 
@@ -3144,8 +3420,68 @@ async fn broadcast_to_gorillapool(client: &reqwest::Client, raw_tx_hex: &str) ->
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
 
+    // GorillaPool returns HTTP 200 even for failures, so we need to parse the response
     if status.is_success() {
-        Ok(text)
+        // Parse the response JSON
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(json) => {
+                // GorillaPool wraps the actual response in a "payload" field (which is a JSON string)
+                if let Some(payload_str) = json["payload"].as_str() {
+                    // Parse the inner payload JSON
+                    match serde_json::from_str::<serde_json::Value>(payload_str) {
+                        Ok(payload) => {
+                            // Check if returnResult is "success"
+                            if let Some(return_result) = payload["returnResult"].as_str() {
+                                if return_result == "success" {
+                                    if let Some(txid) = payload["txid"].as_str() {
+                                        log::info!("   ✅ GorillaPool accepted transaction: {}", txid);
+                                        Ok(format!("GorillaPool accepted: {}", txid))
+                                    } else {
+                                        Ok("GorillaPool accepted (no TXID in response)".to_string())
+                                    }
+                                } else {
+                                    // Transaction was rejected
+                                    let error_desc = payload["resultDescription"].as_str()
+                                        .unwrap_or("Unknown error");
+                                    let error_msg = format!("GorillaPool rejected: {} - {}", return_result, error_desc);
+                                    log::warn!("   ⚠️ {}", error_msg);
+                                    Err(error_msg)
+                                }
+                            } else {
+                                // No returnResult field - assume failure
+                                Err(format!("GorillaPool response missing returnResult: {}", text))
+                            }
+                        }
+                        Err(e) => {
+                            Err(format!("Failed to parse GorillaPool payload JSON: {} - Response: {}", e, text))
+                        }
+                    }
+                } else {
+                    // No payload field - try to parse directly
+                    if let Some(return_result) = json["returnResult"].as_str() {
+                        if return_result == "success" {
+                            Ok("GorillaPool accepted".to_string())
+                        } else {
+                            let error_desc = json["resultDescription"].as_str().unwrap_or("Unknown error");
+                            Err(format!("GorillaPool rejected: {} - {}", return_result, error_desc))
+                        }
+                    } else {
+                        // Assume success if we can't parse (fallback)
+                        log::warn!("   ⚠️ Could not parse GorillaPool response, assuming success: {}", text);
+                        Ok(text)
+                    }
+                }
+            }
+            Err(e) => {
+                // If JSON parsing fails, check HTTP status
+                if status.is_success() {
+                    log::warn!("   ⚠️ GorillaPool returned non-JSON response, assuming success: {}", text);
+                    Ok(text)
+                } else {
+                    Err(format!("{} - {} (JSON parse error: {})", status, text, e))
+                }
+            }
+        }
     } else {
         Err(format!("{} - {}", status, text))
     }
@@ -3310,15 +3646,16 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
         };
 
         match address_repo.create(&address_model) {
-            Ok(_) => {
+            Ok(addr_id) => {
                 // Update wallet's current_index
                 if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
                     log::warn!("   Failed to update wallet index: {}", e);
                 }
-                log::info!("   ✅ Address saved to database");
+                log::info!("   ✅ Address saved to database (ID: {}, index: {}, address: {})", addr_id, current_index, address);
             }
             Err(e) => {
-                log::error!("   Failed to save address: {}", e);
+                log::error!("   ❌ Failed to save address to database: {}", e);
+                log::error!("   Address: {}, Index: {}", address, current_index);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to save address: {}", e)
                 }));
@@ -3564,13 +3901,30 @@ pub async fn send_transaction(
         },
         Err(e) => {
             log::error!("   ❌ Transaction broadcast failed: {}", e);
-            // Even if broadcast fails, we still have a valid transaction
-            // Return success but note the broadcast issue
+
+            // Update transaction status to "failed" in database
+            {
+                use crate::database::TransactionRepository;
+                use crate::action_storage::ActionStatus;
+                let db = state.database.lock().unwrap();
+                let tx_repo = TransactionRepository::new(db.connection());
+                if let Err(db_err) = tx_repo.update_status(&txid, ActionStatus::Failed) {
+                    log::warn!("   ⚠️  Failed to update transaction status in database: {}", db_err);
+                } else {
+                    log::info!("   💾 Transaction status updated to 'failed' in database");
+                }
+            }
+
+            // Extract a clean, user-friendly error message
+            let clean_error = extract_core_error(&e);
+
+            // Return error response - transaction was NOT successfully sent
             HttpResponse::Ok().json(serde_json::json!({
-                "success": true,
+                "success": false,
                 "txid": txid,
-                "whatsOnChainUrl": format!("https://whatsonchain.com/tx/{}", txid),
-                "message": format!("Transaction created but broadcast may have failed: {}", e)
+                "error": clean_error.clone(),
+                "message": clean_error,
+                "status": "failed"
             }))
         }
     }
@@ -4292,15 +4646,44 @@ pub async fn internalize_action(
 
     // Get our wallet addresses to check output ownership
     let our_addresses = {
-        let storage = state.storage.lock().unwrap();
-        match storage.get_all_addresses() {
-            Ok(addrs) => addrs.to_vec(),
+        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                log::error!("   No wallet found in database");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": "error",
+                    "code": "ERR_WALLET",
+                    "description": "No wallet found"
+                }));
+            }
+            Err(e) => {
+                log::error!("   Failed to get wallet: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": "error",
+                    "code": "ERR_WALLET",
+                    "description": format!("Database error: {}", e)
+                }));
+            }
+        };
+
+        let address_repo = AddressRepository::new(db.connection());
+        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
+            Ok(db_addresses) => {
+                db_addresses.iter()
+                    .map(|addr| address_to_address_info(addr))
+                    .collect::<Vec<_>>()
+            }
             Err(e) => {
                 log::error!("   Failed to get wallet addresses: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "status": "error",
                     "code": "ERR_WALLET",
-                    "description": format!("Failed to get wallet addresses: {}", e)
+                    "description": format!("Failed to get addresses: {}", e)
                 }));
             }
         }

@@ -24,6 +24,7 @@ export interface TransactionResponse {
   broadcasted?: boolean;
   success?: boolean;
   message?: string;
+  error?: string;
   whatsOnChainUrl?: string;
 }
 

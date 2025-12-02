@@ -216,8 +216,22 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       // Send transaction (create + sign + broadcast in one call)
       console.log('📝 Sending transaction...');
       const result = await sendTransaction(transactionData);
-      console.log('✅ Transaction sent successfully:', result);
 
+      // Check if transaction was successful
+      if (result.success === false || result.status === 'failed') {
+        console.error('❌ Transaction failed:', result.error || result.message);
+        // Still call callback to show error message to user
+        try {
+          onTransactionCreated(result);
+          console.log('🔄 Form: onTransactionCreated called with error result');
+        } catch (err) {
+          console.error('❌ Form: Callback failed with error result:', err);
+          // Don't crash - just log the error
+        }
+        return; // Don't reset form or show success message
+      }
+
+      console.log('✅ Transaction sent successfully:', result);
       console.log('🎉 Transaction send successful:', result);
 
       // Reset form immediately (don't wait for callback)

@@ -859,7 +859,91 @@ All integration tests passing! ✅
 
 ---
 
-**Last Updated:** October 30, 2025
-**Current Focus:** ✅ **BRC-29 PAYMENTS WORKING!** Complete transaction system with real-world testing!
-**Major Achievement:** BRC-29 payment protocol, TSC Merkle proofs, and Atomic BEEF all working with ToolBSV!
-**Next Session:** Additional testing with other sites, then move to Phase 3 (Output/UTXO Management)
+**Last Updated:** December 2, 2025
+**Current Focus:** 🚨 **CRITICAL: Transaction Error Handling** - Fix UI feedback for failed transactions
+**Major Achievement:** ✅ **Phase 4 UTXO Management Complete!** Database-backed UTXO caching, balance calculation, and spending tracking all working!
+**Next Session:** Fix transaction error handling (see CHECKPOINT_TRANSACTION_ERROR_HANDLING.md), then continue with Phase 5 (BEEF/SPV Caching)
+
+---
+
+## 🗄️ **Phase 4: UTXO Management - COMPLETE!** (2025-12-02)
+
+### **Latest Achievement: Database-Backed UTXO Caching**
+
+Successfully implemented Phase 4 of the database migration, enabling fast UTXO lookups and proper spending tracking!
+
+### **What We Built:**
+
+#### **1. UTXO Repository** ✅
+**File**: `rust-wallet/src/database/utxo_repo.rs`
+
+**Key Features:**
+- `upsert_utxos()` - Insert or update UTXOs in database
+- `get_unspent_by_addresses()` - Fast lookup of unspent UTXOs
+- `mark_spent()` - Track UTXO spending with `spent_txid` and `spent_at`
+- `calculate_balance()` - Sum unspent UTXOs for balance calculation
+- `cleanup_spent_utxos()` - Optional cleanup of old spent UTXOs
+
+#### **2. Database Integration** ✅
+**Files**: `rust-wallet/src/handlers.rs`
+
+**Updated Handlers:**
+- `wallet_balance` - Now calculates from database cache, fetches from API if cache empty
+- `createAction` - Uses database UTXOs first, falls back to API if needed
+- `signAction` - Marks spent UTXOs in database when transaction is signed
+
+**Key Improvements:**
+- ✅ Fast balance checks (no API calls if cache populated)
+- ✅ Automatic cache population on first use
+- ✅ Change address generation (privacy: new address for each change)
+- ✅ UTXO spending tracking (prevents double-spend attempts)
+
+#### **3. Address Management** ✅
+**File**: `rust-wallet/src/database/address_repo.rs`
+
+**Features:**
+- Automatic address marking as "used" when UTXOs are found
+- Proper address indexing and tracking
+- Support for gap limit scanning (ready for background sync)
+
+### **Current Status:**
+- ✅ **UTXO Caching**: Working - UTXOs stored in database
+- ✅ **Balance Calculation**: Working - Fast calculation from cache
+- ✅ **UTXO Spending**: Working - Spent UTXOs tracked in database
+- ✅ **Change Address Privacy**: Fixed - New address for each change output
+- ⏳ **Background Sync**: Pending - Gap limit scanning not yet implemented
+- ⏳ **Periodic Updates**: Pending - Manual refresh required
+
+### **Performance Notes:**
+- ⚠️ **Wallet is still slow** - Balance check fetches from API every time (by design for accuracy)
+- Need to discuss optimization strategy:
+  - Background sync service with gap limit
+  - Periodic UTXO updates (every N minutes)
+  - Smart refresh (only check new addresses)
+  - See Phase 4 research doc for details
+
+### **What Still Needs Work:**
+- 🔄 **Background UTXO Sync**: Implement gap limit scanning service
+- 🔄 **Periodic Updates**: Auto-refresh UTXOs in background
+- 🔄 **Performance Optimization**: Reduce API calls while maintaining accuracy
+
+---
+
+## 🚨 **CRITICAL ISSUE: Transaction Error Handling** (2025-12-02)
+
+### **Problem:**
+When transaction broadcast fails, backend correctly logs error and updates status, but frontend shows "Transaction Sent!" success message.
+
+**Error Example:**
+```
+⚠️ WhatsOnChain failed: 400 Bad Request - "unexpected response code 500: 16: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)"
+```
+
+**Root Causes:**
+1. Script verification error (`OP_EQUALVERIFY` failure) - needs investigation
+2. Frontend checks HTTP status code (200) instead of `response.status` field
+3. Backend always returns 200 OK, even for failures
+
+**See**: `development-docs/CHECKPOINT_TRANSACTION_ERROR_HANDLING.md` for full details and action items.
+
+**Priority**: HIGH - Fix before continuing with Phase 5
