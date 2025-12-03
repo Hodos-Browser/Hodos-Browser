@@ -54,8 +54,12 @@ const MainBrowserView: React.FC = () => {
             <Toolbar sx={{
                 bgcolor: 'grey.100',
                 borderBottom: '1px solid #ccc',
+                height: '100%',
                 minHeight: '64px !important',
-                flexShrink: 0
+                flexShrink: 0,
+                paddingX: 1, // Horizontal padding only
+                paddingY: 0, // No vertical padding to fill height
+                margin: 0
             }}>
                 {/* Back Button */}
                 <IconButton onClick={goBack}>
