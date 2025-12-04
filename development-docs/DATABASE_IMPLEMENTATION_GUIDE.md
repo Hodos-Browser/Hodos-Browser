@@ -212,14 +212,17 @@ This guide outlines the plan to migrate HodosBrowser from JSON file storage to a
 - [x] Retry logic with exponential backoff for API failures
 - [x] Rate limiting protection
 
-### Phase 6: BEEF/SPV Caching ⏳ **PENDING** (Next Phase)
-- [ ] Implement `parent_transactions` table operations
-- [ ] Implement `merkle_proofs` table operations
-- [ ] Implement `block_headers` table operations
-- [ ] Create background service to pre-fetch parent transactions
-- [ ] Pre-fetch Merkle proofs for confirmed parent transactions
-- [ ] Update `signAction()` to use cached data (fallback to API if missing)
-- [ ] Implement proof refresh on reorg detection
+### Phase 6: BEEF/SPV Caching ✅ **COMPLETE** (2025-12-02)
+- [x] Implement `parent_transactions` table operations (`parent_transaction_repo.rs`)
+- [x] Implement `merkle_proofs` table operations (`merkle_proof_repo.rs`)
+- [x] Implement `block_headers` table operations (`block_header_repo.rs`)
+- [x] Create background service to pre-fetch parent transactions (`cache_sync.rs`)
+- [x] Pre-fetch Merkle proofs for confirmed parent transactions
+- [x] Update `signAction()` to use cached data (fallback to API if missing)
+- [x] Schema migration v3 (nullable `utxo_id` for external parent transactions)
+- [x] Unified error handling (`cache_errors.rs`)
+- [x] Cache-first approach with automatic population
+- [ ] Implement proof refresh on reorg detection (deferred to Phase 7)
 
 ### Phase 7: Performance & Optimization
 - [ ] Add database indexes (based on query patterns)
@@ -436,12 +439,32 @@ This guide outlines the plan to migrate HodosBrowser from JSON file storage to a
 - Error handling with retry logic
 - Change address privacy (new address per change)
 
-### ⏳ **Next Steps** (Phase 5)
+### ✅ **Completed Phases** (2025-12-02)
 
-1. **Parent Transaction Caching**: Cache parent transactions for BEEF building
-2. **TSC Proof Caching**: Cache Merkle proofs for SPV verification
-3. **Block Header Caching**: Cache block headers for height resolution
-4. **Performance Optimization**: Query optimization and indexing
+**Phase 1-6: COMPLETE**
+- ✅ Database foundation and schema
+- ✅ Data migration from JSON to SQLite
+- ✅ Core functionality (addresses, transactions)
+- ✅ UTXO management with background sync
+- ✅ BEEF/SPV caching (parent transactions, Merkle proofs, block headers)
+
+**Key Achievements:**
+- Database-backed wallet storage
+- Fast balance checks (database cache)
+- Background UTXO sync (every 5 minutes)
+- New address detection (pending cache)
+- BEEF/SPV caching with automatic population
+- Cache-first transaction signing (no API delays)
+- Background cache sync service (every 10 minutes)
+- Error handling with retry logic
+- Change address privacy (new address per change)
+
+### ⏳ **Next Steps** (Phase 7)
+
+1. **Performance Optimization**: Query optimization and indexing
+2. **Reorg Detection**: Implement proof refresh on blockchain reorganization
+3. **Cache Invalidation**: Smart cache expiration and refresh strategies
+4. **Connection Pooling**: If needed for high concurrency
 
 ---
 

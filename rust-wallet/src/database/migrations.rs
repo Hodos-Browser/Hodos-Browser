@@ -321,3 +321,50 @@ pub fn create_schema_v2(conn: &Connection) -> Result<()> {
     info!("   ✅ Schema version 2 migration complete");
     Ok(())
 }
+
+/// Create schema version 3 (make parent_transactions.utxo_id nullable)
+///
+/// Allows caching parent transactions from external sources (not in our wallet).
+/// SQLite doesn't support ALTER COLUMN directly, so we recreate the table.
+pub fn create_schema_v3(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 3...");
+
+    // SQLite doesn't support ALTER COLUMN directly, so we need to:
+    // 1. Create new table with nullable utxo_id
+    // 2. Copy data
+    // 3. Drop old table
+    // 4. Rename new table
+
+    info!("   Step 1: Creating temporary parent_transactions table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS parent_transactions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            utxo_id INTEGER,
+            txid TEXT NOT NULL UNIQUE,
+            raw_hex TEXT NOT NULL,
+            cached_at INTEGER NOT NULL,
+            FOREIGN KEY (utxo_id) REFERENCES utxos(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    info!("   Step 2: Copying data from old table...");
+    conn.execute(
+        "INSERT INTO parent_transactions_new (id, utxo_id, txid, raw_hex, cached_at)
+         SELECT id, utxo_id, txid, raw_hex, cached_at FROM parent_transactions",
+        [],
+    )?;
+
+    info!("   Step 3: Dropping old table...");
+    conn.execute("DROP TABLE parent_transactions", [])?;
+
+    info!("   Step 4: Renaming new table...");
+    conn.execute("ALTER TABLE parent_transactions_new RENAME TO parent_transactions", [])?;
+
+    // Recreate indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_txns_txid ON parent_transactions(txid)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_txns_utxo_id ON parent_transactions(utxo_id)", [])?;
+
+    info!("   ✅ Schema version 3 migration complete");
+    Ok(())
+}

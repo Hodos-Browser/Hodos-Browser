@@ -340,6 +340,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 3
+        if current_version < 3 {
+            info!("   Applying migration to version 3...");
+            match migrations::create_schema_v3(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 3...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (3)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 3 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 3 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 

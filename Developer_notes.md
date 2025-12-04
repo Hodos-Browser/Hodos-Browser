@@ -937,21 +937,14 @@ Successfully implemented Phase 4 of the database migration, enabling fast UTXO l
 
 ---
 
-## 🚨 **CRITICAL ISSUE: Transaction Error Handling** (2025-12-02)
+## ✅ **FIXED: Transaction Error Handling** (2025-12-02)
 
-### **Problem:**
-When transaction broadcast fails, backend correctly logs error and updates status, but frontend shows "Transaction Sent!" success message.
+### **Status:** ✅ **RESOLVED**
 
-**Error Example:**
-```
-⚠️ WhatsOnChain failed: 400 Bad Request - "unexpected response code 500: 16: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)"
-```
+**What Was Fixed:**
+- Frontend now properly checks `result.success === false || result.status === 'failed'` instead of HTTP status codes
+- TransactionForm.tsx (line 221) and WalletPanelContent.tsx (line 284-285) now correctly display error messages when transactions fail
+- Error modal properly shows failure status with error details when backend returns failure
 
-**Root Causes:**
-1. Script verification error (`OP_EQUALVERIFY` failure) - needs investigation
-2. Frontend checks HTTP status code (200) instead of `response.status` field
-3. Backend always returns 200 OK, even for failures
-
-**See**: `development-docs/CHECKPOINT_TRANSACTION_ERROR_HANDLING.md` for full details and action items.
-
-**Priority**: HIGH - Fix before continuing with Phase 5
+**Remaining Investigation:**
+- Script verification errors (e.g., `OP_EQUALVERIFY` failure) may still occur at backend level and need investigation, but frontend now correctly displays these errors to users

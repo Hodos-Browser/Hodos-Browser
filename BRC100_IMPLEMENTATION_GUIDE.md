@@ -88,7 +88,6 @@ These are foundational - apps need these to identify and authenticate with the w
 4. ✅ BRC-42 "self" counterparty (uses raw key per BRC-56)
 5. ✅ KeyID base64 encoding (was corrupting binary data!)
 6. ✅ **BRC-42 signature verification (derives signer's child public key!)**
-7. ✅ **External backend session bypass (allows app-to-backend API calls!)**
 
 **Real-World Testing**: ✅ ToolBSV fully functional with identity tokens, image/video history!
 

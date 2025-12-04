@@ -15,6 +15,9 @@ mod auth_session;
 mod beef;  // NEW: BEEF parser module
 mod database;  // NEW: Database module
 mod utxo_sync;  // NEW: Background UTXO sync service
+mod cache_errors;  // NEW: Unified error types for caching
+mod cache_helpers;  // NEW: Helper functions for cache operations
+mod cache_sync;  // NEW: Background cache sync service
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -166,6 +169,15 @@ async fn main() -> std::io::Result<()> {
     println!("🔄 Starting background UTXO sync service...");
     utxo_sync::start_background_sync(database_for_sync);
     println!("   ✅ Background sync will run every {} seconds", utxo_sync::SYNC_INTERVAL_SECONDS);
+    println!();
+
+    // Start background cache sync service
+    println!("🔄 Starting background BEEF cache sync service...");
+    let app_state_for_cache = app_state.clone();
+    tokio::spawn(async move {
+        cache_sync::start_cache_sync_service(app_state_for_cache).await;
+    });
+    println!("   ✅ Cache sync will run every 10 minutes");
     println!();
 
     // Start HTTP server

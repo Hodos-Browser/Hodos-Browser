@@ -44,3 +44,35 @@ pub struct Utxo {
     pub spent_txid: Option<String>,
     pub spent_at: Option<i64>,  // Unix timestamp
 }
+
+/// Parent transaction model matching the `parent_transactions` table
+#[derive(Debug, Clone)]
+pub struct ParentTransaction {
+    pub id: i64,
+    pub utxo_id: Option<i64>,  // Nullable - allows external parent transactions
+    pub txid: String,
+    pub raw_hex: String,
+    pub cached_at: i64,  // Unix timestamp
+}
+
+/// Merkle proof model matching the `merkle_proofs` table
+#[derive(Debug, Clone)]
+pub struct MerkleProof {
+    pub id: i64,
+    pub parent_txn_id: i64,
+    pub block_height: u32,
+    pub tx_index: u64,
+    pub target_hash: String,
+    pub nodes: Vec<String>, // Parsed from JSON
+    pub cached_at: i64,  // Unix timestamp
+}
+
+/// Block header model matching the `block_headers` table
+#[derive(Debug, Clone)]
+pub struct BlockHeader {
+    pub id: i64,
+    pub block_hash: String,
+    pub height: u32,
+    pub header_hex: String,
+    pub cached_at: i64,  // Unix timestamp
+}

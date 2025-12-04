@@ -2984,223 +2984,322 @@ pub async fn sign_action(
 
     let mut beef = crate::beef::Beef::new();
 
-    // Fetch parent transactions and their Merkle proofs from WhatsOnChain
+    // Fetch parent transactions and their Merkle proofs (with caching)
     let client = reqwest::Client::new();
     for (i, utxo) in input_utxos.iter().enumerate() {
-        log::info!("   📥 Fetching parent tx {}/{}: {}", i + 1, input_utxos.len(), utxo.txid);
+        log::info!("   📥 Processing parent tx {}/{}: {}", i + 1, input_utxos.len(), utxo.txid);
 
-        // Fetch transaction hex
-        let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", utxo.txid);
-        match client.get(&tx_url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(parent_tx_hex) => {
-                            match hex::decode(&parent_tx_hex) {
-                                Ok(parent_tx_bytes) => {
-                                    // Verify TXID matches what we requested
-                                    use sha2::{Sha256, Digest};
-                                    let hash1 = Sha256::digest(&parent_tx_bytes);
-                                    let hash2 = Sha256::digest(&hash1);
-                                    let calculated_txid: Vec<u8> = hash2.into_iter().rev().collect();
-                                    let calculated_txid_hex = hex::encode(calculated_txid);
+        // STEP 1: Try to get parent transaction from cache
+        let parent_tx_bytes = {
+            let db = state.database.lock().unwrap();
+            let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
 
-                                    log::info!("   ✅ Fetched parent tx {} ({} bytes)", utxo.txid, parent_tx_bytes.len());
-                                    log::info!("   🔍 Calculated TXID from bytes: {}", calculated_txid_hex);
-
-                                    if calculated_txid_hex != utxo.txid {
-                                        log::error!("   ❌ TXID MISMATCH! Requested: {}, Got: {}", utxo.txid, calculated_txid_hex);
-                                        log::error!("   ❌ Transaction hex first 80 chars: {}", &parent_tx_hex[..80.min(parent_tx_hex.len())]);
-                                        continue; // Skip this parent transaction
-                                    }
-
-                                    let tx_index = beef.add_parent_transaction(parent_tx_bytes);
-
-                                    // Fetch TSC Merkle proof (with transaction index)
-                                    log::info!("   🔍 Checking for TSC Merkle proof...");
-                                    let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", utxo.txid);
-                                    match client.get(&proof_url).send().await {
-                                        Ok(proof_response) => {
-                                            let status = proof_response.status();
-                                            log::info!("   📡 TSC proof API status: {}", status);
-
-                                            if status.is_success() {
-                                                match proof_response.text().await {
-                                                    Ok(proof_text) => {
-                                                        log::info!("   📄 TSC proof response: {}", &proof_text[..proof_text.len().min(200)]);
-
-                                                        match serde_json::from_str::<serde_json::Value>(&proof_text) {
-                                                            Ok(tsc_json) => {
-                                                                // Check if response is null (transaction not yet in a block)
-                                                                if tsc_json.is_null() {
-                                                                    log::warn!("   ⚠️  TSC proof is null - transaction {} not yet confirmed in a block", utxo.txid);
-                                                                    log::warn!("   ⚠️  Retrying TSC proof fetch after 2 seconds...");
-
-                                                                    // Retry once after a short delay (transaction might be confirming)
-                                                                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                                                                    match client.get(&proof_url).send().await {
-                                                                        Ok(retry_response) if retry_response.status().is_success() => {
-                                                                            match retry_response.text().await {
-                                                                                Ok(retry_text) => {
-                                                                                    match serde_json::from_str::<serde_json::Value>(&retry_text) {
-                                                                                        Ok(retry_json) => {
-                                                                                            if retry_json.is_null() {
-                                                                                                log::error!("   ❌ TSC proof still null after retry - transaction {} is not confirmed. Cannot create valid Atomic BEEF without BUMP.", utxo.txid);
-                                                                                                log::error!("   ❌ Thoth requires Atomic BEEF with valid BUMPs. Please wait for the transaction to be confirmed before spending it.");
-                                                                                                // Continue without BUMP - this will cause Thoth to reject it
-                                                                                            } else {
-                                                                                                log::info!("   ✅ TSC proof available on retry!");
-                                                                                                // Process the retry_json the same way as below
-                                                                                                let tsc_obj = if retry_json.is_array() {
-                                                                                                    retry_json.get(0)
-                                                                                                } else {
-                                                                                                    Some(&retry_json)
-                                                                                                };
-
-                                                                                                if let Some(tsc_obj) = tsc_obj {
-                                                                                                    // Continue with tsc_obj processing below...
-                                                                                                    // (we'll handle this with a helper function to avoid duplication)
-                                                                                                    if let (Some(index), Some(target)) = (tsc_obj["index"].as_u64(), tsc_obj["target"].as_str()) {
-                                                                                                        log::info!("   ✅ Parent tx confirmed at tx_index {}, target: {}", index, &target[..16.min(target.len())]);
-                                                                                                        log::info!("   📊 Merkle path length: {}", tsc_obj["nodes"].as_array().map(|a| a.len()).unwrap_or(0));
-
-                                                                                                        let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
-                                                                                                        match client.get(&block_header_url).send().await {
-                                                                                                            Ok(header_response) if header_response.status().is_success() => {
-                                                                                                                match header_response.json::<serde_json::Value>().await {
-                                                                                                                    Ok(header_json) => {
-                                                                                                                        if let Some(height) = header_json["height"].as_u64() {
-                                                                                                                            log::info!("   ✅ Block height: {}", height);
-                                                                                                                            let mut enhanced_tsc = tsc_obj.clone();
-                                                                                                                            enhanced_tsc["height"] = serde_json::json!(height);
-                                                                                                                            match beef.add_tsc_merkle_proof(&utxo.txid, tx_index, &enhanced_tsc) {
-                                                                                                                                Ok(_) => {
-                                                                                                                                    log::info!("   ✅ Added TSC Merkle proof (BUMP) to BEEF");
-                                                                                                                                }
-                                                                                                                                Err(e) => {
-                                                                                                                                    log::warn!("   ⚠️  Failed to add TSC Merkle proof: {}", e);
-                                                                                                                                }
-                                                                                                                            }
-                                                                                                                        }
-                                                                                                                    }
-                                                                                                                    Err(_) => {}
-                                                                                                                }
-                                                                                                            }
-                                                                                                            _ => {}
-                                                                                                        }
-                                                                                                    }
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                        Err(_) => {
-                                                                                            log::warn!("   ⚠️  Failed to parse retry TSC proof JSON");
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                                Err(_) => {}
-                                                                            }
-                                                                        }
-                                                                        _ => {
-                                                                            log::warn!("   ⚠️  Retry TSC proof fetch failed");
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    // Normal case: TSC proof is not null
-                                                                    // WhatsOnChain returns array: [{index, txOrId, target, nodes}]
-                                                                    let tsc_obj = if tsc_json.is_array() {
-                                                                        tsc_json.get(0)
-                                                                    } else {
-                                                                        Some(&tsc_json)
-                                                                    };
-
-                                                    if let Some(tsc_obj) = tsc_obj {
-                                                    // TSC format has: index, target (block hash), nodes
-                                                    if let (Some(index), Some(target)) = (tsc_obj["index"].as_u64(), tsc_obj["target"].as_str()) {
-                                                        log::info!("   ✅ Parent tx confirmed at tx_index {}, target: {}", index, &target[..16.min(target.len())]);
-                                                        log::info!("   📊 Merkle path length: {}", tsc_obj["nodes"].as_array().map(|a| a.len()).unwrap_or(0));
-
-                                                        // Fetch block height from block hash (BSV/SDK does this too)
-                                                        log::info!("   🔍 Fetching block height for hash: {}...", &target[..16.min(target.len())]);
-                                                        let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
-
-                                                        match client.get(&block_header_url).send().await {
-                                                            Ok(header_response) if header_response.status().is_success() => {
-                                                                match header_response.json::<serde_json::Value>().await {
-                                                                    Ok(header_json) => {
-                                                                        if let Some(height) = header_json["height"].as_u64() {
-                                                                            log::info!("   ✅ Block height: {}", height);
-
-                                                                            // Create enhanced TSC object with height field
-                                                                            let mut enhanced_tsc = tsc_obj.clone();
-                                                                            enhanced_tsc["height"] = serde_json::json!(height);
-
-                                                                            // Try to add the TSC proof
-                                                                            match beef.add_tsc_merkle_proof(&utxo.txid, tx_index, &enhanced_tsc) {
-                                                                                Ok(_) => {
-                                                                                    log::info!("   ✅ Added TSC Merkle proof (BUMP) to BEEF");
-                                                                                }
-                                                                                Err(e) => {
-                                                                                    log::warn!("   ⚠️  Failed to add TSC Merkle proof: {}", e);
-                                                                                }
-                                                                            }
-                                                                        } else {
-                                                                            log::warn!("   ⚠️  Block header missing height field");
-                                                                        }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        log::warn!("   ⚠️  Failed to parse block header JSON: {}", e);
-                                                                    }
-                                                                }
+            match parent_tx_repo.get_by_txid(&utxo.txid) {
+                Ok(Some(cached)) => {
+                    // Verify cached data
+                    match parent_tx_repo.verify_txid(&utxo.txid, &cached.raw_hex) {
+                        Ok(true) => {
+                            log::info!("   ✅ Using cached parent tx {} (cached at {})", utxo.txid, cached.cached_at);
+                            drop(db); // Release lock before hex decode
+                            match hex::decode(&cached.raw_hex) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    log::warn!("   ⚠️  Failed to decode cached parent tx {}: {}, fetching from API", utxo.txid, e);
+                                    // Fall through to API fetch
+                                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                                        Ok(parent_tx_hex) => {
+                                            match hex::decode(&parent_tx_hex) {
+                                                Ok(bytes) => {
+                                                    match crate::cache_helpers::verify_txid(&bytes, &utxo.txid) {
+                                                        Ok(_) => {
+                                                            // Cache it
+                                                            {
+                                                                let db = state.database.lock().unwrap();
+                                                                let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                                                let utxo_id = crate::cache_helpers::get_utxo_id_from_db(db.connection(), &utxo.txid, utxo.vout)
+                                                                    .ok()
+                                                                    .flatten();
+                                                                let _ = parent_tx_repo.upsert(utxo_id, &utxo.txid, &parent_tx_hex);
                                                             }
-                                                            Ok(header_response) => {
-                                                                log::warn!("   ⚠️  Failed to fetch block header: HTTP {}", header_response.status());
-                                                            }
-                                                            Err(e) => {
-                                                                log::warn!("   ⚠️  Failed to fetch block header: {}", e);
-                                                            }
+                                                            bytes
                                                         }
-                                                    } else {
-                                                        log::warn!("   ⚠️  TSC proof missing index or target field");
-                                                    }
-                                                } else {
-                                                    log::warn!("   ⚠️  TSC proof array is empty");
-                                                }
-                                                                } // end else (tsc_json not null)
-                                                            }
-                                                            Err(e) => {
-                                                                log::warn!("   ⚠️  Failed to parse TSC proof JSON: {}", e);
-                                                            }
+                                                        Err(e) => {
+                                                            log::error!("   ❌ TXID verification failed for {}: {}", utxo.txid, e);
+                                                            continue; // Skip this parent transaction
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        log::warn!("   ⚠️  Failed to read TSC proof response: {}", e);
-                                                    }
                                                 }
-                                            } else {
-                                                log::info!("   ℹ️  TSC proof not available (HTTP {})", status);
+                                                Err(e) => {
+                                                    log::error!("   ❌ Failed to decode parent tx hex for {}: {}", utxo.txid, e);
+                                                    continue; // Skip this parent transaction
+                                                }
                                             }
                                         }
                                         Err(e) => {
-                                            log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
+                                            log::error!("   ❌ Failed to fetch parent tx {}: {}", utxo.txid, e);
+                                            continue; // Skip this parent transaction
                                         }
                                     }
-                                },
-                                Err(e) => {
-                                    log::warn!("   ⚠️  Failed to decode parent tx {}: {}", utxo.txid, e);
                                 }
                             }
-                        },
+                        }
+                        Ok(false) => {
+                            log::warn!("   ⚠️  Cached parent tx {} failed TXID verification, fetching from API", utxo.txid);
+                            drop(db); // Release lock
+                            // Fall through to API fetch
+                            match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                                Ok(parent_tx_hex) => {
+                                    match hex::decode(&parent_tx_hex) {
+                                        Ok(bytes) => {
+                                            match crate::cache_helpers::verify_txid(&bytes, &utxo.txid) {
+                                                Ok(_) => {
+                                                    // Cache it
+                                                    {
+                                                        let db = state.database.lock().unwrap();
+                                                        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                                        let utxo_id = crate::cache_helpers::get_utxo_id_from_db(db.connection(), &utxo.txid, utxo.vout)
+                                                            .ok()
+                                                            .flatten();
+                                                        let _ = parent_tx_repo.upsert(utxo_id, &utxo.txid, &parent_tx_hex);
+                                                    }
+                                                    bytes
+                                                }
+                                                Err(e) => {
+                                                    log::error!("   ❌ TXID verification failed for {}: {}", utxo.txid, e);
+                                                    continue; // Skip this parent transaction
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("   ❌ Failed to decode parent tx hex for {}: {}", utxo.txid, e);
+                                            continue; // Skip this parent transaction
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("   ❌ Failed to fetch parent tx {}: {}", utxo.txid, e);
+                                    continue; // Skip this parent transaction
+                                }
+                            }
+                        }
                         Err(e) => {
-                            log::warn!("   ⚠️  Failed to read parent tx {} response: {}", utxo.txid, e);
+                            log::warn!("   ⚠️  Error verifying cached parent tx {}: {}, fetching from API", utxo.txid, e);
+                            drop(db); // Release lock
+                            // Fall through to API fetch
+                            match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                                Ok(parent_tx_hex) => {
+                                    match hex::decode(&parent_tx_hex) {
+                                        Ok(bytes) => {
+                                            match crate::cache_helpers::verify_txid(&bytes, &utxo.txid) {
+                                                Ok(_) => {
+                                                    // Cache it
+                                                    {
+                                                        let db = state.database.lock().unwrap();
+                                                        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                                        let utxo_id = crate::cache_helpers::get_utxo_id_from_db(db.connection(), &utxo.txid, utxo.vout)
+                                                            .ok()
+                                                            .flatten();
+                                                        let _ = parent_tx_repo.upsert(utxo_id, &utxo.txid, &parent_tx_hex);
+                                                    }
+                                                    bytes
+                                                }
+                                                Err(e) => {
+                                                    log::error!("   ❌ TXID verification failed for {}: {}", utxo.txid, e);
+                                                    continue; // Skip this parent transaction
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("   ❌ Failed to decode parent tx hex for {}: {}", utxo.txid, e);
+                                            continue; // Skip this parent transaction
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("   ❌ Failed to fetch parent tx {}: {}", utxo.txid, e);
+                                    continue; // Skip this parent transaction
+                                }
+                            }
                         }
                     }
-                } else {
-                    log::warn!("   ⚠️  Failed to fetch parent tx {}: HTTP {}", utxo.txid, response.status());
                 }
-            },
-            Err(e) => {
-                log::warn!("   ⚠️  Failed to fetch parent tx {}: {}", utxo.txid, e);
+                Ok(None) => {
+                    drop(db); // Release lock before API call
+                    log::info!("   🌐 Cache miss - fetching parent tx {} from API...", utxo.txid);
+                    // Fetch from API
+                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                        Ok(parent_tx_hex) => {
+                            match hex::decode(&parent_tx_hex) {
+                                Ok(bytes) => {
+                                    match crate::cache_helpers::verify_txid(&bytes, &utxo.txid) {
+                                        Ok(_) => {
+                                            // Cache it for next time
+                                            {
+                                                let db = state.database.lock().unwrap();
+                                                let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                                let utxo_id = crate::cache_helpers::get_utxo_id_from_db(db.connection(), &utxo.txid, utxo.vout)
+                                                    .ok()
+                                                    .flatten();
+                                                match parent_tx_repo.upsert(utxo_id, &utxo.txid, &parent_tx_hex) {
+                                                    Ok(_) => {
+                                                        log::info!("   💾 Cached parent tx {}", utxo.txid);
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!("   ⚠️  Failed to cache parent tx {}: {}", utxo.txid, e);
+                                                        // Continue - caching failure shouldn't block transaction
+                                                    }
+                                                }
+                                            }
+                                            bytes
+                                        }
+                                        Err(e) => {
+                                            log::error!("   ❌ TXID verification failed for {}: {}", utxo.txid, e);
+                                            continue; // Skip this parent transaction
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("   ❌ Failed to decode parent tx hex for {}: {}", utxo.txid, e);
+                                    continue; // Skip this parent transaction
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("   ❌ Failed to fetch parent tx {}: {}", utxo.txid, e);
+                            continue; // Skip this parent transaction
+                        }
+                    }
+                }
+                Err(e) => {
+                    drop(db); // Release lock
+                    log::warn!("   ⚠️  Database error checking cache: {}, fetching from API", e);
+                    // Fall through to API fetch
+                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                        Ok(parent_tx_hex) => {
+                            match hex::decode(&parent_tx_hex) {
+                                Ok(bytes) => {
+                                    match crate::cache_helpers::verify_txid(&bytes, &utxo.txid) {
+                                        Ok(_) => bytes,
+                                        Err(e) => {
+                                            log::error!("   ❌ TXID verification failed for {}: {}", utxo.txid, e);
+                                            continue; // Skip this parent transaction
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("   ❌ Failed to decode parent tx hex for {}: {}", utxo.txid, e);
+                                    continue; // Skip this parent transaction
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("   ❌ Failed to fetch parent tx {}: {}", utxo.txid, e);
+                            continue; // Skip this parent transaction
+                        }
+                    }
+                }
+            }
+        };
+
+        let tx_index = beef.add_parent_transaction(parent_tx_bytes);
+
+        // STEP 2: Try to get Merkle proof from cache
+        let enhanced_tsc = {
+            let cached_proof_result = {
+                let db = state.database.lock().unwrap();
+                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
+                merkle_proof_repo.get_by_parent_txid(&utxo.txid)
+            }; // db is dropped here when merkle_proof_repo goes out of scope
+
+            match cached_proof_result {
+                Ok(Some(cached_proof)) => {
+                    log::info!("   ✅ Using cached Merkle proof for {} (height: {})", utxo.txid, cached_proof.block_height);
+                    // Create a new repo just for conversion (doesn't need to persist)
+                    {
+                        let db = state.database.lock().unwrap();
+                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
+                        merkle_proof_repo.to_tsc_json(&cached_proof)
+                    } // db is dropped here
+                }
+                Ok(None) => {
+                    // Release lock before API call
+                    log::info!("   🌐 Cache miss - fetching TSC proof from API...");
+
+                    // Fetch TSC proof from API (with retry logic)
+                    match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
+                        Ok(Some(tsc_json)) => {
+                            // Get block height from block header (cache or API)
+                            let db = state.database.lock().unwrap();
+                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                            match crate::cache_helpers::enhance_tsc_with_height(
+                                &client,
+                                &block_header_repo,
+                                &tsc_json,
+                            ).await {
+                                Ok(enhanced_tsc) => {
+                                    // Cache the proof
+                                    if let Some(parent_txn_id) = {
+                                        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                        parent_tx_repo.get_id_by_txid(&utxo.txid).unwrap_or(None)
+                                    } {
+                                        let target_hash = enhanced_tsc["target"].as_str().unwrap_or("");
+                                        match serde_json::to_string(&enhanced_tsc["nodes"]) {
+                                            Ok(nodes_json) => {
+                                                let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
+                                                let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
+
+                                                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
+                                                match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, target_hash, &nodes_json) {
+                                                    Ok(_) => {
+                                                        log::info!("   💾 Cached Merkle proof for {}", utxo.txid);
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!("   ⚠️  Failed to cache Merkle proof for {}: {}", utxo.txid, e);
+                                                        // Continue - caching failure shouldn't block transaction
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", utxo.txid, e);
+                                                // Continue - can still use the proof
+                                            }
+                                        }
+                                    }
+
+                                    enhanced_tsc
+                                }
+                                Err(e) => {
+                                    log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", utxo.txid, e);
+                                    serde_json::Value::Null  // Return null to skip proof
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
+                            serde_json::Value::Null  // Return null to skip proof
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
+                            serde_json::Value::Null  // Return null to skip proof
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Database error checking cache: {}, skipping proof", e);
+                    serde_json::Value::Null  // Return null to skip proof
+                }
+            }
+        };
+
+        // STEP 3: Add proof to BEEF
+        if !enhanced_tsc.is_null() {
+            match beef.add_tsc_merkle_proof(&utxo.txid, tx_index, &enhanced_tsc) {
+                Ok(_) => {
+                    log::info!("   ✅ Added TSC Merkle proof (BUMP) to BEEF");
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to add TSC Merkle proof: {}", e);
+                }
             }
         }
     }
