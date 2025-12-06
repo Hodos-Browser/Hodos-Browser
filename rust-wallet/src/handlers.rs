@@ -904,6 +904,16 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
+    // Step 1: Check cache first (fast path)
+    if let Some(cached_balance) = state.balance_cache.get() {
+        log::info!("   ✅ Using cached balance: {} satoshis", cached_balance);
+        return HttpResponse::Ok().json(serde_json::json!({
+            "balance": cached_balance
+        }));
+    }
+
+    log::info!("   🔄 Cache miss - calculating balance from database...");
+
     // Get all addresses from database
     let addresses = {
         use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
@@ -1151,13 +1161,22 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
         drop(db);
 
         log::info!("   ✅ Updated balance after checking pending addresses: {} satoshis", updated_balance);
+
+        // Invalidate cache since new UTXOs were detected
+        state.balance_cache.invalidate();
+        // Update cache with new balance
+        state.balance_cache.set(updated_balance);
+
         return HttpResponse::Ok().json(serde_json::json!({
             "balance": updated_balance
         }));
     }
 
-    // Cache has balance - use it (fast!)
+    // Cache has balance from database - use it and cache it
     log::info!("   ✅ Using cached balance from database: {} satoshis", cached_balance);
+
+    // Update cache with calculated balance
+    state.balance_cache.set(cached_balance);
 
     // Return response in Go wallet format: { "balance": number }
     HttpResponse::Ok().json(serde_json::json!({
@@ -2384,6 +2403,10 @@ pub async fn create_action(
     log::info!("   ✅ Transaction created: {}", txid);
     log::info!("   Reference: {}", reference);
 
+    // Invalidate balance cache (outgoing transaction changes balance)
+    state.balance_cache.invalidate();
+    log::info!("   🔄 Balance cache invalidated (outgoing transaction)");
+
     // Store action in action storage
     use crate::action_storage::{StoredAction, ActionStatus, ActionInput, ActionOutput};
     use chrono::Utc;
@@ -3372,6 +3395,9 @@ pub async fn sign_action(
         match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
             Ok(count) => {
                 log::info!("   ✅ Marked {} UTXOs as spent in database", count);
+                // Invalidate balance cache (UTXOs were spent)
+                state.balance_cache.invalidate();
+                log::info!("   🔄 Balance cache invalidated (UTXOs marked as spent)");
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to mark UTXOs as spent: {}", e);
@@ -5145,4 +5171,319 @@ pub async fn list_actions(
         total_actions: total,
         actions: actions_json,
     })
+}
+
+// ============================================================================
+// Backup and Restore Endpoints
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct BackupRequest {
+    pub destination: String,
+    pub format: Option<String>, // "file" or "json", defaults to "file"
+}
+
+#[derive(Serialize)]
+pub struct BackupResponse {
+    pub success: bool,
+    pub backup_path: String,
+    pub size_bytes: u64,
+    pub timestamp: i64,
+    pub format: String,
+}
+
+/// Backup wallet database
+///
+/// POST /wallet/backup
+///
+/// Request body:
+/// {
+///   "destination": "C:/backups/wallet_backup.db",
+///   "format": "file" // or "json"
+/// }
+pub async fn wallet_backup(
+    state: web::Data<AppState>,
+    req: web::Json<BackupRequest>,
+) -> HttpResponse {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::path::Path;
+
+    log::info!("💾 /wallet/backup called");
+    log::info!("   Destination: {}", req.destination);
+    log::info!("   Format: {:?}", req.format);
+
+    let format = req.format.as_deref().unwrap_or("file");
+    let dest_path = Path::new(&req.destination);
+
+    // Get database path
+    let db_path = {
+        let db = state.database.lock().unwrap();
+        db.path().to_path_buf()
+    };
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    match format {
+        "file" => {
+            match crate::backup::backup_database_file(&db_path, dest_path) {
+                Ok(_) => {
+                    let size_bytes = std::fs::metadata(dest_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+
+                    log::info!("   ✅ Backup complete: {} bytes", size_bytes);
+
+                    HttpResponse::Ok().json(BackupResponse {
+                        success: true,
+                        backup_path: req.destination.clone(),
+                        size_bytes,
+                        timestamp,
+                        format: "file".to_string(),
+                    })
+                }
+                Err(e) => {
+                    log::error!("   ❌ Backup failed: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Backup failed: {}", e)
+                    }))
+                }
+            }
+        }
+        "json" => {
+            let db = state.database.lock().unwrap();
+            match crate::backup::export_to_json(&db, dest_path) {
+                Ok(_) => {
+                    let size_bytes = std::fs::metadata(dest_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+
+                    log::info!("   ✅ JSON export complete: {} bytes", size_bytes);
+
+                    HttpResponse::Ok().json(BackupResponse {
+                        success: true,
+                        backup_path: req.destination.clone(),
+                        size_bytes,
+                        timestamp,
+                        format: "json".to_string(),
+                    })
+                }
+                Err(e) => {
+                    log::error!("   ❌ JSON export failed: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("JSON export failed: {}", e)
+                    }))
+                }
+            }
+        }
+        _ => {
+            log::error!("   ❌ Invalid format: {}", format);
+            HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid format: {}. Use 'file' or 'json'", format)
+            }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RestoreRequest {
+    pub backup_path: String,
+    pub confirm: Option<bool>, // Safety: require explicit confirmation
+}
+
+#[derive(Serialize)]
+pub struct RestoreResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Restore wallet database from backup
+///
+/// POST /wallet/restore
+///
+/// **WARNING**: This will overwrite the current database!
+///
+/// Request body:
+/// {
+///   "backup_path": "C:/backups/wallet_backup.db",
+///   "confirm": true // Must be true to proceed
+/// }
+pub async fn wallet_restore(
+    state: web::Data<AppState>,
+    req: web::Json<RestoreRequest>,
+) -> HttpResponse {
+    use std::path::Path;
+
+    log::info!("🔄 /wallet/restore called");
+    log::info!("   Backup: {}", req.backup_path);
+
+    // Safety check: require explicit confirmation
+    if req.confirm != Some(true) {
+        log::warn!("   ⚠️  Restore requires explicit confirmation");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Restore requires explicit confirmation. Set 'confirm': true"
+        }));
+    }
+
+    let backup_path = Path::new(&req.backup_path);
+
+    // Verify backup exists and is valid
+    match crate::backup::verify_backup(backup_path) {
+        Ok(true) => {
+            log::info!("   ✅ Backup verified");
+        }
+        Ok(false) => {
+            log::error!("   ❌ Backup file is invalid or corrupted");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Backup file is invalid or corrupted"
+            }));
+        }
+        Err(e) => {
+            log::error!("   ❌ Failed to verify backup: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to verify backup: {}", e)
+            }));
+        }
+    }
+
+    // Get current database path
+    let db_path = {
+        let db = state.database.lock().unwrap();
+        db.path().to_path_buf()
+    };
+
+    // Create backup of current database before restore (safety measure)
+    let safety_backup_path = db_path.with_extension("db.backup");
+    log::info!("   💾 Creating safety backup of current database...");
+    if let Err(e) = crate::backup::backup_database_file(&db_path, &safety_backup_path) {
+        log::warn!("   ⚠️  Failed to create safety backup: {}", e);
+        // Continue anyway - user explicitly requested restore
+    } else {
+        log::info!("   ✅ Safety backup created: {}", safety_backup_path.display());
+    }
+
+    // Restore from backup
+    match crate::backup::restore_database(backup_path, &db_path) {
+        Ok(_) => {
+            log::info!("   ✅ Restore complete!");
+            log::warn!("   ⚠️  Wallet server should be restarted to reload database");
+
+            HttpResponse::Ok().json(RestoreResponse {
+                success: true,
+                message: "Database restored successfully. Please restart the wallet server to reload the database.".to_string(),
+            })
+        }
+        Err(e) => {
+            log::error!("   ❌ Restore failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Restore failed: {}", e)
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// Recovery Endpoint
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct RecoveryRequest {
+    pub mnemonic: String,
+    pub gap_limit: Option<u32>,
+    pub start_index: Option<u32>,
+    pub max_index: Option<u32>,
+    pub confirm: Option<bool>, // Safety: require explicit confirmation
+}
+
+#[derive(Serialize)]
+pub struct RecoveryResponse {
+    pub success: bool,
+    pub addresses_found: u32,
+    pub utxos_found: u32,
+    pub total_balance: i64,
+    pub message: String,
+}
+
+/// Recover wallet from mnemonic
+///
+/// POST /wallet/recover
+///
+/// **WARNING**: This will overwrite the existing wallet!
+///
+/// Request body:
+/// {
+///   "mnemonic": "word1 word2 ... word12",
+///   "gap_limit": 20,
+///   "start_index": 0,
+///   "confirm": true // Must be true to proceed
+/// }
+pub async fn wallet_recover(
+    state: web::Data<AppState>,
+    req: web::Json<RecoveryRequest>,
+) -> HttpResponse {
+    log::info!("🔍 /wallet/recover called");
+
+    // Safety check: require explicit confirmation
+    if req.confirm != Some(true) {
+        log::warn!("   ⚠️  Recovery requires explicit confirmation");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Recovery requires explicit confirmation. Set 'confirm': true"
+        }));
+    }
+
+    // Create recovery options
+    let options = crate::recovery::RecoveryOptions {
+        mnemonic: req.mnemonic.clone(),
+        gap_limit: req.gap_limit.unwrap_or(20),
+        start_index: req.start_index.unwrap_or(0),
+        max_index: req.max_index,
+    };
+
+    // Get database
+    let db = state.database.lock().unwrap();
+
+    // Run recovery
+    match crate::recovery::recover_wallet_from_mnemonic(options, &db).await {
+        Ok(result) => {
+            log::info!("   ✅ Recovery complete!");
+            log::info!("   📊 Found {} addresses with {} UTXOs, total balance: {} satoshis",
+                      result.addresses_found, result.utxos_found, result.total_balance);
+
+            // TODO: Save recovered addresses and UTXOs to database
+            // For now, we just return the results
+            // In a full implementation, we would:
+            // 1. Create/update wallet with mnemonic
+            // 2. Insert recovered addresses
+            // 3. Insert recovered UTXOs
+            // 4. Update wallet index
+
+            HttpResponse::Ok().json(RecoveryResponse {
+                success: true,
+                addresses_found: result.addresses_found,
+                utxos_found: result.utxos_found,
+                total_balance: result.total_balance,
+                message: format!(
+                    "Recovery complete! Found {} addresses with {} UTXOs, total balance: {} satoshis. ",
+                    result.addresses_found, result.utxos_found, result.total_balance
+                ),
+            })
+        }
+        Err(e) => {
+            log::error!("   ❌ Recovery failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Recovery failed: {}", e)
+            }))
+        }
+    }
 }

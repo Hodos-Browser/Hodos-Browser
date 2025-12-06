@@ -24,7 +24,7 @@ A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native
 - ✅ Atomic BEEF (BRC-95) format implementation
 - ✅ Complete transaction lifecycle (create → sign → broadcast → confirm)
 
-**Storage:** `%APPDATA%/HodosBrowser/wallet/wallet.json`
+**Storage:** `%APPDATA%/HodosBrowser/wallet/wallet.db` (SQLite database)
 
 ---
 
@@ -94,6 +94,24 @@ cmake --build . --config Release
 ```
 
 See `BUILD_INSTRUCTIONS.md` for detailed build steps.
+
+## 💾 Backup & Recovery
+
+**Current Implementation:**
+- Local file-based backups (SQLite database copy)
+- JSON export for non-sensitive data
+- Recovery from mnemonic (re-derive addresses, re-discover UTXOs from blockchain)
+
+**Future: Online Wallet Backend** (Coordination Required):
+- Cloud-based backup storage for wallet databases
+- User authentication and access control (method TBD)
+- Encrypted backups with user-controlled keys
+- Storage location TBD (coordinated with protocol developers)
+- **Note**: This requires coordination with open source BRC-100 protocol developers to ensure:
+  - Standardized backup format for interoperability
+  - Consistent authentication methods
+  - Unified security practices
+  - User privacy and control
 
 ## 📁 Repository Notes
 

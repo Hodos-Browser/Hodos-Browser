@@ -18,6 +18,9 @@ mod utxo_sync;  // NEW: Background UTXO sync service
 mod cache_errors;  // NEW: Unified error types for caching
 mod cache_helpers;  // NEW: Helper functions for cache operations
 mod cache_sync;  // NEW: Background cache sync service
+mod balance_cache;  // NEW: In-memory balance cache
+mod backup;  // NEW: Database backup and restore utilities
+mod recovery;  // NEW: Wallet recovery from mnemonic
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -32,6 +35,7 @@ pub struct AppState {
     pub whitelist: Arc<DomainWhitelistManager>,
     pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
+    pub balance_cache: Arc<balance_cache::BalanceCache>,  // NEW: In-memory balance cache
 }
 
 #[actix_web::main]
@@ -131,12 +135,17 @@ async fn main() -> std::io::Result<()> {
     // Clone database for background sync (before moving into app_state)
     let database_for_sync = database.clone();
 
+    // Initialize balance cache
+    let balance_cache = Arc::new(balance_cache::BalanceCache::new());
+    println!("✅ Balance cache initialized");
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
         whitelist: whitelist_manager,
         message_store,
         auth_sessions,
+        balance_cache,
     });
 
     println!();
@@ -222,6 +231,9 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/status", web::get().to(handlers::wallet_status))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
+            .route("/wallet/backup", web::post().to(handlers::wallet_backup))
+            .route("/wallet/restore", web::post().to(handlers::wallet_restore))
+            .route("/wallet/recover", web::post().to(handlers::wallet_recover))
 
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))

@@ -368,3 +368,78 @@ pub fn create_schema_v3(conn: &Connection) -> Result<()> {
     info!("   ✅ Schema version 3 migration complete");
     Ok(())
 }
+
+/// Create schema version 4 (performance indexes)
+///
+/// Adds indexes for frequently queried columns to improve query performance:
+/// - Balance calculations (utxos by address_id and is_spent)
+/// - Transaction lookups (txid indexes)
+/// - Parent transaction lookups
+/// - Merkle proof lookups
+/// - Block header lookups
+pub fn create_schema_v4(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 4 (performance indexes)...");
+
+    // Index for balance calculations (most critical for performance)
+    // Partial index: only index unspent UTXOs (is_spent = 0)
+    info!("   Creating index for balance calculations...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_utxos_balance_calc
+         ON utxos(address_id) WHERE is_spent = 0",
+        [],
+    )?;
+    info!("   ✅ Created idx_utxos_balance_calc");
+
+    // Composite index for UTXO lookups (if not already exists from v1)
+    info!("   Creating composite index for UTXO lookups...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_utxos_txid_vout
+         ON utxos(txid, vout)",
+        [],
+    )?;
+    info!("   ✅ Created idx_utxos_txid_vout");
+
+    // Index for transaction lookups by txid
+    info!("   Creating index for transaction lookups...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_txid
+         ON transactions(txid)",
+        [],
+    )?;
+    info!("   ✅ Created idx_transactions_txid");
+
+    // Index for parent transaction lookups (may already exist from v1/v3)
+    info!("   Verifying parent transaction index...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_parent_txns_txid
+         ON parent_transactions(txid)",
+        [],
+    )?;
+    info!("   ✅ Verified idx_parent_txns_txid");
+
+    // Index for Merkle proof lookups
+    info!("   Creating index for Merkle proof lookups...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_merkle_proofs_parent_txid
+         ON merkle_proofs(parent_txn_id)",
+        [],
+    )?;
+    info!("   ✅ Created idx_merkle_proofs_parent_txid");
+
+    // Indexes for block header lookups
+    info!("   Creating indexes for block header lookups...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_block_headers_hash
+         ON block_headers(block_hash)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_block_headers_height
+         ON block_headers(height)",
+        [],
+    )?;
+    info!("   ✅ Created block header indexes");
+
+    info!("   ✅ Schema version 4 migration complete");
+    Ok(())
+}

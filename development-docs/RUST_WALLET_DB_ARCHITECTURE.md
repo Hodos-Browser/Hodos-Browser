@@ -1,7 +1,7 @@
 # Rust Wallet Database Architecture
 
-> **Status**: ✅ **Phase 1-4 Complete** | ⏳ Phase 5 Pending
-> **Last Updated**: December 2, 2025
+> **Status**: ✅ **Phase 1-9 Complete** | ⏳ Phase 8 (Browser DB) Deferred
+> **Last Updated**: December 6, 2025
 > **Target**: SQLite database for HodosBrowser wallet data
 
 ## Executive Summary
@@ -33,11 +33,14 @@ This document defines the database schema and architecture for migrating HodosBr
 **File Structure:**
 ```
 %APPDATA%/HodosBrowser/wallet/
-├── wallet.json          # Keep during migration (backup)
-├── actions.json         # Keep during migration (backup)
-├── wallet.db            # NEW: SQLite database
-└── wallet.db-wal        # SQLite write-ahead log (auto-created)
+├── wallet.db            # SQLite database (primary storage)
+├── wallet.db-wal        # SQLite write-ahead log (auto-created)
+├── wallet.db-shm        # SQLite shared memory (auto-created)
+├── wallet.json          # Legacy (kept for compatibility, not used)
+└── actions.json         # Legacy (kept for compatibility, not used)
 ```
+
+**Backup Files**: Saved to user-specified locations (requires file picker dialog in frontend).
 
 ## Database Initialization
 
@@ -761,13 +764,24 @@ For future async operations:
 
 ### Backup Strategy
 
-1. **Automatic Backups:**
-   - Create `wallet.db.backup` before migrations
-   - Keep last 3 backups
+1. **File-Based Backup:**
+   - User-specified location via file picker (frontend)
+   - Copies database + WAL + SHM files
+   - Creates safety backup before restore operations
 
-2. **Export Functionality:**
-   - Allow users to export wallet to encrypted JSON
-   - For recovery purposes
+2. **JSON Export:**
+   - Exports non-sensitive data (addresses, transactions, UTXOs)
+   - Useful for debugging and migration
+   - No mnemonic or private keys included
+
+3. **Recovery from Mnemonic:**
+   - Re-derives addresses deterministically
+   - Re-discovers UTXOs from blockchain
+   - Uses gap limit (default: 20) to determine when to stop
+
+**Frontend Integration Note:**
+- Backup/restore endpoints require file picker dialog to let user choose backup location
+- User selects destination path via frontend, which is passed to backend API
 
 ## Comparison with metanet-desktop
 

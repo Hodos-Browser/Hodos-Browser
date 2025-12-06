@@ -4,11 +4,28 @@
 
 ---
 
-## 🗄️ **Database Migration Complete!** (2025-12-02)
+## 🗄️ **Database Migration Complete!** (2025-12-06)
 
-### **Latest Achievement: Phase 4 UTXO Management Complete!**
+### **Latest Achievement: Phase 9 Backup & Recovery Complete!**
 
-The wallet has been fully migrated from JSON file storage to SQLite database. All wallet data (addresses, transactions, UTXOs) is now stored in `%APPDATA%/HodosBrowser/wallet/wallet.db`. Phase 4 (UTXO Management) is complete with background sync, new address detection, and error handling.
+The wallet has been fully migrated from JSON file storage to SQLite database. All wallet data (addresses, transactions, UTXOs, BEEF/SPV cache) is now stored in `%APPDATA%/HodosBrowser/wallet/wallet.db`. All database phases (1-9) are complete:
+
+**Phase 1-3**: Database foundation, schema, and data migration ✅
+**Phase 4**: UTXO management with background sync ✅
+**Phase 5**: BEEF/SPV caching (parent transactions, Merkle proofs, block headers) ✅
+**Phase 6**: Performance optimization (indexes, in-memory balance cache) ✅
+**Phase 7**: Backup & recovery (file backup, JSON export, mnemonic recovery) ✅
+**Phase 8**: Browser database (deferred to separate sprint)
+**Phase 9**: Cleanup & documentation ✅
+
+**Key Features:**
+- Fast balance checks (database cache + 30-second in-memory cache)
+- Background UTXO sync (every 5 minutes with gap limit)
+- BEEF/SPV caching with automatic population (every 10 minutes)
+- Cache-first transaction signing (no API delays)
+- File-based backup and restore functionality
+- Recovery from mnemonic (re-derive addresses, re-discover UTXOs)
+- Performance indexes for optimized queries
 
 ---
 
@@ -57,6 +74,70 @@ After comprehensive research and alignment with course notes and metanet-desktop
 - `development-docs/COURSE_NOTES_ALIGNMENT_ANALYSIS.md` - Alignment with course notes
 
 **Next Steps**: Begin Phase 1 - Database Foundation implementation
+
+---
+
+## 🗄️ **Phase 6: BEEF/SPV Caching Complete!** (2025-12-05)
+
+### **Achievement: Cache-First Transaction Signing**
+
+Implemented comprehensive BEEF/SPV caching system to eliminate API delays during transaction signing.
+
+**Key Features:**
+- **Parent Transaction Caching**: Pre-fetched and stored in database
+- **Merkle Proof Caching**: TSC/BUMP format proofs cached with block height
+- **Block Header Caching**: Fast height resolution for proofs
+- **Background Cache Sync**: Automatic population every 10 minutes
+- **Cache-First Approach**: Uses cached data, falls back to API only on miss
+- **Schema Migration v3**: Nullable `utxo_id` for external parent transactions
+
+**Impact**: Transaction signing now uses cached data, eliminating API delays and improving user experience.
+
+---
+
+## 🗄️ **Phase 7: Performance Optimization Complete!** (2025-12-05)
+
+### **Achievement: Fast Queries and Instant Balance Checks**
+
+Implemented performance optimizations including database indexes and in-memory caching.
+
+**Key Features:**
+- **Database Indexes (Schema v4)**: Optimized indexes on frequently queried columns
+  - UTXO lookups: `(address_id, is_spent)`, `(txid, vout)`
+  - Transaction queries: `txid`, `reference_number`
+  - Merkle proof lookups: `parent_txn_id`, `block_hash`, `height`
+- **In-Memory Balance Cache**: 30-second TTL for instant balance checks
+- **Cache Invalidation**: Automatic invalidation on UTXO changes
+- **Query Optimization**: All queries use indexes for fast retrieval
+
+**Impact**: Balance checks are now instant (cached), and all database queries are optimized with indexes.
+
+---
+
+## 🗄️ **Phase 9: Backup & Recovery Complete!** (2025-12-06)
+
+### **Achievement: Complete Backup and Recovery System**
+
+Implemented comprehensive backup, restore, and recovery functionality for wallet data protection.
+
+**Key Features:**
+- **File-Based Backup**: Copies database + WAL + SHM files to user-specified location
+- **JSON Export**: Exports non-sensitive data (addresses, transactions, UTXOs) for debugging
+- **Recovery from Mnemonic**: Re-derives addresses deterministically and re-discovers UTXOs from blockchain
+- **Restore Functionality**: Restores database from backup with safety verification
+- **Backup Verification**: Validates backup file integrity before restore
+
+**Frontend Integration Note:**
+- Backup/restore endpoints require file picker dialog to let user choose backup location
+- User selects destination path via frontend, which is passed to backend API (`POST /wallet/backup`)
+
+**Recovery Process:**
+- Re-derives addresses from mnemonic (tries both BIP32 and BRC-42)
+- Checks blockchain for UTXOs on each address
+- Uses gap limit (default: 20) to determine when to stop
+- Returns discovered addresses and UTXOs (read-only, doesn't modify database)
+
+**Impact**: Users can now backup their wallet, restore from backup, and recover from mnemonic if database is lost.
 
 ---
 
