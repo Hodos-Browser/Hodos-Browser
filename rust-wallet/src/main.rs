@@ -13,6 +13,7 @@ mod domain_whitelist;
 mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
+mod beef_helpers;  // NEW: BEEF building helpers for listOutputs
 mod database;  // NEW: Database module
 mod utxo_sync;  // NEW: Background UTXO sync service
 mod cache_errors;  // NEW: Unified error types for caching
@@ -223,6 +224,8 @@ async fn main() -> std::io::Result<()> {
             .route("/listActions", web::post().to(handlers::list_actions))
             .route("/internalizeAction", web::post().to(handlers::internalize_action))
             .route("/updateConfirmations", web::post().to(handlers::update_confirmations_endpoint))  // NEW
+            .route("/listOutputs", web::post().to(handlers::list_outputs))  // Group C - Part 1
+            .route("/relinquishOutput", web::post().to(handlers::relinquish_output))  // Group C - Part 1
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

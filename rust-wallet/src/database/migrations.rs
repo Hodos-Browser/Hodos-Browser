@@ -280,6 +280,42 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
     // conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_unacknowledged ON messages(recipient, acknowledged) WHERE acknowledged = 0", [])?;
     info!("   ✅ Created messages table");
 
+    // 14. output_tags table (for output categorization)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_deleted BOOLEAN NOT NULL DEFAULT 0,
+            UNIQUE(tag)
+        )",
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tags_tag ON output_tags(tag)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tags_deleted ON output_tags(is_deleted) WHERE is_deleted = 0", [])?;
+    info!("   ✅ Created output_tags table");
+
+    // 15. output_tag_map table (many-to-many relationship between outputs and tags)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_tag_map (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            output_id INTEGER NOT NULL,
+            output_tag_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_deleted BOOLEAN NOT NULL DEFAULT 0,
+            FOREIGN KEY (output_id) REFERENCES utxos(id) ON DELETE CASCADE,
+            FOREIGN KEY (output_tag_id) REFERENCES output_tags(id) ON DELETE CASCADE,
+            UNIQUE(output_id, output_tag_id)
+        )",
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_output_id ON output_tag_map(output_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_tag_id ON output_tag_map(output_tag_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_deleted ON output_tag_map(is_deleted) WHERE is_deleted = 0", [])?;
+    info!("   ✅ Created output_tag_map table");
+
     // 14. domain_whitelist table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS domain_whitelist (
@@ -441,5 +477,35 @@ pub fn create_schema_v4(conn: &Connection) -> Result<()> {
     info!("   ✅ Created block header indexes");
 
     info!("   ✅ Schema version 4 migration complete");
+    Ok(())
+}
+
+/// Create schema version 5 (Group C enhancements)
+///
+/// Adds support for:
+/// - Custom instructions on UTXOs (for BRC-29 payments)
+pub fn create_schema_v5(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 5 (Group C enhancements)...");
+
+    // Add custom_instructions column to utxos table
+    info!("   Adding custom_instructions column to utxos table...");
+    // Check if column already exists (in case migration is run multiple times)
+    let column_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('utxos') WHERE name = 'custom_instructions'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !column_exists {
+        conn.execute(
+            "ALTER TABLE utxos ADD COLUMN custom_instructions TEXT",
+            [],
+        )?;
+        info!("   ✅ Added custom_instructions column to utxos table");
+    } else {
+        info!("   ✅ custom_instructions column already exists");
+    }
+
+    info!("   ✅ Schema version 5 migration complete");
     Ok(())
 }

@@ -43,6 +43,7 @@ pub struct Utxo {
     pub is_spent: bool,
     pub spent_txid: Option<String>,
     pub spent_at: Option<i64>,  // Unix timestamp
+    pub custom_instructions: Option<String>,  // BRC-29 custom instructions (added in v5)
 }
 
 /// Parent transaction model matching the `parent_transactions` table
@@ -75,4 +76,37 @@ pub struct BlockHeader {
     pub height: u32,
     pub header_hex: String,
     pub cached_at: i64,  // Unix timestamp
+}
+
+/// Basket model matching the `baskets` table
+#[derive(Debug, Clone)]
+pub struct Basket {
+    pub id: Option<i64>,
+    pub name: String,
+    pub description: Option<String>,
+    pub token_type: Option<String>,
+    pub protocol_id: Option<String>,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+}
+
+/// Output tag model matching the `output_tags` table
+#[derive(Debug, Clone)]
+pub struct OutputTag {
+    pub id: Option<i64>,
+    pub tag: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_deleted: bool,
+}
+
+/// Output tag map model matching the `output_tag_map` table
+#[derive(Debug, Clone)]
+pub struct OutputTagMap {
+    pub id: Option<i64>,
+    pub output_id: i64,
+    pub output_tag_id: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_deleted: bool,
 }

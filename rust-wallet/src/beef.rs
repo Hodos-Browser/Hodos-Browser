@@ -244,6 +244,40 @@ impl Beef {
         self.tx_to_bump.push(None);
     }
 
+    /// Find a transaction by its TXID in the BEEF structure
+    ///
+    /// Returns the index of the transaction if found, None otherwise.
+    /// This is used for deduplication when building BEEF for multiple outputs.
+    pub fn find_txid(&self, txid: &str) -> Option<usize> {
+        use sha2::{Sha256, Digest};
+
+        // Decode the requested TXID (it's in hex, display format - reversed)
+        let requested_txid_bytes = match hex::decode(txid) {
+            Ok(bytes) => {
+                if bytes.len() != 32 {
+                    return None;
+                }
+                // TXID in hex is display format (reversed), convert to wire format
+                bytes.into_iter().rev().collect::<Vec<u8>>()
+            },
+            Err(_) => return None,
+        };
+
+        // Check each transaction in the BEEF
+        for (index, tx_bytes) in self.transactions.iter().enumerate() {
+            // Calculate TXID: double SHA-256
+            let first_hash = Sha256::digest(tx_bytes);
+            let second_hash = Sha256::digest(&first_hash);
+
+            // Compare with requested TXID (both in wire format)
+            if second_hash.as_slice() == requested_txid_bytes.as_slice() {
+                return Some(index);
+            }
+        }
+
+        None
+    }
+
     /// Add a Merkle proof (BUMP) from WhatsOnChain merkleproof format
     ///
     /// WhatsOnChain /merkleproof response format:

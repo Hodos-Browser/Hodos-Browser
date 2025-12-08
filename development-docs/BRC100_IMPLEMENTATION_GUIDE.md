@@ -41,21 +41,28 @@
 
 ---
 
-## 🚨 **CRITICAL DISCOVERY: BRC-33 Message Relay Required!**
+## ⚠️ **BRC-33 Message Relay - IMPLEMENTED (Needs Real-World Testing)**
 
-**Issue**: Apps like Coinflip and Thryll are failing with "object null is not iterable"
-**Root Cause**: Missing BRC-33 PeerServ Message Relay endpoints (NOT part of BRC-100!)
+**Status**: ✅ Endpoints implemented (in-memory storage), ❓ Real-world testing unknown
+**Note**: BRC-33 is **separate from BRC-100** but required by many apps
 
-### BRC-33 Message Relay Endpoints (Priority 0 - BLOCKING APPS!)
-These are **separate from BRC-100** but required by many apps:
+### BRC-33 Message Relay Endpoints
 
-| Endpoint | Status | Spec | Notes |
-|----------|--------|------|-------|
-| `/sendMessage` | ❌ | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Send messages to recipients |
-| `/listMessages` | ❌ | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | **BLOCKING COINFLIP** - Returns 404! |
-| `/acknowledgeMessage` | ❌ | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Acknowledge received messages |
+| Endpoint | Status | Real-World Test | Spec | Notes |
+|----------|--------|-----------------|------|-------|
+| `/sendMessage` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Send messages to recipients - **Implemented, needs testing** |
+| `/listMessages` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | List messages from inbox - **Implemented, needs testing** |
+| `/acknowledgeMessage` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Acknowledge received messages - **Implemented, needs testing** |
 
 **Authentication**: Uses BRC-31 (Authrite) - same as `/.well-known/auth` ✅
+**Storage**: Currently in-memory (`MessageStore`) - database persistence optional enhancement
+**Implementation**: `rust-wallet/src/message_relay.rs` and handlers in `handlers.rs`
+
+**Real-World Testing Needed**:
+- Test with apps that use BRC-33 (Coinflip, Thryll, etc.)
+- Verify message delivery and retrieval
+- Test message acknowledgment flow
+- Verify authentication works correctly
 
 ---
 

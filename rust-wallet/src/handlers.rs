@@ -5487,3 +5487,374 @@ pub async fn wallet_recover(
         }
     }
 }
+
+// ============================================================================
+// Part 1: Output Management - Group C
+// ============================================================================
+
+/// Request structure for /listOutputs endpoint
+#[derive(Debug, Deserialize)]
+pub struct ListOutputsRequest {
+    pub basket: String,
+    pub tags: Option<Vec<String>>,
+    #[serde(rename = "tagQueryMode")]
+    pub tag_query_mode: Option<String>,  // "all" or "any"
+    pub include: Option<String>,  // "locking scripts" or "entire transactions"
+    #[serde(rename = "includeCustomInstructions")]
+    pub include_custom_instructions: Option<bool>,
+    #[serde(rename = "includeTags")]
+    pub include_tags: Option<bool>,
+    #[serde(rename = "includeLabels")]
+    pub include_labels: Option<bool>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Response structure for /listOutputs endpoint
+#[derive(Debug, Serialize)]
+pub struct ListOutputsResponse {
+    #[serde(rename = "totalOutputs")]
+    pub total_outputs: u32,
+    pub outputs: Vec<WalletOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub BEEF: Option<String>,  // Hex-encoded BEEF if include='entire transactions'
+}
+
+/// Wallet output structure
+#[derive(Debug, Serialize)]
+pub struct WalletOutput {
+    pub outpoint: String,  // "txid.vout"
+    pub satoshis: i64,
+    pub spendable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "lockingScript")]
+    pub locking_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "customInstructions")]
+    pub custom_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+}
+
+/// POST /listOutputs - BRC-100 Call Code 6
+/// Lists spendable outputs within a specific basket
+pub async fn list_outputs(
+    state: web::Data<AppState>,
+    req: web::Json<ListOutputsRequest>,
+) -> HttpResponse {
+    log::info!("📋 /listOutputs called");
+    log::info!("   Basket: {}", req.basket);
+    log::info!("   Tags: {:?}", req.tags);
+    log::info!("   Tag query mode: {:?}", req.tag_query_mode);
+
+    // Validate basket name (must not be "default" per BRC-100 spec)
+    if req.basket.trim().to_lowercase() == "default" {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Basket name 'default' is prohibited by BRC-100 specification"
+        }));
+    }
+
+    // Get database
+    let db = state.database.lock().unwrap();
+    let basket_repo = crate::database::BasketRepository::new(db.connection());
+    let tag_repo = crate::database::TagRepository::new(db.connection());
+    let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+
+    // Resolve basket (find or create)
+    let basket_id = match basket_repo.find_or_insert(&req.basket) {
+        Ok(id) => id,
+        Err(e) => {
+            log::error!("   Failed to find or create basket: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to resolve basket: {}", e)
+            }));
+        }
+    };
+
+    // Resolve tags if provided
+    let tag_ids = if let Some(tags) = &req.tags {
+        if tags.is_empty() {
+            Vec::new()
+        } else {
+            match tag_repo.find_tag_ids(tags) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    log::error!("   Failed to resolve tags: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to resolve tags: {}", e)
+                    }));
+                }
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Query outputs with filters
+    // TODO: Implement tag filtering in UtxoRepository
+    // For now, we'll query by basket only
+    let all_utxos = match utxo_repo.get_unspent_by_basket(basket_id) {
+        Ok(utxos) => utxos,
+        Err(e) => {
+            log::error!("   Failed to query outputs: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to query outputs: {}", e)
+            }));
+        }
+    };
+
+    // Apply tag filtering if tags provided
+    let filtered_utxos = if !tag_ids.is_empty() {
+        let tag_query_mode = req.tag_query_mode.as_deref().unwrap_or("any");
+        filter_utxos_by_tags(&db, &all_utxos, &tag_ids, tag_query_mode == "all")
+    } else {
+        all_utxos
+    };
+
+    // Apply pagination
+    let offset = req.offset.unwrap_or(0) as usize;
+    let limit = req.limit.unwrap_or(10).min(10000) as usize;
+    let total_outputs = filtered_utxos.len();
+    let paginated_utxos: Vec<_> = filtered_utxos.into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    log::info!("   Found {} outputs (total: {})", paginated_utxos.len(), total_outputs);
+
+    // Build response outputs
+    let include_locking_scripts = req.include.as_deref() == Some("locking scripts");
+    let include_transactions = req.include.as_deref() == Some("entire transactions");
+    let include_custom_instructions = req.include_custom_instructions.unwrap_or(false);
+    let include_tags = req.include_tags.unwrap_or(false);
+    let include_labels = req.include_labels.unwrap_or(false);
+
+    let mut outputs = Vec::new();
+    let mut beef = crate::beef::Beef::new();
+
+    // Create HTTP client for BEEF building (if needed)
+    let client = if include_transactions {
+        Some(reqwest::Client::new())
+    } else {
+        None
+    };
+
+    for utxo in &paginated_utxos {
+        let outpoint = format!("{}.{}", utxo.txid, utxo.vout);
+
+        // Get tags if requested
+        let tags = if include_tags {
+            if let Some(output_id) = utxo.id {
+                tag_repo.get_tags_for_output(output_id).ok()
+                    .filter(|t| !t.is_empty())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Get labels if requested (from transaction)
+        let labels = if include_labels {
+            tag_repo.get_labels_for_txid(&utxo.txid).ok()
+                .filter(|l| !l.is_empty())
+        } else {
+            None
+        };
+
+        let output = WalletOutput {
+            outpoint,
+            satoshis: utxo.satoshis,
+            spendable: true,  // All returned outputs are spendable
+            locking_script: if include_locking_scripts {
+                Some(utxo.script.clone())
+            } else {
+                None
+            },
+            custom_instructions: if include_custom_instructions {
+                utxo.custom_instructions.clone()
+            } else {
+                None
+            },
+            tags,
+            labels,
+        };
+
+        // Build BEEF if requested
+        if include_transactions {
+            // Check if transaction already in BEEF (deduplication)
+            if beef.find_txid(&utxo.txid).is_none() {
+                if let Some(ref client_ref) = client {
+                    // Build BEEF for this output's transaction and its parents
+                    if let Err(e) = crate::beef_helpers::build_beef_for_txid(
+                        &utxo.txid,
+                        &mut beef,
+                        &state.database,
+                        client_ref,
+                    ).await {
+                        log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", utxo.txid, e);
+                        // Continue processing other outputs even if one fails
+                    }
+                }
+            } else {
+                log::info!("   ⏭️  Transaction {} already in BEEF, skipping", utxo.txid);
+            }
+        }
+
+        outputs.push(output);
+    }
+
+    // Serialize BEEF if built
+    let beef_hex = if include_transactions && !beef.transactions.is_empty() {
+        match beef.to_bytes() {
+            Ok(bytes) => Some(hex::encode(bytes)),
+            Err(e) => {
+                log::warn!("   Failed to serialize BEEF: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    drop(db);
+
+    HttpResponse::Ok().json(ListOutputsResponse {
+        total_outputs: total_outputs as u32,
+        outputs,
+        BEEF: beef_hex,
+    })
+}
+
+/// Helper function to filter UTXOs by tags
+fn filter_utxos_by_tags(
+    db: &crate::database::WalletDatabase,
+    utxos: &[crate::database::Utxo],
+    tag_ids: &[i64],
+    require_all: bool,
+) -> Vec<crate::database::Utxo> {
+    use crate::database::TagRepository;
+    let tag_repo = TagRepository::new(db.connection());
+
+    utxos.iter()
+        .filter(|utxo| {
+            if let Some(output_id) = utxo.id {
+                // Get tag IDs for this output
+                match tag_repo.get_tag_ids_for_output(output_id) {
+                    Ok(output_tag_ids) => {
+                        if require_all {
+                            // All requested tags must be in output's tags
+                            tag_ids.iter().all(|tag_id| output_tag_ids.contains(tag_id))
+                        } else {
+                            // Any requested tag matches
+                            tag_ids.iter().any(|tag_id| output_tag_ids.contains(tag_id))
+                        }
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Request structure for /relinquishOutput endpoint
+#[derive(Debug, Deserialize)]
+pub struct RelinquishOutputRequest {
+    pub basket: String,
+    pub output: String,  // Outpoint string "txid.vout"
+}
+
+/// POST /relinquishOutput - BRC-100 Call Code 7
+/// Removes an output from a basket (stops tracking it)
+pub async fn relinquish_output(
+    state: web::Data<AppState>,
+    req: web::Json<RelinquishOutputRequest>,
+) -> HttpResponse {
+    log::info!("📋 /relinquishOutput called");
+    log::info!("   Basket: {}", req.basket);
+    log::info!("   Output: {}", req.output);
+
+    // Parse outpoint
+    let parts: Vec<&str> = req.output.split('.').collect();
+    if parts.len() != 2 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid outpoint format. Expected 'txid.vout'"
+        }));
+    }
+
+    let txid = parts[0];
+    let vout: i32 = match parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid vout value"
+            }));
+        }
+    };
+
+    // Get database
+    let db = state.database.lock().unwrap();
+    let basket_repo = crate::database::BasketRepository::new(db.connection());
+    let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+
+    // Resolve basket
+    let basket_id = match basket_repo.find_by_name(&req.basket) {
+        Ok(Some(basket)) => basket.id.unwrap(),
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("Basket '{}' not found", req.basket)
+            }));
+        }
+        Err(e) => {
+            log::error!("   Failed to find basket: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to find basket: {}", e)
+            }));
+        }
+    };
+
+    // Find UTXO
+    let utxo = match utxo_repo.get_by_txid_vout(txid, vout as u32) {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("Output {} not found", req.output)
+            }));
+        }
+        Err(e) => {
+            log::error!("   Failed to find UTXO: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to find UTXO: {}", e)
+            }));
+        }
+    };
+
+    // Verify UTXO is in the specified basket
+    if utxo.basket_id != Some(basket_id) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Output {} is not in basket '{}'", req.output, req.basket)
+        }));
+    }
+
+    // Remove from basket (set basket_id to NULL)
+    match utxo_repo.remove_from_basket(utxo.id.unwrap()) {
+        Ok(_) => {
+            log::info!("   ✅ Output {} removed from basket '{}'", req.output, req.basket);
+            drop(db);
+            HttpResponse::Ok().json(serde_json::json!({
+                "relinquished": true
+            }))
+        }
+        Err(e) => {
+            log::error!("   Failed to remove output from basket: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to remove output from basket: {}", e)
+            }))
+        }
+    }
+}

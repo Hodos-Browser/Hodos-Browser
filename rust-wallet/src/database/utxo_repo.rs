@@ -82,7 +82,7 @@ impl<'a> UtxoRepository<'a> {
             .collect();
         let query = format!(
             "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                    first_seen, last_updated, is_spent, spent_txid, spent_at
+                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
              FROM utxos
              WHERE address_id IN ({}) AND is_spent = 0
              ORDER BY satoshis DESC",
@@ -106,6 +106,7 @@ impl<'a> UtxoRepository<'a> {
                     is_spent: row.get::<_, i32>(9)? != 0,
                     spent_txid: row.get(10)?,
                     spent_at: row.get(11)?,
+                    custom_instructions: row.get(12).ok(),  // May not exist in older schemas
                 })
             },
         )?
@@ -166,11 +167,46 @@ impl<'a> UtxoRepository<'a> {
         Ok(total_affected)
     }
 
+    /// Get all unspent UTXOs for a specific basket
+    pub fn get_unspent_by_basket(&self, basket_id: i64) -> Result<Vec<Utxo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
+                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
+             FROM utxos
+             WHERE basket_id = ?1 AND is_spent = 0
+             ORDER BY satoshis DESC"
+        )?;
+
+        let utxos = stmt.query_map(
+            rusqlite::params![basket_id],
+            |row| {
+                Ok(Utxo {
+                    id: Some(row.get(0)?),
+                    address_id: row.get(1)?,
+                    basket_id: row.get(2)?,
+                    txid: row.get(3)?,
+                    vout: row.get(4)?,
+                    satoshis: row.get(5)?,
+                    script: row.get(6)?,
+                    first_seen: row.get(7)?,
+                    last_updated: row.get(8)?,
+                    is_spent: row.get::<_, i32>(9)? != 0,
+                    spent_txid: row.get(10)?,
+                    spent_at: row.get(11)?,
+                    custom_instructions: row.get(12).ok(),  // May not exist in older schemas
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>>>()?;
+
+        Ok(utxos)
+    }
+
     /// Get UTXO by txid and vout
     pub fn get_by_txid_vout(&self, txid: &str, vout: u32) -> Result<Option<Utxo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                    first_seen, last_updated, is_spent, spent_txid, spent_at
+                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
              FROM utxos
              WHERE txid = ?1 AND vout = ?2"
         )?;
@@ -191,6 +227,7 @@ impl<'a> UtxoRepository<'a> {
                     is_spent: row.get::<_, i32>(9)? != 0,
                     spent_txid: row.get(10)?,
                     spent_at: row.get(11)?,
+                    custom_instructions: row.get(12).ok(),  // May not exist in older schemas
                 })
             },
         ) {
@@ -242,5 +279,14 @@ impl<'a> UtxoRepository<'a> {
         }
 
         Ok(rows_affected)
+    }
+
+    /// Remove UTXO from basket (set basket_id to NULL)
+    pub fn remove_from_basket(&self, utxo_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE utxos SET basket_id = NULL WHERE id = ?1",
+            rusqlite::params![utxo_id],
+        )?;
+        Ok(())
     }
 }

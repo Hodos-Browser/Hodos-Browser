@@ -394,6 +394,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 5 (Group C enhancements)
+        if current_version < 5 {
+            info!("   Applying migration to version 5...");
+            match migrations::create_schema_v5(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 5...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (5)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 5 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 5 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 
