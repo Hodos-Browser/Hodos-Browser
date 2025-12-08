@@ -172,6 +172,16 @@ async fn main() -> std::io::Result<()> {
     println!("   POST /listMessages");
     println!("   POST /acknowledgeMessage");
     println!();
+    println!("📊 Blockchain Query endpoints (Group C - Part 2):");
+    println!("   POST /getHeight");
+    println!("   POST /getHeaderForHeight");
+    println!("   POST /getNetwork");
+    println!();
+    println!("📊 Blockchain Query endpoints:");
+    println!("   POST /getHeight");
+    println!("   POST /getHeaderForHeight");
+    println!("   POST /getNetwork");
+    println!();
     println!("✅ Server ready - CEF browser can now connect!");
     println!();
 
@@ -226,6 +236,11 @@ async fn main() -> std::io::Result<()> {
             .route("/updateConfirmations", web::post().to(handlers::update_confirmations_endpoint))  // NEW
             .route("/listOutputs", web::post().to(handlers::list_outputs))  // Group C - Part 1
             .route("/relinquishOutput", web::post().to(handlers::relinquish_output))  // Group C - Part 1
+
+            // Part 2: Blockchain Queries
+            .route("/getHeight", web::post().to(handlers::get_height))  // Group C - Part 2
+            .route("/getHeaderForHeight", web::post().to(handlers::get_header_for_height))  // Group C - Part 2
+            .route("/getNetwork", web::post().to(handlers::get_network))  // Group C - Part 2
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

@@ -4,6 +4,30 @@
 
 ---
 
+## 🎉 **Group C - Part 2: Blockchain Queries Complete!** (2025-12-08)
+
+### **Latest Achievement: All Three Blockchain Query Methods Implemented!**
+
+Successfully implemented all three blockchain utility methods for Group C Part 2:
+- ✅ `getHeight` (Call Code 25) - Returns current blockchain height
+- ✅ `getHeaderForHeight` (Call Code 26) - Returns 80-byte block header by height
+- ✅ `getNetwork` (Call Code 27) - Returns network name ("mainnet")
+
+**Key Implementation Details**:
+- `getHeight`: Fetches from WhatsOnChain `/chain/info` API, extracts `blocks` field
+- `getHeaderForHeight`: Cache-first approach (database → API), constructs 80-byte header from API fields
+- `getNetwork`: Simple hardcoded "mainnet" return (can be enhanced with config later)
+
+**Testing**: All three methods tested successfully with PowerShell commands. `getHeaderForHeight` required fixing API endpoint format (uses `/block/{hash}/header` as per ts-brc100 reference).
+
+**Files Modified**:
+- `rust-wallet/src/handlers.rs` - Added three handler functions
+- `rust-wallet/src/main.rs` - Added routes for all three methods
+
+**Next**: Part 3 - Certificate Management (BRC-52)
+
+---
+
 ## 🗄️ **Database Migration Complete!** (2025-12-06)
 
 ### **Latest Achievement: Phase 9 Backup & Recovery Complete!**
@@ -1015,6 +1039,82 @@ Successfully implemented Phase 4 of the database migration, enabling fast UTXO l
 - 🔄 **Parent Transaction Caching**: Cache parent transactions for BEEF building
 - 🔄 **TSC Proof Caching**: Cache Merkle proofs for SPV verification
 - 🔄 **Block Header Caching**: Cache block headers for height resolution
+
+---
+
+## ⚠️ **Testing Strategy & Concerns** (2025-01-XX)
+
+### **Internal Testing Problem: Confirmation Bias in Tests**
+
+**Problem**: When implementing to a protocol specification, there's a risk of writing tests that have the same fundamental misunderstandings as the implementation code. This is sometimes called:
+- **"Confirmation bias in testing"** - Tests confirm our (potentially incorrect) understanding
+- **"Self-validating tests"** - Tests pass even when implementation is wrong
+- **"Circular validation"** - Tests mirror implementation bugs
+
+**Example**: If we misunderstand how BEEF format should work, we might:
+1. Implement BEEF generation incorrectly
+2. Write tests that expect the incorrect format
+3. Tests pass, but real-world apps fail
+
+**Our Approach**:
+- ✅ **Real-world testing first** - Test with actual BRC-100 apps (ToolBSV, Thryll, etc.)
+- ⏳ **Internal tests deferred** - Will add comprehensive unit tests after consulting with protocol developers
+- 📋 **Documentation** - Keep detailed notes on what works in real-world scenarios
+- 🔍 **Reference implementation** - Compare against `ts-brc100` TypeScript SDK
+
+**Status**: Internal test suite is minimal. Focus is on real-world compatibility testing.
+
+**Challenges**:
+- Limited real-world BRC-100 apps available for testing
+- Need to validate understanding with protocol developers before writing comprehensive tests
+- Real-world testing is slower but more reliable than potentially flawed internal tests
+
+**Next Steps**:
+- Consult with BRC-100 protocol developers to validate our understanding
+- Build comprehensive test suite based on confirmed understanding
+- Use real-world app testing as primary validation method
+
+---
+
+## 📋 **Development Process Notes** (2025-12-08)
+
+### **Database Migrations**
+
+**How Migrations Work**:
+- Migrations run **automatically** when the wallet starts (`WalletDatabase::new()` in `rust-wallet/src/database/connection.rs`)
+- Migration system tracks version numbers in `schema_version` table
+- Migrations are incremental (v1, v2, v3, v4, v5...)
+- Uses `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` with existence checks - **safe for existing data**
+
+**After Adding New Tables/Columns**:
+1. Add migration function to `rust-wallet/src/database/migrations.rs` (e.g., `create_schema_v6()`)
+2. Add migration step to `WalletDatabase::migrate()` in `connection.rs`
+3. **Restart the wallet** - migrations run automatically on startup
+4. ✅ **No manual migration command needed** - it's automatic!
+
+**Migration Safety**:
+- ✅ Uses `CREATE TABLE IF NOT EXISTS` - won't overwrite existing tables
+- ✅ Uses existence checks before `ALTER TABLE` - won't duplicate columns
+- ✅ Tracks version numbers - won't run migrations twice
+- ✅ **Existing data is preserved** - migrations only add new structures
+
+**Example**: After adding `output_tags` tables in migration v1, the wallet will automatically create them on next startup. No manual intervention needed!
+
+**Note**: The `output_tags` and `output_tag_map` tables are in migration v1, but if the database was created before v1 included them, you need to restart the wallet to run migrations. The error "no such table: output_tags" indicates migrations haven't run yet.
+
+### **HTTP Interceptor Updates**
+
+**When Implementing New Endpoints**:
+- Add endpoint to `isWalletEndpoint()` in `cef-native/src/core/HttpRequestInterceptor.cpp`
+- This ensures requests to the endpoint are intercepted and routed to the wallet
+- **Example**: Added `/discoverByIdentityKey` after finding it in real-world testing logs
+
+**Current Status**: All Group C endpoints have been added to the interceptor proactively:
+- ✅ `/listOutputs`, `/relinquishOutput`
+- ✅ `/acquireCertificate`, `/listCertificates`, `/proveCertificate`, `/relinquishCertificate`
+- ✅ `/discoverByIdentityKey`, `/discoverByAttributes`
+- ✅ `/getHeight`, `/getHeaderForHeight`
+- ✅ `/waitForAuthentication`, `/getNetwork` (already existed)
 
 ---
 

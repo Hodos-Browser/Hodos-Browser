@@ -5858,3 +5858,260 @@ pub async fn relinquish_output(
         }
     }
 }
+
+/// Request structure for /getHeaderForHeight endpoint
+#[derive(Debug, Deserialize)]
+pub struct GetHeaderForHeightRequest {
+    pub height: u32,
+}
+
+/// POST /getHeight - BRC-100 Call Code 25
+/// Returns the current blockchain height (chain tip)
+pub async fn get_height() -> HttpResponse {
+    log::info!("📋 /getHeight called");
+
+    // Fetch current blockchain height from WhatsOnChain API
+    let url = "https://api.whatsonchain.com/v1/bsv/main/chain/info";
+    let client = reqwest::Client::new();
+
+    match client.get(url).send().await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                log::error!("   WhatsOnChain API returned status: {}", response.status());
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("API returned status: {}", response.status())
+                }));
+            }
+
+            match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    // Extract "blocks" field which contains current height
+                    let height = json["blocks"].as_u64()
+                        .or_else(|| json["blocks"].as_i64().map(|h| h as u64))
+                        .unwrap_or(0) as u32;
+
+                    log::info!("   Current blockchain height: {}", height);
+
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "height": height
+                    }))
+                }
+                Err(e) => {
+                    log::error!("   Failed to parse API response: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to parse API response: {}", e)
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("   Failed to fetch blockchain height: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch blockchain height: {}", e)
+            }))
+        }
+    }
+}
+
+/// POST /getHeaderForHeight - BRC-100 Call Code 26
+/// Returns the 80-byte block header for a given height
+pub async fn get_header_for_height(
+    state: web::Data<AppState>,
+    req: web::Json<GetHeaderForHeightRequest>,
+) -> HttpResponse {
+    log::info!("📋 /getHeaderForHeight called");
+    log::info!("   Height: {}", req.height);
+
+    // Check database cache first
+    let db = state.database.lock().unwrap();
+    let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+
+    match block_header_repo.get_by_height(req.height) {
+        Ok(Some(cached_header)) => {
+            log::info!("   ✅ Found block header in cache");
+            drop(db);
+            return HttpResponse::Ok().json(serde_json::json!({
+                "header": cached_header.header_hex
+            }));
+        }
+        Ok(None) => {
+            log::info!("   🌐 Cache miss - fetching from API...");
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Database error checking cache: {}, fetching from API", e);
+        }
+    }
+    drop(db);
+
+    // Fetch from WhatsOnChain API
+    // First, get block info by height to get the hash
+    let block_info_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", req.height);
+    let client = reqwest::Client::new();
+
+    // Step 1: Get block hash from height
+    let block_hash = match client.get(&block_info_url).send().await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                log::error!("   WhatsOnChain API returned status: {}", response.status());
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("API returned status: {}", response.status())
+                }));
+            }
+
+            match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    // Extract block hash
+                    match json["hash"].as_str() {
+                        Some(hash) => hash.to_string(),
+                        None => {
+                            log::error!("   Missing 'hash' field in block info response");
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Missing 'hash' field in API response"
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("   Failed to parse block info response: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to parse API response: {}", e)
+                    }));
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("   Failed to fetch block info: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch block info: {}", e)
+            }));
+        }
+    };
+
+    // Step 2: Get block header by hash using /block/{hash}/header endpoint (as per ts-brc100)
+    let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/{}/header", block_hash);
+
+    match client.get(&block_header_url).send().await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                log::error!("   WhatsOnChain API returned status: {}", response.status());
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("API returned status: {}", response.status())
+                }));
+            }
+
+            match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    // The /block/{hash}/header endpoint returns WocHeader format (same as ts-brc100)
+                    // Construct 80-byte block header from individual fields
+                    // Block header format: version (4) + prev_hash (32) + merkle_root (32) + time (4) + bits (4) + nonce (4) = 80 bytes
+
+                    let version = json["version"].as_u64().unwrap_or(0) as u32;
+                    let prev_hash = json["previousblockhash"].as_str().unwrap_or("");
+                    let merkle_root = json["merkleroot"].as_str().unwrap_or("");
+                    let time = json["time"].as_u64().unwrap_or(0) as u32;
+                    // bits can be number or hex string (as per WocHeader interface)
+                    let bits = json["bits"].as_u64()
+                        .or_else(|| {
+                            json["bits"].as_str()
+                                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                        })
+                        .unwrap_or(0) as u32;
+                    let nonce = json["nonce"].as_u64().unwrap_or(0) as u32;
+
+                    // Decode hex strings and reverse (Bitcoin uses little-endian)
+                    let prev_hash_bytes = match hex::decode(prev_hash) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            log::error!("   Invalid previousblockhash hex: {}", e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": format!("Invalid previousblockhash hex: {}", e)
+                            }));
+                        }
+                    };
+
+                    let merkle_root_bytes = match hex::decode(merkle_root) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            log::error!("   Invalid merkleroot hex: {}", e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": format!("Invalid merkleroot hex: {}", e)
+                            }));
+                        }
+                    };
+
+                    if prev_hash_bytes.len() != 32 {
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": format!("Invalid previousblockhash length: {} (expected 32)", prev_hash_bytes.len())
+                        }));
+                    }
+                    if merkle_root_bytes.len() != 32 {
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": format!("Invalid merkleroot length: {} (expected 32)", merkle_root_bytes.len())
+                        }));
+                    }
+
+                    // Reverse bytes (little-endian)
+                    let mut prev_hash_rev = prev_hash_bytes.clone();
+                    prev_hash_rev.reverse();
+                    let mut merkle_root_rev = merkle_root_bytes.clone();
+                    merkle_root_rev.reverse();
+
+                    // Build 80-byte header
+                    let mut header_bytes = Vec::with_capacity(80);
+                    header_bytes.extend_from_slice(&version.to_le_bytes());  // 4 bytes
+                    header_bytes.extend_from_slice(&prev_hash_rev);          // 32 bytes
+                    header_bytes.extend_from_slice(&merkle_root_rev);        // 32 bytes
+                    header_bytes.extend_from_slice(&time.to_le_bytes());     // 4 bytes
+                    header_bytes.extend_from_slice(&bits.to_le_bytes());     // 4 bytes
+                    header_bytes.extend_from_slice(&nonce.to_le_bytes());    // 4 bytes
+
+                    let header_hex = hex::encode(header_bytes);
+
+                    // Extract height for caching (should match requested height)
+                    let height = json["height"].as_u64().unwrap_or(req.height as u64) as u32;
+
+                    // Cache the header for future use
+                    {
+                        let db = state.database.lock().unwrap();
+                        let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                        if let Err(e) = block_header_repo.upsert(&block_hash, height, &header_hex) {
+                            log::warn!("   ⚠️  Failed to cache block header: {}", e);
+                        } else {
+                            log::info!("   💾 Cached block header for height {}", height);
+                        }
+                    }
+
+                    log::info!("   ✅ Fetched block header ({} bytes)", header_hex.len() / 2);
+
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "header": header_hex
+                    }))
+                }
+                Err(e) => {
+                    log::error!("   Failed to parse API response: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to parse API response: {}", e)
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("   Failed to fetch block header: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch block header: {}", e)
+            }))
+        }
+    }
+}
+
+/// POST /getNetwork - BRC-100 Call Code 27
+/// Returns the network name ("mainnet" or "testnet")
+pub async fn get_network() -> HttpResponse {
+    log::info!("📋 /getNetwork called");
+
+    // For now, return hardcoded "mainnet"
+    // TODO: Could read from config file or environment variable later
+    HttpResponse::Ok().json(serde_json::json!({
+        "network": "mainnet"
+    }))
+}

@@ -509,3 +509,75 @@ pub fn create_schema_v5(conn: &Connection) -> Result<()> {
     info!("   ✅ Schema version 5 migration complete");
     Ok(())
 }
+
+/// Create schema version 6 (Tag tables for listOutputs)
+///
+/// Adds support for:
+/// - output_tags table (for output categorization)
+/// - output_tag_map table (many-to-many relationship)
+///
+/// This migration is safe to run on existing databases - it only creates tables if they don't exist.
+pub fn create_schema_v6(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 6 (Tag tables for listOutputs)...");
+
+    // Check if output_tags table exists
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='output_tags'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !table_exists {
+        info!("   Creating output_tags table...");
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS output_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                is_deleted BOOLEAN NOT NULL DEFAULT 0,
+                UNIQUE(tag)
+            )",
+            [],
+        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tags_tag ON output_tags(tag)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tags_deleted ON output_tags(is_deleted) WHERE is_deleted = 0", [])?;
+        info!("   ✅ Created output_tags table");
+    } else {
+        info!("   ✅ output_tags table already exists");
+    }
+
+    // Check if output_tag_map table exists
+    let map_table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='output_tag_map'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !map_table_exists {
+        info!("   Creating output_tag_map table...");
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS output_tag_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                output_id INTEGER NOT NULL,
+                output_tag_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                is_deleted BOOLEAN NOT NULL DEFAULT 0,
+                FOREIGN KEY (output_id) REFERENCES utxos(id) ON DELETE CASCADE,
+                FOREIGN KEY (output_tag_id) REFERENCES output_tags(id) ON DELETE CASCADE,
+                UNIQUE(output_id, output_tag_id)
+            )",
+            [],
+        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_output_id ON output_tag_map(output_id)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_tag_id ON output_tag_map(output_tag_id)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_deleted ON output_tag_map(is_deleted) WHERE is_deleted = 0", [])?;
+        info!("   ✅ Created output_tag_map table");
+    } else {
+        info!("   ✅ output_tag_map table already exists");
+    }
+
+    info!("   ✅ Schema version 6 migration complete");
+    Ok(())
+}

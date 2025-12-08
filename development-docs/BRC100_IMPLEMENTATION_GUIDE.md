@@ -158,20 +158,25 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 
 | Call Code | Method | Status | Internal Test | Real-World Test | Notes |
 |-----------|--------|--------|---------------|-----------------|-------|
-| 6 | `listOutputs` | ⏳ | ❌ | ❌ | **Database schema ready** - Will support basket filtering |
-| 7 | `relinquishOutput` | ❌ | ❌ | ❌ | Release UTXO control |
-| 17 | `acquireCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 18 | `listCertificates` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 19 | `proveCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 20 | `relinquishCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added |
-| 24 | `waitForAuthentication` | ❌ | ❌ | ❌ | Async auth wait |
-| 25 | `getHeight` | ❌ | ❌ | ❌ | Get blockchain height |
-| 26 | `getHeaderForHeight` | ⏳ | ❌ | ❌ | **Database schema ready** - `block_headers` table added |
-| 27 | `getNetwork` | ❌ | ❌ | ❌ | Return "mainnet" or "testnet" |
+| 6 | `listOutputs` | ⏳ | ❌ | ❌ | **Database schema ready** - Will support basket filtering<br>⚠️ **Note**: Add `/listOutputs` to HTTP interceptor when implementing |
+| 7 | `relinquishOutput` | ❌ | ❌ | ❌ | Release UTXO control<br>⚠️ **Note**: Add `/relinquishOutput` to HTTP interceptor when implementing |
+| 17 | `acquireCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/acquireCertificate` to HTTP interceptor when implementing |
+| 18 | `listCertificates` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/listCertificates` to HTTP interceptor when implementing |
+| 19 | `proveCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/proveCertificate` to HTTP interceptor when implementing |
+| 20 | `relinquishCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/relinquishCertificate` to HTTP interceptor when implementing |
+| 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **CRITICAL**: Add `/discoverByIdentityKey` to HTTP interceptor (microblog.bitspv.com uses this!) |
+| 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/discoverByAttributes` to HTTP interceptor when implementing |
+| 24 | `waitForAuthentication` | ❌ | ❌ | ❌ | Async auth wait<br>✅ **Already in HTTP interceptor** |
+| 25 | `getHeight` | ✅ | ✅ | ❌ | Get blockchain height<br>✅ **COMPLETE** - Fetches from WhatsOnChain `/chain/info`<br>✅ **Already in HTTP interceptor** |
+| 26 | `getHeaderForHeight` | ✅ | ✅ | ❌ | Get block header by height<br>✅ **COMPLETE** - Cache-first with API fallback, constructs 80-byte header<br>✅ **Already in HTTP interceptor** |
+| 27 | `getNetwork` | ✅ | ✅ | ❌ | Return "mainnet" or "testnet"<br>✅ **COMPLETE** - Returns hardcoded "mainnet"<br>✅ **Already in HTTP interceptor** |
 
 **Database Support**: ✅ Schema includes `baskets`, `certificates`, `utxos`, `block_headers` tables - ready for implementation after database migration.
+
+**⚠️ Important Notes**:
+- **Database Migrations**: Migrations run automatically when the wallet starts (`WalletDatabase::new()`). After adding new tables/columns, restart the wallet to apply migrations.
+- **HTTP Interceptor**: When implementing new endpoints, add them to `isWalletEndpoint()` in `cef-native/src/core/HttpRequestInterceptor.cpp` to ensure requests are intercepted.
+- **Migration Safety**: Migrations use `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` with existence checks - they won't overwrite existing data.
 
 #### **Group D: Encryption & Advanced Crypto (Priority 4)**
 Privacy features and advanced cryptography.
@@ -717,6 +722,44 @@ mod tests {
 
 ---
 
-**Last Updated**: October 22, 2025
-**Current Focus**: Group A - Authentication (`verifySignature` and BRC-104)
-**Next Milestone**: Authentication Complete (1 week)
+## ⚠️ Testing Strategy & Concerns
+
+### Internal Testing Problem: Confirmation Bias in Tests
+
+**Problem**: When implementing to a protocol specification, there's a risk of writing tests that have the same fundamental misunderstandings as the implementation code. This is sometimes called:
+- **"Confirmation bias in testing"** - Tests confirm our (potentially incorrect) understanding
+- **"Self-validating tests"** - Tests pass even when implementation is wrong
+- **"Circular validation"** - Tests mirror implementation bugs
+
+**Example**: If we misunderstand how BEEF format should work, we might:
+1. Implement BEEF generation incorrectly
+2. Write tests that expect the incorrect format
+3. Tests pass, but real-world apps fail
+
+**Our Approach**:
+- ✅ **Real-world testing first** - Test with actual BRC-100 apps (ToolBSV, Thryll, etc.)
+- ⏳ **Internal tests deferred** - Will add comprehensive unit tests after consulting with protocol developers
+- 📋 **Documentation** - Keep detailed notes on what works in real-world scenarios
+- 🔍 **Reference implementation** - Compare against `ts-brc100` TypeScript SDK
+
+**Status**: Internal test suite is minimal. Focus is on real-world compatibility testing.
+
+**Challenges**:
+- Limited real-world BRC-100 apps available for testing
+- Need to validate understanding with protocol developers before writing comprehensive tests
+- Real-world testing is slower but more reliable than potentially flawed internal tests
+
+**Next Steps**:
+- Consult with BRC-100 protocol developers to validate our understanding
+- Build comprehensive test suite based on confirmed understanding
+- Use real-world app testing as primary validation method
+
+---
+
+**Last Updated**: December 8, 2025
+**Current Focus**: Group C - Output/Basket & Certificate Management
+**Progress**:
+- ✅ Part 1: Output Management (`listOutputs`, `relinquishOutput`) - **COMPLETE**
+- ✅ Part 2: Blockchain Queries (`getHeight`, `getHeaderForHeight`, `getNetwork`) - **COMPLETE**
+- ⏳ Part 3: Certificate Management - **NEXT**
+**Next Milestone**: Complete Part 3 (Certificate Management)

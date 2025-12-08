@@ -421,6 +421,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 6 (Tag tables for listOutputs)
+        if current_version < 6 {
+            info!("   Applying migration to version 6...");
+            match migrations::create_schema_v6(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 6...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (6)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 6 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 6 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 
