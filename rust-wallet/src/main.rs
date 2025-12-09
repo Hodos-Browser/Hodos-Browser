@@ -22,6 +22,7 @@ mod cache_sync;  // NEW: Background cache sync service
 mod balance_cache;  // NEW: In-memory balance cache
 mod backup;  // NEW: Database backup and restore utilities
 mod recovery;  // NEW: Wallet recovery from mnemonic
+mod script;  // NEW: Bitcoin script parsing and PushDrop (BRC-48)
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;

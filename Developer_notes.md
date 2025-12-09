@@ -1083,11 +1083,11 @@ Successfully implemented Phase 4 of the database migration, enabling fast UTXO l
 **How Migrations Work**:
 - Migrations run **automatically** when the wallet starts (`WalletDatabase::new()` in `rust-wallet/src/database/connection.rs`)
 - Migration system tracks version numbers in `schema_version` table
-- Migrations are incremental (v1, v2, v3, v4, v5...)
+- Migrations are incremental (v1, v2, v3, v4, v5, v6, v7...)
 - Uses `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` with existence checks - **safe for existing data**
 
 **After Adding New Tables/Columns**:
-1. Add migration function to `rust-wallet/src/database/migrations.rs` (e.g., `create_schema_v6()`)
+1. Add migration function to `rust-wallet/src/database/migrations.rs` (e.g., `create_schema_v7()`)
 2. Add migration step to `WalletDatabase::migrate()` in `connection.rs`
 3. **Restart the wallet** - migrations run automatically on startup
 4. ✅ **No manual migration command needed** - it's automatic!
@@ -1101,6 +1101,24 @@ Successfully implemented Phase 4 of the database migration, enabling fast UTXO l
 **Example**: After adding `output_tags` tables in migration v1, the wallet will automatically create them on next startup. No manual intervention needed!
 
 **Note**: The `output_tags` and `output_tag_map` tables are in migration v1, but if the database was created before v1 included them, you need to restart the wallet to run migrations. The error "no such table: output_tags" indicates migrations haven't run yet.
+
+### **Database Export/Import Procedures** ⚠️ **TODO: Review After Schema Changes**
+
+**Status**: Database schema has been updated with new tables and columns (v7: certificate_fields, enhanced certificates table).
+
+**Action Required**:
+- ⚠️ **Review database export/import procedures** to ensure they handle:
+  - New `certificate_fields` table
+  - New BRC-52 columns in `certificates` table (`type`, `serial_number`, `certifier`, `subject`, `verifier`, `revocation_outpoint`, `signature`, `is_deleted`)
+  - Data migration from `relinquished` to `is_deleted` (if applicable)
+  - Foreign key relationships between `certificates` and `certificate_fields`
+
+**Files to Review**:
+- `rust-wallet/src/handlers.rs` - Backup/restore endpoints
+- `rust-wallet/src/database/connection.rs` - Database initialization and migration
+- Any JSON export functionality that includes certificate data
+
+**When**: Review before implementing certificate management features (Part 3) to ensure backup/restore works correctly with new schema.
 
 ### **HTTP Interceptor Updates**
 

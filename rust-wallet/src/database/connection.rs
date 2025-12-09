@@ -448,6 +448,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 7 (Certificate Management - Part 3)
+        if current_version < 7 {
+            info!("   Applying migration to version 7...");
+            match migrations::create_schema_v7(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 7...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (7)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 7 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 7 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 
