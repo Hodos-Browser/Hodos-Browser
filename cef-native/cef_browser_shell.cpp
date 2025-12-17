@@ -996,8 +996,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
     wc.lpszClassName = L"HodosBrowserWndClass"; RegisterClass(&wc);
 
-    WNDCLASS browserClass = {}; browserClass.lpfnWndProc = DefWindowProc; browserClass.hInstance = hInstance;
-    browserClass.lpszClassName = L"CEFHostWindow"; RegisterClass(&browserClass);
+    WNDCLASS browserClass = {};
+    browserClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;  // Redraw on resize, no border styles
+    browserClass.lpfnWndProc = DefWindowProc;
+    browserClass.hInstance = hInstance;
+    browserClass.lpszClassName = L"CEFHostWindow";
+    browserClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);  // Black background
+    RegisterClass(&browserClass);
 
 
     WNDCLASS settingsOverlayClass = {};

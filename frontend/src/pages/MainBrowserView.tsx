@@ -25,8 +25,85 @@ const MainBrowserView: React.FC = () => {
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const addressBarRef = useRef<HTMLInputElement>(null);
+    const mainBoxRef = useRef<HTMLDivElement>(null);
+    const tabBarRef = useRef<HTMLDivElement>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
+
+    // Dimension diagnostics
+    React.useEffect(() => {
+        const logDimensions = () => {
+            console.log('========================================');
+            console.log('📐 FRONTEND DIMENSION DIAGNOSTICS:');
+
+            // Window dimensions
+            console.log('🪟 Window:', {
+                innerWidth: window.innerWidth,
+                innerHeight: window.innerHeight,
+                outerWidth: window.outerWidth,
+                outerHeight: window.outerHeight
+            });
+
+            // Main box dimensions
+            if (mainBoxRef.current) {
+                const rect = mainBoxRef.current.getBoundingClientRect();
+                const computed = window.getComputedStyle(mainBoxRef.current);
+                console.log('📦 Main Box:', {
+                    width: rect.width,
+                    height: rect.height,
+                    left: rect.left,
+                    top: rect.top,
+                    marginLeft: computed.marginLeft,
+                    marginRight: computed.marginRight,
+                    paddingLeft: computed.paddingLeft,
+                    paddingRight: computed.paddingRight
+                });
+            }
+
+            // Tab bar dimensions
+            if (tabBarRef.current) {
+                const rect = tabBarRef.current.getBoundingClientRect();
+                const computed = window.getComputedStyle(tabBarRef.current);
+                console.log('📑 Tab Bar:', {
+                    width: rect.width,
+                    height: rect.height,
+                    left: rect.left,
+                    top: rect.top,
+                    paddingLeft: computed.paddingLeft
+                });
+            }
+
+            // Toolbar dimensions
+            if (toolbarRef.current) {
+                const rect = toolbarRef.current.getBoundingClientRect();
+                const computed = window.getComputedStyle(toolbarRef.current);
+                console.log('🔧 Toolbar:', {
+                    width: rect.width,
+                    height: rect.height,
+                    left: rect.left,
+                    top: rect.top,
+                    paddingLeft: computed.paddingLeft
+                });
+            }
+
+            console.log('========================================');
+        };
+
+        // Log on mount
+        logDimensions();
+
+        // Log on window resize
+        window.addEventListener('resize', logDimensions);
+
+        // Log every 5 seconds for debugging
+        const interval = setInterval(logDimensions, 5000);
+
+        return () => {
+            window.removeEventListener('resize', logDimensions);
+            clearInterval(interval);
+        };
+    }, []);
 
     // Tab management
     const {
@@ -106,12 +183,15 @@ const MainBrowserView: React.FC = () => {
 
     return (
         <Box
+            ref={mainBoxRef}
             sx={{
-                width: '100%',
-                height: '100%',
+                width: 'calc(100% + 16px)', // Compensate for 8px borders on both sides
+                height: 'calc(100% + 16px)', // Compensate for 8px borders top/bottom
                 display: 'flex',
                 flexDirection: 'column',
-                overflow: 'hidden', // Prevent scrolling
+                overflow: 'hidden',
+                margin: '-8px', // Negative margin to offset CEF window border
+                padding: 0,
             }}
         >
             {/* Tab Bar */}
@@ -125,7 +205,9 @@ const MainBrowserView: React.FC = () => {
             />
 
             {/* Top Navigation Bar */}
-            <Toolbar sx={{
+            <Toolbar
+                ref={toolbarRef}
+                sx={{
                 bgcolor: '#ffffff',
                 borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
                 minHeight: '52px !important',

@@ -21,6 +21,8 @@ export const TabBar: React.FC<TabBarProps> = ({
   onCloseTab,
   onSwitchTab,
 }) => {
+  const tabBarRef = React.useRef<HTMLDivElement>(null);
+
   // Debug logging
   React.useEffect(() => {
     console.log('📑 TabBar render:', {
@@ -29,6 +31,17 @@ export const TabBar: React.FC<TabBarProps> = ({
       isLoading,
       tabs: tabs.map(t => ({ id: t.id, title: t.title }))
     });
+
+    // Log dimensions
+    if (tabBarRef.current) {
+      const rect = tabBarRef.current.getBoundingClientRect();
+      console.log('📑 TabBar dimensions:', {
+        width: rect.width,
+        height: rect.height,
+        left: rect.left,
+        top: rect.top
+      });
+    }
   }, [tabs, activeTabId, isLoading]);
 
   const handleTabClose = (e: React.MouseEvent, tabId: number) => {
@@ -38,6 +51,7 @@ export const TabBar: React.FC<TabBarProps> = ({
 
   return (
     <Box
+      ref={tabBarRef}
       sx={{
         display: 'flex',
         alignItems: 'flex-end',

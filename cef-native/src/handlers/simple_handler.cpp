@@ -404,33 +404,64 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
 
+    std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
+    std::cout << "  Role: " << role_ << std::endl;
+    std::cout << "  Browser ID: " << browser->GetIdentifier() << std::endl;
+    std::cout << "  IsPopup: " << (browser->IsPopup() ? "YES" : "NO") << std::endl;
+
     LOG_DEBUG_BROWSER("🔴 OnBeforeClose for role: " + role_ + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
-    // Check if this is a tab browser
-    int tab_id = ExtractTabIdFromRole(role_);
-    if (tab_id != -1) {
-        // This is a tab browser closing - notify TabManager to clean up HWND
-        TabManager::GetInstance().OnTabBrowserClosed(tab_id);
-        LOG_DEBUG_BROWSER("📑 Tab browser closed callback: ID " + std::to_string(tab_id));
+    // CRITICAL: Check if this is a popup (DevTools, etc.)
+    if (browser->IsPopup()) {
+        std::cout << "  → Detected as popup, skipping cleanup" << std::endl;
+        LOG_DEBUG_BROWSER("🔧 Popup browser (DevTools or other) closing - ignoring");
+        std::cout << "🔴 OnBeforeClose EXITING (popup)" << std::endl;
         return;
     }
 
+    std::cout << "  → Not a popup, checking if tab browser..." << std::endl;
+
+    // Check if this is a tab browser
+    int tab_id = ExtractTabIdFromRole(role_);
+    std::cout << "  → Extracted tab ID: " << tab_id << std::endl;
+
+    if (tab_id != -1) {
+        std::cout << "  → Is tab browser, calling OnTabBrowserClosed" << std::endl;
+        TabManager::GetInstance().OnTabBrowserClosed(tab_id);
+        LOG_DEBUG_BROWSER("📑 Tab browser closed callback: ID " + std::to_string(tab_id));
+        std::cout << "🔴 OnBeforeClose EXITING (tab)" << std::endl;
+        return;
+    }
+
+    std::cout << "  → Not a tab, checking overlays..." << std::endl;
+
     // Handle overlay browser cleanup
     if (role_ == "settings" && browser == settings_browser_) {
+        std::cout << "  → Settings browser cleanup" << std::endl;
         settings_browser_ = nullptr;
     } else if (role_ == "wallet" && browser == wallet_browser_) {
+        std::cout << "  → Wallet browser cleanup" << std::endl;
         wallet_browser_ = nullptr;
     } else if (role_ == "backup" && browser == backup_browser_) {
+        std::cout << "  → Backup browser cleanup" << std::endl;
         backup_browser_ = nullptr;
     } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
+        std::cout << "  → BRC100 auth browser cleanup" << std::endl;
         brc100_auth_browser_ = nullptr;
     } else if (role_ == "overlay" && browser == overlay_browser_) {
+        std::cout << "  → Overlay browser cleanup" << std::endl;
         overlay_browser_ = nullptr;
     } else if (role_ == "webview" && browser == webview_browser_) {
+        std::cout << "  → Webview browser cleanup" << std::endl;
         webview_browser_ = nullptr;
     } else if (role_ == "header" && browser == header_browser_) {
+        std::cout << "  → Header browser cleanup" << std::endl;
         header_browser_ = nullptr;
+    } else {
+        std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
+
+    std::cout << "🔴 OnBeforeClose EXITING (overlay)" << std::endl;
 }
 
 bool SimpleHandler::OnBeforePopup(
@@ -452,6 +483,12 @@ bool SimpleHandler::OnBeforePopup(
 
     std::string url = target_url.ToString();
     LOG_DEBUG_BROWSER("🔗 Popup requested: " + url + " (disposition: " + std::to_string(target_disposition) + ")");
+
+    // Allow DevTools and other special popups to open normally
+    if (url.find("devtools://") == 0 || url.find("chrome://") == 0 || url.empty()) {
+        LOG_DEBUG_BROWSER("🔧 Allowing special popup (DevTools/Chrome): " + url);
+        return false;  // Allow default popup behavior
+    }
 
     // Only handle popups from tab browsers
     int tab_id = ExtractTabIdFromRole(role_);
