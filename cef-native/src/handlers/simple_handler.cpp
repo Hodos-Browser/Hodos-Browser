@@ -433,6 +433,52 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
 }
 
+bool SimpleHandler::OnBeforePopup(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    int popup_id,
+    const CefString& target_url,
+    const CefString& target_frame_name,
+    CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+    bool user_gesture,
+    const CefPopupFeatures& popupFeatures,
+    CefWindowInfo& windowInfo,
+    CefRefPtr<CefClient>& client,
+    CefBrowserSettings& settings,
+    CefRefPtr<CefDictionaryValue>& extra_info,
+    bool* no_javascript_access) {
+
+    CEF_REQUIRE_UI_THREAD();
+
+    std::string url = target_url.ToString();
+    LOG_DEBUG_BROWSER("🔗 Popup requested: " + url + " (disposition: " + std::to_string(target_disposition) + ")");
+
+    // Only handle popups from tab browsers
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        // Create a new tab instead of opening a popup window
+        LOG_DEBUG_BROWSER("📑 Creating new tab for popup URL: " + url);
+
+        // Get main window dimensions
+        extern HWND g_hwnd;
+        RECT rect;
+        GetClientRect(g_hwnd, &rect);
+        int width = rect.right - rect.left;
+        int height = rect.bottom - rect.top;
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+        int tabHeight = height - shellHeight;
+
+        // Create new tab with the popup URL
+        TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+
+        // Return true to cancel the popup (we handled it with a new tab)
+        return true;
+    }
+
+    // For non-tab browsers, allow default popup behavior
+    return false;
+}
+
 bool SimpleHandler::OnProcessMessageReceived(
     CefRefPtr<CefBrowser> browser,
     CefRefPtr<CefFrame> frame,
