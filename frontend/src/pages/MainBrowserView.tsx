@@ -19,91 +19,12 @@ import { TabBar } from '../components/TabBar';
 
 
 const MainBrowserView: React.FC = () => {
-    console.log("🔍 MainBrowserView rendering");
-
     // Address bar state
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const addressBarRef = useRef<HTMLInputElement>(null);
-    const mainBoxRef = useRef<HTMLDivElement>(null);
-    const tabBarRef = useRef<HTMLDivElement>(null);
-    const toolbarRef = useRef<HTMLDivElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
-
-    // Dimension diagnostics
-    React.useEffect(() => {
-        const logDimensions = () => {
-            console.log('========================================');
-            console.log('📐 FRONTEND DIMENSION DIAGNOSTICS:');
-
-            // Window dimensions
-            console.log('🪟 Window:', {
-                innerWidth: window.innerWidth,
-                innerHeight: window.innerHeight,
-                outerWidth: window.outerWidth,
-                outerHeight: window.outerHeight
-            });
-
-            // Main box dimensions
-            if (mainBoxRef.current) {
-                const rect = mainBoxRef.current.getBoundingClientRect();
-                const computed = window.getComputedStyle(mainBoxRef.current);
-                console.log('📦 Main Box:', {
-                    width: rect.width,
-                    height: rect.height,
-                    left: rect.left,
-                    top: rect.top,
-                    marginLeft: computed.marginLeft,
-                    marginRight: computed.marginRight,
-                    paddingLeft: computed.paddingLeft,
-                    paddingRight: computed.paddingRight
-                });
-            }
-
-            // Tab bar dimensions
-            if (tabBarRef.current) {
-                const rect = tabBarRef.current.getBoundingClientRect();
-                const computed = window.getComputedStyle(tabBarRef.current);
-                console.log('📑 Tab Bar:', {
-                    width: rect.width,
-                    height: rect.height,
-                    left: rect.left,
-                    top: rect.top,
-                    paddingLeft: computed.paddingLeft
-                });
-            }
-
-            // Toolbar dimensions
-            if (toolbarRef.current) {
-                const rect = toolbarRef.current.getBoundingClientRect();
-                const computed = window.getComputedStyle(toolbarRef.current);
-                console.log('🔧 Toolbar:', {
-                    width: rect.width,
-                    height: rect.height,
-                    left: rect.left,
-                    top: rect.top,
-                    paddingLeft: computed.paddingLeft
-                });
-            }
-
-            console.log('========================================');
-        };
-
-        // Log on mount
-        logDimensions();
-
-        // Log on window resize
-        window.addEventListener('resize', logDimensions);
-
-        // Log every 5 seconds for debugging
-        const interval = setInterval(logDimensions, 5000);
-
-        return () => {
-            window.removeEventListener('resize', logDimensions);
-            clearInterval(interval);
-        };
-    }, []);
 
     // Tab management
     const {
@@ -126,7 +47,6 @@ const MainBrowserView: React.FC = () => {
             const activeTab = tabs.find(t => t.id === activeTabId);
             if (activeTab && activeTab.url) {
                 setAddress(activeTab.url);
-                console.log('🔗 Address bar synced to active tab:', activeTab.url);
             }
         }
     }, [activeTabId, tabs, isEditingAddress]);
@@ -140,17 +60,11 @@ const MainBrowserView: React.FC = () => {
         onSwitchToTab: switchToTabByIndex,
         onFocusAddressBar: () => addressBarRef.current?.focus(),
         onReload: reload,
-        onToggleDevTools: () => {
-            // F12 will be handled by CEF natively
-            console.log('DevTools toggle requested');
-        },
     });
 
     const handleNavigate = () => {
-        console.log('🧭 Navigating to:', address);
         navigate(address);
         setIsEditingAddress(false);
-        // Address will update from tab list sync
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -183,14 +97,13 @@ const MainBrowserView: React.FC = () => {
 
     return (
         <Box
-            ref={mainBoxRef}
             sx={{
-                width: 'calc(100% + 16px)', // Compensate for 8px borders on both sides
-                height: 'calc(100% + 16px)', // Compensate for 8px borders top/bottom
+                width: 'calc(100% + 16px)',
+                height: 'calc(100% + 16px)',
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
-                margin: '-8px', // Negative margin to offset CEF window border
+                margin: '-8px',
                 padding: 0,
             }}
         >
@@ -205,9 +118,7 @@ const MainBrowserView: React.FC = () => {
             />
 
             {/* Top Navigation Bar */}
-            <Toolbar
-                ref={toolbarRef}
-                sx={{
+            <Toolbar sx={{
                 bgcolor: '#ffffff',
                 borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
                 minHeight: '52px !important',
@@ -317,7 +228,6 @@ const MainBrowserView: React.FC = () => {
                 {/* Wallet Button */}
                 <IconButton
                     onClick={() => {
-                        console.log("🟢 Wallet button clicked");
                         window.cefMessage?.send('overlay_show_wallet', []);
                         window.hodosBrowser.overlay.toggleInput(true);
                     }}
@@ -337,7 +247,6 @@ const MainBrowserView: React.FC = () => {
                 {/* Settings Button */}
                 <IconButton
                     onClick={() => {
-                        console.log("🔧 Settings button clicked");
                         window.cefMessage?.send('overlay_show_settings', []);
                         window.hodosBrowser.overlay.toggleInput(true);
                     }}

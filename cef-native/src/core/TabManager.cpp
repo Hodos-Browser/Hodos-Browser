@@ -7,17 +7,6 @@
 #include "include/cef_task.h"
 #include <algorithm>
 #include <sstream>
-#include <iostream>
-#include <fstream>
-
-// Helper function to write to diagnostic log file
-void LogToFile(const std::string& message) {
-    std::ofstream logFile("tab_diagnostics.log", std::ios::app);
-    if (logFile.is_open()) {
-        logFile << message << std::endl;
-        logFile.close();
-    }
-}
 
 // External global variables from cef_browser_shell.cpp
 extern HINSTANCE g_hInstance;
@@ -89,95 +78,6 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     }
 
     new_tab.hwnd = tab_hwnd;
-    LOG(INFO) << "Created HWND for tab " << tab_id << ": " << tab_hwnd;
-
-    // COMPREHENSIVE DIAGNOSTIC LOGGING TO FILE
-    std::stringstream log;
-    log << "\n========================================\n";
-    log << "📐 TAB " << tab_id << " CREATION DIAGNOSTICS\n";
-    log << "========================================\n";
-    log << "URL: " << tab_url << "\n";
-
-    // Check parent window extended styles (RTL layout check)
-    LONG_PTR parentExStyle = GetWindowLongPtr(parent_hwnd, GWL_EXSTYLE);
-    log << "\nPARENT WINDOW EXTENDED STYLES:\n";
-    log << "  Extended Style Flags: 0x" << std::hex << parentExStyle << std::dec << "\n";
-    log << "  Has WS_EX_LAYOUTRTL: " << ((parentExStyle & WS_EX_LAYOUTRTL) ? "YES (RTL LAYOUT ENABLED!)" : "NO") << "\n";
-    log << "  Has WS_EX_RIGHT: " << ((parentExStyle & WS_EX_RIGHT) ? "YES" : "NO") << "\n";
-    log << "  Has WS_EX_RTLREADING: " << ((parentExStyle & WS_EX_RTLREADING) ? "YES" : "NO") << "\n";
-
-    // Check tab window extended styles
-    LONG_PTR tabExStyle = GetWindowLongPtr(tab_hwnd, GWL_EXSTYLE);
-    log << "\nTAB WINDOW EXTENDED STYLES:\n";
-    log << "  Extended Style Flags: 0x" << std::hex << tabExStyle << std::dec << "\n";
-    log << "  Has WS_EX_LAYOUTRTL: " << ((tabExStyle & WS_EX_LAYOUTRTL) ? "YES" : "NO") << "\n";
-
-    log << "\nREQUESTED DIMENSIONS:\n";
-    log << "  Position: (" << x << ", " << y << ")\n";
-    log << "  Size: " << width << "x" << height << "\n";
-
-    // Get window rect BEFORE SetWindowPos
-    RECT windowRectBefore;
-    GetWindowRect(tab_hwnd, &windowRectBefore);
-    log << "\nWINDOW RECT IMMEDIATELY AFTER CreateWindow:\n";
-    log << "  Left: " << windowRectBefore.left << "\n";
-    log << "  Top: " << windowRectBefore.top << "\n";
-    log << "  Right: " << windowRectBefore.right << "\n";
-    log << "  Bottom: " << windowRectBefore.bottom << "\n";
-
-    // Get window rect AFTER SetWindowPos
-    RECT windowRect;
-    GetWindowRect(tab_hwnd, &windowRect);
-    log << "\nWINDOW RECT AFTER SetWindowPos CORRECTION:\n";
-    log << "  Left: " << windowRect.left << "\n";
-    log << "  Top: " << windowRect.top << "\n";
-    log << "  Right: " << windowRect.right << "\n";
-    log << "  Bottom: " << windowRect.bottom << "\n";
-    log << "  Width: " << (windowRect.right - windowRect.left) << "\n";
-    log << "  Height: " << (windowRect.bottom - windowRect.top) << "\n";
-
-    // Get client rect (content area)
-    RECT clientRect;
-    GetClientRect(tab_hwnd, &clientRect);
-    int clientWidth = clientRect.right - clientRect.left;
-    int clientHeight = clientRect.bottom - clientRect.top;
-    log << "\nCLIENT RECT (content area):\n";
-    log << "  Width: " << clientWidth << "\n";
-    log << "  Height: " << clientHeight << "\n";
-
-    // Check for mismatches
-    if (clientWidth != width || clientHeight != height) {
-        log << "\n⚠️ CLIENT AREA MISMATCH!\n";
-        log << "  Expected: " << width << "x" << height << "\n";
-        log << "  Got: " << clientWidth << "x" << clientHeight << "\n";
-        log << "  Difference: " << (width - clientWidth) << "x" << (height - clientHeight) << "\n";
-    }
-
-    // Get parent window info for comparison
-    RECT parentClientRect;
-    GetClientRect(parent_hwnd, &parentClientRect);
-    RECT parentWindowRect;
-    GetWindowRect(parent_hwnd, &parentWindowRect);
-
-    log << "\nPARENT WINDOW (g_hwnd) INFO:\n";
-    log << "  Client Rect Width: " << (parentClientRect.right - parentClientRect.left) << "\n";
-    log << "  Client Rect Height: " << (parentClientRect.bottom - parentClientRect.top) << "\n";
-    log << "  Screen Position: Left=" << parentWindowRect.left << ", Top=" << parentWindowRect.top << "\n";
-    log << "  Screen Size: " << (parentWindowRect.right - parentWindowRect.left) << "x"
-        << (parentWindowRect.bottom - parentWindowRect.top) << "\n";
-
-    // Calculate where child SHOULD be based on parent position
-    int expectedScreenX = parentWindowRect.left + x;
-    int expectedScreenY = parentWindowRect.top + y;
-    log << "\nEXPECTED CHILD SCREEN POSITION:\n";
-    log << "  Should be at screen: (" << expectedScreenX << ", " << expectedScreenY << ")\n";
-    log << "  Actual screen: (" << windowRect.left << ", " << windowRect.top << ")\n";
-    log << "  Offset: (" << (windowRect.left - expectedScreenX) << ", " << (windowRect.top - expectedScreenY) << ")\n";
-
-    log << "========================================\n";
-
-    LogToFile(log.str());
-    std::cout << "✅ Tab " << tab_id << " diagnostics written to tab_diagnostics.log" << std::endl;
 
     // Create SimpleHandler for this tab
     // Role string format: "tab_{id}" - used to identify tab in callbacks
@@ -198,12 +98,6 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     GetClientRect(tab_hwnd, &cef_rect);
     int cef_width = cef_rect.right - cef_rect.left;
     int cef_height = cef_rect.bottom - cef_rect.top;
-
-    std::stringstream cef_log;
-    cef_log << "\nCEF BROWSER CONFIGURATION:\n";
-    cef_log << "  CefRect: (0, 0, " << cef_width << ", " << cef_height << ")\n";
-    cef_log << "  Parent HWND: " << tab_hwnd << "\n";
-    LogToFile(cef_log.str());
 
     CefWindowInfo window_info;
     window_info.SetAsChild(tab_hwnd, CefRect(0, 0, cef_width, cef_height));
@@ -235,18 +129,11 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     // Switch to the new tab (will be shown when browser is created)
     SwitchToTab(tab_id);
 
-    // CRITICAL FIX: Queue WM_SIZE to force correct tab positioning
-    // This fixes the offset issue when creating tabs while window is maximized
-    // PostMessage queues WM_SIZE for after current operations complete
+    // Queue WM_SIZE to fix positioning (important for maximized windows)
     RECT parentRect;
     GetClientRect(parent_hwnd, &parentRect);
-    int parentWidth = parentRect.right - parentRect.left;
-    int parentHeight = parentRect.bottom - parentRect.top;
-
-    // Use PostMessage (async) instead of SendMessage (sync) to queue repositioning
-    PostMessage(parent_hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(parentWidth, parentHeight));
-
-    LOG(INFO) << "Queued WM_SIZE to reposition tab " << tab_id;
+    PostMessage(parent_hwnd, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(parentRect.right - parentRect.left, parentRect.bottom - parentRect.top));
 
     return tab_id;
 }

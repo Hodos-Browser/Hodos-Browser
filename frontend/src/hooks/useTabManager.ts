@@ -14,11 +14,8 @@ export const useTabManager = () => {
 
   // Fetch tab list from backend
   const refreshTabList = useCallback(() => {
-    console.log('📑 Requesting tab list from backend...');
     if (window.cefMessage) {
       window.cefMessage.send('get_tab_list');
-    } else {
-      console.error('❌ window.cefMessage not available');
     }
   }, []);
 
@@ -90,23 +87,17 @@ export const useTabManager = () => {
 
   // Listen for tab list updates from C++
   useEffect(() => {
-    console.log('📑 useTabManager: Setting up message listener');
-
     const handleTabListResponse = (event: MessageEvent) => {
-      console.log('📨 Message event received:', event.data);
-
       if (event.data && event.data.type === 'tab_list_response') {
-        console.log('📑 Tab list response received:', event.data.data);
         try {
           const response: TabListResponse = JSON.parse(event.data.data);
-          console.log('📑 Parsed tab list:', response);
           setState({
             tabs: response.tabs,
             activeTabId: response.activeTabId,
             isLoading: false,
           });
         } catch (error) {
-          console.error('❌ Failed to parse tab list response:', error, event.data.data);
+          console.error('Failed to parse tab list response:', error);
         }
       }
     };
@@ -114,17 +105,12 @@ export const useTabManager = () => {
     window.addEventListener('message', handleTabListResponse);
 
     // Initial fetch
-    console.log('📑 useTabManager: Calling initial refreshTabList');
     refreshTabList();
 
     // Refresh periodically to keep in sync (every 2 seconds)
-    const interval = setInterval(() => {
-      console.log('📑 Periodic tab list refresh');
-      refreshTabList();
-    }, 2000);
+    const interval = setInterval(refreshTabList, 2000);
 
     return () => {
-      console.log('📑 useTabManager: Cleanup');
       window.removeEventListener('message', handleTabListResponse);
       clearInterval(interval);
     };
