@@ -17,13 +17,13 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum Brc42Error {
     #[error("invalid private key: {0}")]
     InvalidPrivateKey(String),
-    
+
     #[error("invalid public key: {0}")]
     InvalidPublicKey(String),
-    
+
     #[error("derivation failed: {0}")]
     DerivationFailed(String),
-    
+
     #[error("secp256k1 error: {0}")]
     Secp256k1Error(String),
 }
@@ -52,21 +52,21 @@ pub fn compute_shared_secret(
             format!("Private key must be 32 bytes, got {}", private_key.len())
         ));
     }
-    
+
     let secp = Secp256k1::new();
-    
+
     // Parse keys
     let secret = SecretKey::from_slice(private_key)
         .map_err(|e| Brc42Error::InvalidPrivateKey(e.to_string()))?;
-    
+
     let pubkey = PublicKey::from_slice(public_key)
         .map_err(|e| Brc42Error::InvalidPublicKey(e.to_string()))?;
-    
+
     // Compute ECDH: privkey * pubkey
     // mul_tweak multiplies the public key by the scalar (private key)
     let shared_point = pubkey.mul_tweak(&secp, &secret.into())
         .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
-    
+
     // Serialize as compressed (33 bytes) - THIS IS THE KEY DIFFERENCE
     // TypeScript: sharedSecret.encode(true) returns compressed format
     // Format: [0x02 or 0x03] + [32-byte x-coordinate]
@@ -85,13 +85,80 @@ pub fn compute_shared_secret(
 ///
 /// ## Returns
 /// 32-byte HMAC output
-fn compute_invoice_hmac(shared_secret: &[u8], invoice_number: &str) -> Result<Vec<u8>, Brc42Error> {
+pub fn compute_invoice_hmac(shared_secret: &[u8], invoice_number: &str) -> Result<Vec<u8>, Brc42Error> {
     let mut mac = HmacSha256::new_from_slice(shared_secret)
         .map_err(|e| Brc42Error::DerivationFailed(format!("HMAC init failed: {}", e)))?;
-    
+
     mac.update(invoice_number.as_bytes());
-    
+
     Ok(mac.finalize().into_bytes().to_vec())
+}
+
+/// Derive symmetric key for HMAC using BRC-42
+///
+/// **TypeScript Reference**: keyDeriver.deriveSymmetricKey(protocolID, keyID, counterparty)
+///
+/// The SDK's deriveSymmetricKey:
+/// 1. Derives our child private key (using BRC-42 with invoice number)
+/// 2. Derives their child public key (using BRC-42 with invoice number)
+/// 3. Computes ECDH between our child private key and their child public key
+/// 4. Takes the x-coordinate of the result as the symmetric key
+///
+/// ## Algorithm
+/// 1. Derive our child private key: our_master_privkey + HMAC_scalar (BRC-42)
+/// 2. Derive their child public key: their_master_pubkey + HMAC_scalar*G (BRC-42)
+/// 3. Compute ECDH: our_child_privkey * their_child_pubkey
+/// 4. Extract x-coordinate (32 bytes) as symmetric key
+///
+/// ## Arguments
+/// - `our_private_key`: Our 32-byte master private key
+/// - `their_public_key`: Their 33-byte master public key (counterparty)
+/// - `invoice_number`: UTF-8 invoice number string (format: "{level}-{protocolID}-{keyID}")
+///
+/// ## Returns
+/// 32-byte symmetric key for HMAC operations (x-coordinate of ECDH result)
+pub fn derive_symmetric_key_for_hmac(
+    our_private_key: &[u8],
+    their_public_key: &[u8],
+    invoice_number: &str,
+) -> Result<Vec<u8>, Brc42Error> {
+    let secp = Secp256k1::new();
+
+    // Step 1: Compute shared secret at master level (for HMAC scalar derivation)
+    let master_shared_secret = compute_shared_secret(our_private_key, their_public_key)?;
+
+    // Step 2: Compute HMAC over invoice number with master shared secret
+    // This gives us the scalar to add to keys (BRC-42 step)
+    let hmac_output = compute_invoice_hmac(&master_shared_secret, invoice_number)?;
+
+    // Step 3: Convert HMAC to scalar (for BRC-42 child key derivation)
+    let hmac_secret = SecretKey::from_slice(&hmac_output)
+        .map_err(|e| Brc42Error::DerivationFailed(format!("Invalid HMAC for scalar: {}", e)))?;
+
+    // Step 4: Derive our child private key (our_master_privkey + HMAC_scalar)
+    let our_secret = SecretKey::from_slice(our_private_key)
+        .map_err(|e| Brc42Error::InvalidPrivateKey(e.to_string()))?;
+    let our_child_secret = our_secret.add_tweak(&hmac_secret.into())
+        .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
+
+    // Step 5: Derive their child public key (their_master_pubkey + HMAC_scalar*G)
+    let their_pubkey = PublicKey::from_slice(their_public_key)
+        .map_err(|e| Brc42Error::InvalidPublicKey(e.to_string()))?;
+    let their_child_pubkey = their_pubkey.add_exp_tweak(&secp, &hmac_secret.into())
+        .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
+
+    // Step 6: Compute ECDH between our child private key and their child public key
+    // This gives us the shared secret point
+    let shared_point = their_child_pubkey.mul_tweak(&secp, &our_child_secret.into())
+        .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
+
+    // Step 7: Extract x-coordinate (32 bytes) as symmetric key
+    // The SDK uses: derivedPrivateKey.deriveSharedSecret(derivedPublicKey)?.x?.toArray()
+    // This returns the x-coordinate in big-endian format, padded to 32 bytes
+    let shared_point_bytes = shared_point.serialize();
+    let x_coordinate = &shared_point_bytes[1..33]; // Skip compression byte, get x-coordinate
+
+    Ok(x_coordinate.to_vec())
 }
 
 /// Derive child public key for recipient (sender's perspective)
@@ -122,25 +189,25 @@ pub fn derive_child_public_key(
     invoice_number: &str,
 ) -> Result<Vec<u8>, Brc42Error> {
     let secp = Secp256k1::new();
-    
+
     // Step 1: Compute shared secret
     let shared_secret = compute_shared_secret(sender_private_key, recipient_public_key)?;
-    
+
     // Step 2: Compute HMAC over invoice number
     let hmac_output = compute_invoice_hmac(&shared_secret, invoice_number)?;
-    
+
     // Step 3: Convert HMAC to scalar - treat as private key to get the scalar value
     let hmac_secret = SecretKey::from_slice(&hmac_output)
         .map_err(|e| Brc42Error::DerivationFailed(format!("Invalid HMAC for scalar: {}", e)))?;
-    
+
     // Parse recipient's public key
     let recipient_pubkey = PublicKey::from_slice(recipient_public_key)
         .map_err(|e| Brc42Error::InvalidPublicKey(e.to_string()))?;
-    
+
     // Step 4 & 5: hmac_scalar * G + recipient_pubkey
     let child_pubkey = recipient_pubkey.add_exp_tweak(&secp, &hmac_secret.into())
         .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
-    
+
     // Step 6: Return compressed child public key
     Ok(child_pubkey.serialize().to_vec())
 }
@@ -173,22 +240,22 @@ pub fn derive_child_private_key(
 ) -> Result<Vec<u8>, Brc42Error> {
     // Step 1: Compute shared secret
     let shared_secret = compute_shared_secret(recipient_private_key, sender_public_key)?;
-    
+
     // Step 2: Compute HMAC over invoice number
     let hmac_output = compute_invoice_hmac(&shared_secret, invoice_number)?;
-    
+
     // Step 3: Convert HMAC to scalar (big-endian) - treat as a private key for addition
     let hmac_secret = SecretKey::from_slice(&hmac_output)
         .map_err(|e| Brc42Error::DerivationFailed(format!("Invalid HMAC for secret key: {}", e)))?;
-    
+
     // Parse recipient's private key
     let recipient_secret = SecretKey::from_slice(recipient_private_key)
         .map_err(|e| Brc42Error::InvalidPrivateKey(e.to_string()))?;
-    
+
     // Step 4: Add HMAC (as scalar) to private key (mod N)
     let child_secret = recipient_secret.add_tweak(&hmac_secret.into())
         .map_err(|e| Brc42Error::Secp256k1Error(e.to_string()))?;
-    
+
     // Return child private key
     Ok(child_secret.secret_bytes().to_vec())
 }
@@ -196,9 +263,9 @@ pub fn derive_child_private_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Test vectors from BRC-42 specification
-    
+
     #[test]
     fn test_private_key_derivation_vector_1() {
         // BRC-42 Test Vector 1 for private key derivation
@@ -206,12 +273,12 @@ mod tests {
         let recipient_privkey = hex::decode("6a1751169c111b4667a6539ee1be6b7cd9f6e9c8fe011a5f2fe31e03a15e0ede").unwrap();
         let invoice_number = "f3WCaUmnN9U=";
         let expected_privkey = hex::decode("761656715bbfa172f8f9f58f5af95d9d0dfd69014cfdcacc9a245a10ff8893ef").unwrap();
-        
+
         let derived = derive_child_private_key(&recipient_privkey, &sender_pubkey, invoice_number).unwrap();
-        
+
         assert_eq!(derived, expected_privkey);
     }
-    
+
     #[test]
     fn test_private_key_derivation_vector_2() {
         // BRC-42 Test Vector 2
@@ -219,12 +286,12 @@ mod tests {
         let recipient_privkey = hex::decode("cab2500e206f31bc18a8af9d6f44f0b9a208c32d5cca2b22acfe9d1a213b2f36").unwrap();
         let invoice_number = "2Ska++APzEc=";
         let expected_privkey = hex::decode("09f2b48bd75f4da6429ac70b5dce863d5ed2b350b6f2119af5626914bdb7c276").unwrap();
-        
+
         let derived = derive_child_private_key(&recipient_privkey, &sender_pubkey, invoice_number).unwrap();
-        
+
         assert_eq!(derived, expected_privkey);
     }
-    
+
     #[test]
     fn test_public_key_derivation_vector_1() {
         // BRC-42 Test Vector 1 for public key derivation
@@ -232,12 +299,12 @@ mod tests {
         let recipient_pubkey = hex::decode("02c0c1e1a1f7d247827d1bcf399f0ef2deef7695c322fd91a01a91378f101b6ffc").unwrap();
         let invoice_number = "IBioA4D/OaE=";
         let expected_pubkey = hex::decode("03c1bf5baadee39721ae8c9882b3cf324f0bf3b9eb3fc1b8af8089ca7a7c2e669f").unwrap();
-        
+
         let derived = derive_child_public_key(&sender_privkey, &recipient_pubkey, invoice_number).unwrap();
-        
+
         assert_eq!(derived, expected_pubkey);
     }
-    
+
     #[test]
     fn test_public_key_derivation_vector_2() {
         // BRC-42 Test Vector 2
@@ -245,30 +312,30 @@ mod tests {
         let recipient_pubkey = hex::decode("039a9da906ecb8ced5c87971e9c2e7c921e66ad450fd4fc0a7d569fdb5bede8e0f").unwrap();
         let invoice_number = "PWYuo9PDKvI=";
         let expected_pubkey = hex::decode("0398cdf4b56a3b2e106224ff3be5253afd5b72de735d647831be51c713c9077848").unwrap();
-        
+
         let derived = derive_child_public_key(&sender_privkey, &recipient_pubkey, invoice_number).unwrap();
-        
+
         assert_eq!(derived, expected_pubkey);
     }
-    
+
     #[test]
     fn test_shared_secret_symmetry() {
         // Shared secret should be the same from both perspectives
         let alice_privkey = [1u8; 32];
         let bob_privkey = [2u8; 32];
-        
+
         // Derive public keys
         let secp = Secp256k1::new();
         let alice_secret = SecretKey::from_slice(&alice_privkey).unwrap();
         let bob_secret = SecretKey::from_slice(&bob_privkey).unwrap();
-        
+
         let alice_pubkey = PublicKey::from_secret_key(&secp, &alice_secret).serialize().to_vec();
         let bob_pubkey = PublicKey::from_secret_key(&secp, &bob_secret).serialize().to_vec();
-        
+
         // Compute shared secrets
         let secret_ab = compute_shared_secret(&alice_privkey, &bob_pubkey).unwrap();
         let secret_ba = compute_shared_secret(&bob_privkey, &alice_pubkey).unwrap();
-        
+
         assert_eq!(secret_ab, secret_ba);
     }
 }

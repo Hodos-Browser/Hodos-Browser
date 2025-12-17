@@ -4,6 +4,188 @@
 
 ---
 
+## 🔐 **Group C - Part 3: Certificate Management - IN PROGRESS** (2025-12-10)
+
+### **Current Status: Certificate Infrastructure Complete, Encryption Debugging**
+
+Successfully implemented BRC-100 certificate management infrastructure and all four certificate handlers, but currently debugging encryption/format mismatch causing 500 errors from certifier servers.
+
+### **What We've Implemented:**
+
+#### **1. Database Schema (Migration v7)** ✅
+**File**: `rust-wallet/src/database/migrations.rs`
+
+**Tables Created:**
+- `certificates` - Stores BRC-52 certificate metadata (type, serialNumber, certifier, subject, signature, revocationOutpoint, etc.)
+- `certificate_fields` - Stores encrypted certificate field data (field_name, encrypted_value, encrypted_revelation_key)
+
+**Key Design Decisions:**
+- Separate `certificate_fields` table for better querying and selective disclosure support
+- Foreign key relationship: `certificate_fields.certificate_id → certificates.id`
+- Supports both master keyring (no serial_number) and verifier keyrings (with serial_number)
+
+#### **2. Certificate Infrastructure** ✅
+**Files**: `rust-wallet/src/certificate/`
+
+**Modules Implemented:**
+- `types.rs` - Certificate and CertificateField data structures
+- `parser.rs` - BRC-52 certificate JSON parsing
+- `verifier.rs` - BRC-52 signature verification and revocation checking
+- `selective_disclosure.rs` - Keyring generation for verifiers
+
+**Key Features:**
+- BRC-52 signature verification using BRC-42 key derivation
+- Revocation checking via UTXO spending status (WhatsOnChain API)
+- Certificate preimage serialization matching TypeScript SDK exactly
+- Selective disclosure keyring generation
+
+#### **3. BRC-2 Encryption Implementation** ✅
+**Files**: `rust-wallet/src/crypto/brc2.rs`, `rust-wallet/src/crypto/aesgcm_custom.rs`, `rust-wallet/src/crypto/ghash.rs`
+
+**Custom AES-GCM Implementation:**
+- Full custom AESGCM matching TypeScript SDK byte-for-byte
+- Custom GHASH implementation for 32-byte IV processing
+- GCTR (Galois Counter) mode encryption/decryption
+- Proper IV processing: 32-byte IVs processed through GHASH to derive preCounterBlock
+- Increment least significant 32 bits for counter blocks
+
+**Key Technical Details:**
+- **IV Processing**: TypeScript SDK uses GHASH to process 32-byte IVs (non-standard GCM behavior)
+- **Key Format**: Always uses 32-byte keys (`toArray('be', 32)` pads with leading zeros)
+- **Revelation Key**: Uses `toArray()` without length parameter, which strips leading zeros
+- **Format**: `[32-byte IV][ciphertext][16-byte auth tag]`
+
+#### **4. Certificate Handlers** ✅
+**File**: `rust-wallet/src/handlers/certificate_handlers.rs`
+
+**All Four Handlers Implemented:**
+- ✅ `relinquishCertificate` - Marks certificates as deleted
+- ✅ `listCertificates` - Lists certificates with filtering
+- ✅ `acquireCertificate` - Supports both 'direct' and 'issuance' protocols
+- ✅ `proveCertificate` - Selective disclosure with keyring generation
+
+#### **5. BRC-53 Issuance Protocol** ✅
+**File**: `rust-wallet/src/handlers/certificate_handlers.rs` (lines 629-1995)
+
+**Full Two-Step Protocol:**
+1. **Step 1: Initial Request** (BRC-31 Peer Protocol)
+   - Sends unsigned `initialRequest` to `/.well-known/auth` (or `/initialRequest`)
+   - Receives `initialResponse` with server's identity key and nonce
+   - Verifies server's signature on `initialResponse` (mutual authentication)
+   - Uses JavaScript-compatible base64 decoding for server signature verification
+
+2. **Step 2: Certificate Signing Request (CSR)**
+   - Encrypts certificate fields using BRC-2
+   - Creates `masterKeyring` with encrypted revelation keys
+   - Signs CSR using BRC-3 (BRC-42 key derivation)
+   - Sends to `/signCertificate` with BRC-31 authentication headers
+
+**BRC-31 Authentication Headers:**
+- `x-bsv-auth-version: 0.1`
+- `x-bsv-auth-identity-key: <hex>`
+- `x-bsv-auth-nonce: <base64>` (separate signing nonce)
+- `x-bsv-auth-your-nonce: <base64>` (server's nonce from initialResponse)
+- `x-bsv-auth-request-id: <base64>` (first 32 bytes of serialized request)
+- `x-bsv-auth-signature: <hex>` (DER-encoded ECDSA signature)
+
+**Request Serialization:**
+- Binary format with VarInt encoding (matching `AuthFetch.serializeRequest()`)
+- Format: `[32-byte nonce][VarInt method length][method][VarInt path length][path][VarInt header count][headers][VarInt body length][body]`
+- Headers encoded as `[VarInt key length][key][VarInt value length][value]`
+
+### **What We've Learned About CSR Format:**
+
+#### **CSR JSON Structure:**
+```json
+{
+  "clientNonce": "<base64>",  // Original nonce from initialRequest
+  "type": "<base64>",         // Certificate type (32 bytes, base64-encoded)
+  "fields": {                 // Encrypted field values
+    "<fieldName>": "<base64>" // Encrypted: [32-byte IV][ciphertext][16-byte tag]
+  },
+  "masterKeyring": {          // Encrypted revelation keys for certifier
+    "<fieldName>": "<base64>" // Encrypted: [32-byte IV][ciphertext][16-byte tag]
+  }
+}
+```
+
+**Key Points:**
+- **Minimal Fields**: TypeScript SDK only sends `clientNonce`, `type`, `fields`, `masterKeyring`
+- **No Optional Fields**: Does NOT include `messageType`, `serverSerialNonce`, `validationKey`, etc.
+- **Field Values**: Must be strings (booleans/numbers converted to string representation)
+- **Base64 Encoding**: All encrypted values are base64-encoded strings
+
+#### **Field Encryption Process:**
+1. **Generate Random Symmetric Key**: 32 random bytes for each field
+2. **Encrypt Field Value**: AES-256-GCM with the symmetric key
+   - Plaintext: Field value as UTF-8 string (e.g., `"true"` → `[0x74, 0x72, 0x75, 0x65]`)
+   - IV: 32 random bytes
+   - Output: `[32-byte IV][ciphertext][16-byte auth tag]`
+3. **Encrypt Revelation Key**: Encrypt the symmetric key for the certifier using BRC-2
+   - Plaintext: Symmetric key with leading zeros stripped (matching `SymmetricKey.toArray()`)
+   - Invoice number: `"2-certificate field encryption-<fieldName>"`
+   - Counterparty: Certifier's public key
+   - Output: `[32-byte IV][ciphertext][16-byte auth tag]`
+
+### **What We've Learned About Encryption:**
+
+#### **BRC-2 Encryption Details:**
+- **Symmetric Key Derivation**: Uses BRC-42 ECDH shared secret, extracts x-coordinate (32 bytes)
+- **Invoice Number Format**: `"<securityLevel>-<protocolName>-<keyID>"` (protocolName lowercased and trimmed)
+- **Key Derivation**: `derive_symmetric_key(sender_private, recipient_public, invoice_number)`
+- **Encryption**: Custom AES-256-GCM with 32-byte IV processing through GHASH
+
+#### **TypeScript SDK Behavior:**
+- **SymmetricKey.encrypt()**: Always uses 32-byte key (`toArray('be', 32)` pads with leading zeros)
+- **SymmetricKey.toArray()**: Without length parameter, strips leading zeros
+- **IV Generation**: `Random(32)` generates 32 random bytes
+- **IV Processing**: 32-byte IVs processed through GHASH to derive preCounterBlock (non-standard GCM)
+
+#### **Critical Discoveries:**
+1. **Revelation Key Length**: Must strip leading zeros from symmetric key before encrypting (matches `toArray()` behavior)
+2. **Field Value Serialization**: Convert JSON values to string representation (`true` → `"true"`, not `[1]` or `\"true\"`)
+3. **Base64 Decoding**: Server uses JavaScript-compatible lenient base64 decoding (handles invalid padding)
+4. **Nonce Order**: Server signature verification uses `client_nonce + server_nonce` (in that order)
+5. **Invoice Number**: Protocol name must be lowercased and trimmed (BRC-43 specification)
+
+### **Current Issue: 500 Internal Server Error**
+
+**Status**: After successful mutual authentication, certifier returns 500 error when processing CSR.
+
+**What We Know:**
+- ✅ Mutual authentication working (server signature verified)
+- ✅ Request serialization correct (matches TypeScript SDK)
+- ✅ CSR structure correct (minimal fields only)
+- ✅ Field encryption structure correct (52 bytes for field, 80 bytes for revelation key)
+- ❌ Server cannot decrypt/process our CSR (returns 500)
+
+**Hypothesis:**
+- Encryption format mismatch (our custom AESGCM may differ from TypeScript SDK)
+- Key derivation mismatch (BRC-42 or invoice number format)
+- Revelation key encryption mismatch (leading zero stripping or key format)
+
+**Next Steps:**
+- Test interoperability: Use TypeScript SDK to encrypt, try to decrypt with Rust
+- Compare intermediate encryption values (hash subkey, preCounterBlock, ciphertext, auth tag)
+- Verify invoice number format matches exactly
+- Check if revelation key length/stripping matches TypeScript SDK behavior
+
+**Files Modified:**
+- `rust-wallet/src/database/migrations.rs` - Added v7 migration for certificates
+- `rust-wallet/src/database/certificate_repo.rs` - Certificate CRUD operations
+- `rust-wallet/src/certificate/` - All certificate infrastructure modules
+- `rust-wallet/src/crypto/brc2.rs` - BRC-2 encryption/decryption
+- `rust-wallet/src/crypto/aesgcm_custom.rs` - Custom AES-GCM implementation
+- `rust-wallet/src/crypto/ghash.rs` - GHASH implementation
+- `rust-wallet/src/handlers/certificate_handlers.rs` - All four certificate handlers
+
+**Documentation Created:**
+- `development-docs/CSR_FORMAT_AND_IMPLEMENTATION.md` - Comprehensive CSR format documentation
+- `development-docs/ENCRYPTION_AND_DB_STORAGE.md` - Encryption and storage flow
+- `development-docs/ENCRYPTION_VERIFICATION.md` - Encryption verification details
+
+---
+
 ## 🎉 **Group C - Part 2: Blockchain Queries Complete!** (2025-12-08)
 
 ### **Latest Achievement: All Three Blockchain Query Methods Implemented!**

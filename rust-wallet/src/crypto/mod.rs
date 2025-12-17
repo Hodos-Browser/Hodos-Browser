@@ -4,6 +4,12 @@
 
 pub mod brc42;
 pub mod brc43;
+pub mod brc2;
+pub mod ghash;
+pub mod aesgcm_custom;
+
+#[cfg(test)]
+mod aesgcm_custom_test;
 pub mod keys;
 pub mod signing;
 

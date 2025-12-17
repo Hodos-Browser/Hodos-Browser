@@ -41,3 +41,6 @@ reference/
 
 # Archived documentation (already in repo, no longer tracking changes)
 archived-docs/
+
+# Debugging and one-off test scripts (not part of the test suite)
+rust-wallet/test-scripts/

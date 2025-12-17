@@ -23,6 +23,7 @@ mod balance_cache;  // NEW: In-memory balance cache
 mod backup;  // NEW: Database backup and restore utilities
 mod recovery;  // NEW: Wallet recovery from mnemonic
 mod script;  // NEW: Bitcoin script parsing and PushDrop (BRC-48)
+mod certificate;  // NEW: Certificate management (BRC-52)
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -212,6 +213,17 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(app_state.clone())
+            .app_data(web::JsonConfig::default().error_handler(|err, _req| {
+                // Custom JSON error handler to ensure proper error responses
+                let error_msg = err.to_string();
+                log::error!("   JSON deserialization error: {}", error_msg);
+                actix_web::error::InternalError::from_response(
+                    err,
+                    actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("Invalid JSON request: {}", error_msg)
+                    }))
+                ).into()
+            }))
             .wrap(cors)
             .wrap(middleware::Logger::new("%a \"%r\" %s %b \"%{Referer}i\" %T"))
 
@@ -242,6 +254,12 @@ async fn main() -> std::io::Result<()> {
             .route("/getHeight", web::post().to(handlers::get_height))  // Group C - Part 2
             .route("/getHeaderForHeight", web::post().to(handlers::get_header_for_height))  // Group C - Part 2
             .route("/getNetwork", web::post().to(handlers::get_network))  // Group C - Part 2
+
+            // Part 3: Certificate Management
+            .route("/acquireCertificate", web::post().to(handlers::acquire_certificate))  // Group C - Part 3
+            .route("/listCertificates", web::post().to(handlers::list_certificates))  // Group C - Part 3
+            .route("/proveCertificate", web::post().to(handlers::prove_certificate))  // Group C - Part 3
+            .route("/relinquishCertificate", web::post().to(handlers::relinquish_certificate))  // Group C - Part 3
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

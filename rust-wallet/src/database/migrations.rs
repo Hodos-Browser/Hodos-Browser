@@ -246,7 +246,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS certificates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            certificate_txid TEXT NOT NULL UNIQUE,
+            certificate_txid TEXT UNIQUE,
             identity_key TEXT NOT NULL,
             attributes TEXT,
             acquired_at INTEGER NOT NULL,

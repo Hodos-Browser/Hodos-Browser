@@ -6,6 +6,15 @@ use crate::crypto::brc42::{derive_child_private_key, derive_child_public_key};
 use crate::crypto::brc43::{InvoiceNumber, SecurityLevel, normalize_protocol_id};
 use crate::crypto::signing::{sha256, hmac_sha256, verify_hmac_sha256};
 
+// Certificate handlers (Group C - Part 3)
+mod certificate_handlers;
+pub use certificate_handlers::{
+    relinquish_certificate,
+    list_certificates,
+    acquire_certificate,
+    prove_certificate,
+};
+
 // Health check
 pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
