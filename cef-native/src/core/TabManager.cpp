@@ -2,6 +2,9 @@
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_closure_task.h"
+#include "include/base/cef_bind.h"
+#include "include/cef_task.h"
 #include <algorithm>
 #include <sstream>
 
@@ -139,40 +142,62 @@ bool TabManager::CloseTab(int tab_id) {
     Tab& tab = it->second;
     LOG(INFO) << "Closing tab " << tab_id << " (URL: " << tab.url << ")";
 
-    // Close the CEF browser
-    if (tab.browser) {
-        tab.browser->GetHost()->CloseBrowser(false);
-        tab.browser = nullptr;
-    }
-
-    // Destroy the HWND
-    if (tab.hwnd && IsWindow(tab.hwnd)) {
-        DestroyWindow(tab.hwnd);
-        tab.hwnd = nullptr;
-    }
-
-    // If this was the active tab, switch to another tab
-    bool was_active = (tab_id == active_tab_id_);
-
-    // Remove from map
-    tabs_.erase(it);
-
-    LOG(INFO) << "Tab " << tab_id << " closed. Remaining tabs: " << tabs_.size();
-
-    // If we closed the active tab and there are other tabs, switch to one
-    if (was_active && !tabs_.empty()) {
+    // If this is the active tab, switch to another tab BEFORE closing
+    if (tab_id == active_tab_id_ && tabs_.size() > 1) {
         int new_active_id = FindTabToSwitchTo(tab_id);
         if (new_active_id != -1) {
             SwitchToTab(new_active_id);
-        } else {
-            active_tab_id_ = -1;
         }
-    } else if (tabs_.empty()) {
-        active_tab_id_ = -1;
-        LOG(INFO) << "All tabs closed";
+    }
+
+    // Request browser to close
+    // OnBeforeClose will be called when CEF is ready, then we'll destroy the HWND
+    if (tab.browser) {
+        LOG(INFO) << "Requesting browser close for tab " << tab_id;
+        tab.browser->GetHost()->CloseBrowser(false);
+    } else {
+        // No browser exists yet, safe to clean up immediately
+        OnTabBrowserClosed(tab_id);
     }
 
     return true;
+}
+
+void TabManager::OnTabBrowserClosed(int tab_id) {
+    CEF_REQUIRE_UI_THREAD();
+
+    auto it = tabs_.find(tab_id);
+    if (it == tabs_.end()) {
+        LOG(WARNING) << "OnTabBrowserClosed called for non-existent tab " << tab_id;
+        return;
+    }
+
+    Tab& tab = it->second;
+    LOG(INFO) << "Browser closed callback for tab " << tab_id << " - cleaning up resources";
+
+    // Clear the browser reference
+    tab.browser = nullptr;
+    tab.is_closing = true;
+
+    // Hide the HWND
+    if (tab.hwnd && IsWindow(tab.hwnd)) {
+        ShowWindow(tab.hwnd, SW_HIDE);
+        LOG(INFO) << "Tab " << tab_id << " HWND hidden";
+    }
+
+    // DON'T destroy HWND or remove from map yet
+    // Keep the tab structure but mark as closing
+    // This prevents crashes from late CEF callbacks
+
+    // Count remaining non-closing tabs
+    int active_count = 0;
+    for (const auto& pair : tabs_) {
+        if (!pair.second.is_closing) {
+            active_count++;
+        }
+    }
+
+    LOG(INFO) << "Tab " << tab_id << " marked as closing. Active tabs: " << active_count;
 }
 
 bool TabManager::SwitchToTab(int tab_id) {

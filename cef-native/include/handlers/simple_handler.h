@@ -61,6 +61,8 @@ public:
 
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
 
+    void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+
     bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                               CefRefPtr<CefFrame> frame,
                               CefProcessId source_process,

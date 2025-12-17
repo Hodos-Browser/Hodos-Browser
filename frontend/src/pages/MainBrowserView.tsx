@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Box,
   Toolbar,
@@ -13,21 +13,48 @@ import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
+import { useTabManager } from '../hooks/useTabManager';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { TabBar } from '../components/TabBar';
 
 
 const MainBrowserView: React.FC = () => {
     console.log("🔍 MainBrowserView rendering");
-    console.warn("⚠️ Console warn test");
-    console.error("❌ Console error test");
-
-    // Test alert
-    // alert("MainBrowserView is working!");
-
 
     // Settings panel state now managed in separate overlay process
     const [address, setAddress] = useState('https://metanetapps.com/');
+    const addressBarRef = useRef<HTMLInputElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
+
+    // Tab management
+    const {
+        tabs,
+        activeTabId,
+        isLoading,
+        createTab,
+        closeTab,
+        switchToTab,
+        nextTab,
+        prevTab,
+        switchToTabByIndex,
+        closeActiveTab,
+    } = useTabManager();
+
+    // Keyboard shortcuts
+    useKeyboardShortcuts({
+        onNewTab: createTab,
+        onCloseTab: closeActiveTab,
+        onNextTab: nextTab,
+        onPrevTab: prevTab,
+        onSwitchToTab: switchToTabByIndex,
+        onFocusAddressBar: () => addressBarRef.current?.focus(),
+        onReload: reload,
+        onToggleDevTools: () => {
+            // F12 will be handled by CEF natively
+            console.log('DevTools toggle requested');
+        },
+    });
 
     const handleNavigate = () => {
         console.log('🧭 Navigating to:', address);
@@ -44,21 +71,29 @@ const MainBrowserView: React.FC = () => {
         <Box
             sx={{
                 width: '100%',
-                height: '100%',
                 display: 'flex',
                 flexDirection: 'column',
-                overflow: 'hidden'
             }}
         >
+            {/* Tab Bar */}
+            <TabBar
+                tabs={tabs}
+                activeTabId={activeTabId}
+                isLoading={isLoading}
+                onCreateTab={createTab}
+                onCloseTab={closeTab}
+                onSwitchTab={switchToTab}
+            />
+
             {/* Top Navigation Bar */}
             <Toolbar sx={{
                 bgcolor: 'grey.100',
                 borderBottom: '1px solid #ccc',
-                height: '100%',
-                minHeight: '64px !important',
+                minHeight: '48px !important',
+                height: '48px',
                 flexShrink: 0,
-                paddingX: 1, // Horizontal padding only
-                paddingY: 0, // No vertical padding to fill height
+                paddingX: 1,
+                paddingY: 0,
                 margin: 0
             }}>
                 {/* Back Button */}
@@ -91,6 +126,7 @@ const MainBrowserView: React.FC = () => {
                     }}
                 >
                     <InputBase
+                        inputRef={addressBarRef}
                         value={address}
                         onChange={(e) => setAddress(e.target.value)}
                         onKeyDown={handleKeyDown}

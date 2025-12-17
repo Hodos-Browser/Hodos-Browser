@@ -49,6 +49,9 @@ struct Tab {
     // Whether this tab is currently loading a page
     bool is_loading;
 
+    // Whether this tab is being closed (pending destruction)
+    bool is_closing;
+
     // Navigation state (from OnLoadingStateChange)
     bool can_go_back;
     bool can_go_forward;
@@ -71,6 +74,7 @@ struct Tab {
           handler(nullptr),
           is_visible(false),
           is_loading(false),
+          is_closing(false),
           can_go_back(false),
           can_go_forward(false),
           created_at(std::chrono::system_clock::now()),
@@ -89,6 +93,7 @@ struct Tab {
           handler(nullptr),
           is_visible(false),
           is_loading(true),
+          is_closing(false),
           can_go_back(false),
           can_go_forward(false),
           created_at(std::chrono::system_clock::now()),

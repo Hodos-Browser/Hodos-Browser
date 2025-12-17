@@ -333,6 +333,38 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
 }
 
+void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+    CEF_REQUIRE_UI_THREAD();
+
+    LOG_DEBUG_BROWSER("🔴 OnBeforeClose for role: " + role_ + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
+
+    // Check if this is a tab browser
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        // This is a tab browser closing - notify TabManager to clean up HWND
+        TabManager::GetInstance().OnTabBrowserClosed(tab_id);
+        LOG_DEBUG_BROWSER("📑 Tab browser closed callback: ID " + std::to_string(tab_id));
+        return;
+    }
+
+    // Handle overlay browser cleanup
+    if (role_ == "settings" && browser == settings_browser_) {
+        settings_browser_ = nullptr;
+    } else if (role_ == "wallet" && browser == wallet_browser_) {
+        wallet_browser_ = nullptr;
+    } else if (role_ == "backup" && browser == backup_browser_) {
+        backup_browser_ = nullptr;
+    } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
+        brc100_auth_browser_ = nullptr;
+    } else if (role_ == "overlay" && browser == overlay_browser_) {
+        overlay_browser_ = nullptr;
+    } else if (role_ == "webview" && browser == webview_browser_) {
+        webview_browser_ = nullptr;
+    } else if (role_ == "header" && browser == header_browser_) {
+        header_browser_ = nullptr;
+    }
+}
+
 bool SimpleHandler::OnProcessMessageReceived(
     CefRefPtr<CefBrowser> browser,
     CefRefPtr<CefFrame> frame,

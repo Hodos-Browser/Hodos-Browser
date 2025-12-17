@@ -1045,8 +1045,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
         WS_CHILD | WS_VISIBLE, 0, 0, width, shellHeight, hwnd, nullptr, hInstance, nullptr);
 
+    // OLD: Single webview window - NO LONGER USED WITH TAB SYSTEM
+    // Kept for compatibility but made invisible (tabs now handle content display)
     HWND webview_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD | WS_VISIBLE, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
+        WS_CHILD, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
+    // Note: Removed WS_VISIBLE - this window was blocking input to tabs!
 
     // 🌍 Assign to globals
     g_hwnd = hwnd;
@@ -1055,7 +1058,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     ShowWindow(hwnd, SW_SHOW);        UpdateWindow(hwnd);
     ShowWindow(header_hwnd, SW_SHOW); UpdateWindow(header_hwnd);
-    ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
+    // Don't show webview_hwnd - it's no longer used (tabs handle content now)
+    // ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
 
     LOG_DEBUG("Initializing CEF...");
     bool success = CefInitialize(main_args, settings, app, nullptr);

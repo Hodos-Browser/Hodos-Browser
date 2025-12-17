@@ -327,6 +327,38 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
     std::cout << "🔍 Source Process: " << source_process << std::endl;
 
+        if (message_name == "tab_list_response") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string tabListJson = args->GetString(0);
+
+            LOG_DEBUG_RENDER("📑 Tab list response received, dispatching to React");
+
+            // Escape the JSON string for JavaScript
+            std::string escaped_json = tabListJson;
+            size_t pos = 0;
+            while ((pos = escaped_json.find("\\", pos)) != std::string::npos) {
+                escaped_json.replace(pos, 1, "\\\\");
+                pos += 2;
+            }
+            pos = 0;
+            while ((pos = escaped_json.find("\"", pos)) != std::string::npos) {
+                escaped_json.replace(pos, 1, "\\\"");
+                pos += 2;
+            }
+
+            // Send message to React component
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'tab_list_response',
+                        data: ')" + escaped_json + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "brc100_auth_request") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string domain = args->GetString(0);

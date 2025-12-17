@@ -172,6 +172,17 @@ public:
      */
     bool RegisterTabBrowser(int tab_id, CefRefPtr<CefBrowser> browser);
 
+    /**
+     * @brief Called when a tab's browser is about to close (from SimpleHandler::OnBeforeClose)
+     *
+     * This is the proper cleanup point for tab resources.
+     * CEF calls OnBeforeClose when the browser is ready to be destroyed.
+     * At this point it's safe to destroy the HWND and remove the tab.
+     *
+     * @param tab_id ID of tab whose browser is closing
+     */
+    void OnTabBrowserClosed(int tab_id);
+
 private:
     /**
      * @brief Private constructor (singleton pattern)

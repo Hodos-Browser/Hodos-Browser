@@ -4,3 +4,5 @@ Build the project and evaluate errors after changes in relevant platform (cargo 
 
 I will run the browser on my own to test, including the rust wallet     
 backend and React frontend. Store these instructions in project memory existing CLAUDE.md
+
+Make sure to read relevant file contents before using Update tool.
