@@ -175,29 +175,34 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
     Tab& tab = it->second;
     LOG(INFO) << "Browser closed callback for tab " << tab_id << " - cleaning up resources";
 
-    // Clear the browser reference
+    // Clear the browser reference first (safe)
     tab.browser = nullptr;
     tab.is_closing = true;
 
-    // Hide the HWND
+    // Hide the HWND immediately (safe)
     if (tab.hwnd && IsWindow(tab.hwnd)) {
         ShowWindow(tab.hwnd, SW_HIDE);
         LOG(INFO) << "Tab " << tab_id << " HWND hidden";
+
+        // Use PostMessage to destroy HWND asynchronously
+        // This queues the destruction and gives CEF time to clean up child windows
+        HWND hwnd_to_destroy = tab.hwnd;
+        PostMessage(hwnd_to_destroy, WM_DESTROY, 0, 0);
+
+        tab.hwnd = nullptr;
+        LOG(INFO) << "Tab " << tab_id << " HWND destruction queued";
     }
 
-    // DON'T destroy HWND or remove from map yet
-    // Keep the tab structure but mark as closing
-    // This prevents crashes from late CEF callbacks
+    // Remove from map now that resources are queued for cleanup
+    tabs_.erase(it);
 
-    // Count remaining non-closing tabs
-    int active_count = 0;
-    for (const auto& pair : tabs_) {
-        if (!pair.second.is_closing) {
-            active_count++;
-        }
+    LOG(INFO) << "Tab " << tab_id << " removed from map. Remaining tabs: " << tabs_.size();
+
+    // Update active tab ID if needed
+    if (tabs_.empty()) {
+        active_tab_id_ = -1;
+        LOG(INFO) << "All tabs closed";
     }
-
-    LOG(INFO) << "Tab " << tab_id << " marked as closing. Active tabs: " << active_count;
 }
 
 bool TabManager::SwitchToTab(int tab_id) {

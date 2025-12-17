@@ -132,7 +132,7 @@ void SimpleApp::OnContextInitialized() {
     GetClientRect(g_hwnd, &mainRect);
     int width = mainRect.right - mainRect.left;
     int height = mainRect.bottom - mainRect.top;
-    int shellHeight = (std::max)(60, static_cast<int>(height * 0.08));
+    int shellHeight = (std::max)(90, static_cast<int>(height * 0.10));
     int tabHeight = height - shellHeight;
 
     LOG_INFO_APP("📑 Creating initial tab with TabManager...");

@@ -21,6 +21,16 @@ export const TabBar: React.FC<TabBarProps> = ({
   onCloseTab,
   onSwitchTab,
 }) => {
+  // Debug logging
+  React.useEffect(() => {
+    console.log('📑 TabBar render:', {
+      tabCount: tabs.length,
+      activeTabId,
+      isLoading,
+      tabs: tabs.map(t => ({ id: t.id, title: t.title }))
+    });
+  }, [tabs, activeTabId, isLoading]);
+
   const handleTabClose = (e: React.MouseEvent, tabId: number) => {
     e.stopPropagation();
     onCloseTab(tabId);
@@ -53,12 +63,12 @@ export const TabBar: React.FC<TabBarProps> = ({
         },
       }}
     >
-      {/* Loading indicator */}
-      {isLoading && tabs.length === 0 && (
-        <Box sx={{ display: 'flex', alignItems: 'center', px: 2 }}>
-          <CircularProgress size={16} sx={{ mr: 1 }} />
-          <Typography variant="body2" sx={{ color: 'rgba(255, 255, 255, 0.5)' }}>
-            Loading tabs...
+      {/* Loading indicator or empty state */}
+      {tabs.length === 0 && (
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 2, bgcolor: 'red', height: '100%' }}>
+          {isLoading && <CircularProgress size={16} sx={{ mr: 1, color: 'white' }} />}
+          <Typography variant="body2" sx={{ color: 'white', fontWeight: 'bold' }}>
+            {isLoading ? 'Loading tabs...' : 'No tabs - Click + to create'}
           </Typography>
         </Box>
       )}

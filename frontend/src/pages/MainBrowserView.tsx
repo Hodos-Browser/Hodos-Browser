@@ -21,8 +21,9 @@ import { TabBar } from '../components/TabBar';
 const MainBrowserView: React.FC = () => {
     console.log("🔍 MainBrowserView rendering");
 
-    // Settings panel state now managed in separate overlay process
+    // Address bar state
     const [address, setAddress] = useState('https://metanetapps.com/');
+    const [isEditingAddress, setIsEditingAddress] = useState(false);
     const addressBarRef = useRef<HTMLInputElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
@@ -40,6 +41,18 @@ const MainBrowserView: React.FC = () => {
         switchToTabByIndex,
         closeActiveTab,
     } = useTabManager();
+
+    // Sync address bar with active tab's URL
+    React.useEffect(() => {
+        // Only update if user is not currently editing the address bar
+        if (!isEditingAddress) {
+            const activeTab = tabs.find(t => t.id === activeTabId);
+            if (activeTab && activeTab.url) {
+                setAddress(activeTab.url);
+                console.log('🔗 Address bar synced to active tab:', activeTab.url);
+            }
+        }
+    }, [activeTabId, tabs, isEditingAddress]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -59,11 +72,35 @@ const MainBrowserView: React.FC = () => {
     const handleNavigate = () => {
         console.log('🧭 Navigating to:', address);
         navigate(address);
+        setIsEditingAddress(false);
+        // Address will update from tab list sync
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter') {
-        handleNavigate();
+            handleNavigate();
+        } else if (e.key === 'Escape') {
+            setIsEditingAddress(false);
+            // Reset to active tab's URL
+            const activeTab = tabs.find(t => t.id === activeTabId);
+            if (activeTab) {
+                setAddress(activeTab.url);
+            }
+        }
+    };
+
+    const handleAddressFocus = () => {
+        setIsEditingAddress(true);
+        // Select all text for easy editing
+        setTimeout(() => addressBarRef.current?.select(), 0);
+    };
+
+    const handleAddressBlur = () => {
+        setIsEditingAddress(false);
+        // Reset to active tab's URL if user didn't navigate
+        const activeTab = tabs.find(t => t.id === activeTabId);
+        if (activeTab && activeTab.url !== address) {
+            setAddress(activeTab.url);
         }
     };
 
@@ -71,8 +108,10 @@ const MainBrowserView: React.FC = () => {
         <Box
             sx={{
                 width: '100%',
+                height: '100%',
                 display: 'flex',
                 flexDirection: 'column',
+                overflow: 'hidden', // Prevent scrolling
             }}
         >
             {/* Tab Bar */}
@@ -132,6 +171,8 @@ const MainBrowserView: React.FC = () => {
                         value={address}
                         onChange={(e) => setAddress(e.target.value)}
                         onKeyDown={handleKeyDown}
+                        onFocus={handleAddressFocus}
+                        onBlur={handleAddressBlur}
                         placeholder="Search or enter address"
                         fullWidth
                         sx={{

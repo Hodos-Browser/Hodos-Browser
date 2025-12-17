@@ -337,8 +337,8 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetClientRect(hwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
-            // Header: 10% of parent height, minimum 60px for usability
-            int shellHeight = std::max(60, static_cast<int>(height * 0.08));
+            // Header: 10% of parent height, minimum 90px (for tab bar 36px + toolbar 48px)
+            int shellHeight = (std::max)(90, static_cast<int>(height * 0.10));
             int webviewHeight = height - shellHeight;
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
@@ -989,8 +989,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    // Header: 10% of parent height, minimum 60px for usability
-    int shellHeight = std::max(60, static_cast<int>(height * 0.08));
+    // Header: 10% of parent height, minimum 90px (for tab bar 36px + toolbar 48px)
+    int shellHeight = (std::max)(90, static_cast<int>(height * 0.10));
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;

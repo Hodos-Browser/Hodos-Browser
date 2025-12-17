@@ -140,6 +140,24 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString
 #endif
 }
 
+void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
+                                   CefRefPtr<CefFrame> frame,
+                                   const CefString& url) {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Only track main frame address changes
+    if (!frame->IsMain()) {
+        return;
+    }
+
+    // Check if this is a tab browser and update TabManager
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        TabManager::GetInstance().UpdateTabURL(tab_id, url.ToString());
+        LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url.ToString());
+    }
+}
+
 void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
                                 ErrorCode errorCode,
@@ -392,8 +410,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
 
-        // Account for header height (8%)
-        int shellHeight = (std::max)(60, static_cast<int>(height * 0.08));
+        // Account for header height (10% for tab bar + toolbar)
+        int shellHeight = (std::max)(90, static_cast<int>(height * 0.10));
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
