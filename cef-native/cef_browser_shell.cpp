@@ -26,6 +26,7 @@
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
 #include "include/core/WalletService.h"
+#include "include/core/TabManager.h"
 #include <shellapi.h>
 #include <windows.h>
 #include <algorithm>  // For std::max
@@ -359,7 +360,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Resize webview window
+            // Resize webview window (legacy - will be removed when fully migrated to tabs)
             if (g_webview_hwnd && IsWindow(g_webview_hwnd)) {
                 SetWindowPos(g_webview_hwnd, nullptr, 0, shellHeight, width, webviewHeight,
                     SWP_NOZORDER | SWP_NOACTIVATE);
@@ -372,6 +373,26 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         SetWindowPos(webview_cef_hwnd, nullptr, 0, 0, width, webviewHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
                         webview_browser->GetHost()->WasResized();
+                    }
+                }
+            }
+
+            // Resize all tab windows and browsers (NEW for tab management)
+            std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+            for (Tab* tab : tabs) {
+                if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                    // Position tab window below header
+                    SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                                SWP_NOZORDER | SWP_NOACTIVATE);
+
+                    // Resize tab's CEF browser
+                    if (tab->browser) {
+                        HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
+                        if (cef_hwnd && IsWindow(cef_hwnd)) {
+                            SetWindowPos(cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                                        SWP_NOZORDER | SWP_NOACTIVATE);
+                            tab->browser->GetHost()->WasResized();
+                        }
                     }
                 }
             }

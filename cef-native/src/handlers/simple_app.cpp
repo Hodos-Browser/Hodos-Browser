@@ -9,6 +9,7 @@
 #include "include/cef_process_message.h"
 #include "../../include/core/WebSocketServerHandler.h"
 #include "../../include/core/WalletService.h"
+#include "../../include/core/TabManager.h"
 #include <iostream>
 #include <fstream>
 
@@ -126,30 +127,31 @@ void SimpleApp::OnContextInitialized() {
         log << "❌ header browser creation threw an exception!\n";
     }
 
-    // ───── WebView Browser Setup ─────
-    RECT webviewRect;
-    GetClientRect(g_webview_hwnd, &webviewRect);
-    int webviewWidth = webviewRect.right - webviewRect.left;
-    int webviewHeight = webviewRect.bottom - webviewRect.top;
+    // ───── Initial Tab Creation (replaces single webview) ─────
+    RECT mainRect;
+    GetClientRect(g_hwnd, &mainRect);
+    int width = mainRect.right - mainRect.left;
+    int height = mainRect.bottom - mainRect.top;
+    int shellHeight = (std::max)(60, static_cast<int>(height * 0.08));
+    int tabHeight = height - shellHeight;
 
-    CefWindowInfo webview_window_info;
-    webview_window_info.SetAsChild(g_webview_hwnd, CefRect(0, 0, webviewWidth, webviewHeight));
-
-    CefRefPtr<SimpleHandler> webview_handler = new SimpleHandler("webview");
-    CefBrowserSettings webview_settings;
+    LOG_INFO_APP("📑 Creating initial tab with TabManager...");
 
     try {
-        bool webview_result = CefBrowserHost::CreateBrowser(
-        webview_window_info,
-        webview_handler,
-        "https://metanetapps.com/",
-        webview_settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
-    std::cout << "WebView browser created: " << (webview_result ? "true" : "false") << std::endl;
+        int initial_tab_id = TabManager::GetInstance().CreateTab(
+            "https://metanetapps.com/",
+            g_hwnd,
+            0,              // x position
+            shellHeight,    // y position (below header)
+            width,
+            tabHeight
+        );
+
+        LOG_INFO_APP("✅ Initial tab created: ID " + std::to_string(initial_tab_id));
+        std::cout << "Initial tab created: ID " << initial_tab_id << std::endl;
     } catch (...) {
-        log << "❌ webview browser creation threw an exception!\n";
+        log << "❌ Initial tab creation threw an exception!\n";
+        LOG(ERROR) << "Failed to create initial tab";
     }
 }
 

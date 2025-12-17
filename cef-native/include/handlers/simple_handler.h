@@ -10,6 +10,10 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_keyboard_handler.h"
 
+// Forward declarations to avoid circular dependency
+struct Tab;
+class TabManager;
+
 class SimpleHandler : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
@@ -101,5 +105,12 @@ private:
     static CefRefPtr<CefBrowser> wallet_browser_;
     static CefRefPtr<CefBrowser> backup_browser_;
     static CefRefPtr<CefBrowser> brc100_auth_browser_;
+
+    /**
+     * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)
+     * @return Tab ID, or -1 if not a tab role
+     */
+    static int ExtractTabIdFromRole(const std::string& role);
+
     IMPLEMENT_REFCOUNTING(SimpleHandler);
 };

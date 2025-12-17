@@ -1,6 +1,7 @@
 // cef_native/src/simple_handler.cpp
 #include "../../include/handlers/simple_handler.h"
 #include "../../include/handlers/simple_app.h"
+#include "../../include/core/TabManager.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
 #include "include/cef_v8.h"
@@ -16,6 +17,7 @@
 #include <windows.h>
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <nlohmann/json.hpp>
 
 // Forward declaration of Logger class from main shell
@@ -53,6 +55,20 @@ std::string SimpleHandler::pending_panel_;
 bool SimpleHandler::needs_overlay_reload_ = false;
 
 SimpleHandler::SimpleHandler(const std::string& role) : role_(role) {}
+
+// Static helper to extract tab ID from role string (format: "tab_1", "tab_2", etc.)
+int SimpleHandler::ExtractTabIdFromRole(const std::string& role) {
+    if (role.rfind("tab_", 0) == 0) {
+        // Role is "tab_X" - extract X
+        std::string id_str = role.substr(4);  // Skip "tab_"
+        try {
+            return std::stoi(id_str);
+        } catch (...) {
+            return -1;
+        }
+    }
+    return -1;
+}
 
 CefRefPtr<CefLifeSpanHandler> SimpleHandler::GetLifeSpanHandler() {
     return this;
@@ -111,6 +127,14 @@ void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
 
 
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Check if this is a tab browser and update TabManager
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        TabManager::GetInstance().UpdateTabTitle(tab_id, title.ToString());
+    }
+
 #if defined(OS_WIN)
     SetWindowText(browser->GetHost()->GetWindowHandle(), std::wstring(title).c_str());
 #endif
@@ -150,10 +174,18 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                                          bool isLoading,
                                          bool canGoBack,
                                          bool canGoForward) {
-        LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
+    CEF_REQUIRE_UI_THREAD();
 
-        // Special debug for BRC-100 auth overlay
-        if (role_ == "brc100auth") {
+    // Check if this is a tab browser and update TabManager
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        TabManager::GetInstance().UpdateTabLoadingState(tab_id, isLoading, canGoBack, canGoForward);
+    }
+
+    LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
+
+    // Special debug for BRC-100 auth overlay
+    if (role_ == "brc100auth") {
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Loading state: " + std::string(isLoading ? "loading..." : "done"));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Browser ID: " + std::to_string(browser->GetIdentifier()));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -208,6 +240,12 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                 extern void sendAuthRequestDataToOverlay();
                 sendAuthRequestDataToOverlay();
             }), 500);
+        } else if (ExtractTabIdFromRole(role_) != -1) {
+            // Inject the hodosBrowser API into tab browsers
+            LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
+
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         }
 
         // Overlay-specific logic
@@ -241,6 +279,17 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
 
     LOG_DEBUG_BROWSER("✅ OnAfterCreated for role: " + role_);
+
+    // Check if this is a tab browser - register with TabManager first
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        // This is a tab browser - register with TabManager
+        TabManager::GetInstance().RegisterTabBrowser(tab_id, browser);
+        LOG_DEBUG_BROWSER("📑 Tab browser registered: ID " + std::to_string(tab_id) +
+                         ", Browser ID: " + std::to_string(browser->GetIdentifier()));
+        browser->GetHost()->WasResized();
+        return;  // Tab browsers don't need the overlay/header/webview handling below
+    }
 
     if (role_ == "webview") {
         webview_browser_ = browser;
@@ -298,6 +347,93 @@ bool SimpleHandler::OnProcessMessageReceived(
     // Additional logging for debugging
     LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
+    // ========== TAB MANAGEMENT MESSAGES ==========
+
+    if (message_name == "tab_create") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+        // Get main window dimensions for tab size
+        extern HWND g_hwnd;
+        RECT rect;
+        GetClientRect(g_hwnd, &rect);
+        int width = rect.right - rect.left;
+        int height = rect.bottom - rect.top;
+
+        // Account for header height (8%)
+        int shellHeight = (std::max)(60, static_cast<int>(height * 0.08));
+        int tabHeight = height - shellHeight;
+
+        int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+
+        LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id));
+
+        // TODO: Send tab list update to frontend
+        return true;
+    }
+
+    if (message_name == "tab_close") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() > 0) {
+            int tab_id = args->GetInt(0);
+            bool success = TabManager::GetInstance().CloseTab(tab_id);
+
+            LOG_DEBUG_BROWSER("📑 Tab close: ID " + std::to_string(tab_id) +
+                             (success ? " succeeded" : " failed"));
+
+            // TODO: Send tab list update to frontend
+        }
+        return true;
+    }
+
+    if (message_name == "tab_switch") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() > 0) {
+            int tab_id = args->GetInt(0);
+            bool success = TabManager::GetInstance().SwitchToTab(tab_id);
+
+            LOG_DEBUG_BROWSER("📑 Tab switch: ID " + std::to_string(tab_id) +
+                             (success ? " succeeded" : " failed"));
+        }
+        return true;
+    }
+
+    if (message_name == "get_tab_list") {
+        // Get all tabs and send to frontend
+        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+        int active_tab_id = TabManager::GetInstance().GetActiveTabId();
+
+        // Build JSON response
+        std::stringstream json;
+        json << "{\"tabs\":[";
+        for (size_t i = 0; i < tabs.size(); i++) {
+            Tab* tab = tabs[i];
+            if (i > 0) json << ",";
+            json << "{";
+            json << "\"id\":" << tab->id << ",";
+            json << "\"title\":\"" << tab->title << "\",";
+            json << "\"url\":\"" << tab->url << "\",";
+            json << "\"isActive\":" << (tab->id == active_tab_id ? "true" : "false") << ",";
+            json << "\"isLoading\":" << (tab->is_loading ? "true" : "false");
+            json << "}";
+        }
+        json << "],\"activeTabId\":" << active_tab_id << "}";
+
+        // Send response to header browser
+        CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+        if (header) {
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("tab_list_response");
+            CefRefPtr<CefListValue> response_args = response->GetArgumentList();
+            response_args->SetString(0, json.str());
+            header->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+            LOG_DEBUG_BROWSER("📑 Tab list sent to header: " + json.str());
+        }
+
+        return true;
+    }
+
+    // ========== NAVIGATION MESSAGES ==========
+
     if (message_name == "navigate") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string path = args->GetString(0);
@@ -307,12 +443,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             path = "http://" + path;
         }
 
-        LOG_DEBUG_BROWSER("🔁 Forwarding navigation to webview: " + path);
-
-        if (SimpleHandler::webview_browser_ && SimpleHandler::webview_browser_->GetMainFrame()) {
-            SimpleHandler::webview_browser_->GetMainFrame()->LoadURL(path);
+        // Use TabManager to get active tab
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser && active_tab->browser->GetMainFrame()) {
+            active_tab->browser->GetMainFrame()->LoadURL(path);
+            LOG_DEBUG_BROWSER("🔁 Navigate to " + path + " on active tab " + std::to_string(active_tab->id));
         } else {
-            LOG_DEBUG_BROWSER("⚠️ WebView browser not available or not fully initialized.");
+            LOG_DEBUG_BROWSER("⚠️ No active tab available for navigation");
         }
 
         return true;
@@ -321,12 +458,12 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_back") {
         LOG_DEBUG_BROWSER("🔙 navigate_back message received from role: " + role_);
 
-        CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
-        if (webview) {
-            webview->GoBack();
-            LOG_DEBUG_BROWSER("🔙 GoBack() called on webview browser");
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            active_tab->browser->GoBack();
+            LOG_DEBUG_BROWSER("🔙 GoBack() called on active tab " + std::to_string(active_tab->id));
         } else {
-            LOG_WARNING_BROWSER("⚠️ No webview browser available for GoBack");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for GoBack");
         }
         return true;
     }
@@ -334,12 +471,12 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_forward") {
         LOG_DEBUG_BROWSER("🔜 navigate_forward message received from role: " + role_);
 
-        CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
-        if (webview) {
-            webview->GoForward();
-            LOG_DEBUG_BROWSER("🔜 GoForward() called on webview browser");
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            active_tab->browser->GoForward();
+            LOG_DEBUG_BROWSER("🔜 GoForward() called on active tab " + std::to_string(active_tab->id));
         } else {
-            LOG_WARNING_BROWSER("⚠️ No webview browser available for GoForward");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for GoForward");
         }
         return true;
     }
@@ -347,12 +484,12 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_reload") {
         LOG_DEBUG_BROWSER("🔄 navigate_reload message received from role: " + role_);
 
-        CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
-        if (webview) {
-            webview->Reload();
-            LOG_DEBUG_BROWSER("🔄 Reload() called on webview browser");
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            active_tab->browser->Reload();
+            LOG_DEBUG_BROWSER("🔄 Reload() called on active tab " + std::to_string(active_tab->id));
         } else {
-            LOG_WARNING_BROWSER("⚠️ No webview browser available for Reload");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for Reload");
         }
         return true;
     }
