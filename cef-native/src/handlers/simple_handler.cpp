@@ -305,7 +305,18 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         TabManager::GetInstance().RegisterTabBrowser(tab_id, browser);
         LOG_DEBUG_BROWSER("📑 Tab browser registered: ID " + std::to_string(tab_id) +
                          ", Browser ID: " + std::to_string(browser->GetIdentifier()));
-        browser->GetHost()->WasResized();
+
+        // Delayed WasResized() + Invalidate() to fix first-render black screen
+        // CEF needs time for HWND to be fully initialized before rendering
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+                LOG(INFO) << "Tab browser delayed resize/invalidate completed";
+            }
+        }, browser_ref), 150);  // 150ms delay for window initialization
+
         return;  // Tab browsers don't need the overlay/header/webview handling below
     }
 
@@ -333,19 +344,58 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         settings_browser_ = browser;
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized.");
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+
     } else if (role_ == "wallet") {
         wallet_browser_ = browser;
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized.");
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+
     } else if (role_ == "backup") {
         backup_browser_ = browser;
         LOG_DEBUG_BROWSER("💾 Backup browser initialized.");
         LOG_DEBUG_BROWSER("💾 Backup browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+
     } else if (role_ == "brc100auth") {
         brc100_auth_browser_ = browser;
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+
+        // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());

@@ -61,8 +61,11 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
 
     command_line->AppendSwitchWithValue("remote-allow-origins", "*");
 
+    // Fix first-render black screen issue - disable GPU compositing for reliable rendering
+    command_line->AppendSwitch("disable-gpu-compositing");
+
+    // Additional GPU flags (keep commented for now):
     // command_line->AppendSwitch("disable-gpu");
-    // command_line->AppendSwitch("disable-gpu-compositing");
     // command_line->AppendSwitch("disable-gpu-shader-disk-cache");
     // command_line->AppendSwitchWithValue("use-gl", "disabled");
     // command_line->AppendSwitchWithValue("use-angle", "none");
