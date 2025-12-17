@@ -25,32 +25,26 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         display: 'flex',
         alignItems: 'center',
         gap: 1,
-        px: 2,
+        px: 1.5,
         py: 0.75,
-        minWidth: 180,
-        maxWidth: 240,
-        height: 36,
-        backgroundColor: isActive ? '#2d2d2d' : 'transparent',
-        borderRight: '1px solid rgba(255, 255, 255, 0.1)',
+        minWidth: 160,
+        maxWidth: 220,
+        height: 34,
+        backgroundColor: isActive ? '#ffffff' : 'rgba(255, 255, 255, 0.5)',
+        borderTopLeftRadius: 8,
+        borderTopRightRadius: 8,
+        marginRight: 0.25,
         cursor: 'pointer',
-        transition: 'background-color 0.2s',
+        transition: 'all 0.15s ease',
         position: 'relative',
+        border: '1px solid rgba(0, 0, 0, 0.1)',
+        borderBottom: isActive ? '1px solid #ffffff' : '1px solid rgba(0, 0, 0, 0.1)',
         '&:hover': {
-          backgroundColor: isActive ? '#2d2d2d' : 'rgba(255, 255, 255, 0.05)',
+          backgroundColor: isActive ? '#ffffff' : 'rgba(255, 255, 255, 0.75)',
           '& .tab-close-btn': {
             opacity: 1,
           },
         },
-        // Active tab indicator
-        '&::after': isActive ? {
-          content: '""',
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 2,
-          backgroundColor: 'primary.main',
-        } : {},
       }}
     >
       {/* Favicon or default icon */}
@@ -58,19 +52,19 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         <img
           src={tab.favicon}
           alt=""
-          width={16}
-          height={16}
+          width={14}
+          height={14}
           style={{ flexShrink: 0 }}
         />
       ) : (
-        <PublicIcon sx={{ fontSize: 16, color: 'grey.500', flexShrink: 0 }} />
+        <PublicIcon sx={{ fontSize: 14, color: 'rgba(0, 0, 0, 0.4)', flexShrink: 0 }} />
       )}
 
       {/* Loading indicator */}
       {tab.isLoading && (
         <CircularProgress
           size={12}
-          sx={{ color: 'primary.main', flexShrink: 0 }}
+          sx={{ color: 'rgba(0, 0, 0, 0.4)', flexShrink: 0 }}
         />
       )}
 
@@ -82,8 +76,9 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
-          fontSize: 13,
-          color: isActive ? 'white' : 'rgba(255, 255, 255, 0.7)',
+          fontSize: 12.5,
+          fontWeight: isActive ? 500 : 400,
+          color: isActive ? 'rgba(0, 0, 0, 0.87)' : 'rgba(0, 0, 0, 0.6)',
           userSelect: 'none',
         }}
       >
@@ -96,18 +91,20 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         onClick={onClose}
         size="small"
         sx={{
-          width: 20,
-          height: 20,
+          width: 18,
+          height: 18,
           padding: 0,
-          opacity: isActive ? 1 : 0,
-          transition: 'opacity 0.2s',
+          marginLeft: 0.5,
+          opacity: isActive ? 0.5 : 0,
+          transition: 'all 0.15s ease',
           flexShrink: 0,
           '&:hover': {
-            backgroundColor: 'rgba(255, 255, 255, 0.1)',
+            backgroundColor: 'rgba(0, 0, 0, 0.08)',
+            opacity: 1,
           },
         }}
       >
-        <CloseIcon sx={{ fontSize: 14, color: 'rgba(255, 255, 255, 0.7)' }} />
+        <CloseIcon sx={{ fontSize: 13, color: 'rgba(0, 0, 0, 0.6)' }} />
       </IconButton>
     </Box>
   );

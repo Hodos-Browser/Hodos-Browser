@@ -40,35 +40,36 @@ export const TabBar: React.FC<TabBarProps> = ({
     <Box
       sx={{
         display: 'flex',
-        alignItems: 'center',
-        backgroundColor: '#1e1e1e',
-        borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
-        height: 36,
+        alignItems: 'flex-end',
+        backgroundColor: '#dee1e6',
+        paddingX: 0.5,
+        paddingTop: 0.5,
+        height: 42,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,
         // Custom scrollbar styling
         '&::-webkit-scrollbar': {
-          height: 4,
+          height: 3,
         },
         '&::-webkit-scrollbar-track': {
           backgroundColor: 'transparent',
         },
         '&::-webkit-scrollbar-thumb': {
-          backgroundColor: 'rgba(255, 255, 255, 0.2)',
+          backgroundColor: 'rgba(0, 0, 0, 0.2)',
           borderRadius: 2,
           '&:hover': {
-            backgroundColor: 'rgba(255, 255, 255, 0.3)',
+            backgroundColor: 'rgba(0, 0, 0, 0.3)',
           },
         },
       }}
     >
       {/* Loading indicator or empty state */}
       {tabs.length === 0 && (
-        <Box sx={{ display: 'flex', alignItems: 'center', px: 2, bgcolor: 'red', height: '100%' }}>
-          {isLoading && <CircularProgress size={16} sx={{ mr: 1, color: 'white' }} />}
-          <Typography variant="body2" sx={{ color: 'white', fontWeight: 'bold' }}>
-            {isLoading ? 'Loading tabs...' : 'No tabs - Click + to create'}
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 2, height: '100%' }}>
+          {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: 'rgba(0, 0, 0, 0.5)' }} />}
+          <Typography variant="body2" sx={{ color: 'rgba(0, 0, 0, 0.6)', fontSize: 13 }}>
+            {isLoading ? 'Loading tabs...' : 'No tabs'}
           </Typography>
         </Box>
       )}
@@ -90,14 +91,15 @@ export const TabBar: React.FC<TabBarProps> = ({
           onClick={onCreateTab}
           size="small"
           sx={{
-            minWidth: 36,
-            width: 36,
-            height: 36,
-            borderRadius: 0,
-            color: 'rgba(255, 255, 255, 0.7)',
+            minWidth: 32,
+            width: 32,
+            height: 32,
+            borderRadius: '6px',
+            marginLeft: 0.5,
+            color: 'rgba(0, 0, 0, 0.6)',
             '&:hover': {
-              backgroundColor: 'rgba(255, 255, 255, 0.05)',
-              color: 'white',
+              backgroundColor: 'rgba(0, 0, 0, 0.05)',
+              color: 'rgba(0, 0, 0, 0.87)',
             },
           }}
         >

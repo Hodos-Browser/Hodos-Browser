@@ -410,8 +410,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
 
-        // Account for header height (10% for tab bar + toolbar)
-        int shellHeight = (std::max)(90, static_cast<int>(height * 0.10));
+        // Account for header height (12% for tab bar + toolbar)
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);

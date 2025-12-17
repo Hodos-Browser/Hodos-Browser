@@ -126,29 +126,62 @@ const MainBrowserView: React.FC = () => {
 
             {/* Top Navigation Bar */}
             <Toolbar sx={{
-                bgcolor: 'grey.100',
-                borderBottom: '1px solid #ccc',
-                minHeight: '48px !important',
-                height: '48px',
+                bgcolor: '#ffffff',
+                borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
+                minHeight: '52px !important',
+                height: '52px',
                 flexShrink: 0,
-                px: 0.5,
+                px: 1,
                 py: 0,
                 margin: 0,
-                gap: 0.5,
+                gap: 0.75,
                 overflow: 'hidden', // Prevent scrolling
             }}>
                 {/* Back Button */}
-                <IconButton onClick={goBack} size="small" sx={{ flexShrink: 0 }}>
+                <IconButton
+                    onClick={goBack}
+                    size="small"
+                    sx={{
+                        flexShrink: 0,
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
+                    }}
+                >
                     <ArrowBackIcon fontSize="small" />
                 </IconButton>
 
                 {/* Forward Button */}
-                <IconButton onClick={goForward} size="small" sx={{ flexShrink: 0 }}>
+                <IconButton
+                    onClick={goForward}
+                    size="small"
+                    sx={{
+                        flexShrink: 0,
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
+                    }}
+                >
                     <ArrowForwardIcon fontSize="small" />
                 </IconButton>
 
                 {/* Refresh Button */}
-                <IconButton onClick={reload} size="small" sx={{ flexShrink: 0 }}>
+                <IconButton
+                    onClick={reload}
+                    size="small"
+                    sx={{
+                        flexShrink: 0,
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
+                    }}
+                >
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
@@ -159,11 +192,21 @@ const MainBrowserView: React.FC = () => {
                         alignItems: 'center',
                         flex: 1,
                         minWidth: 0, // Allow shrinking below content size
-                        height: 32,
-                        borderRadius: 16,
-                        px: 1.5,
-                        bgcolor: 'white',
-                        boxShadow: 1,
+                        height: 36,
+                        borderRadius: 20,
+                        px: 2,
+                        bgcolor: '#f1f3f4',
+                        boxShadow: 'none',
+                        border: '1px solid transparent',
+                        '&:hover': {
+                            bgcolor: '#ffffff',
+                            border: '1px solid rgba(0, 0, 0, 0.1)',
+                        },
+                        '&:focus-within': {
+                            bgcolor: '#ffffff',
+                            border: '1px solid #1a73e8',
+                            boxShadow: '0 0 0 2px rgba(26, 115, 232, 0.1)',
+                        },
                     }}
                 >
                     <InputBase
@@ -176,9 +219,14 @@ const MainBrowserView: React.FC = () => {
                         placeholder="Search or enter address"
                         fullWidth
                         sx={{
-                            fontSize: 14,
+                            fontSize: 13,
+                            color: 'rgba(0, 0, 0, 0.87)',
                             '& input': {
                                 padding: 0,
+                                '&::placeholder': {
+                                    color: 'rgba(0, 0, 0, 0.4)',
+                                    opacity: 1,
+                                },
                             }
                         }}
                     />
@@ -194,8 +242,11 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        bgcolor: 'grey.200',
-                        '&:hover': { bgcolor: 'grey.300' }
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
                     }}
                 >
                     <AccountBalanceWalletIcon fontSize="small" />
@@ -211,8 +262,11 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        bgcolor: 'grey.200',
-                        '&:hover': { bgcolor: 'grey.300' }
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
                     }}
                 >
                     <MoreVertIcon fontSize="small" />
