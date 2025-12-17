@@ -92,35 +92,37 @@ const MainBrowserView: React.FC = () => {
                 minHeight: '48px !important',
                 height: '48px',
                 flexShrink: 0,
-                paddingX: 1,
-                paddingY: 0,
-                margin: 0
+                px: 0.5,
+                py: 0,
+                margin: 0,
+                gap: 0.5,
+                overflow: 'hidden', // Prevent scrolling
             }}>
                 {/* Back Button */}
-                <IconButton onClick={goBack}>
-                    <ArrowBackIcon />
+                <IconButton onClick={goBack} size="small" sx={{ flexShrink: 0 }}>
+                    <ArrowBackIcon fontSize="small" />
                 </IconButton>
 
                 {/* Forward Button */}
-                <IconButton onClick={goForward}>
-                    <ArrowForwardIcon />
+                <IconButton onClick={goForward} size="small" sx={{ flexShrink: 0 }}>
+                    <ArrowForwardIcon fontSize="small" />
                 </IconButton>
 
                 {/* Refresh Button */}
-                <IconButton onClick={reload}>
-                    <RefreshIcon />
+                <IconButton onClick={reload} size="small" sx={{ flexShrink: 0 }}>
+                    <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Address Bar */}
+                {/* Address Bar - grows to fill available space */}
                 <Paper
                     sx={{
                         display: 'flex',
                         alignItems: 'center',
-                        flexGrow: 1,
-                        mx: 2,
-                        height: 40,
-                        borderRadius: 20,
-                        pl: 2,
+                        flex: 1,
+                        minWidth: 0, // Allow shrinking below content size
+                        height: 32,
+                        borderRadius: 16,
+                        px: 1.5,
                         bgcolor: 'white',
                         boxShadow: 1,
                     }}
@@ -130,13 +132,16 @@ const MainBrowserView: React.FC = () => {
                         value={address}
                         onChange={(e) => setAddress(e.target.value)}
                         onKeyDown={handleKeyDown}
-                        placeholder="Enter address or search"
+                        placeholder="Search or enter address"
                         fullWidth
+                        sx={{
+                            fontSize: 14,
+                            '& input': {
+                                padding: 0,
+                            }
+                        }}
                     />
                 </Paper>
-
-                {/* Spacer */}
-                <Box flexGrow={1} />
 
                 {/* Wallet Button */}
                 <IconButton
@@ -145,36 +150,31 @@ const MainBrowserView: React.FC = () => {
                         window.cefMessage?.send('overlay_show_wallet', []);
                         window.hodosBrowser.overlay.toggleInput(true);
                     }}
+                    size="small"
                     sx={{
-                        ml: 1,
+                        flexShrink: 0,
                         bgcolor: 'grey.200',
-                        borderRadius: '50%',
                         '&:hover': { bgcolor: 'grey.300' }
                     }}
                 >
-                    <AccountBalanceWalletIcon />
+                    <AccountBalanceWalletIcon fontSize="small" />
                 </IconButton>
-
 
                 {/* Settings Button */}
                 <IconButton
                     onClick={() => {
                         console.log("🔧 Settings button clicked");
-                        console.log("🔧 hodosBrowser:", window.hodosBrowser);
-                        // console.log("🔧 overlayPanel:", window.hodosBrowser?.overlayPanel);
-                        // console.log("🔧 overlayPanel.toggleInput:", window.hodosBrowser?.overlayPanel?.toggleInput);
                         window.cefMessage?.send('overlay_show_settings', []);
-                        console.log("🔧 Settings overlay will open in separate process");
                         window.hodosBrowser.overlay.toggleInput(true);
                     }}
+                    size="small"
                     sx={{
-                        ml: 1,
+                        flexShrink: 0,
                         bgcolor: 'grey.200',
-                        borderRadius: '50%',
                         '&:hover': { bgcolor: 'grey.300' }
                     }}
                 >
-                    <MoreVertIcon />
+                    <MoreVertIcon fontSize="small" />
                 </IconButton>
             </Toolbar>
         </Box>
