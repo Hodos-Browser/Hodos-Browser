@@ -1,38 +1,115 @@
 # Part 3: Certificate Management - Implementation Guide
 
-> **Status**: 🚀 Implementation Phase - Ready to Begin
-> **Last Updated**: 2025-12-08
+> **Status**: 🚧 Implementation In Progress - Core Features Working
+> **Last Updated**: 2025-12-17
 > **Current Phase**: Part 3 - Certificate Management (4 methods)
 > **Prerequisites**: ✅ Part 1 & Part 2 Complete
-> **Completed**: ✅ Phase 2 (Database Migration), ✅ Phase 3 (PushDrop Implementation & Testing)
+> **Completed**: ✅ Phase 2 (Database Migration), ✅ Phase 3 (PushDrop Implementation & Testing), ✅ Phase 4 (Certificate Acquisition & Storage)
 
 ## 🎯 Executive Summary
 
-### Research Progress: 70% Complete ✅
+### Implementation Status: Core Features Working ✅
 
-**✅ Fully Answered (4/7 Critical Questions)**:
-1. ✅ Certificate Parsing: PushDrop encoding in output scripts
-2. ✅ Field Encryption: Always encrypted using BRC-2 (AES-GCM)
-3. ✅ Acquisition Format: 'direct' protocol receives JSON certificate data
-4. ✅ Revocation Checking: UTXO-based via WhatsOnChain API
+**✅ Completed (2025-12-17)**:
+1. ✅ **Certificate Acquisition ('direct' protocol)**: Successfully acquiring certificates from certifier servers
+2. ✅ **Certificate Signature Verification**: BRC-52 signature verification working (fixed `anyone_private_key` bug)
+3. ✅ **Certificate Storage**: Certificates stored in database with encrypted fields
+4. ✅ **Database Schema**: Migration v7 complete with `certificates` and `certificate_fields` tables
+5. ✅ **Response Format**: Fixed UI display - returning JSON object instead of base64 string
 
-**⚠️ Partially Answered (3/7 Critical Questions)**:
-5. ⚠️ Signature Verification: Need exact field order from BRC-52 spec
-6. ⚠️ Keyring Generation: Found function signature, need internal details
-7. ⚠️ Validation Key: Appears optional, need BRC-52 confirmation
+**⚠️ In Progress / Known Issues**:
+1. ⚠️ **'issuance' Protocol**: Not yet fully tested - social cert works with other wallets and creates Bitcoin transactions, need to review our process
+2. ⚠️ **Certificate Transaction Creation**: Need to investigate how certificates are embedded in blockchain transactions
+3. ⚠️ **Keyring Generation**: Implementation exists but needs testing
+4. ⚠️ **Selective Disclosure**: `proveCertificate` needs full testing
 
 **🆕 Key Discoveries**:
 - Certificates use **PushDrop encoding** (not OP_RETURN)
 - Fields are **always encrypted** (mandatory, not optional)
 - `acquireCertificate` receives **JSON data directly** (not BEEF parsing)
-- Database migration to **separate `certificate_fields` table** recommended
+- Database migration to **separate `certificate_fields` table** implemented
+- **Critical Bug Fixed**: `anyone_private_key` was incorrectly initialized as `[1u8; 32]` - fixed to `[0u8; 32]` with last byte = 1
+- **UI Display Fix**: Changed response from base64-encoded string to JSON object for proper UI display
 
-**📋 Ready to Start Implementation**:
-- ✅ Database migration plan complete
-- ✅ Method specifications understood
-- ✅ TypeScript reference patterns identified
-- ✅ PushDrop understanding complete (BRC-48)
-- ✅ Iterative research approach defined (research specs during implementation)
+**📋 Implementation Progress**:
+- ✅ Database migration complete (v7)
+- ✅ Certificate infrastructure (parser, verifier, types)
+- ✅ BRC-2 encryption implementation
+- ✅ Certificate acquisition ('direct' protocol)
+- ✅ Certificate storage and retrieval
+- ⏳ Certificate issuance protocol (needs review)
+- ⏳ Blockchain transaction creation for certificates
+- ⏳ Full end-to-end testing
+
+---
+
+## 📊 Current Implementation Status (2025-12-17)
+
+### ✅ What's Working
+
+1. **Certificate Acquisition ('direct' protocol)**
+   - Successfully acquiring certificates from certifier servers
+   - Certificate data received as JSON and stored in database
+   - Response format fixed to return JSON object (not base64) for UI display
+
+2. **Certificate Signature Verification**
+   - BRC-52 signature verification implemented and working
+   - Fixed critical bug: `anyone_private_key` initialization (was `[1u8; 32]`, now `[0u8; 32]` with last byte = 1)
+   - BRC-42 key derivation working correctly
+   - Preimage serialization matching TypeScript SDK
+
+3. **Database Storage**
+   - Certificates stored in `certificates` table with metadata
+   - Encrypted fields stored in `certificate_fields` table
+   - Placeholder `certificate_txid` for certificates not yet on-chain (format: `"Not on Chain_<hash>"`)
+
+4. **Certificate Infrastructure**
+   - Certificate parser (JSON parsing)
+   - Certificate verifier (signature + revocation checking)
+   - Certificate types and data structures
+   - Database repository for CRUD operations
+
+### ⚠️ What Needs Work
+
+1. **'issuance' Protocol**
+   - Social cert works with other wallets and creates Bitcoin transactions
+   - Need to review our issuance process and compare with working implementations
+   - May need to investigate how certificates are embedded in blockchain transactions
+
+2. **Certificate Transaction Creation**
+   - When certificates are issued via 'issuance' protocol, they should create Bitcoin transactions
+   - Need to understand the full flow from CSR → signed certificate → blockchain transaction
+   - Compare with working wallet implementations
+
+3. **End-to-End Testing**
+   - Test with various certificate types (cool cert, social cert, etc.)
+   - Verify certificate display in UI
+   - Test certificate revocation checking
+   - Test selective disclosure (`proveCertificate`)
+
+4. **Documentation**
+   - Document the certificate lifecycle
+   - Document the issuance protocol flow
+   - Document any differences from TypeScript SDK
+
+### 🔍 Next Steps
+
+1. **Review Issuance Protocol**
+   - Compare our implementation with working wallet (that successfully creates Bitcoin transactions)
+   - Investigate certificate transaction creation process
+   - Test with social cert to identify any missing steps
+
+2. **Complete Testing**
+   - Test all certificate types
+   - Verify UI display works correctly
+   - Test certificate revocation
+   - Test selective disclosure
+
+3. **Documentation**
+   - Update implementation notes with findings
+   - Document any protocol differences discovered
+
+**Note**: Core certificate acquisition and storage are working. The main remaining work is around the issuance protocol and ensuring certificates are properly embedded in blockchain transactions when issued.
 
 ---
 

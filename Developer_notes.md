@@ -4,11 +4,11 @@
 
 ---
 
-## 🔐 **Group C - Part 3: Certificate Management - IN PROGRESS** (2025-12-10)
+## 🔐 **Group C - Part 3: Certificate Management - IN PROGRESS** (2025-12-17)
 
-### **Current Status: Certificate Infrastructure Complete, Encryption Debugging**
+### **Current Status: Core Features Working, Issuance Protocol Needs Review**
 
-Successfully implemented BRC-100 certificate management infrastructure and all four certificate handlers, but currently debugging encryption/format mismatch causing 500 errors from certifier servers.
+Successfully implemented certificate acquisition, signature verification, and database storage. Certificates are being stored in the database. However, the issuance protocol needs review - social cert works with other wallets and creates Bitcoin transactions, so we need to investigate our process.
 
 ### **What We've Implemented:**
 
@@ -148,27 +148,30 @@ Successfully implemented BRC-100 certificate management infrastructure and all f
 4. **Nonce Order**: Server signature verification uses `client_nonce + server_nonce` (in that order)
 5. **Invoice Number**: Protocol name must be lowercased and trimmed (BRC-43 specification)
 
-### **Current Issue: 500 Internal Server Error**
+### **Current Status: Certificate Acquisition & Storage Working ✅**
 
-**Status**: After successful mutual authentication, certifier returns 500 error when processing CSR.
+**What's Working:**
+- ✅ Certificate acquisition via 'direct' protocol - successfully acquiring certificates
+- ✅ Certificate signature verification - BRC-52 verification working (fixed `anyone_private_key` bug)
+- ✅ Certificate storage - certificates stored in database with encrypted fields
+- ✅ UI display - fixed to return JSON object instead of base64 string
+- ✅ Database schema - migration v7 complete with proper certificate storage
 
-**What We Know:**
-- ✅ Mutual authentication working (server signature verified)
-- ✅ Request serialization correct (matches TypeScript SDK)
-- ✅ CSR structure correct (minimal fields only)
-- ✅ Field encryption structure correct (52 bytes for field, 80 bytes for revelation key)
-- ❌ Server cannot decrypt/process our CSR (returns 500)
+**Critical Bug Fixed:**
+- **`anyone_private_key` Initialization**: Was incorrectly `[1u8; 32]` (all bytes = 1), fixed to `[0u8; 32]` with last byte = 1 (private key with value 1)
+- This was causing signature verification failures - now working correctly
 
-**Hypothesis:**
-- Encryption format mismatch (our custom AESGCM may differ from TypeScript SDK)
-- Key derivation mismatch (BRC-42 or invoice number format)
-- Revelation key encryption mismatch (leading zero stripping or key format)
+**Known Issues / Needs Review:**
+- ⚠️ **Issuance Protocol**: Social cert works with other wallets and creates Bitcoin transactions
+  - Need to review our issuance process and compare with working implementations
+  - May need to investigate how certificates are embedded in blockchain transactions
+  - Our process may be missing steps for creating the actual Bitcoin transaction
 
 **Next Steps:**
-- Test interoperability: Use TypeScript SDK to encrypt, try to decrypt with Rust
-- Compare intermediate encryption values (hash subkey, preCounterBlock, ciphertext, auth tag)
-- Verify invoice number format matches exactly
-- Check if revelation key length/stripping matches TypeScript SDK behavior
+- Review issuance protocol implementation
+- Compare with working wallet that successfully creates Bitcoin transactions
+- Test with social cert to identify any missing steps
+- Complete end-to-end testing with various certificate types
 
 **Files Modified:**
 - `rust-wallet/src/database/migrations.rs` - Added v7 migration for certificates
