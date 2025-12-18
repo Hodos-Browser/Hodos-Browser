@@ -10,6 +10,10 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_keyboard_handler.h"
 
+// Forward declarations to avoid circular dependency
+struct Tab;
+class TabManager;
+
 class SimpleHandler : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
@@ -43,6 +47,10 @@ public:
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
 
+    void OnAddressChange(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        const CefString& url) override;
+
     // CefLoadHandler methods
     void OnLoadError(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefFrame> frame,
@@ -56,6 +64,22 @@ public:
                                bool canGoForward) override;
 
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
+
+    void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+
+    bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      int popup_id,
+                      const CefString& target_url,
+                      const CefString& target_frame_name,
+                      CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+                      bool user_gesture,
+                      const CefPopupFeatures& popupFeatures,
+                      CefWindowInfo& windowInfo,
+                      CefRefPtr<CefClient>& client,
+                      CefBrowserSettings& settings,
+                      CefRefPtr<CefDictionaryValue>& extra_info,
+                      bool* no_javascript_access) override;
 
     bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                               CefRefPtr<CefFrame> frame,
@@ -101,5 +125,12 @@ private:
     static CefRefPtr<CefBrowser> wallet_browser_;
     static CefRefPtr<CefBrowser> backup_browser_;
     static CefRefPtr<CefBrowser> brc100_auth_browser_;
+
+    /**
+     * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)
+     * @return Tab ID, or -1 if not a tab role
+     */
+    static int ExtractTabIdFromRole(const std::string& role);
+
     IMPLEMENT_REFCOUNTING(SimpleHandler);
 };

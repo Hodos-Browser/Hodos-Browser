@@ -26,6 +26,7 @@
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
 #include "include/core/WalletService.h"
+#include "include/core/TabManager.h"
 #include <shellapi.h>
 #include <windows.h>
 #include <algorithm>  // For std::max
@@ -336,8 +337,8 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetClientRect(hwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
-            // Header: 10% of parent height, minimum 60px for usability
-            int shellHeight = std::max(60, static_cast<int>(height * 0.08));
+            // Header: 12% of parent height, minimum 100px (for tab bar 40px + toolbar 52px)
+            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
             int webviewHeight = height - shellHeight;
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
@@ -359,7 +360,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Resize webview window
+            // Resize webview window (legacy - will be removed when fully migrated to tabs)
             if (g_webview_hwnd && IsWindow(g_webview_hwnd)) {
                 SetWindowPos(g_webview_hwnd, nullptr, 0, shellHeight, width, webviewHeight,
                     SWP_NOZORDER | SWP_NOACTIVATE);
@@ -372,6 +373,26 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         SetWindowPos(webview_cef_hwnd, nullptr, 0, 0, width, webviewHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
                         webview_browser->GetHost()->WasResized();
+                    }
+                }
+            }
+
+            // Resize all tab windows and browsers (NEW for tab management)
+            std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+            for (Tab* tab : tabs) {
+                if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                    // Position tab window below header
+                    SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                                SWP_NOZORDER | SWP_NOACTIVATE);
+
+                    // Resize tab's CEF browser
+                    if (tab->browser) {
+                        HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
+                        if (cef_hwnd && IsWindow(cef_hwnd)) {
+                            SetWindowPos(cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                                        SWP_NOZORDER | SWP_NOACTIVATE);
+                            tab->browser->GetHost()->WasResized();
+                        }
                     }
                 }
             }
@@ -968,15 +989,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    // Header: 10% of parent height, minimum 60px for usability
-    int shellHeight = std::max(60, static_cast<int>(height * 0.08));
+    // Header: 12% of parent height, minimum 100px (for tab bar 40px + toolbar 52px)
+    int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
     wc.lpszClassName = L"HodosBrowserWndClass"; RegisterClass(&wc);
 
-    WNDCLASS browserClass = {}; browserClass.lpfnWndProc = DefWindowProc; browserClass.hInstance = hInstance;
-    browserClass.lpszClassName = L"CEFHostWindow"; RegisterClass(&browserClass);
+    WNDCLASS browserClass = {};
+    browserClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;  // Redraw on resize, no border styles
+    browserClass.lpfnWndProc = DefWindowProc;
+    browserClass.hInstance = hInstance;
+    browserClass.lpszClassName = L"CEFHostWindow";
+    browserClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);  // Black background
+    RegisterClass(&browserClass);
 
 
     WNDCLASS settingsOverlayClass = {};
@@ -1024,8 +1050,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
         WS_CHILD | WS_VISIBLE, 0, 0, width, shellHeight, hwnd, nullptr, hInstance, nullptr);
 
+    // OLD: Single webview window - NO LONGER USED WITH TAB SYSTEM
+    // Kept for compatibility but made invisible (tabs now handle content display)
     HWND webview_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD | WS_VISIBLE, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
+        WS_CHILD, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
+    // Note: Removed WS_VISIBLE - this window was blocking input to tabs!
 
     // 🌍 Assign to globals
     g_hwnd = hwnd;
@@ -1034,7 +1063,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     ShowWindow(hwnd, SW_SHOW);        UpdateWindow(hwnd);
     ShowWindow(header_hwnd, SW_SHOW); UpdateWindow(header_hwnd);
-    ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
+    // Don't show webview_hwnd - it's no longer used (tabs handle content now)
+    // ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
 
     LOG_DEBUG("Initializing CEF...");
     bool success = CefInitialize(main_args, settings, app, nullptr);

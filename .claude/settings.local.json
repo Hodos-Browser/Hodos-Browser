@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tasklist:*)",
+      "Bash(cmake --build:*)",
+      "Bash(cat:*)"
+    ]
+  }
+}

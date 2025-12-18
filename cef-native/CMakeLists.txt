@@ -41,6 +41,10 @@ set(SOURCES
     src/core/BRC100Handler.cpp
     src/core/HttpRequestInterceptor.cpp
     src/core/WebSocketServerHandler.cpp
+    # Tab management (Phase 1)
+    include/core/Tab.h
+    include/core/TabManager.h
+    src/core/TabManager.cpp
     # Add other source files here
 )
 
