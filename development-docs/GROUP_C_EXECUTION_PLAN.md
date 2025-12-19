@@ -1,8 +1,8 @@
 # Group C: Output/Basket & Certificate Management - Execution Plan
 
-> **Status**: 🚧 Implementation In Progress
-> **Last Updated**: 2025-12-08
-> **Current Phase**: Part 2 Complete, Part 3 Next
+> **Status**: 🚧 Implementation In Progress - Part 3 Implemented, Testing Needed
+> **Last Updated**: 2025-12-19
+> **Current Phase**: Part 3 Complete (all 4 methods implemented), Testing & Discovery Methods Next
 
 ## 📋 Table of Contents
 
@@ -44,12 +44,16 @@ Group C consists of **10 BRC-100 methods** covering:
 - ✅ `getHeaderForHeight` - **IMPLEMENTED** - Cache-first with API fallback, constructs 80-byte headers from API fields
 - ✅ `getNetwork` - **IMPLEMENTED** - Returns "mainnet" (hardcoded, can be enhanced with config later)
 
-**BRC-52 Certificates**:
-- ✅ Certificate structure understood (type, subject, validationKey, fields, certifier, signature, keyring)
-- ✅ Fields are encrypted using BRC-2 (AES-GCM with BRC-42 key derivation)
-- ✅ Selective disclosure via `keyring` for privacy-preserving field revelation
-- ✅ UTXO-based revocation (check if `revocationOutpoint` is spent)
-- ✅ ECDSA signature verification required (certifier signs certificate data)
+**BRC-52 Certificates** ✅ **IMPLEMENTED**:
+- ✅ Certificate structure understood and implemented (type, subject, validationKey, fields, certifier, signature, keyring)
+- ✅ Fields are encrypted using BRC-2 (AES-GCM with BRC-42 key derivation) - fully implemented
+- ✅ Selective disclosure via `keyring` for privacy-preserving field revelation - implemented
+- ✅ UTXO-based revocation (check if `revocationOutpoint` is spent) - working
+- ✅ ECDSA signature verification required (certifier signs certificate data) - working
+- ✅ All four certificate handlers implemented (`acquireCertificate`, `listCertificates`, `proveCertificate`, `relinquishCertificate`)
+- ✅ BRC-53 issuance protocol working (certifier creates transaction)
+- ✅ Transaction ID extraction from revocationOutpoint (fixes "Not on Chain" issue)
+- ⏳ End-to-end testing needed with real-world apps
 
 **waitForAuthentication**:
 - ✅ HTTP polling approach (not WebSocket)
@@ -313,22 +317,25 @@ Group C consists of **10 BRC-100 methods** covering:
 
 #### Method 17: `acquireCertificate`
 **Call Code**: 17
-**Status**: ⏳ Database ready, endpoint pending
+**Status**: ✅ **IMPLEMENTED** - Working with socialcert.net
 **Complexity**: High
 
 **What It Does**:
-- Acquires a BRC-52 identity certificate
-- Parses certificate from transaction
-- Stores certificate in database
-- Validates certificate signature
+- Acquires a BRC-52 identity certificate via 'direct' or 'issuance' protocol
+- Parses certificate from JSON (not BEEF transaction - certificate data provided directly)
+- Verifies certificate signature using BRC-52 verification
+- Checks revocation status on-chain
+- Stores certificate in database with correct transaction ID
+- Returns certificate in flat format (matching BRC-52 spec)
 
-**Research Needed**:
-- [ ] **CRITICAL**: Read [BRC-52 spec](https://bsv.brc.dev/peer-to-peer/0052) completely
-- [ ] Understand certificate structure (type, subject, validationKey, fields, etc.)
-- [ ] Review certificate parsing logic
-- [ ] Understand certificate verification (signature validation)
-- [ ] Check reference implementation in TypeScript SDK
-- [ ] Understand field encryption (BRC-2 encryption for sensitive fields)
+**Implementation Status** ✅:
+- ✅ Supports both 'direct' and 'issuance' protocols
+- ✅ BRC-53 issuance protocol fully implemented (initialRequest → CSR → certificate)
+- ✅ Certifier creates blockchain transaction (not wallet)
+- ✅ Signature verification working
+- ✅ On-chain revocation checking working
+- ✅ Transaction ID extraction from revocationOutpoint (fixes "Not on Chain" issue)
+- ✅ Working with socialcert.net
 
 **Dependencies**:
 - ✅ Database `certificates` table (exists)
@@ -368,7 +375,7 @@ Group C consists of **10 BRC-100 methods** covering:
 
 #### Method 18: `listCertificates`
 **Call Code**: 18
-**Status**: ⏳ Database ready, endpoint pending
+**Status**: ✅ **IMPLEMENTED** - Needs testing
 **Complexity**: Low
 
 **What It Does**:
@@ -395,7 +402,7 @@ Group C consists of **10 BRC-100 methods** covering:
 
 #### Method 19: `proveCertificate`
 **Call Code**: 19
-**Status**: ⏳ Database ready, endpoint pending
+**Status**: ✅ **IMPLEMENTED** - Needs testing
 **Complexity**: Medium
 
 **What It Does**:
@@ -424,7 +431,7 @@ Group C consists of **10 BRC-100 methods** covering:
 
 #### Method 20: `relinquishCertificate`
 **Call Code**: 20
-**Status**: ⏳ Database ready, endpoint pending
+**Status**: ✅ **IMPLEMENTED** - Needs testing
 **Complexity**: Low
 
 **What It Does**:
@@ -655,30 +662,36 @@ loop {
 
 ---
 
-### Phase 3: Certificate Management (Week 2-3)
+### Phase 3: Certificate Management (Week 2-3) ✅ **IMPLEMENTED** - Testing Needed
 **Goal**: Complete BRC-52 certificate system
 
 **Methods**:
-6. `listCertificates` (Call Code 18) - 2-3 hours
-7. `relinquishCertificate` (Call Code 20) - 1-2 hours
-8. `proveCertificate` (Call Code 19) - 4-6 hours
-9. `acquireCertificate` (Call Code 17) - 6-8 hours
+1. ✅ `acquireCertificate` (Call Code 17) - **COMPLETE** - Working with socialcert.net
+2. ✅ `listCertificates` (Call Code 18) - **COMPLETE** - Needs testing
+3. ✅ `proveCertificate` (Call Code 19) - **COMPLETE** - Needs testing
+4. ✅ `relinquishCertificate` (Call Code 20) - **COMPLETE** - Needs testing
 
 **Deliverables**:
 - ✅ BRC-52 certificate parser
 - ✅ Certificate signature verification
-- ✅ Field decryption (BRC-2)
+- ✅ Field encryption/decryption (BRC-2)
 - ✅ All four methods implemented
 - ✅ Certificate repository
-- ✅ Unit tests
-- ✅ Integration tests with real certificates
+- ✅ BRC-53 issuance protocol
+- ✅ Transaction ID extraction from revocationOutpoint
+- ⏳ Unit tests (deferred to after real-world testing)
+- ⏳ Integration tests with real certificates
 
-**Success Criteria**:
-- Can acquire certificates from transactions
-- Can list certificates
-- Can prove certificate ownership
-- Can relinquish certificates
-- Certificate validation working
+**Success Criteria** - **MOSTLY MET**:
+- ✅ Can acquire certificates via 'direct' and 'issuance' protocols
+- ✅ Can list certificates (implemented, needs testing)
+- ✅ Can prove certificate ownership (implemented, needs testing)
+- ✅ Can relinquish certificates (implemented, needs testing)
+- ✅ Certificate validation working
+
+**Remaining Work**:
+- ⏳ End-to-end testing with real-world apps
+- ⏳ Certificate discovery methods (not yet implemented)
 
 ---
 

@@ -4,11 +4,11 @@
 
 ---
 
-## 🔐 **Group C - Part 3: Certificate Management - IN PROGRESS** (2025-12-17)
+## 🔐 **Group C - Part 3: Certificate Management - IN PROGRESS** (2025-12-19)
 
-### **Current Status: Core Features Working, Issuance Protocol Needs Review**
+### **Current Status: Certificate Acquisition Working, Testing Remaining**
 
-Successfully implemented certificate acquisition, signature verification, and database storage. Certificates are being stored in the database. However, the issuance protocol needs review - social cert works with other wallets and creates Bitcoin transactions, so we need to investigate our process.
+Successfully implemented certificate acquisition for both 'direct' and 'issuance' protocols. The certifier creates the blockchain transaction and provides the revocationOutpoint. We verify the certificate signature, check on-chain status, and store the certificate with the correct transaction ID. All four certificate handlers are implemented and ready for testing with real-world apps.
 
 ### **What We've Implemented:**
 
@@ -161,17 +161,17 @@ Successfully implemented certificate acquisition, signature verification, and da
 - **`anyone_private_key` Initialization**: Was incorrectly `[1u8; 32]` (all bytes = 1), fixed to `[0u8; 32]` with last byte = 1 (private key with value 1)
 - This was causing signature verification failures - now working correctly
 
-**Known Issues / Needs Review:**
-- ⚠️ **Issuance Protocol**: Social cert works with other wallets and creates Bitcoin transactions
-  - Need to review our issuance process and compare with working implementations
-  - May need to investigate how certificates are embedded in blockchain transactions
-  - Our process may be missing steps for creating the actual Bitcoin transaction
+**Recent Fixes (2025-12-19):**
+- ✅ **Fixed "Not on Chain" Issue**: When `check_revocation_status` returns `Ok(false)` (certificate active), we now extract the `txid` from the `revocationOutpoint` (format: "txid.vout") and store it as `certificate_txid` in the database. This prevents certificates that are on-chain from being marked as "Not on Chain_...". The fix is in both `acquire_certificate_direct` and `acquire_certificate_issuance` handlers.
+- ✅ **Issuance Protocol Clarified**: The certifier creates the blockchain transaction (not the wallet). We receive the certificate with the actual `revocationOutpoint` from the certifier, verify it exists on-chain, extract the transaction ID, and store it. The wallet's role is to verify and store certificates, not create transactions.
 
-**Next Steps:**
-- Review issuance protocol implementation
-- Compare with working wallet that successfully creates Bitcoin transactions
-- Test with social cert to identify any missing steps
-- Complete end-to-end testing with various certificate types
+**What's Left to Test:**
+- ⏳ **End-to-End Testing**: Test all four certificate methods with real-world apps
+  - `acquireCertificate` - Working with socialcert.net ✅
+  - `listCertificates` - Implemented, needs testing
+  - `proveCertificate` - Implemented, needs testing
+  - `relinquishCertificate` - Implemented, needs testing
+- ⏳ **Certificate Discovery**: `discoverByIdentityKey` and `discoverByAttributes` not yet implemented
 
 **Files Modified:**
 - `rust-wallet/src/database/migrations.rs` - Added v7 migration for certificates

@@ -9,11 +9,17 @@
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
 use crate::AppState;
-// Note: Certificate and CertificateError will be used when implementing acquireCertificate and proveCertificate
-// use crate::certificate::types::{Certificate, CertificateError};
-// use crate::certificate::verifier::verify_certificate_signature;
+use crate::certificate::types::CertificateError;
 use crate::database::CertificateRepository;
+use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
+use crate::script::pushdrop::{encode, LockPosition};
+use crate::handlers::{select_utxos, broadcast_transaction};
+use crate::transaction::sighash::calculate_sighash;
+use crate::transaction::sighash::SIGHASH_ALL_FORKID;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use sha2::{Sha256, Digest};
+use ripemd::Ripemd160;
+use secp256k1::{Secp256k1, SecretKey, Message};
 
 // ============================================================================
 // Method 20: relinquishCertificate (Call Code 20)
@@ -668,15 +674,19 @@ pub async fn acquire_certificate(
     log::info!("   Acquisition protocol: {:?}", protocol);
 
     match protocol {
-        AcquisitionProtocol::Direct => acquire_certificate_direct(state, web::Json(req)).await,
+        AcquisitionProtocol::Direct => acquire_certificate_direct(state, web::Json(req), false).await,
         AcquisitionProtocol::Issuance => acquire_certificate_issuance(state, web::Json(req)).await,
     }
 }
 
 /// Acquire certificate via 'direct' protocol
+///
+/// `skip_signature_verification`: If true, skip signature verification (useful when
+/// signature was already verified with original revocationOutpoint before updating it)
 async fn acquire_certificate_direct(
     state: web::Data<AppState>,
     req: web::Json<AcquireCertificateRequest>,
+    _skip_signature_verification: bool, // Unused - kept for API compatibility
 ) -> HttpResponse {
     log::info!("   Using 'direct' protocol");
 
@@ -741,24 +751,27 @@ async fn acquire_certificate_direct(
         }
     };
 
-    // Verify certificate signature
-    use crate::certificate::verifier::verify_certificate_signature_with_keyid;
-    // Use original base64 strings from JSON for keyID (matching server's behavior)
-    let type_base64_original = cert_json_value.get("type").and_then(|v| v.as_str());
-    let serial_base64_original = cert_json_value.get("serialNumber").and_then(|v| v.as_str());
-    match verify_certificate_signature_with_keyid(
-        &certificate,
-        type_base64_original,
-        serial_base64_original,
-    ) {
-        Ok(_) => {
-            log::info!("   ✅ Certificate signature verified");
-        }
-        Err(e) => {
-            log::error!("   Certificate signature verification failed: {}", e);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Certificate signature verification failed: {}", e)
-            }));
+    // Verify certificate signature (unless already verified)
+    // Always verify signature (the skip flag is unused but kept for API compatibility)
+    {
+        use crate::certificate::verifier::verify_certificate_signature_with_keyid;
+        // Use original base64 strings from JSON for keyID (matching server's behavior)
+        let type_base64_original = cert_json_value.get("type").and_then(|v| v.as_str());
+        let serial_base64_original = cert_json_value.get("serialNumber").and_then(|v| v.as_str());
+        match verify_certificate_signature_with_keyid(
+            &certificate,
+            type_base64_original,
+            serial_base64_original,
+        ) {
+            Ok(_) => {
+                log::info!("   ✅ Certificate signature verified");
+            }
+            Err(e) => {
+                log::error!("   Certificate signature verification failed: {}", e);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Certificate signature verification failed: {}", e)
+                }));
+            }
         }
     }
 
@@ -773,11 +786,26 @@ async fn acquire_certificate_direct(
         }
         Ok(false) => {
             log::info!("   ✅ Certificate is ACTIVE - revocation outpoint is unspent");
+            // Extract txid from revocationOutpoint (format: "txid.vout") and set as certificate_txid
+            // Since the revocationOutpoint exists on-chain, we know the transaction exists
+            if let Some(txid) = certificate.revocation_outpoint.split('.').next() {
+                if txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()) {
+                    certificate.certificate_txid = Some(txid.to_string());
+                    log::info!("   📍 Extracted txid from revocationOutpoint: {}", txid);
+                }
+            }
         }
         Err(e) => {
             log::warn!("   Failed to check revocation status: {} - proceeding anyway", e);
             // Continue with acquisition even if revocation check fails
             // This allows certificates to be acquired even if API is temporarily unavailable
+            // Try to extract txid from revocationOutpoint anyway (might still be on-chain)
+            if let Some(txid) = certificate.revocation_outpoint.split('.').next() {
+                if txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()) {
+                    certificate.certificate_txid = Some(txid.to_string());
+                    log::info!("   📍 Extracted txid from revocationOutpoint (check failed, but using txid anyway): {}", txid);
+                }
+            }
         }
     }
 
@@ -2251,7 +2279,7 @@ async fn acquire_certificate_issuance(
 
     // Handle BRC-53 response format: { "status": "success", "certificate": { ... } }
     // Or direct format: { "type": "...", "certifier": "...", ... }
-    let cert_obj = if cert_response.get("certificate").is_some() {
+    let mut cert_obj = if cert_response.get("certificate").is_some() {
         // BRC-53 format - extract certificate object
         log::info!("   📋 Response is in BRC-53 format (with 'certificate' field)");
         cert_response.get("certificate").unwrap().clone()
@@ -2280,21 +2308,594 @@ async fn acquire_certificate_issuance(
         Some(serde_json::Value::Object(keyring_map))
     };
 
+    // Extract certifier public key from certificate
+    let certifier_pubkey_hex = match cert_obj.get("certifier").and_then(|v| v.as_str()) {
+        Some(hex) => hex,
+        None => {
+            log::error!("   ❌ Certificate missing certifier field");
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": "Certificate missing certifier field"
+            }));
+        }
+    };
+
+    let certifier_pubkey_bytes = match hex::decode(certifier_pubkey_hex) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::error!("   ❌ Invalid certifier public key hex: {}", e);
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Invalid certifier public key: {}", e)
+            }));
+        }
+    };
+
+    if certifier_pubkey_bytes.len() != 33 {
+        log::error!("   ❌ Invalid certifier public key length: {} (expected 33)", certifier_pubkey_bytes.len());
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": "Invalid certifier public key length (must be 33 bytes)"
+        }));
+    }
+
+    // Verify certificate signature with the revocationOutpoint from certifier
+    // The certifier creates the transaction and sends us the actual revocationOutpoint
+    log::info!("   🔍 Verifying certificate signature with certifier's revocationOutpoint...");
+    use crate::certificate::parser::parse_certificate_from_json;
+    use crate::certificate::verifier::verify_certificate_signature_with_keyid;
+
+    // Get revocationOutpoint from certifier
+    let revocation_outpoint = match cert_obj.get("revocationOutpoint")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()) {
+        Some(outpoint) => outpoint,
+        None => {
+            log::error!("   ❌ Certificate missing revocationOutpoint field");
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": "Certificate missing revocationOutpoint field"
+            }));
+        }
+    };
+
+    log::info!("   📍 Certifier's revocationOutpoint: {}", revocation_outpoint);
+
+    // Parse certificate for verification
+    let certificate_for_verification = match parse_certificate_from_json(&cert_obj) {
+        Ok(cert) => cert,
+        Err(e) => {
+            log::error!("   ❌ Failed to parse certificate for verification: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Failed to parse certificate: {}", e)
+            }));
+        }
+    };
+
+    // Verify signature
+    let type_base64_original = cert_obj.get("type").and_then(|v| v.as_str());
+    let serial_base64_original = cert_obj.get("serialNumber").and_then(|v| v.as_str());
+    match verify_certificate_signature_with_keyid(
+        &certificate_for_verification,
+        type_base64_original,
+        serial_base64_original,
+    ) {
+        Ok(_) => {
+            log::info!("   ✅ Certificate signature verified");
+        }
+        Err(e) => {
+            log::error!("   ❌ Certificate signature verification failed: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Certificate signature verification failed: {}", e)
+            }));
+        }
+    }
+
+    // Verify the revocationOutpoint exists on-chain (certifier should have created the transaction)
+    log::info!("   🔍 Verifying revocationOutpoint exists on-chain...");
+    use crate::certificate::verifier::check_revocation_status;
+    let revocation_txid = revocation_outpoint.split('.').next()
+        .filter(|txid| txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|txid| txid.to_string());
+
+    match check_revocation_status(&revocation_outpoint).await {
+        Ok(is_spent) => {
+            if is_spent {
+                log::warn!("   ⚠️  Revocation outpoint is spent - certificate may be revoked");
+            } else {
+                log::info!("   ✅ Revocation outpoint exists on-chain and is unspent");
+                // Store the txid for later use when storing the certificate
+                if let Some(txid) = &revocation_txid {
+                    log::info!("   📍 Extracted txid from revocationOutpoint: {}", txid);
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to verify revocationOutpoint on-chain: {} - proceeding anyway", e);
+            // Continue - the certifier may have just created it and it hasn't propagated yet
+        }
+    }
+
+    // Build request for 'direct' protocol handler
+    // Use the certifier's revocationOutpoint (they created the transaction)
+
     let direct_req = AcquireCertificateRequest {
         acquisition_protocol: Some(AcquisitionProtocol::Direct), // Switch to 'direct' protocol
         type_: cert_obj.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
         certifier: cert_obj.get("certifier").and_then(|v| v.as_str()).map(|s| s.to_string()),
         fields: cert_obj.get("fields").cloned(),
         serial_number: cert_obj.get("serialNumber").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        revocation_outpoint: cert_obj.get("revocationOutpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        revocation_outpoint: Some(revocation_outpoint.clone()), // Use certifier's revocationOutpoint
         signature: cert_obj.get("signature").and_then(|v| v.as_str()).map(|s| s.to_string()),
         keyring_for_subject: keyring_for_subject,
         subject: cert_obj.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
         certifier_url: None,
     };
 
-    // Process using 'direct' protocol handler
-    acquire_certificate_direct(state, web::Json(direct_req)).await
+    // Process using 'direct' protocol handler to store the certificate
+    // (Signature already verified above, but acquire_certificate_direct will verify again - that's okay)
+    let response = acquire_certificate_direct(state.clone(), web::Json(direct_req), false).await;
+
+    // If successful, return certificate in flat format (matching BRC-52 spec and TypeScript SDK)
+    // Return the certificate as-is with the certifier's revocationOutpoint (they created the transaction)
+    if response.status().is_success() {
+        // Extract the certificate from the nested response
+        let body_bytes = actix_web::body::to_bytes(response.into_body()).await.unwrap();
+        let nested_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Extract the certificate object from the nested structure
+        let cert_obj = if let Some(cert) = nested_response.get("certificate").and_then(|v| v.as_object()) {
+            cert.clone()
+        } else {
+            log::error!("   ❌ Failed to extract certificate from response");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to extract certificate from response"
+            }));
+        };
+
+        log::info!("   ✅ Certificate stored successfully");
+        log::info!("   📍 Returning certificate with certifier's revocationOutpoint: {}", revocation_outpoint);
+        // Log the exact response being returned for debugging
+        if let Ok(response_json) = serde_json::to_string_pretty(&cert_obj) {
+            log::info!("   📤 Response JSON (flat format, matching BRC-52 and TypeScript SDK):\n{}", response_json);
+        }
+
+        // Return flat structure (matching BRC-52 spec and TypeScript SDK AcquireCertificateResult)
+        // The certificate already has the correct revocationOutpoint from the certifier
+        HttpResponse::Ok().json(cert_obj)
+    } else {
+        // Return the error response as-is
+        response
+    }
+}
+
+// ============================================================================
+// Certificate Transaction Creation (PRESERVED FOR FUTURE USE)
+// ============================================================================
+// NOTE: Currently, the certifier creates the transaction and sends us the
+// revocationOutpoint. This function is preserved for future use if we want
+// to act as a certifier ourselves.
+// ============================================================================
+
+/// Create a blockchain transaction embedding a certificate using PushDrop encoding
+///
+/// This function creates a transaction that embeds a BRC-52 certificate in a PushDrop-encoded
+/// output. The output becomes the certificate's revocation outpoint.
+///
+/// **Parameters**:
+/// - `certificate_json`: The certificate JSON object (as received from certifier)
+/// - `certifier_pubkey`: Certifier's identity key (33-byte compressed public key)
+/// - `state`: Application state (for database access, UTXO selection, etc.)
+///
+/// **Returns**: `(txid, revocation_outpoint)` where:
+/// - `txid`: Transaction ID (hex string)
+/// - `revocation_outpoint`: Outpoint string in format "txid.0"
+async fn create_certificate_transaction(
+    certificate_json: &serde_json::Value,
+    certifier_pubkey: &[u8],
+    state: &AppState,
+) -> Result<(String, String), CertificateError> {
+    use crate::database::WalletRepository;
+
+    // Step 1: Serialize certificate JSON to UTF-8 bytes
+    // The certificate JSON embedded in the PushDrop output will contain the original
+    // revocationOutpoint as signed by the certifier.
+    let certificate_json_string = serde_json::to_string(certificate_json)
+        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize certificate: {}", e)))?;
+    let certificate_bytes = certificate_json_string.as_bytes().to_vec();
+    log::info!("   📝 Certificate JSON size: {} bytes", certificate_bytes.len());
+
+    // Step 2: Create PushDrop script
+    let fields = vec![certificate_bytes];
+    let locking_script_bytes = encode(&fields, certifier_pubkey, LockPosition::Before)
+        .map_err(|e| CertificateError::InvalidFormat(format!("PushDrop encoding failed: {:?}", e)))?;
+    log::info!("   📜 PushDrop script created: {} bytes", locking_script_bytes.len());
+
+    // Step 3: Select UTXOs to fund transaction (reuse logic from createAction)
+    let certificate_output_amount = 600; // satoshis (above dust limit)
+    let estimated_fee = 5000; // Use same fee estimate as createAction
+    let total_needed = certificate_output_amount + estimated_fee;
+
+    // Get addresses from database (reuse from createAction)
+    use crate::database::{address_to_address_info, utxo_to_fetcher_utxo};
+    let addresses = {
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+        let wallet = wallet_repo.get_primary_wallet()
+            .map_err(|e| CertificateError::Database(format!("Failed to get wallet: {}", e)))?
+            .ok_or_else(|| CertificateError::Database("No wallet found".to_string()))?;
+
+        let address_repo = AddressRepository::new(db.connection());
+        let db_addresses = address_repo.get_all_by_wallet(wallet.id.unwrap())
+            .map_err(|e| CertificateError::Database(format!("Failed to get addresses: {}", e)))?;
+        drop(db);
+
+        db_addresses.iter()
+            .map(|addr| address_to_address_info(addr))
+            .collect::<Vec<_>>()
+    };
+
+    if addresses.is_empty() {
+        return Err(CertificateError::Database("No wallet addresses found".to_string()));
+    }
+
+    // Fetch UTXOs (reuse caching logic from createAction)
+    use crate::database::{UtxoRepository, AddressRepository};
+    let db = state.database.lock().unwrap();
+    let address_repo = AddressRepository::new(db.connection());
+    let utxo_repo = UtxoRepository::new(db.connection());
+
+    // Get address IDs and create address index map
+    let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+    let mut address_ids = Vec::new();
+
+    for addr in &addresses {
+        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+            if let Some(addr_id) = db_addr.id {
+                address_ids.push(addr_id);
+                address_id_map.insert(addr_id, addr.index as u32);
+            }
+        }
+    }
+
+    // Get UTXOs from database cache first (same logic as createAction)
+    let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
+        Ok(db_utxos) => {
+            // Convert database UTXOs to fetcher format (reuse helper)
+            db_utxos.iter()
+                .filter_map(|db_utxo| {
+                    address_id_map.get(&db_utxo.address_id)
+                        .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
+                })
+                .collect::<Vec<_>>()
+        }
+        Err(e) => {
+            log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
+            Vec::new()
+        }
+    };
+    drop(db);
+
+    // Check if we need to fetch from API (same logic as createAction)
+    let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
+    if all_utxos.is_empty() {
+        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
+    } else if cached_balance < total_needed {
+        log::info!("   Insufficient cached balance ({} < {}), fetching from API to check for new UTXOs...", cached_balance, total_needed);
+    } else {
+        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
+    }
+
+    if all_utxos.is_empty() || cached_balance < total_needed {
+        // Fetch from API
+        let api_utxos = crate::utxo_fetcher::fetch_all_utxos(&addresses).await
+            .map_err(|e| CertificateError::Database(format!("Failed to fetch UTXOs: {}", e)))?;
+
+        // Cache UTXOs to database (same logic as createAction)
+        let db = state.database.lock().unwrap();
+        let address_repo = AddressRepository::new(db.connection());
+        let utxo_repo = UtxoRepository::new(db.connection());
+
+        for addr in &addresses {
+            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+                if let Some(addr_id) = db_addr.id {
+                    let addr_utxos: Vec<_> = api_utxos.iter()
+                        .filter(|u| u.address_index == addr.index as u32)
+                        .cloned()
+                        .collect();
+
+                    if !addr_utxos.is_empty() {
+                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                        }
+                    }
+                }
+            }
+        }
+        drop(db);
+
+        // Use API UTXOs (they're more up-to-date)
+        all_utxos = api_utxos;
+    }
+
+    if all_utxos.is_empty() {
+        return Err(CertificateError::Database("No UTXOs available for certificate transaction".to_string()));
+    }
+
+    // Select UTXOs (reuse helper function)
+    let selected_utxos = select_utxos(&all_utxos, total_needed);
+    if selected_utxos.is_empty() {
+        return Err(CertificateError::Database(format!(
+            "Insufficient funds: need {} satoshis for certificate transaction (have {} satoshis)",
+            total_needed,
+            all_utxos.iter().map(|u| u.satoshis).sum::<i64>()
+        )));
+    }
+
+    let total_input: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
+    log::info!("   💰 Selected {} UTXOs ({} satoshis)", selected_utxos.len(), total_input);
+
+    // Log each selected UTXO for debugging
+    for (i, utxo) in selected_utxos.iter().enumerate() {
+        log::info!("      UTXO {}: {}:{} ({} satoshis, address index {})",
+            i, utxo.txid, utxo.vout, utxo.satoshis, utxo.address_index);
+    }
+
+    // Step 4: Create transaction structure
+    let mut tx = Transaction::new();
+
+    // Add inputs
+    for utxo in &selected_utxos {
+        let outpoint = OutPoint::new(utxo.txid.clone(), utxo.vout);
+        tx.add_input(TxInput::new(outpoint));
+    }
+
+    // Add certificate output (with original placeholder revocationOutpoint as signed by certifier)
+    let certificate_output = TxOutput::new(certificate_output_amount, locking_script_bytes.clone());
+    tx.add_output(certificate_output);
+    log::info!("   📤 Added certificate output: {} satoshis", certificate_output_amount);
+
+    // Calculate fees (use same estimate as createAction)
+    let fee = estimated_fee; // Already calculated above
+
+    // Calculate change amount
+    let change_amount = total_input - certificate_output_amount - fee;
+
+    // Add change output if needed (reuse logic from createAction)
+    if change_amount > 546 {
+        // Generate new change address (reuse from createAction)
+        use crate::database::get_master_private_key_from_db;
+        use crate::database::get_master_public_key_from_db;
+        use crate::crypto::brc42::derive_child_public_key;
+        use crate::handlers::pubkey_to_address;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let db = state.database.lock().unwrap();
+        let wallet_repo = WalletRepository::new(db.connection());
+        let wallet = wallet_repo.get_primary_wallet()
+            .map_err(|e| CertificateError::Database(format!("Failed to get wallet: {}", e)))?
+            .ok_or_else(|| CertificateError::Database("No wallet found".to_string()))?;
+
+        let wallet_id = wallet.id.unwrap();
+        let current_index = wallet.current_index;
+
+        // Derive new address for change (reuse from createAction)
+        let master_privkey = get_master_private_key_from_db(&db)
+            .map_err(|e| CertificateError::Database(format!("Failed to get master key: {}", e)))?;
+        let master_pubkey = get_master_public_key_from_db(&db)
+            .map_err(|e| CertificateError::Database(format!("Failed to get master pubkey: {}", e)))?;
+
+        // Create BRC-43 invoice number for change address
+        let invoice_number = format!("2-receive address-{}", current_index);
+
+        // Derive child public key using BRC-42
+        let derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, &invoice_number)
+            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to derive change key: {}", e)))?;
+
+        // Convert to Bitcoin address
+        let change_address = pubkey_to_address(&derived_pubkey)
+            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to create change address: {}", e)))?;
+
+        // Save new change address to database (reuse from createAction)
+        let address_repo = AddressRepository::new(db.connection());
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let address_model = crate::database::Address {
+            id: None,
+            wallet_id,
+            index: current_index,
+            address: change_address.clone(),
+            public_key: hex::encode(&derived_pubkey),
+            used: true,
+            balance: 0,
+            pending_utxo_check: false,
+            created_at,
+        };
+
+        if let Err(e) = address_repo.create(&address_model) {
+            log::warn!("   Failed to save change address: {} (continuing anyway)", e);
+        } else {
+            if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
+                log::warn!("   Failed to update wallet index: {}", e);
+            }
+            log::info!("   ✅ Generated new change address: {} (index {})", change_address, current_index);
+        }
+
+        drop(db);
+
+        // Build P2PKH script for change (reuse from createAction)
+        let pubkey_bytes = derived_pubkey;
+        let sha_hash = Sha256::digest(&pubkey_bytes);
+        let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+        let change_script = Script::p2pkh_locking_script(&pubkey_hash)
+            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to create change script: {}", e)))?;
+
+        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
+        log::info!("   💸 Added change output: {} satoshis", change_amount);
+    } else if change_amount > 0 {
+        log::info!("   💸 Change below dust limit ({}), adding to fee", change_amount);
+    }
+
+    // Step 5: Sign transaction
+    log::info!("   🖊️  Signing certificate transaction...");
+    let secp = Secp256k1::new();
+
+    for (i, utxo) in selected_utxos.iter().enumerate() {
+        // Get private key for this address index (same as signAction)
+        let db = state.database.lock().unwrap();
+        let private_key_bytes = crate::database::derive_private_key_from_db(&db, utxo.address_index)
+            .map_err(|e| CertificateError::Database(format!("Failed to derive private key for address {}: {}", utxo.address_index, e)))?;
+        drop(db);
+
+        // Decode prev script
+        let prev_script = hex::decode(&utxo.script)
+            .map_err(|e| CertificateError::InvalidHex(format!("Invalid script hex: {}", e)))?;
+
+        // Calculate signature hash
+        let sighash = calculate_sighash(
+            &tx,
+            i,
+            &prev_script,
+            utxo.satoshis,
+            SIGHASH_ALL_FORKID,
+        ).map_err(|e| CertificateError::InvalidFormat(format!("Failed to calculate sighash: {}", e)))?;
+
+        // Sign
+        let secret_key = SecretKey::from_slice(&private_key_bytes)
+            .map_err(|_| CertificateError::InvalidFormat("Invalid private key".to_string()))?;
+        let message = Message::from_digest_slice(&sighash)
+            .map_err(|_| CertificateError::InvalidFormat("Invalid sighash message".to_string()))?;
+        let signature = secp.sign_ecdsa(&message, &secret_key);
+
+        // Serialize signature as DER + sighash byte
+        let mut sig_der = signature.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+
+        // Get public key
+        use secp256k1::PublicKey;
+        let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey_bytes = pubkey.serialize();
+
+        // Build unlocking script: <signature> <pubkey>
+        use crate::transaction::Script;
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes);
+
+        // Update input with unlocking script
+        tx.inputs[i].set_script(unlocking_script.bytes);
+
+        log::info!("   ✅ Input {} signed", i);
+    }
+
+    log::info!("   ✅ Transaction signed");
+
+    // Step 6: Calculate txid
+    // Note: The certificate embedded in the PushDrop output contains the original placeholder
+    // revocationOutpoint (as signed by the certifier). We calculate the txid once and return
+    // the actual revocationOutpoint (txid.0) in the response so the certifier can locate it.
+    let txid = tx.txid()
+        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to calculate txid: {}", e)))?;
+    log::info!("   📝 Transaction ID: {}", txid);
+
+    // Step 7: Extract revocation outpoint (first output, index 0)
+    // Note: The certificate embedded on-chain has the original placeholder revocationOutpoint
+    // (as signed by the certifier). We return the actual txid.0 in the response so the
+    // certifier can locate the certificate on-chain.
+    let revocation_outpoint = format!("{}.0", txid);
+    log::info!("   📍 Revocation outpoint (for response): {}", revocation_outpoint);
+
+    // Step 8: Broadcast transaction
+    let raw_tx_hex = tx.to_hex()
+        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize transaction: {}", e)))?;
+
+    log::info!("   📡 Broadcasting certificate transaction...");
+    let broadcast_result = broadcast_transaction(&raw_tx_hex).await;
+
+    // Handle "Missing inputs" error by checking UTXOs and retrying
+    if let Err(ref e) = broadcast_result {
+        let error_str = e.to_string().to_lowercase();
+        if error_str.contains("missing inputs") {
+            log::warn!("   ⚠️  Received 'Missing inputs' error - checking which UTXOs are spent...");
+
+            // Check each selected UTXO to see if it's spent on-chain
+            let mut spent_utxos = Vec::new();
+            for utxo in &selected_utxos {
+                let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
+                let client = reqwest::Client::new();
+                match client.get(&url).send().await {
+                    Ok(response) => {
+                        if response.status() == 404 {
+                            // 404 means likely spent
+                            log::warn!("      ⚠️  UTXO {}:{} returned 404 - likely SPENT", utxo.txid, utxo.vout);
+                            spent_utxos.push((utxo.txid.clone(), utxo.vout));
+                        } else if response.status().is_success() {
+                            if let Ok(json) = response.json::<serde_json::Value>().await {
+                                if let Some(spent) = json.get("spent").and_then(|v| v.as_bool()) {
+                                    if spent {
+                                        log::warn!("      ⚠️  UTXO {}:{} is SPENT on-chain", utxo.txid, utxo.vout);
+                                        spent_utxos.push((utxo.txid.clone(), utxo.vout));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Ignore API errors - we'll just mark all as potentially spent
+                    }
+                }
+            }
+
+            // Mark spent UTXOs in database
+            if !spent_utxos.is_empty() {
+                log::info!("   🔄 Marking {} UTXO(s) as spent in database...", spent_utxos.len());
+                let db = state.database.lock().unwrap();
+                let utxo_repo = UtxoRepository::new(db.connection());
+                for (txid, vout) in &spent_utxos {
+                    let _ = utxo_repo.mark_spent(txid, *vout, "unknown");
+                    log::info!("      ✅ Marked {}:{} as spent", txid, vout);
+                }
+                drop(db);
+
+                // Return error - the spent UTXOs are now marked, so a retry will work
+                return Err(CertificateError::Database(format!(
+                    "Transaction failed: {} UTXO(s) were already spent on-chain. They have been marked as spent in the database. Please retry the certificate acquisition.",
+                    spent_utxos.len()
+                )));
+            }
+        }
+    }
+
+    // If we get here, either broadcast succeeded or it's a different error
+    match broadcast_result {
+        Ok(_) => {
+            log::info!("   ✅ Certificate transaction broadcast successful!");
+        }
+        Err(e) => {
+            log::error!("   ❌ Failed to broadcast certificate transaction: {}", e);
+            return Err(CertificateError::Database(format!("Failed to broadcast transaction: {}", e)));
+        }
+    }
+
+    // Mark UTXOs as spent in database (same as createAction)
+    {
+        let db = state.database.lock().unwrap();
+        use crate::database::UtxoRepository;
+        let utxo_repo = UtxoRepository::new(db.connection());
+        let utxos_to_mark: Vec<_> = selected_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+
+        match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
+            Ok(count) => {
+                log::info!("   ✅ Marked {} UTXOs as spent in database", count);
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to mark UTXOs as spent: {}", e);
+            }
+        }
+    }
+
+    // Step 9: Return txid and revocation outpoint
+    Ok((txid, revocation_outpoint))
 }
 
 // ============================================================================

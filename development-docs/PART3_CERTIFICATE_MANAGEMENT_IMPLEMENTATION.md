@@ -1,27 +1,29 @@
 # Part 3: Certificate Management - Implementation Guide
 
-> **Status**: 🚧 Implementation In Progress - Core Features Working
-> **Last Updated**: 2025-12-17
-> **Current Phase**: Part 3 - Certificate Management (4 methods)
+> **Status**: 🚧 Implementation In Progress - Core Features Working, Testing Remaining
+> **Last Updated**: 2025-12-19
+> **Current Phase**: Part 3 - Certificate Management (4 methods implemented, testing needed)
 > **Prerequisites**: ✅ Part 1 & Part 2 Complete
-> **Completed**: ✅ Phase 2 (Database Migration), ✅ Phase 3 (PushDrop Implementation & Testing), ✅ Phase 4 (Certificate Acquisition & Storage)
+> **Completed**: ✅ Phase 2 (Database Migration), ✅ Phase 3 (PushDrop Implementation & Testing), ✅ Phase 4 (Certificate Acquisition & Storage), ✅ Issuance Protocol Working
 
 ## 🎯 Executive Summary
 
 ### Implementation Status: Core Features Working ✅
 
-**✅ Completed (2025-12-17)**:
+**✅ Completed (2025-12-19)**:
 1. ✅ **Certificate Acquisition ('direct' protocol)**: Successfully acquiring certificates from certifier servers
-2. ✅ **Certificate Signature Verification**: BRC-52 signature verification working (fixed `anyone_private_key` bug)
-3. ✅ **Certificate Storage**: Certificates stored in database with encrypted fields
-4. ✅ **Database Schema**: Migration v7 complete with `certificates` and `certificate_fields` tables
-5. ✅ **Response Format**: Fixed UI display - returning JSON object instead of base64 string
+2. ✅ **Certificate Acquisition ('issuance' protocol)**: Working with socialcert.net - certifier creates transaction, we verify and store
+3. ✅ **Certificate Signature Verification**: BRC-52 signature verification working (fixed `anyone_private_key` bug)
+4. ✅ **Certificate Storage**: Certificates stored in database with encrypted fields and correct transaction IDs
+5. ✅ **Database Schema**: Migration v7 complete with `certificates` and `certificate_fields` tables
+6. ✅ **Response Format**: Fixed UI display - returning JSON object instead of base64 string
+7. ✅ **Transaction ID Extraction**: Fixed "Not on Chain" issue - extract txid from revocationOutpoint when certificate exists on-chain
+8. ✅ **All Four Handlers**: `acquireCertificate`, `listCertificates`, `proveCertificate`, `relinquishCertificate` all implemented
 
-**⚠️ In Progress / Known Issues**:
-1. ⚠️ **'issuance' Protocol**: Not yet fully tested - social cert works with other wallets and creates Bitcoin transactions, need to review our process
-2. ⚠️ **Certificate Transaction Creation**: Need to investigate how certificates are embedded in blockchain transactions
-3. ⚠️ **Keyring Generation**: Implementation exists but needs testing
-4. ⚠️ **Selective Disclosure**: `proveCertificate` needs full testing
+**⏳ Testing Needed**:
+1. ⏳ **End-to-End Testing**: Test all certificate methods with real-world apps
+2. ⏳ **Certificate Discovery**: `discoverByIdentityKey` and `discoverByAttributes` not yet implemented
+3. ⏳ **Selective Disclosure**: `proveCertificate` needs full testing with real verifiers
 
 **🆕 Key Discoveries**:
 - Certificates use **PushDrop encoding** (not OP_RETURN)
@@ -36,10 +38,11 @@
 - ✅ Certificate infrastructure (parser, verifier, types)
 - ✅ BRC-2 encryption implementation
 - ✅ Certificate acquisition ('direct' protocol)
-- ✅ Certificate storage and retrieval
-- ⏳ Certificate issuance protocol (needs review)
-- ⏳ Blockchain transaction creation for certificates
-- ⏳ Full end-to-end testing
+- ✅ Certificate acquisition ('issuance' protocol) - certifier creates transaction
+- ✅ Certificate storage and retrieval with correct transaction IDs
+- ✅ All four certificate handlers implemented
+- ⏳ End-to-end testing with real-world apps
+- ⏳ Certificate discovery methods (not yet implemented)
 
 ---
 
@@ -69,47 +72,47 @@
    - Certificate types and data structures
    - Database repository for CRUD operations
 
-### ⚠️ What Needs Work
+### ⏳ What Needs Testing/Implementation
 
-1. **'issuance' Protocol**
-   - Social cert works with other wallets and creates Bitcoin transactions
-   - Need to review our issuance process and compare with working implementations
-   - May need to investigate how certificates are embedded in blockchain transactions
+1. **End-to-End Testing**
+   - ✅ `acquireCertificate` - Working with socialcert.net
+   - ⏳ `listCertificates` - Implemented, needs testing
+   - ⏳ `proveCertificate` - Implemented, needs testing with real verifiers
+   - ⏳ `relinquishCertificate` - Implemented, needs testing
 
-2. **Certificate Transaction Creation**
-   - When certificates are issued via 'issuance' protocol, they should create Bitcoin transactions
-   - Need to understand the full flow from CSR → signed certificate → blockchain transaction
-   - Compare with working wallet implementations
+2. **Certificate Discovery (Not Yet Implemented)**
+   - ⏳ `discoverByIdentityKey` - Find certificates by identity key
+   - ⏳ `discoverByAttributes` - Find certificates by field attributes
 
-3. **End-to-End Testing**
+3. **Real-World App Testing**
    - Test with various certificate types (cool cert, social cert, etc.)
    - Verify certificate display in UI
    - Test certificate revocation checking
-   - Test selective disclosure (`proveCertificate`)
+   - Test selective disclosure (`proveCertificate`) with real verifiers
 
 4. **Documentation**
-   - Document the certificate lifecycle
-   - Document the issuance protocol flow
-   - Document any differences from TypeScript SDK
+   - ✅ Certificate lifecycle documented
+   - ✅ Issuance protocol flow documented (certifier creates transaction)
+   - ⏳ Document any differences from TypeScript SDK discovered during testing
 
 ### 🔍 Next Steps
 
-1. **Review Issuance Protocol**
-   - Compare our implementation with working wallet (that successfully creates Bitcoin transactions)
-   - Investigate certificate transaction creation process
-   - Test with social cert to identify any missing steps
+1. **Complete Testing**
+   - Test `listCertificates` with real-world apps
+   - Test `proveCertificate` with real verifiers
+   - Test `relinquishCertificate` functionality
+   - Verify certificate display in UI works correctly
 
-2. **Complete Testing**
-   - Test all certificate types
-   - Verify UI display works correctly
-   - Test certificate revocation
-   - Test selective disclosure
+2. **Implement Certificate Discovery**
+   - Implement `discoverByIdentityKey` (Call Code 21)
+   - Implement `discoverByAttributes` (Call Code 22)
+   - These are needed for some apps (e.g., microblog.bitspv.com uses `discoverByIdentityKey`)
 
 3. **Documentation**
-   - Update implementation notes with findings
-   - Document any protocol differences discovered
+   - Update implementation notes with testing findings
+   - Document any protocol differences discovered during real-world testing
 
-**Note**: Core certificate acquisition and storage are working. The main remaining work is around the issuance protocol and ensuring certificates are properly embedded in blockchain transactions when issued.
+**Note**: Core certificate acquisition and storage are working. The certifier creates the blockchain transaction (not the wallet). We verify the certificate signature, check on-chain status, extract the transaction ID from the revocationOutpoint, and store the certificate correctly. All four certificate handlers are implemented and ready for testing.
 
 ---
 

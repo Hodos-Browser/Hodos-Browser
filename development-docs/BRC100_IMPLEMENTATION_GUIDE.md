@@ -160,10 +160,10 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 |-----------|--------|--------|---------------|-----------------|-------|
 | 6 | `listOutputs` | ⏳ | ❌ | ❌ | **Database schema ready** - Will support basket filtering<br>⚠️ **Note**: Add `/listOutputs` to HTTP interceptor when implementing |
 | 7 | `relinquishOutput` | ❌ | ❌ | ❌ | Release UTXO control<br>⚠️ **Note**: Add `/relinquishOutput` to HTTP interceptor when implementing |
-| 17 | `acquireCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/acquireCertificate` to HTTP interceptor when implementing |
-| 18 | `listCertificates` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/listCertificates` to HTTP interceptor when implementing |
-| 19 | `proveCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/proveCertificate` to HTTP interceptor when implementing |
-| 20 | `relinquishCertificate` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/relinquishCertificate` to HTTP interceptor when implementing |
+| 17 | `acquireCertificate` | ✅ | ✅ | ✅ | **COMPLETE** - Working with socialcert.net<br>✅ Supports 'direct' and 'issuance' protocols<br>✅ Certifier creates transaction, we verify and store<br>✅ Fixed "Not on Chain" issue (extract txid from revocationOutpoint) |
+| 18 | `listCertificates` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real-world apps |
+| 19 | `proveCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real verifiers |
+| 20 | `relinquishCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing |
 | 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **CRITICAL**: Add `/discoverByIdentityKey` to HTTP interceptor (microblog.bitspv.com uses this!) |
 | 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/discoverByAttributes` to HTTP interceptor when implementing |
 | 24 | `waitForAuthentication` | ❌ | ❌ | ❌ | Async auth wait<br>✅ **Already in HTTP interceptor** |

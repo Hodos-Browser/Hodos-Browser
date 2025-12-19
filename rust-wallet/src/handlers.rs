@@ -3534,11 +3534,71 @@ pub async fn process_action(
 
     log::info!("   Signed transaction: {}", txid);
 
+    // Get input UTXOs from pending transaction for error handling
+    let input_utxos = {
+        let pending = PENDING_TRANSACTIONS.lock().unwrap();
+        if let Some(pending_tx) = pending.get(&reference) {
+            pending_tx.input_utxos.clone()
+        } else {
+            Vec::new() // If not found, we can't check UTXOs, but that's okay
+        }
+    };
+
     // Step 3: Broadcast (if requested)
     let status = if should_broadcast {
         log::info!("   Broadcasting to network...");
 
-        match broadcast_transaction(&raw_tx).await {
+        let broadcast_result = broadcast_transaction(&raw_tx).await;
+
+        // Handle "Missing inputs" error by checking UTXOs and marking them as spent
+        if let Err(ref e) = broadcast_result {
+            let error_str = e.to_string().to_lowercase();
+            if error_str.contains("missing inputs") {
+                log::warn!("   ⚠️  Received 'Missing inputs' error - checking which UTXOs are spent...");
+
+                // Check each input UTXO to see if it's spent on-chain
+                let mut spent_utxos = Vec::new();
+                for utxo in &input_utxos {
+                    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
+                    let client = reqwest::Client::new();
+                    match client.get(&url).send().await {
+                        Ok(response) => {
+                            if response.status() == 404 {
+                                log::warn!("      ⚠️  UTXO {}:{} returned 404 - likely SPENT", utxo.txid, utxo.vout);
+                                spent_utxos.push((utxo.txid.clone(), utxo.vout));
+                            } else if response.status().is_success() {
+                                if let Ok(json) = response.json::<serde_json::Value>().await {
+                                    if let Some(spent) = json.get("spent").and_then(|v| v.as_bool()) {
+                                        if spent {
+                                            log::warn!("      ⚠️  UTXO {}:{} is SPENT on-chain", utxo.txid, utxo.vout);
+                                            spent_utxos.push((utxo.txid.clone(), utxo.vout));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Ignore API errors
+                        }
+                    }
+                }
+
+                // Mark spent UTXOs in database
+                if !spent_utxos.is_empty() {
+                    log::info!("   🔄 Marking {} UTXO(s) as spent in database...", spent_utxos.len());
+                    let db = state.database.lock().unwrap();
+                    use crate::database::UtxoRepository;
+                    let utxo_repo = UtxoRepository::new(db.connection());
+                    for (txid, vout) in &spent_utxos {
+                        let _ = utxo_repo.mark_spent(txid, *vout, "unknown");
+                        log::info!("      ✅ Marked {}:{} as spent", txid, vout);
+                    }
+                    drop(db);
+                }
+            }
+        }
+
+        match broadcast_result {
             Ok(_) => {
                 log::info!("   ✅ Transaction broadcast successful!");
 
