@@ -30,11 +30,11 @@ export const TabBar: React.FC<TabBarProps> = ({
     <Box
       sx={{
         display: 'flex',
-        alignItems: 'flex-end',
+        alignItems: 'center',
         backgroundColor: '#dee1e6',
         paddingX: 0.5,
         paddingTop: 0.5,
-        height: 42,
+        height: 40,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,

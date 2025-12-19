@@ -7,6 +7,7 @@
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/cef_task.h"
+#include "include/internal/cef_types.h"  // For CEF_WOD_* constants
 #include "base/cef_callback.h"
 #include "base/internal/cef_callback_internal.h"
 #include <fstream>
@@ -125,6 +126,43 @@ void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
     }
 }
 
+// Static method to notify frontend of tab list changes (called from TabManager)
+void SimpleHandler::NotifyTabListChanged() {
+    CEF_REQUIRE_UI_THREAD();
+
+    std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+    int active_tab_id = TabManager::GetInstance().GetActiveTabId();
+
+    // Build JSON response using nlohmann::json (handles escaping automatically)
+    nlohmann::json response;
+    response["activeTabId"] = active_tab_id;
+    response["tabs"] = nlohmann::json::array();
+
+    for (Tab* tab : tabs) {
+        nlohmann::json tab_json;
+        tab_json["id"] = tab->id;
+        tab_json["title"] = tab->title;
+        tab_json["url"] = tab->url;
+        tab_json["isActive"] = (tab->id == active_tab_id);
+        tab_json["isLoading"] = tab->is_loading;
+        if (!tab->favicon_url.empty()) {
+            tab_json["favicon"] = tab->favicon_url;
+        }
+        response["tabs"].push_back(tab_json);
+    }
+
+    std::string json_str = response.dump();
+
+    // Send response to header browser
+    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+    if (header) {
+        CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
+        CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
+        response_args->SetString(0, json_str);
+        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
+        LOG_DEBUG_BROWSER("📑 Tab list updated and sent to header: " + json_str);
+    }
+}
 
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
     CEF_REQUIRE_UI_THREAD();
@@ -155,6 +193,25 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabURL(tab_id, url.ToString());
         LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url.ToString());
+    }
+}
+
+void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
+                                      const std::vector<CefString>& icon_urls) {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Only process if we have favicon URLs
+    if (icon_urls.empty()) {
+        return;
+    }
+
+    // Check if this is a tab browser and update TabManager
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        // Use the first favicon URL (usually the most appropriate)
+        std::string favicon_url = icon_urls[0].ToString();
+        TabManager::GetInstance().UpdateTabFavicon(tab_id, favicon_url);
+        LOG_DEBUG_BROWSER("🖼️ Tab " + std::to_string(tab_id) + " favicon updated: " + favicon_url);
     }
 }
 
@@ -482,7 +539,26 @@ bool SimpleHandler::OnBeforePopup(
     CEF_REQUIRE_UI_THREAD();
 
     std::string url = target_url.ToString();
-    LOG_DEBUG_BROWSER("🔗 Popup requested: " + url + " (disposition: " + std::to_string(target_disposition) + ")");
+
+    // Log disposition value and role for debugging
+    std::string disposition_str;
+    switch (target_disposition) {
+        case CEF_WOD_UNKNOWN: disposition_str = "UNKNOWN"; break;
+        case CEF_WOD_CURRENT_TAB: disposition_str = "CURRENT_TAB"; break;
+        case CEF_WOD_SINGLETON_TAB: disposition_str = "SINGLETON_TAB"; break;
+        case CEF_WOD_NEW_FOREGROUND_TAB: disposition_str = "NEW_FOREGROUND_TAB"; break;
+        case CEF_WOD_NEW_BACKGROUND_TAB: disposition_str = "NEW_BACKGROUND_TAB"; break;
+        case CEF_WOD_NEW_POPUP: disposition_str = "NEW_POPUP"; break;
+        case CEF_WOD_NEW_WINDOW: disposition_str = "NEW_WINDOW"; break;
+        case CEF_WOD_SAVE_TO_DISK: disposition_str = "SAVE_TO_DISK"; break;
+        case CEF_WOD_OFF_THE_RECORD: disposition_str = "OFF_THE_RECORD"; break;
+        case CEF_WOD_IGNORE_ACTION: disposition_str = "IGNORE_ACTION"; break;
+        case CEF_WOD_SWITCH_TO_TAB: disposition_str = "SWITCH_TO_TAB"; break;
+        case CEF_WOD_NEW_PICTURE_IN_PICTURE: disposition_str = "NEW_PICTURE_IN_PICTURE"; break;
+        default: disposition_str = "UNKNOWN_VALUE(" + std::to_string(target_disposition) + ")"; break;
+    }
+
+    LOG_DEBUG_BROWSER("🔗 Popup requested: " + url + " (disposition: " + disposition_str + ", role: " + role_ + ")");
 
     // Allow DevTools and other special popups to open normally
     if (url.find("devtools://") == 0 || url.find("chrome://") == 0 || url.empty()) {
@@ -490,11 +566,20 @@ bool SimpleHandler::OnBeforePopup(
         return false;  // Allow default popup behavior
     }
 
-    // Only handle popups from tab browsers
-    int tab_id = ExtractTabIdFromRole(role_);
-    if (tab_id != -1) {
-        // Create a new tab instead of opening a popup window
-        LOG_DEBUG_BROWSER("📑 Creating new tab for popup URL: " + url);
+    // Convert ALL popup requests to new tabs (including NEW_POPUP and NEW_WINDOW)
+    // This ensures that right-click "Open in new tab", middle-click, Ctrl+Click,
+    // and target="_blank" links all open in tabs instead of separate windows
+    bool should_create_tab = (
+        target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
+        target_disposition == CEF_WOD_NEW_BACKGROUND_TAB ||
+        target_disposition == CEF_WOD_SINGLETON_TAB ||
+        target_disposition == CEF_WOD_NEW_POPUP ||
+        target_disposition == CEF_WOD_NEW_WINDOW
+    );
+
+    if (should_create_tab) {
+        // Create new tab for ANY browser (tab browser, webview, etc.)
+        LOG_DEBUG_BROWSER("📑 Converting popup to new tab: " + url + " (disposition: " + disposition_str + ", role: " + role_ + ")");
 
         // Get main window dimensions
         extern HWND g_hwnd;
@@ -508,11 +593,12 @@ bool SimpleHandler::OnBeforePopup(
         // Create new tab with the popup URL
         TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
 
-        // Return true to cancel the popup (we handled it with a new tab)
+        // Return true to cancel the popup window creation (we handled it with a new tab)
         return true;
     }
 
-    // For non-tab browsers, allow default popup behavior
+    // For other dispositions (CURRENT_TAB, SAVE_TO_DISK, etc.), allow default behavior
+    LOG_DEBUG_BROWSER("🔧 Allowing default behavior (disposition: " + disposition_str + ")");
     return false;
 }
 
@@ -581,37 +667,44 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "get_tab_list") {
-        // Get all tabs and send to frontend
+    // Helper function to send tab list to frontend (used by get_tab_list and after tab creation)
+    auto SendTabListToFrontend = []() {
         std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
         int active_tab_id = TabManager::GetInstance().GetActiveTabId();
 
-        // Build JSON response
-        std::stringstream json;
-        json << "{\"tabs\":[";
-        for (size_t i = 0; i < tabs.size(); i++) {
-            Tab* tab = tabs[i];
-            if (i > 0) json << ",";
-            json << "{";
-            json << "\"id\":" << tab->id << ",";
-            json << "\"title\":\"" << tab->title << "\",";
-            json << "\"url\":\"" << tab->url << "\",";
-            json << "\"isActive\":" << (tab->id == active_tab_id ? "true" : "false") << ",";
-            json << "\"isLoading\":" << (tab->is_loading ? "true" : "false");
-            json << "}";
+        // Build JSON response using nlohmann::json (handles escaping automatically)
+        nlohmann::json response;
+        response["activeTabId"] = active_tab_id;
+        response["tabs"] = nlohmann::json::array();
+
+        for (Tab* tab : tabs) {
+            nlohmann::json tab_json;
+            tab_json["id"] = tab->id;
+            tab_json["title"] = tab->title;
+            tab_json["url"] = tab->url;
+            tab_json["isActive"] = (tab->id == active_tab_id);
+            tab_json["isLoading"] = tab->is_loading;
+            if (!tab->favicon_url.empty()) {
+                tab_json["favicon"] = tab->favicon_url;
+            }
+            response["tabs"].push_back(tab_json);
         }
-        json << "],\"activeTabId\":" << active_tab_id << "}";
+
+        std::string json_str = response.dump();
 
         // Send response to header browser
         CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
         if (header) {
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("tab_list_response");
-            CefRefPtr<CefListValue> response_args = response->GetArgumentList();
-            response_args->SetString(0, json.str());
-            header->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📑 Tab list sent to header: " + json.str());
+            CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
+            CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
+            response_args->SetString(0, json_str);
+            header->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
+            LOG_DEBUG_BROWSER("📑 Tab list sent to header: " + json_str);
         }
+    };
 
+    if (message_name == "get_tab_list") {
+        SendTabListToFrontend();
         return true;
     }
 
@@ -1931,11 +2024,45 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
                                          CefRefPtr<CefContextMenuParams> params,
                                          int command_id,
                                          EventFlags event_flags) {
+    // Log all context menu commands for debugging
+    LOG_DEBUG_BROWSER("🔘 Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
+
+    // Handle DevTools for overlay windows
     if ((role_ == "settings" || role_ == "wallet" || role_ == "backup" || role_ == "brc100auth") && command_id == (MENU_ID_USER_FIRST + 1)) {
         // Open DevTools
         browser->GetHost()->ShowDevTools(CefWindowInfo(), nullptr, CefBrowserSettings(), CefPoint());
         LOG_DEBUG_BROWSER("🔧 DevTools opened for " + role_ + " overlay");
         return true;
     }
+
+    // Intercept "Open link in new tab" command (Chromium internal command ID: 50100)
+    // This is called when user right-clicks and selects "Open in new tab"
+    // OnBeforePopup is NOT called for this action, so we handle it here
+    if (command_id == 50100 && role_.find("tab_") == 0) {
+        std::string link_url = params->GetLinkUrl().ToString();
+
+        if (!link_url.empty()) {
+            LOG_DEBUG_BROWSER("📑 Intercepting 'Open in new tab' command, creating tab for: " + link_url);
+
+            // Get main window dimensions
+            extern HWND g_hwnd;
+            RECT rect;
+            GetClientRect(g_hwnd, &rect);
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+            int tabHeight = height - shellHeight;
+
+            // Create new tab with the link URL
+            TabManager::GetInstance().CreateTab(link_url, g_hwnd, 0, shellHeight, width, tabHeight);
+
+            // Return true to prevent default behavior (opening in separate window)
+            return true;
+        } else {
+            LOG_DEBUG_BROWSER("⚠️ Command 50100 called but no link URL available");
+        }
+    }
+
+    // Allow default handling for other commands
     return false;
 }

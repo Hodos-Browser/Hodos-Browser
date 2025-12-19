@@ -157,6 +157,13 @@ public:
      */
     void UpdateTabLoadingState(int tab_id, bool is_loading, bool can_go_back, bool can_go_forward);
 
+    /**
+     * @brief Update tab favicon URL (called from SimpleHandler::OnFaviconURLChange)
+     * @param tab_id ID of tab to update
+     * @param favicon_url New favicon URL
+     */
+    void UpdateTabFavicon(int tab_id, const std::string& favicon_url);
+
     // ========== Browser Registration ==========
 
     /**

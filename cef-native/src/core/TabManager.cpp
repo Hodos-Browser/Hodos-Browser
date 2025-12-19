@@ -93,6 +93,10 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     // and it needs to find the tab in the map
     tabs_[tab_id] = new_tab;
 
+    // Notify frontend immediately so tab UI renders before page navigation starts
+    // This prevents the jarring effect where the page loads before the tab appears
+    SimpleHandler::NotifyTabListChanged();
+
     // Configure CEF browser settings
     RECT cef_rect;
     GetClientRect(tab_hwnd, &cef_rect);
@@ -309,6 +313,14 @@ void TabManager::UpdateTabLoadingState(int tab_id, bool is_loading, bool can_go_
                   << (is_loading ? "loading" : "loaded")
                   << ", back: " << (can_go_back ? "yes" : "no")
                   << ", forward: " << (can_go_forward ? "yes" : "no");
+    }
+}
+
+void TabManager::UpdateTabFavicon(int tab_id, const std::string& favicon_url) {
+    Tab* tab = GetTab(tab_id);
+    if (tab) {
+        tab->favicon_url = favicon_url;
+        LOG(INFO) << "Tab " << tab_id << " favicon updated to: " << favicon_url;
     }
 }
 

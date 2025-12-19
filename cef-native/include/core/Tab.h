@@ -31,6 +31,9 @@ struct Tab {
     // Current URL (updated from OnAddressChange)
     std::string url;
 
+    // Favicon URL for this tab (updated from OnFaviconURLChange)
+    std::string favicon_url;
+
     // Window handle for this tab's browser container
     // Each tab gets its own HWND which is shown/hidden on tab switch
     HWND hwnd;
@@ -69,6 +72,7 @@ struct Tab {
         : id(0),
           title("New Tab"),
           url(""),
+          favicon_url(""),
           hwnd(nullptr),
           browser(nullptr),
           handler(nullptr),
@@ -88,6 +92,7 @@ struct Tab {
         : id(tab_id),
           title("New Tab"),
           url(initial_url),
+          favicon_url(""),
           hwnd(nullptr),
           browser(nullptr),
           handler(nullptr),

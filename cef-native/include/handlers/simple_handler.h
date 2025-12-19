@@ -43,6 +43,7 @@ public:
     static std::string pending_panel_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
+    static void NotifyTabListChanged();  // Notify frontend of tab list changes
 
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
@@ -50,6 +51,9 @@ public:
     void OnAddressChange(CefRefPtr<CefBrowser> browser,
                         CefRefPtr<CefFrame> frame,
                         const CefString& url) override;
+
+    void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
+                          const std::vector<CefString>& icon_urls) override;
 
     // CefLoadHandler methods
     void OnLoadError(CefRefPtr<CefBrowser> browser,

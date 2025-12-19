@@ -121,8 +121,8 @@ const MainBrowserView: React.FC = () => {
             <Toolbar sx={{
                 bgcolor: '#ffffff',
                 borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
-                minHeight: '52px !important',
-                height: '52px',
+                minHeight: '54px !important',
+                height: '54px',
                 flexShrink: 0,
                 px: 1,
                 py: 0,
@@ -212,7 +212,7 @@ const MainBrowserView: React.FC = () => {
                         placeholder="Search or enter address"
                         fullWidth
                         sx={{
-                            fontSize: 13,
+                            fontSize: 14,
                             color: 'rgba(0, 0, 0, 0.87)',
                             '& input': {
                                 padding: 0,

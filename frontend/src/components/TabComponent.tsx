@@ -33,6 +33,8 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         backgroundColor: isActive ? '#ffffff' : 'rgba(255, 255, 255, 0.5)',
         borderTopLeftRadius: 8,
         borderTopRightRadius: 8,
+        borderBottomLeftRadius: 8,
+        borderBottomRightRadius: 8,
         marginRight: 0.25,
         cursor: 'pointer',
         transition: 'all 0.15s ease',
@@ -55,6 +57,14 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           width={14}
           height={14}
           style={{ flexShrink: 0 }}
+          onError={(e) => {
+            // Hide broken image and let fallback show
+            e.currentTarget.style.display = 'none';
+          }}
+          onLoad={(e) => {
+            // Ensure image is visible on successful load
+            e.currentTarget.style.display = 'block';
+          }}
         />
       ) : (
         <PublicIcon sx={{ fontSize: 14, color: 'rgba(0, 0, 0, 0.4)', flexShrink: 0 }} />
