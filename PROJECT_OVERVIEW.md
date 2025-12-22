@@ -152,6 +152,23 @@ Traditional browser wallets face significant security challenges because they op
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## 🗄️ Data Storage Architecture
+
+The browser separates data storage into two domains:
+
+| Domain | Location | Owner | Contents |
+|--------|----------|-------|----------|
+| **Wallet Data** | `%APPDATA%/HodosBrowser/wallet/wallet.db` | Rust | Keys, UTXOs, certificates, transactions |
+| **Browser Data** | `%APPDATA%/HodosBrowser/Default/` | C++ | History (in progress), bookmarks, cookies |
+
+This separation mirrors Chrome's architecture and maintains security isolation between wallet operations and browser data.
+
+**Current Status:**
+- History management: In progress
+- Bookmarks: Planned
+- Cookies: Planned
+- Database encryption: Requires research
+
 ## 🪟 HWND System & Window Management Architecture
 
 ### Window Hierarchy & Creation Flow

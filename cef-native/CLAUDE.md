@@ -37,6 +37,7 @@ cd cef-native/build/bin/Release
 3. **Do not modify `CefMessageSendHandler`** without understanding IPC flow
 4. **Do not change HTTP interception routing** without asking — affects all wallet API calls
 5. **Process-per-overlay architecture is intentional** — each overlay subprocess provides V8 context isolation for defense in depth
+6. **Browser data is separate from wallet data** — history, bookmarks, and cookies live in CEF layer (`%APPDATA%/HodosBrowser/Default/`), not in the Rust wallet
 
 ## Entry Points
 
@@ -65,3 +66,4 @@ cd cef-native/build/bin/Release
 | `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose` |
 | `src/core/HttpRequestInterceptor.cpp` | `DomainVerifier`, `AsyncWalletResourceHandler`, `g_pendingAuthRequest`, `isWalletEndpoint` |
 | `src/core/BRC100Bridge.cpp` | `makeHttpRequest` (WinHTTP to localhost:3301) |
+| `src/core/HistoryManager.cpp` | Browser history SQLite database; singleton with `AddVisit`, `GetHistory`, `SearchHistory`, `DeleteHistoryEntry` |
