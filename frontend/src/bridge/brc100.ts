@@ -437,6 +437,13 @@ declare global {
         verifySPV(data: any): Promise<any>;
         createSPVProof(data: any): Promise<any>;
       };
+      history?: {
+        get(params?: { limit?: number; offset?: number }): any[];
+        search(params: { search?: string; startTime?: number; endTime?: number; limit?: number; offset?: number }): any[];
+        delete(url: string): boolean;
+        clearAll(): boolean;
+        clearRange(params: { startTime: number; endTime: number }): boolean;
+      };
       wallet?: {
         getStatus(): Promise<any>;
         create(): Promise<any>;

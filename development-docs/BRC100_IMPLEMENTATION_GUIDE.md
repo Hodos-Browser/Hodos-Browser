@@ -166,7 +166,7 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 | 20 | `relinquishCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing |
 | 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **CRITICAL**: Add `/discoverByIdentityKey` to HTTP interceptor (microblog.bitspv.com uses this!) |
 | 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/discoverByAttributes` to HTTP interceptor when implementing |
-| 24 | `waitForAuthentication` | ❌ | ❌ | ❌ | Async auth wait<br>✅ **Already in HTTP interceptor** |
+| 24 | `waitForAuthentication` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Validates wallet exists in database<br>✅ **Already in HTTP interceptor** |
 | 25 | `getHeight` | ✅ | ✅ | ❌ | Get blockchain height<br>✅ **COMPLETE** - Fetches from WhatsOnChain `/chain/info`<br>✅ **Already in HTTP interceptor** |
 | 26 | `getHeaderForHeight` | ✅ | ✅ | ❌ | Get block header by height<br>✅ **COMPLETE** - Cache-first with API fallback, constructs 80-byte header<br>✅ **Already in HTTP interceptor** |
 | 27 | `getNetwork` | ✅ | ✅ | ❌ | Return "mainnet" or "testnet"<br>✅ **COMPLETE** - Returns hardcoded "mainnet"<br>✅ **Already in HTTP interceptor** |

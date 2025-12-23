@@ -1,0 +1,639 @@
+#include "../../include/core/HistoryManager.h"
+#include <iostream>
+#include <sstream>
+#include <fstream>
+
+// Forward declaration of Logger
+class Logger {
+public:
+    static void Log(const std::string& message, int level = 1, int process = 0);
+};
+
+#define LOG_DEBUG_HISTORY(msg) Logger::Log(msg, 0, 0)
+#define LOG_INFO_HISTORY(msg) Logger::Log(msg, 1, 0)
+#define LOG_ERROR_HISTORY(msg) Logger::Log(msg, 3, 0)
+
+HistoryManager& HistoryManager::GetInstance() {
+    static HistoryManager instance;
+    return instance;
+}
+
+HistoryManager::~HistoryManager() {
+    CloseDatabase();
+}
+
+bool HistoryManager::Initialize(const std::string& user_data_path) {
+    history_db_path_ = user_data_path + "/HodosHistory";
+    LOG_INFO_HISTORY("📚 HistoryManager initializing with OUR database: " + history_db_path_);
+
+    // Open and create our database immediately
+    if (!OpenDatabase()) {
+        LOG_ERROR_HISTORY("❌ Failed to create History database");
+        return false;
+    }
+
+    LOG_INFO_HISTORY("📚 HistoryManager initialization complete");
+    return true;
+}
+
+bool HistoryManager::OpenDatabase() {
+    if (history_db_) {
+        // Already open
+        return true;
+    }
+
+    LOG_INFO_HISTORY("📚 Creating/Opening our History database at: " + history_db_path_);
+
+    // Create or open the database (CREATE flag)
+    int rc = sqlite3_open_v2(history_db_path_.c_str(), &history_db_,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to create/open History database: " + std::string(sqlite3_errmsg(history_db_)));
+        if (history_db_) {
+            sqlite3_close(history_db_);
+        }
+        history_db_ = nullptr;
+        return false;
+    }
+
+    LOG_INFO_HISTORY("📚 History database opened, creating schema...");
+
+    // Create Chromium-compatible schema
+    const char* schema_sql = R"(
+        CREATE TABLE IF NOT EXISTS urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL UNIQUE,
+            title TEXT,
+            visit_count INTEGER DEFAULT 0,
+            typed_count INTEGER DEFAULT 0,
+            last_visit_time INTEGER NOT NULL,
+            hidden INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url INTEGER NOT NULL,
+            visit_time INTEGER NOT NULL,
+            from_visit INTEGER,
+            transition INTEGER NOT NULL,
+            segment_id INTEGER,
+            visit_duration INTEGER DEFAULT 0,
+            FOREIGN KEY (url) REFERENCES urls(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
+        CREATE INDEX IF NOT EXISTS idx_urls_last_visit_time ON urls(last_visit_time);
+        CREATE INDEX IF NOT EXISTS idx_visits_url ON visits(url);
+        CREATE INDEX IF NOT EXISTS idx_visits_visit_time ON visits(visit_time);
+    )";
+
+    char* err_msg = nullptr;
+    rc = sqlite3_exec(history_db_, schema_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to create schema: " + std::string(err_msg ? err_msg : "unknown"));
+        if (err_msg) sqlite3_free(err_msg);
+        CloseDatabase();
+        return false;
+    }
+
+    LOG_INFO_HISTORY("✅ History database schema created");
+
+    // Enable WAL mode for better concurrency
+    rc = sqlite3_exec(history_db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_INFO_HISTORY("⚠️ Warning: Could not enable WAL mode: " + std::string(err_msg ? err_msg : "unknown"));
+        if (err_msg) sqlite3_free(err_msg);
+    }
+
+    // Set busy timeout to handle locks
+    sqlite3_busy_timeout(history_db_, 5000);
+
+    LOG_INFO_HISTORY("✅ History database ready");
+    return true;
+}
+
+void HistoryManager::CloseDatabase() {
+    if (history_db_) {
+        sqlite3_close(history_db_);
+        history_db_ = nullptr;
+        LOG_INFO_HISTORY("📚 History database closed");
+    }
+}
+
+bool HistoryManager::AddVisit(const std::string& url, const std::string& title, int transition_type) {
+    if (!history_db_) {
+        LOG_ERROR_HISTORY("❌ Cannot add visit - database not open");
+        return false;
+    }
+
+    int64_t now = GetCurrentChromiumTime();
+
+    LOG_INFO_HISTORY("📚 Adding visit: " + url);
+
+    // First, check if URL exists
+    const char* check_sql = "SELECT id, visit_count FROM urls WHERE url = ?";
+    sqlite3_stmt* stmt;
+
+    int rc = sqlite3_prepare_v2(history_db_, check_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare check query: " + std::string(sqlite3_errmsg(history_db_)));
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, url.c_str(), -1, SQLITE_STATIC);
+
+    int64_t url_id = -1;
+    int visit_count = 0;
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // URL exists
+        url_id = sqlite3_column_int64(stmt, 0);
+        visit_count = sqlite3_column_int(stmt, 1);
+        LOG_INFO_HISTORY("📚 URL exists, updating (current visits: " + std::to_string(visit_count) + ")");
+    }
+    sqlite3_finalize(stmt);
+
+    if (url_id == -1) {
+        // Insert new URL
+        const char* insert_url_sql = "INSERT INTO urls (url, title, visit_count, last_visit_time) VALUES (?, ?, 1, ?)";
+        rc = sqlite3_prepare_v2(history_db_, insert_url_sql, -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            LOG_ERROR_HISTORY("❌ Failed to prepare insert URL: " + std::string(sqlite3_errmsg(history_db_)));
+            return false;
+        }
+
+        sqlite3_bind_text(stmt, 1, url.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 3, now);
+
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+
+        if (rc != SQLITE_DONE) {
+            LOG_ERROR_HISTORY("❌ Failed to insert URL: " + std::string(sqlite3_errmsg(history_db_)));
+            return false;
+        }
+
+        url_id = sqlite3_last_insert_rowid(history_db_);
+        LOG_INFO_HISTORY("✅ New URL inserted with ID: " + std::to_string(url_id));
+    } else {
+        // Update existing URL
+        const char* update_url_sql = "UPDATE urls SET visit_count = visit_count + 1, last_visit_time = ?, title = ? WHERE id = ?";
+        rc = sqlite3_prepare_v2(history_db_, update_url_sql, -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            LOG_ERROR_HISTORY("❌ Failed to prepare update URL: " + std::string(sqlite3_errmsg(history_db_)));
+            return false;
+        }
+
+        sqlite3_bind_int64(stmt, 1, now);
+        sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 3, url_id);
+
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+
+        if (rc != SQLITE_DONE) {
+            LOG_ERROR_HISTORY("❌ Failed to update URL: " + std::string(sqlite3_errmsg(history_db_)));
+            return false;
+        }
+
+        LOG_INFO_HISTORY("✅ URL updated, new visit count: " + std::to_string(visit_count + 1));
+    }
+
+    // Insert visit record
+    const char* insert_visit_sql = "INSERT INTO visits (url, visit_time, transition) VALUES (?, ?, ?)";
+    rc = sqlite3_prepare_v2(history_db_, insert_visit_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare insert visit: " + std::string(sqlite3_errmsg(history_db_)));
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, url_id);
+    sqlite3_bind_int64(stmt, 2, now);
+    sqlite3_bind_int(stmt, 3, transition_type);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR_HISTORY("❌ Failed to insert visit: " + std::string(sqlite3_errmsg(history_db_)));
+        return false;
+    }
+
+    LOG_INFO_HISTORY("✅ Visit recorded successfully");
+    return true;
+}
+
+std::vector<HistoryEntry> HistoryManager::GetHistory(int limit, int offset) {
+    std::vector<HistoryEntry> entries;
+
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        LOG_INFO_HISTORY("⚠️ History database not available yet");
+        return entries;
+    }
+
+    if (!history_db_) {
+        // Database still not open (doesn't exist yet)
+        LOG_INFO_HISTORY("⚠️ History database still not available");
+        return entries;
+    }
+
+    const char* sql = R"(
+        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, v.visit_time, v.transition
+        FROM urls u
+        INNER JOIN visits v ON u.id = v.url
+        WHERE u.hidden = 0
+        ORDER BY v.visit_time DESC
+        LIMIT ? OFFSET ?
+    )";
+
+    LOG_INFO_HISTORY("📚 Preparing SQL query for GetHistory");
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare history query: " + std::string(sqlite3_errmsg(history_db_)));
+        return entries;
+    }
+
+    sqlite3_bind_int(stmt, 1, limit);
+    sqlite3_bind_int(stmt, 2, offset);
+
+    LOG_INFO_HISTORY("📚 Executing query with limit=" + std::to_string(limit) + ", offset=" + std::to_string(offset));
+
+    int row_count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        row_count++;
+        HistoryEntry entry;
+        entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry.visit_time = sqlite3_column_int64(stmt, 5);
+        entry.transition = sqlite3_column_int(stmt, 6);
+
+        entries.push_back(entry);
+    }
+
+    LOG_INFO_HISTORY("📚 Query returned " + std::to_string(row_count) + " rows");
+
+    sqlite3_finalize(stmt);
+
+    LOG_INFO_HISTORY("📚 Retrieved " + std::to_string(entries.size()) + " history entries");
+    return entries;
+}
+
+std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParams& params) {
+    std::vector<HistoryEntry> entries;
+
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        std::cerr << "⚠️ History database not available yet" << std::endl;
+        return entries;
+    }
+
+    if (!history_db_) {
+        return entries;
+    }
+
+    std::stringstream sql;
+    sql << "SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, v.visit_time, v.transition "
+        << "FROM urls u "
+        << "INNER JOIN visits v ON u.id = v.url "
+        << "WHERE u.hidden = 0";
+
+    bool has_search = !params.search_term.empty();
+    bool has_start = params.start_time > 0;
+    bool has_end = params.end_time > 0;
+
+    if (has_search) {
+        sql << " AND (u.url LIKE ? OR u.title LIKE ?)";
+    }
+
+    if (has_start) {
+        sql << " AND v.visit_time >= ?";
+    }
+
+    if (has_end) {
+        sql << " AND v.visit_time <= ?";
+    }
+
+    sql << " ORDER BY v.visit_time DESC LIMIT ? OFFSET ?";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql.str().c_str(), -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to prepare search query: " << sqlite3_errmsg(history_db_) << std::endl;
+        return entries;
+    }
+
+    int param_index = 1;
+
+    if (has_search) {
+        std::string pattern = "%" + params.search_term + "%";
+        sqlite3_bind_text(stmt, param_index++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, param_index++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    }
+
+    if (has_start) {
+        sqlite3_bind_int64(stmt, param_index++, params.start_time);
+    }
+
+    if (has_end) {
+        sqlite3_bind_int64(stmt, param_index++, params.end_time);
+    }
+
+    sqlite3_bind_int(stmt, param_index++, params.limit);
+    sqlite3_bind_int(stmt, param_index++, params.offset);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        HistoryEntry entry;
+        entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry.visit_time = sqlite3_column_int64(stmt, 5);
+        entry.transition = sqlite3_column_int(stmt, 6);
+
+        entries.push_back(entry);
+    }
+
+    sqlite3_finalize(stmt);
+
+    std::cout << "🔍 Search returned " << entries.size() << " entries" << std::endl;
+    return entries;
+}
+
+HistoryEntry HistoryManager::GetHistoryEntryByUrl(const std::string& url) {
+    HistoryEntry entry;
+    entry.id = -1; // Invalid ID
+
+    if (!history_db_) {
+        return entry;
+    }
+
+    const char* sql = R"(
+        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time
+        FROM urls u
+        WHERE u.url = ?
+        LIMIT 1
+    )";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        return entry;
+    }
+
+    sqlite3_bind_text(stmt, 1, url.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry.visit_time = entry.last_visit_time; // Use last visit as visit time
+        entry.transition = 0;
+    }
+
+    sqlite3_finalize(stmt);
+    return entry;
+}
+
+bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        std::cerr << "⚠️ History database not available yet" << std::endl;
+        return false;
+    }
+
+    if (!history_db_) {
+        return false;
+    }
+
+    // First get the url_id
+    const char* get_id_sql = "SELECT id FROM urls WHERE url = ?";
+    sqlite3_stmt* stmt;
+
+    int rc = sqlite3_prepare_v2(history_db_, get_id_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to query URL ID: " << sqlite3_errmsg(history_db_) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, url.c_str(), -1, SQLITE_STATIC);
+
+    int64_t url_id = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        url_id = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+
+    if (url_id < 0) {
+        std::cout << "⚠️ URL not found in history: " << url << std::endl;
+        return false;
+    }
+
+    // Delete visits for this URL
+    const char* delete_visits_sql = "DELETE FROM visits WHERE url = ?";
+    rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to delete visits: " << sqlite3_errmsg(history_db_) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, url_id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Delete the URL entry
+    const char* delete_url_sql = "DELETE FROM urls WHERE id = ?";
+    rc = sqlite3_prepare_v2(history_db_, delete_url_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to delete URL: " << sqlite3_errmsg(history_db_) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, url_id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc == SQLITE_DONE) {
+        std::cout << "✅ Deleted history entry: " << url << std::endl;
+        return true;
+    }
+
+    return false;
+}
+
+bool HistoryManager::DeleteAllHistory() {
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        std::cerr << "⚠️ History database not available yet" << std::endl;
+        return false;
+    }
+
+    if (!history_db_) {
+        return false;
+    }
+
+    const char* delete_sql = R"(
+        DELETE FROM visits;
+        DELETE FROM urls;
+        DELETE FROM keyword_search_terms;
+    )";
+
+    char* err_msg = nullptr;
+    int rc = sqlite3_exec(history_db_, delete_sql, nullptr, nullptr, &err_msg);
+
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to clear history: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        return false;
+    }
+
+    std::cout << "✅ All history cleared" << std::endl;
+    return true;
+}
+
+bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        std::cerr << "⚠️ History database not available yet" << std::endl;
+        return false;
+    }
+
+    if (!history_db_) {
+        return false;
+    }
+
+    // Delete visits in range
+    const char* delete_visits_sql = "DELETE FROM visits WHERE visit_time >= ? AND visit_time <= ?";
+    sqlite3_stmt* stmt;
+
+    int rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to prepare delete range query: " << sqlite3_errmsg(history_db_) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, start_time);
+    sqlite3_bind_int64(stmt, 2, end_time);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Clean up orphaned URLs (URLs with no visits)
+    const char* cleanup_sql = "DELETE FROM urls WHERE id NOT IN (SELECT DISTINCT url FROM visits)";
+    rc = sqlite3_prepare_v2(history_db_, cleanup_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "❌ Failed to clean up orphaned URLs: " << sqlite3_errmsg(history_db_) << std::endl;
+        return false;
+    }
+
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    std::cout << "✅ History range cleared" << std::endl;
+    return true;
+}
+
+int64_t HistoryManager::GetCurrentChromiumTime() {
+    // Chromium time: microseconds since January 1, 1601 UTC
+    auto now = std::chrono::system_clock::now();
+    auto unix_time = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()
+    ).count();
+
+    // Convert Unix epoch (1970) to Windows epoch (1601)
+    // 11644473600 seconds = difference between epochs
+    return unix_time + (11644473600LL * 1000000LL);
+}
+
+int64_t HistoryManager::ChromiumTimeToUnix(int64_t chromium_time) {
+    // Convert Chromium microseconds to Unix seconds
+    return (chromium_time / 1000000) - 11644473600LL;
+}
+
+int64_t HistoryManager::UnixToChromiumTime(int64_t unix_time) {
+    // Convert Unix seconds to Chromium microseconds
+    return (unix_time + 11644473600LL) * 1000000LL;
+}
+
+std::vector<HistoryEntry> HistoryManager::GetHistorySimple(int limit) {
+    std::vector<HistoryEntry> entries;
+
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        LOG_INFO_HISTORY("⚠️ History database not available for simple query");
+        return entries;
+    }
+
+    if (!history_db_) {
+        return entries;
+    }
+
+    // Simple query - just get URLs without JOIN to diagnose
+    const char* sql = "SELECT id, url, title, visit_count, last_visit_time FROM urls LIMIT ?";
+
+    LOG_INFO_HISTORY("📚 Running simple test query");
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare simple query: " + std::string(sqlite3_errmsg(history_db_)));
+        return entries;
+    }
+
+    sqlite3_bind_int(stmt, 1, limit);
+
+    int row_count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        row_count++;
+        HistoryEntry entry;
+        entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry.visit_time = entry.last_visit_time;
+        entry.transition = 0;
+
+        entries.push_back(entry);
+
+        LOG_INFO_HISTORY("📚 Found URL: " + entry.url + " (visits: " + std::to_string(entry.visit_count) + ")");
+    }
+
+    LOG_INFO_HISTORY("📚 Simple query returned " + std::to_string(row_count) + " rows");
+
+    sqlite3_finalize(stmt);
+    return entries;
+}

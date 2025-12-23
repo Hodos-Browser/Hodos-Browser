@@ -3,7 +3,11 @@
     "allow": [
       "Bash(tasklist:*)",
       "Bash(cmake --build:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(sqlite3:*)",
+      "Bash(./kill-browser.sh)"
     ]
   }
 }

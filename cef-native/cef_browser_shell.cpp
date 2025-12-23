@@ -27,6 +27,7 @@
 #include "include/handlers/simple_app.h"
 #include "include/core/WalletService.h"
 #include "include/core/TabManager.h"
+#include "include/core/HistoryManager.h"
 #include <shellapi.h>
 #include <windows.h>
 #include <algorithm>  // For std::max
@@ -48,6 +49,7 @@ HWND g_settings_overlay_hwnd = nullptr;
 HWND g_wallet_overlay_hwnd = nullptr;
 HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
+HWND g_settings_menu_overlay_hwnd = nullptr;
 
 // Log levels
 enum class LogLevel {
@@ -941,6 +943,41 @@ LRESULT CALLBACK BRC100AuthOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Settings Menu Dropdown Overlay Window Procedure
+LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+
+            CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetSettingsMenuBrowser();
+            if (menu_browser && menu_browser->GetHost()) {
+                if (msg == WM_LBUTTONDOWN) {
+                    menu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                    menu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+                } else if (msg == WM_MOUSEMOVE) {
+                    menu_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+                }
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            g_settings_menu_overlay_hwnd = nullptr;
+            return 0;
+    }
+
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
     CefMainArgs main_args(hInstance);
@@ -972,6 +1009,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     settings.log_severity = LOGSEVERITY_INFO;
     settings.remote_debugging_port = 9222;
     settings.windowless_rendering_enabled = true;
+
+    // Set root cache path for browser data (history, cookies, etc.)
+    std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
+    std::string user_data_path = appdata_path + "\\HodosBrowser";
+    CefString(&settings.root_cache_path).FromString(user_data_path);
+    CefString(&settings.cache_path).FromString(user_data_path + "\\Default");
 
     // Enable CEF's runtime API for JavaScript communication
     CefString(&settings.javascript_flags).FromASCII("--expose-gc --allow-running-insecure-content");
@@ -1043,6 +1086,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("❌ Failed to register BRC-100 auth overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
+    // Register Settings Menu overlay window class (small dropdown)
+    WNDCLASS settingsMenuOverlayClass = {};
+    settingsMenuOverlayClass.lpfnWndProc = SettingsMenuOverlayWndProc;
+    settingsMenuOverlayClass.hInstance = hInstance;
+    settingsMenuOverlayClass.lpszClassName = L"CEFSettingsMenuOverlayWindow";
+
+    if (!RegisterClass(&settingsMenuOverlayClass)) {
+        LOG_DEBUG("❌ Failed to register settings menu overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
@@ -1071,6 +1124,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_DEBUG("CefInitialize success: " + std::string(success ? "true" : "false"));
 
     if (!success) return 1;
+
+    // Initialize HistoryManager with cache path (where CEF creates History database)
+    LOG_INFO("Initializing HistoryManager...");
+    std::string cache_dir = user_data_path + "\\Default";
+    if (HistoryManager::GetInstance().Initialize(cache_dir)) {
+        LOG_INFO("✅ HistoryManager initialized successfully");
+    } else {
+        LOG_ERROR("❌ Failed to initialize HistoryManager");
+    }
 
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);

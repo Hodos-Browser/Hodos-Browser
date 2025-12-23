@@ -3135,3 +3135,151 @@ pub async fn prove_certificate(
         keyring_for_verifier: verifier_keyring,
     })
 }
+
+// ============================================================================
+// Method 21: discoverByIdentityKey (Call Code 21)
+// ============================================================================
+
+/// Request structure for discoverByIdentityKey
+#[derive(Debug, Deserialize)]
+pub struct DiscoverByIdentityKeyRequest {
+    /// Identity key to search for (hex-encoded 33-byte compressed public key)
+    #[serde(rename = "identityKey")]
+    pub identity_key: String,
+
+    /// Maximum number of certificates to return (optional)
+    pub limit: Option<i64>,
+
+    /// Number of certificates to skip for pagination (optional)
+    pub offset: Option<i64>,
+}
+
+/// Response structure for discoverByIdentityKey
+#[derive(Debug, Serialize)]
+pub struct DiscoverByIdentityKeyResponse {
+    /// Total number of certificates found
+    #[serde(rename = "totalCertificates")]
+    pub total_certificates: i64,
+
+    /// Array of discovered certificates
+    pub certificates: Vec<CertificateResponse>,
+}
+
+/// discoverByIdentityKey - BRC-100 endpoint (Call Code 21)
+///
+/// Discovers certificates by identity key. Searches for certificates where
+/// the `subject` field matches the provided identity key.
+///
+/// This is used by apps to find certificates issued to a specific identity.
+pub async fn discover_by_identity_key(
+    state: web::Data<AppState>,
+    req: web::Json<DiscoverByIdentityKeyRequest>,
+) -> HttpResponse {
+    log::info!("📋 /discoverByIdentityKey called");
+    log::info!("   Identity key: {}", req.identity_key);
+    log::info!("   Limit: {:?}, Offset: {:?}", req.limit, req.offset);
+
+    // Validate identity key format (should be 33 bytes hex = 66 chars)
+    if req.identity_key.len() != 66 {
+        log::warn!("   Invalid identity key length: {} (expected 66 hex chars)", req.identity_key.len());
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid identity key length: {} (expected 66 hex characters for 33-byte compressed public key)", req.identity_key.len())
+        }));
+    }
+
+    // Validate hex format
+    if hex::decode(&req.identity_key).is_err() {
+        log::warn!("   Invalid identity key format: not valid hex");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid identity key format: must be hex-encoded"
+        }));
+    }
+
+    // Get database connection
+    let db = state.database.lock().unwrap();
+    let cert_repo = CertificateRepository::new(db.connection());
+
+    // Query certificates by subject (identity key)
+    // The subject is stored as hex in the database
+    let certificates = match cert_repo.list_certificates(
+        None,  // type_filter
+        None,  // certifier_filter
+        Some(&req.identity_key),  // subject_filter (identity key)
+        Some(false),  // is_deleted = false (only active certificates)
+        req.limit.map(|l| l as i32),
+        req.offset.map(|o| o as i32),
+    ) {
+        Ok(certs) => certs,
+        Err(e) => {
+            log::error!("   Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    let total = certificates.len() as i64;
+    log::info!("   Found {} certificates for identity key", total);
+
+    // Convert to response format (reusing CertificateResponse from listCertificates)
+    let mut cert_responses = Vec::new();
+    for cert in certificates {
+        // Get certificate fields
+        let fields_map = if let Some(cert_id) = cert.id {
+            match cert_repo.get_certificate_fields(cert_id) {
+                Ok(fields) => {
+                    let mut fields_json = serde_json::Map::new();
+                    for (field_name, field) in fields.iter() {
+                        let field_value_base64 = BASE64.encode(&field.field_value);
+                        fields_json.insert(
+                            field_name.clone(),
+                            serde_json::Value::String(field_value_base64),
+                        );
+                    }
+                    serde_json::Value::Object(fields_json)
+                }
+                Err(_) => serde_json::json!({}),
+            }
+        } else {
+            serde_json::json!({})
+        };
+
+        // Get keyring from certificate fields' master_key
+        let keyring_map = if let Some(cert_id) = cert.id {
+            match cert_repo.get_certificate_fields(cert_id) {
+                Ok(fields) => {
+                    let mut keyring_json = serde_json::Map::new();
+                    for (field_name, field) in fields.iter() {
+                        let master_key_base64 = BASE64.encode(&field.master_key);
+                        keyring_json.insert(
+                            field_name.clone(),
+                            serde_json::Value::String(master_key_base64),
+                        );
+                    }
+                    serde_json::Value::Object(keyring_json)
+                }
+                Err(_) => serde_json::json!({}),
+            }
+        } else {
+            serde_json::json!({})
+        };
+
+        cert_responses.push(CertificateResponse {
+            type_: BASE64.encode(&cert.type_),
+            serial_number: BASE64.encode(&cert.serial_number),
+            subject: hex::encode(&cert.subject),
+            certifier: hex::encode(&cert.certifier),
+            revocation_outpoint: cert.revocation_outpoint.clone(),
+            signature: hex::encode(&cert.signature),
+            fields: fields_map,
+            keyring: keyring_map,
+        });
+    }
+
+    log::info!("   ✅ Returning {} certificates", cert_responses.len());
+
+    HttpResponse::Ok().json(DiscoverByIdentityKeyResponse {
+        total_certificates: total,
+        certificates: cert_responses,
+    })
+}

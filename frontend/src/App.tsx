@@ -5,6 +5,7 @@ import WalletOverlayRoot from './pages/WalletOverlayRoot';
 import BackupOverlayRoot from './pages/BackupOverlayRoot';
 import BRC100AuthOverlayRoot from './pages/BRC100AuthOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
+import HistoryPage from './pages/HistoryPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
 import { brc100 } from './bridge/brc100';
 // Removed identity types - now using unified wallet system
@@ -155,6 +156,7 @@ const App = () => {
       <Routes>
         {/* <Route path="/" element={walletExists ? <MainBrowserView /> : <OverlayRoot />} /> */}
         <Route path="/" element={<MainBrowserView />} />
+        <Route path="/history" element={<HistoryPage />} />
         <Route path="/settings" element={<SettingsOverlayRoot />} />
         <Route path="/wallet" element={<WalletOverlayRoot />} />
         <Route path="/backup" element={<BackupOverlayRoot />} />

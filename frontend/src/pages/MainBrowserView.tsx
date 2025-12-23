@@ -10,7 +10,8 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
-import MoreVertIcon from '@mui/icons-material/MoreVert';
+import HistoryIcon from '@mui/icons-material/History';
+import SettingsIcon from '@mui/icons-material/Settings';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
@@ -244,6 +245,23 @@ const MainBrowserView: React.FC = () => {
                     <AccountBalanceWalletIcon fontSize="small" />
                 </IconButton>
 
+                {/* History Button */}
+                <IconButton
+                    onClick={() => createTab('http://127.0.0.1:5137/history')}
+                    size="small"
+                    sx={{
+                        flexShrink: 0,
+                        color: 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            color: 'rgba(0, 0, 0, 0.87)',
+                        }
+                    }}
+                    title="History"
+                >
+                    <HistoryIcon fontSize="small" />
+                </IconButton>
+
                 {/* Settings Button */}
                 <IconButton
                     onClick={() => {
@@ -259,8 +277,9 @@ const MainBrowserView: React.FC = () => {
                             color: 'rgba(0, 0, 0, 0.87)',
                         }
                     }}
+                    title="Settings"
                 >
-                    <MoreVertIcon fontSize="small" />
+                    <SettingsIcon fontSize="small" />
                 </IconButton>
             </Toolbar>
         </Box>

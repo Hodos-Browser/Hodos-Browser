@@ -23,6 +23,14 @@ bool NavigationHandler::Execute(const CefString& name,
     }
 
     std::string path = arguments[0]->GetStringValue();
+
+    // Handle hodos:// custom protocol - redirect to local frontend
+    if (path.find("hodos://") == 0) {
+        // Replace "hodos://" with "http://127.0.0.1:5137/"
+        path.replace(0, 8, "http://127.0.0.1:5137/");
+        std::cout << "📡 hodos:// protocol handler - redirecting to: " << path << std::endl;
+    }
+
     std::cout << "📡 Navigation request to: " << path << std::endl;
 
     CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();

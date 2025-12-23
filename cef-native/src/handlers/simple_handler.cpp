@@ -2,6 +2,7 @@
 #include "../../include/handlers/simple_handler.h"
 #include "../../include/handlers/simple_app.h"
 #include "../../include/core/TabManager.h"
+#include "../../include/core/HistoryManager.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
 #include "include/cef_v8.h"
@@ -90,6 +91,7 @@ CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
 }
@@ -113,6 +115,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
     return brc100_auth_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
+    return settings_menu_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -258,6 +264,33 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
     }
 
     LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
+
+    // Track history when page finishes loading (for main tabs only)
+    if (!isLoading && tab_id != -1) {
+        CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+        if (frame && frame->IsValid()) {
+            std::string url = frame->GetURL().ToString();
+
+            // Get title from TabManager which tracks it properly
+            std::string title;
+            auto& tab_mgr = TabManager::GetInstance();
+            auto tab = tab_mgr.GetTab(tab_id);
+            if (tab) {
+                title = tab->title;
+            }
+
+            // Don't track internal URLs
+            if (url.find("http://127.0.0.1:5137") != 0 &&
+                url.find("devtools://") != 0 &&
+                url.find("chrome://") != 0 &&
+                url.find("about:") != 0 &&
+                !url.empty()) {
+
+                LOG_INFO_BROWSER("📚 Recording history: " + url + " [" + title + "]");
+                HistoryManager::GetInstance().AddVisit(url, title, 0);
+            }
+        }
+    }
 
     // Special debug for BRC-100 auth overlay
     if (role_ == "brc100auth") {
@@ -444,6 +477,12 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+
+        // Delayed resize/invalidate to fix first-render issue
+    } else if (role_ == "settings_menu") {
+        settings_menu_browser_ = browser;
+        LOG_DEBUG_BROWSER("📋 Settings menu browser initialized.");
+        LOG_DEBUG_BROWSER("📋 Settings menu browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         // Delayed resize/invalidate to fix first-render issue
         CefRefPtr<CefBrowser> browser_ref = browser;
@@ -1298,6 +1337,16 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Create new process for settings overlay
         extern HINSTANCE g_hInstance;
         CreateSettingsOverlayWithSeparateProcess(g_hInstance);
+        return true;
+    }
+
+    if (message_name == "overlay_show_settings_menu") {
+        LOG_DEBUG_BROWSER("📋 overlay_show_settings_menu message received from role: " + role_);
+
+        // Create/toggle settings menu dropdown
+        extern HINSTANCE g_hInstance;
+        extern void CreateSettingsMenuOverlay(HINSTANCE);
+        CreateSettingsMenuOverlay(g_hInstance);
         return true;
     }
 

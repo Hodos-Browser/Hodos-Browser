@@ -15,6 +15,7 @@ set(OPENSSL_USE_STATIC_LIBS TRUE)
 # set(OPENSSL_MSVC_STATIC_RT TRUE)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 
 # Use the correct include path
@@ -45,6 +46,9 @@ set(SOURCES
     include/core/Tab.h
     include/core/TabManager.h
     src/core/TabManager.cpp
+    # History management
+    include/core/HistoryManager.h
+    src/core/HistoryManager.cpp
     # Add other source files here
 )
 
@@ -97,6 +101,7 @@ target_link_libraries(HodosBrowserShell PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     nlohmann_json::nlohmann_json
+    unofficial::sqlite3::sqlite3
 )
 
 # Delay-load

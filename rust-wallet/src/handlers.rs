@@ -13,6 +13,7 @@ pub use certificate_handlers::{
     list_certificates,
     acquire_certificate,
     prove_certificate,
+    discover_by_identity_key,
 };
 
 // Health check
@@ -95,6 +96,39 @@ pub async fn is_authenticated() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
         "authenticated": true
     }))
+}
+
+// /waitForAuthentication - BRC-100 endpoint (Call Code 24)
+// Waits for wallet to be initialized and returns once ready.
+// Unlike wrapper implementations, this IS the actual wallet - so we validate state.
+pub async fn wait_for_authentication(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("📋 /waitForAuthentication called");
+
+    // Verify wallet exists in database
+    let db = state.database.lock().unwrap();
+    let wallet_repo = crate::database::WalletRepository::new(db.connection());
+
+    match wallet_repo.get_primary_wallet() {
+        Ok(Some(wallet)) => {
+            log::info!("   ✅ Wallet ready (ID: {})", wallet.id.unwrap_or(0));
+            HttpResponse::Ok().json(serde_json::json!({
+                "authenticated": true
+            }))
+        }
+        Ok(None) => {
+            log::warn!("   ⚠️ Wallet not initialized");
+            HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": "Wallet not initialized",
+                "authenticated": false
+            }))
+        }
+        Err(e) => {
+            log::error!("   ❌ Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
 }
 
 // Authentication request structure

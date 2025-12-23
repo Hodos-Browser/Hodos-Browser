@@ -213,17 +213,19 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(app_state.clone())
-            .app_data(web::JsonConfig::default().error_handler(|err, _req| {
-                // Custom JSON error handler to ensure proper error responses
-                let error_msg = err.to_string();
-                log::error!("   JSON deserialization error: {}", error_msg);
-                actix_web::error::InternalError::from_response(
-                    err,
-                    actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                        "error": format!("Invalid JSON request: {}", error_msg)
-                    }))
-                ).into()
-            }))
+            .app_data(web::JsonConfig::default()
+                .limit(10 * 1024 * 1024)  // 10MB limit for BEEF transactions
+                .error_handler(|err, _req| {
+                    // Custom JSON error handler to ensure proper error responses
+                    let error_msg = err.to_string();
+                    log::error!("   JSON deserialization error: {}", error_msg);
+                    actix_web::error::InternalError::from_response(
+                        err,
+                        actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Invalid JSON request: {}", error_msg)
+                        }))
+                    ).into()
+                }))
             .wrap(cors)
             .wrap(middleware::Logger::new("%a \"%r\" %s %b \"%{Referer}i\" %T"))
 
@@ -236,6 +238,7 @@ async fn main() -> std::io::Result<()> {
             .route("/getVersion", web::get().to(handlers::get_version))
             .route("/getPublicKey", web::post().to(handlers::get_public_key))
             .route("/isAuthenticated", web::post().to(handlers::is_authenticated))
+            .route("/waitForAuthentication", web::post().to(handlers::wait_for_authentication))  // BRC-100 Call Code 24
             .route("/createHmac", web::post().to(handlers::create_hmac))
             .route("/verifyHmac", web::post().to(handlers::verify_hmac))
             .route("/verifySignature", web::post().to(handlers::verify_signature))
@@ -260,6 +263,7 @@ async fn main() -> std::io::Result<()> {
             .route("/listCertificates", web::post().to(handlers::list_certificates))  // Group C - Part 3
             .route("/proveCertificate", web::post().to(handlers::prove_certificate))  // Group C - Part 3
             .route("/relinquishCertificate", web::post().to(handlers::relinquish_certificate))  // Group C - Part 3
+            .route("/discoverByIdentityKey", web::post().to(handlers::discover_by_identity_key))  // Group C - Part 4
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

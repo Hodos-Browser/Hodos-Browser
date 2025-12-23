@@ -1,0 +1,5 @@
+🚀 OnContextInitialized entered
+→ header_hwnd_: 0000000000000000
+→ IsWindow(header_hwnd_): 0
+→ webview_hwnd_: 0000000000000000
+→ IsWindow(webview_hwnd_): 0

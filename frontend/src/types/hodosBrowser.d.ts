@@ -1,9 +1,17 @@
 import type { AddressData } from './address';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
+import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams } from './history';
 
 declare global {
   interface Window {
     hodosBrowser: {
+      history: {
+        get: (params?: HistoryGetParams) => HistoryEntry[];
+        search: (params: HistorySearchParams) => HistoryEntry[];
+        delete: (url: string) => boolean;
+        clearAll: () => boolean;
+        clearRange: (params: ClearRangeParams) => boolean;
+      };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
         create: () => Promise<{ success: boolean; wallet?: { mnemonic: string; address?: string; version?: string; backedUp?: boolean }; error?: string }>;

@@ -748,3 +748,86 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
         debugLog5.close();
     }
 }
+
+void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
+    LOG_INFO_APP("📋 Creating settings menu dropdown overlay");
+
+    // Check if overlay already exists
+    if (g_settings_menu_overlay_hwnd && IsWindow(g_settings_menu_overlay_hwnd)) {
+        LOG_INFO_APP("📋 Settings menu overlay already exists, closing it");
+        DestroyWindow(g_settings_menu_overlay_hwnd);
+        g_settings_menu_overlay_hwnd = nullptr;
+        return; // Toggle behavior - click again to close
+    }
+
+    // Get main window dimensions
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    int mainWidth = mainRect.right - mainRect.left;
+
+    // Small dropdown dimensions
+    int menuWidth = 200;
+    int menuHeight = 120;
+
+    // Position below toolbar (below both wallet and settings icons)
+    // Tab bar = 40px, Toolbar = 54px, total header = 94px
+    int menuX = mainRect.left + mainWidth - menuWidth - 10; // 10px from right edge
+    int menuY = mainRect.top + 100; // Below header + small gap (94px header + 6px gap)
+
+    LOG_INFO_APP("📋 Creating menu at position: (" + std::to_string(menuX) + ", " + std::to_string(menuY) + ")");
+
+    // Create small popup window
+    HWND menu_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFSettingsMenuOverlayWindow",
+        L"Settings Menu",
+        WS_POPUP,
+        menuX, menuY, menuWidth, menuHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!menu_hwnd) {
+        LOG_ERROR_APP("❌ Failed to create settings menu HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position and show
+    SetWindowPos(menu_hwnd, HWND_TOPMOST,
+        menuX, menuY, menuWidth, menuHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    g_settings_menu_overlay_hwnd = menu_hwnd;
+    LOG_INFO_APP("✅ Settings menu HWND created: " + std::to_string(reinterpret_cast<intptr_t>(menu_hwnd)));
+
+    // Create CEF browser for the menu
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(menu_hwnd, "SettingsMenu");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 255, 255, 255); // white background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> menu_handler(new SimpleHandler("settings_menu"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(menu_hwnd, menuWidth, menuHeight);
+    menu_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        menu_handler,
+        "http://127.0.0.1:5137/settings-menu",
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (result) {
+        LOG_INFO_APP("✅ Settings menu browser created");
+
+        // Enable mouse input
+        LONG exStyle = GetWindowLong(menu_hwnd, GWL_EXSTYLE);
+        SetWindowLong(menu_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+    } else {
+        LOG_ERROR_APP("❌ Failed to create settings menu browser");
+    }
+}

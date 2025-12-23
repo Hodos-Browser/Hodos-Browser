@@ -3,6 +3,7 @@
 #include "../../include/core/IdentityHandler.h"
 #include "../../include/core/NavigationHandler.h"
 #include "../../include/core/AddressHandler.h"
+#include "../../include/core/HistoryManager.h"
 #include "BRC100Handler.h"
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -193,10 +194,208 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
+// Handler for history operations
+class HistoryV8Handler : public CefV8Handler {
+public:
+    HistoryV8Handler() {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        LOG_INFO_RENDER("📚 HistoryV8Handler::Execute called with name: " + name.ToString());
+
+        auto& manager = HistoryManager::GetInstance();
+
+        // Note: Database opens lazily on first access
+        // Manager is always "initialized" even if database doesn't exist yet
+
+        if (name == "get") {
+            LOG_INFO_RENDER("📚 history.get() called - calling BROWSER process");
+
+            // Get parameters
+            int limit = 50;
+            int offset = 0;
+
+            if (arguments.size() > 0 && arguments[0]->IsObject()) {
+                CefRefPtr<CefV8Value> params = arguments[0];
+                if (params->HasValue("limit") && params->GetValue("limit")->IsInt()) {
+                    limit = params->GetValue("limit")->GetIntValue();
+                }
+                if (params->HasValue("offset") && params->GetValue("offset")->IsInt()) {
+                    offset = params->GetValue("offset")->GetIntValue();
+                }
+            }
+
+            // For now, call GetInstance() which will be uninitialized in render process
+            // This returns empty array - the proper fix is to use process messages
+            // but that requires async callbacks which complicates the API
+            auto entries = manager.GetHistory(limit, offset);
+
+            // Convert to V8 array
+            retval = CefV8Value::CreateArray(static_cast<int>(entries.size()));
+            for (size_t i = 0; i < entries.size(); i++) {
+                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
+                entry_obj->SetValue("url", CefV8Value::CreateString(entries[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("title", CefV8Value::CreateString(entries[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(entries[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitTime", CefV8Value::CreateDouble(static_cast<double>(entries[i].visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("transition", CefV8Value::CreateInt(entries[i].transition), V8_PROPERTY_ATTRIBUTE_NONE);
+
+                retval->SetValue(static_cast<int>(i), entry_obj);
+            }
+
+            LOG_INFO_RENDER("📚 Returning " + std::to_string(entries.size()) + " entries from RENDER process");
+            return true;
+        }
+        else if (name == "search") {
+            // arguments[0] = { search, startTime, endTime, limit, offset }
+            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
+                exception = "search() requires a parameters object";
+                return true;
+            }
+
+            HistorySearchParams params;
+            params.limit = 50;
+            params.offset = 0;
+            params.start_time = 0;
+            params.end_time = 0;
+
+            CefRefPtr<CefV8Value> search_params = arguments[0];
+
+            if (search_params->HasValue("search") && search_params->GetValue("search")->IsString()) {
+                params.search_term = search_params->GetValue("search")->GetStringValue().ToString();
+            }
+
+            if (search_params->HasValue("limit") && search_params->GetValue("limit")->IsInt()) {
+                params.limit = search_params->GetValue("limit")->GetIntValue();
+            }
+
+            if (search_params->HasValue("offset") && search_params->GetValue("offset")->IsInt()) {
+                params.offset = search_params->GetValue("offset")->GetIntValue();
+            }
+
+            if (search_params->HasValue("startTime") && search_params->GetValue("startTime")->IsDouble()) {
+                params.start_time = static_cast<int64_t>(search_params->GetValue("startTime")->GetDoubleValue());
+            }
+
+            if (search_params->HasValue("endTime") && search_params->GetValue("endTime")->IsDouble()) {
+                params.end_time = static_cast<int64_t>(search_params->GetValue("endTime")->GetDoubleValue());
+            }
+
+            std::cout << "🔍 history.search() called with term: " << params.search_term << std::endl;
+
+            auto results = manager.SearchHistory(params);
+
+            // Convert to V8 array
+            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
+            for (size_t i = 0; i < results.size(); i++) {
+                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
+                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitTime", CefV8Value::CreateDouble(static_cast<double>(results[i].visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
+
+                retval->SetValue(static_cast<int>(i), entry_obj);
+            }
+
+            std::cout << "✅ Search returned " << results.size() << " entries" << std::endl;
+            return true;
+        }
+        else if (name == "delete") {
+            // arguments[0] = url string
+            if (arguments.size() == 0 || !arguments[0]->IsString()) {
+                exception = "delete() requires a URL string";
+                return true;
+            }
+
+            std::string url = arguments[0]->GetStringValue().ToString();
+            std::cout << "🗑️ history.delete() called for URL: " << url << std::endl;
+
+            bool success = manager.DeleteHistoryEntry(url);
+            retval = CefV8Value::CreateBool(success);
+
+            return true;
+        }
+        else if (name == "clearAll") {
+            std::cout << "🗑️ history.clearAll() called" << std::endl;
+
+            bool success = manager.DeleteAllHistory();
+            retval = CefV8Value::CreateBool(success);
+
+            return true;
+        }
+        else if (name == "clearRange") {
+            // arguments[0] = { startTime, endTime }
+            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
+                exception = "clearRange() requires a parameters object with startTime and endTime";
+                return true;
+            }
+
+            CefRefPtr<CefV8Value> params = arguments[0];
+
+            if (!params->HasValue("startTime") || !params->HasValue("endTime")) {
+                exception = "clearRange() requires startTime and endTime parameters";
+                return true;
+            }
+
+            int64_t start_time = static_cast<int64_t>(params->GetValue("startTime")->GetDoubleValue());
+            int64_t end_time = static_cast<int64_t>(params->GetValue("endTime")->GetDoubleValue());
+
+            std::cout << "🗑️ history.clearRange() called" << std::endl;
+
+            bool success = manager.DeleteHistoryRange(start_time, end_time);
+            retval = CefV8Value::CreateBool(success);
+
+            return true;
+        }
+        else if (name == "test") {
+            LOG_INFO_RENDER("📚 history.test() called - running simple query");
+
+            auto results = manager.GetHistorySimple(10);
+
+            LOG_INFO_RENDER("📚 Simple query returned " + std::to_string(results.size()) + " entries");
+
+            // Convert to V8 array
+            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
+            for (size_t i = 0; i < results.size(); i++) {
+                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
+                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
+
+                retval->SetValue(static_cast<int>(i), entry_obj);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(HistoryV8Handler);
+};
+
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 SimpleRenderProcessHandler constructor called!");
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
+
+    // Initialize HistoryManager for render process
+    std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
+    std::string user_data_path = appdata_path + "\\HodosBrowser\\Default";
+
+    LOG_DEBUG_RENDER("🔧 Initializing HistoryManager in RENDER process");
+    if (HistoryManager::GetInstance().Initialize(user_data_path)) {
+        LOG_DEBUG_RENDER("✅ HistoryManager initialized in RENDER process");
+    } else {
+        LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
+    }
 }
 
 void SimpleRenderProcessHandler::OnContextCreated(
@@ -285,6 +484,35 @@ void SimpleRenderProcessHandler::OnContextCreated(
     addressObject->SetValue("generate",
         CefV8Value::CreateFunction("generate", addressHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // Create the history object
+    LOG_DEBUG_RENDER("📚 Creating history object for V8 context");
+    CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+
+    // Bind HistoryV8Handler
+    LOG_DEBUG_RENDER("📚 Binding HistoryV8Handler functions");
+    CefRefPtr<HistoryV8Handler> historyHandler = new HistoryV8Handler();
+    historyObject->SetValue("get",
+        CefV8Value::CreateFunction("get", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("search",
+        CefV8Value::CreateFunction("search", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("delete",
+        CefV8Value::CreateFunction("delete", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("clearAll",
+        CefV8Value::CreateFunction("clearAll", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("clearRange",
+        CefV8Value::CreateFunction("clearRange", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("test",
+        CefV8Value::CreateFunction("test", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);
