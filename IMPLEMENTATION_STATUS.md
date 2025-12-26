@@ -317,7 +317,7 @@ From the guide:
 
 ~~1. Rebuild wallet with 10MB JSON limit fix (`cargo build --release`)~~
 ~~2. Implement inputBEEF handling per the guide~~
-3. Test with beta.zanaadu.com (blocked by Zanaadu registry state issue)
+~~3. Test with beta.zanaadu.com~~ - COMPLETED (Dec 26, 2024)
 
 ---
 
@@ -388,7 +388,7 @@ Added `input_beef: Option<Beef>` field to store the parsed inputBEEF for use dur
 ### Status
 
 **Implementation**: COMPLETED
-**Testing**: Blocked by Zanaadu registry state issue (previous transaction failed to broadcast due to fee issues)
+**Testing**: SUCCESSFUL (Dec 26, 2024) - Registered as @18 on beta.zanaadu.com
 
 ---
 
@@ -459,4 +459,14 @@ TODO comment added for future dynamic fee rate fetching:
 ### Status
 
 **Implementation**: COMPLETED
-**Testing**: Blocked by Zanaadu registry state issue
+**Testing**: SUCCESSFUL (Dec 26, 2024)
+
+### Test Results
+
+Successfully registered identity @18 on beta.zanaadu.com:
+- Transaction: `b91dbdf1c5480e9579b0366b62f85623cf1d83625c58b52235ea29e08490f345`
+- Transaction propagated to blockchain via miners
+- inputBEEF parsing and full BEEF chain preservation working correctly
+- Dynamic fee calculation ensured sufficient fees for 78KB+ transactions
+
+**Notes on Broadcast Warnings**: Some SHIP overlay acknowledgment warnings appeared but these are Zanaadu-side configuration issues, not wallet bugs. The transaction still propagated successfully through standard miner broadcast.

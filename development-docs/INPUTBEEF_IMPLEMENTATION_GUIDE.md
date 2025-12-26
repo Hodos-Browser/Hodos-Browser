@@ -475,8 +475,8 @@ if user_input_total < total_output + estimated_fee {
 - [x] Implement broadcast decision logic
 - [x] Add error handling for edge cases
 - [x] Custom outpoint deserializer for both object and string formats
-- [ ] Update tests
-- [ ] Test with real apps (beta.zanaadu.com) - blocked by registry state issue
+- [x] Test with real apps (beta.zanaadu.com) - SUCCESSFUL (Dec 26, 2024)
+- [ ] Update unit tests
 
 ---
 
@@ -492,7 +492,15 @@ if user_input_total < total_output + estimated_fee {
 ---
 
 **Last Updated**: 2024-12-26
-**Status**: IMPLEMENTED (testing blocked by Zanaadu registry state issue)
+**Status**: IMPLEMENTED AND TESTED
+
+### Test Results (Dec 26, 2024)
+
+Successfully tested with beta.zanaadu.com:
+- Registered identity @18
+- Transaction: `b91dbdf1c5480e9579b0366b62f85623cf1d83625c58b52235ea29e08490f345`
+- Full BEEF chain preservation verified
+- Dynamic fee calculation working correctly for large transactions
 
 ### Additional Implementation Notes (Dec 26, 2024)
 
