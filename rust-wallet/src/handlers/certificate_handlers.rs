@@ -2509,7 +2509,20 @@ async fn create_certificate_transaction(
 
     // Step 3: Select UTXOs to fund transaction (reuse logic from createAction)
     let certificate_output_amount = 600; // satoshis (above dust limit)
-    let estimated_fee = 5000; // Use same fee estimate as createAction
+
+    // Calculate fee based on transaction size
+    // Certificate tx: 1-2 inputs (P2PKH) + 1 certificate output + 1 change output
+    let certificate_script_len = locking_script_bytes.len();
+    let output_script_lengths = vec![certificate_script_len, 25]; // certificate + P2PKH change
+    let estimated_fee = crate::handlers::estimate_fee_for_transaction(
+        2,  // Estimate 2 inputs
+        &output_script_lengths,
+        false,  // Change already included in output_script_lengths
+        crate::handlers::DEFAULT_SATS_PER_KB
+    ) as i64;
+    log::info!("   📊 Certificate tx fee estimate: {} satoshis (script: {} bytes)",
+        estimated_fee, certificate_script_len);
+
     let total_needed = certificate_output_amount + estimated_fee;
 
     // Get addresses from database (reuse from createAction)

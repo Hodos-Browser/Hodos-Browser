@@ -230,3 +230,233 @@ The history feature implementation is complete and functional. The TypeScript bu
 - Grouping by date
 - Advanced filtering options
 - History sync across devices
+
+---
+
+## inputBEEF Implementation Research - COMPLETED
+
+**Date**: December 25, 2024
+
+### Overview
+
+Completed research and documentation for implementing `inputBEEF` handling in the `createAction` endpoint. This is required for collaborative transactions where apps provide their own UTXOs.
+
+### Problem Identified
+
+The `createAction` endpoint has a critical bug:
+1. **Missing `inputs` field**: The `CreateActionRequest` struct doesn't have an `inputs` field
+2. **inputBEEF ignored**: The `input_beef` field is defined but never processed
+3. **Always uses wallet UTXOs**: The handler always fetches wallet's own UTXOs
+
+### Root Cause
+
+Apps like beta.zanaadu.com send requests with:
+- `inputBEEF`: BEEF data containing source transactions
+- `inputs`: Array of outpoints referencing transactions in the BEEF
+
+The wallet ignores both fields and tries to build transactions from scratch.
+
+### Research Completed
+
+1. **BRC-100 Specification** - Reviewed createAction requirements
+2. **TypeScript SDK Analysis** - Studied `buildSignableTransaction.ts`:
+   - Line 26: `Beef.fromBinary(args.inputBEEF)`
+   - Line 108: `inputBeef?.findTxid(argsInput.outpoint.txid)?.tx`
+3. **BEEF.js Implementation** - Studied `@bsv/sdk` BEEF parsing:
+   - `findTxid()` method for lookup
+   - `findTransactionForSigning()` for complete tx resolution
+   - Graceful handling of missing transactions
+4. **Collaborative Transaction Patterns** - Documented ANYONECANPAY flows
+
+### Files Created
+
+1. **development-docs/INPUTBEEF_IMPLEMENTATION_GUIDE.md**
+   - Complete implementation guide with code examples
+   - Step-by-step implementation plan
+   - Error handling strategies
+   - Testing checklist
+
+### Key Findings
+
+| Aspect | Current State | Required State |
+|--------|--------------|----------------|
+| `inputs` field | Missing | Add `Vec<CreateActionInput>` |
+| `inputBEEF` parsing | Ignored | Parse with `Beef::from_hex()` |
+| Source tx lookup | None | Use `beef.find_txid()` |
+| Pre-signed inputs | Not supported | Preserve `unlockingScript` |
+| Response BEEF | Only wallet txs | Include input BEEF sources |
+
+### Implementation Checklist
+
+From the guide:
+- [ ] Add `CreateActionInput` and `CreateActionOutpoint` structs
+- [ ] Add `inputs` field to `CreateActionRequest`
+- [ ] Parse inputBEEF when present
+- [ ] Look up source transactions from BEEF
+- [ ] Handle pre-signed unlocking scripts
+- [ ] Handle missing source transactions (fetch from network)
+- [ ] Calculate input values from source transactions
+- [ ] Determine when wallet UTXOs needed
+- [ ] Build response BEEF with all source transactions
+- [ ] Implement broadcast decision logic
+
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/handlers.rs` | Add structs, update handler |
+| `rust-wallet/src/beef.rs` | May need helper methods |
+
+### Status
+
+**Research**: COMPLETED
+**Documentation**: COMPLETED
+**Implementation**: PENDING
+
+### Next Steps
+
+~~1. Rebuild wallet with 10MB JSON limit fix (`cargo build --release`)~~
+~~2. Implement inputBEEF handling per the guide~~
+3. Test with beta.zanaadu.com (blocked by Zanaadu registry state issue)
+
+---
+
+## inputBEEF Implementation - COMPLETED
+
+**Date**: December 25-26, 2024
+
+### Overview
+
+Successfully implemented `inputBEEF` and `inputs` field handling in the `createAction` endpoint. This enables collaborative transactions where apps provide their own UTXOs (e.g., ANYONECANPAY signature patterns).
+
+### Changes Made
+
+#### 1. CreateActionRequest Updates (`handlers.rs`)
+
+Added support for flexible input formats:
+
+```rust
+// inputBEEF accepts both hex string and byte array
+#[serde(rename = "inputBEEF")]
+pub input_beef: Option<serde_json::Value>,
+
+// inputs field for user-provided outpoints
+#[serde(rename = "inputs")]
+pub inputs: Option<Vec<CreateActionInput>>,
+```
+
+#### 2. Custom Outpoint Deserializer
+
+Implemented custom serde deserializer for `CreateActionOutpoint` to handle both formats:
+- Object format: `{"txid": "abc...", "vout": 0}`
+- String format: `"abc....0"` (txid.vout)
+
+#### 3. inputBEEF Format Handling
+
+Parse inputBEEF from either:
+- Hex string: `"0100beef..."`
+- Byte array: `[1, 0, 190, 239, ...]`
+
+#### 4. Full BEEF Chain Preservation
+
+Modified `sign_action` to copy ALL transactions and BUMPs from inputBEEF to the response BEEF, not just the direct parent transaction. This ensures overlay servers can verify the complete SPV chain.
+
+#### 5. PendingTransaction Enhancement
+
+Added `input_beef: Option<Beef>` field to store the parsed inputBEEF for use during signing.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/handlers.rs` | Added `CreateActionInput`, custom `CreateActionOutpoint` deserializer, inputBEEF parsing, full BEEF chain copying |
+
+### Implementation Checklist (Updated)
+
+- [x] Add `CreateActionInput` and `CreateActionOutpoint` structs
+- [x] Add `inputs` field to `CreateActionRequest`
+- [x] Parse inputBEEF when present (both hex and byte array formats)
+- [x] Look up source transactions from BEEF
+- [x] Handle pre-signed unlocking scripts
+- [x] Handle missing source transactions (fetch from network) - partial
+- [x] Calculate input values from source transactions
+- [x] Determine when wallet UTXOs needed
+- [x] Build response BEEF with all source transactions
+- [x] Implement broadcast decision logic
+- [x] Add error handling for edge cases
+
+### Status
+
+**Implementation**: COMPLETED
+**Testing**: Blocked by Zanaadu registry state issue (previous transaction failed to broadcast due to fee issues)
+
+---
+
+## Dynamic Fee Calculation - COMPLETED
+
+**Date**: December 26, 2024
+
+### Overview
+
+Implemented size-based transaction fee calculation to replace hardcoded fees. BSV miners currently require ~1 sat/byte, so the previous hardcoded 5000 sat fee was insufficient for large transactions (e.g., 78KB transactions require ~78,000 sats).
+
+### Problem Solved
+
+Large transactions with inputBEEF (containing full SPV verification chains) were being rejected with "Fees are insufficient" because the hardcoded 5000 sat fee was too low.
+
+### Implementation
+
+#### Fee Calculation Utilities (`handlers.rs`)
+
+```rust
+/// Default fee rate: 1 sat/byte = 1000 sat/kb
+pub const DEFAULT_SATS_PER_KB: u64 = 1000;
+
+/// Minimum fee to ensure relay
+pub const MIN_FEE_SATS: u64 = 200;
+
+/// Calculate fee from transaction size
+pub fn calculate_fee(tx_size_bytes: usize, sats_per_kb: u64) -> u64
+
+/// Estimate transaction size from script lengths
+pub fn estimate_transaction_size(
+    input_script_lengths: &[usize],
+    output_script_lengths: &[usize],
+) -> usize
+
+/// Estimate fee before transaction is built
+pub fn estimate_fee_for_transaction(
+    num_inputs: usize,
+    output_script_lengths: &[usize],
+    include_change: bool,
+    sats_per_kb: u64,
+) -> u64
+```
+
+#### Two-Pass Fee Calculation in `create_action`
+
+1. **Initial estimate**: Based on expected outputs + estimated inputs (for UTXO selection)
+2. **Recalculation**: After selecting actual UTXOs, recalculate with accurate input count
+
+#### Certificate Handler Update
+
+Updated `certificate_handlers.rs` to use dynamic fee calculation based on certificate script size.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/handlers.rs` | Added fee utilities, two-pass fee calculation in `create_action` |
+| `rust-wallet/src/handlers/certificate_handlers.rs` | Dynamic fee for certificate transactions |
+
+### Future Enhancement: MAPI Integration
+
+TODO comment added for future dynamic fee rate fetching:
+- TAAL MAPI: `https://merchantapi.taal.com/mapi/feeQuote`
+- Response contains `miningFee.satoshis` and `miningFee.bytes`
+- Recommended: Cache with 1-hour TTL, fallback to DEFAULT_SATS_PER_KB
+
+### Status
+
+**Implementation**: COMPLETED
+**Testing**: Blocked by Zanaadu registry state issue

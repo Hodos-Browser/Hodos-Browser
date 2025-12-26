@@ -45,13 +45,27 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | File | Identifiers |
 |------|-------------|
 | `src/main.rs` | `AppState`, `main()`, route registration |
-| `src/handlers.rs` | `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, `list_certificates`, `acquire_certificate` |
+| `src/handlers.rs` | `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, `list_certificates`, `acquire_certificate`, fee calculation utilities |
 | `src/crypto/brc42.rs` | `derive_child_private_key`, `derive_child_public_key` |
 | `src/crypto/brc43.rs` | `InvoiceNumber`, `SecurityLevel`, `normalize_protocol_id` |
 | `src/crypto/signing.rs` | `sha256`, `hmac_sha256`, `verify_hmac_sha256` |
 | `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository` |
 | `src/database/helpers.rs` | `get_master_private_key_from_db`, `get_master_public_key_from_db` |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
+
+## Fee Calculation
+
+Transaction fees are calculated dynamically based on size (not hardcoded):
+
+| Constant/Function | Purpose |
+|-------------------|---------|
+| `DEFAULT_SATS_PER_KB` | Default fee rate: 1000 sat/kb (1 sat/byte) |
+| `MIN_FEE_SATS` | Minimum fee: 200 satoshis |
+| `estimate_transaction_size()` | Calculate tx size from script lengths |
+| `calculate_fee()` | Compute fee from size and rate |
+| `estimate_fee_for_transaction()` | Estimate fee before tx is built |
+
+**Future**: MAPI integration for dynamic fee rates (see TODO in `handlers.rs`)
 
 ## API Endpoints (subset)
 

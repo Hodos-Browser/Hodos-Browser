@@ -226,6 +226,7 @@ async fn main() -> std::io::Result<()> {
                         }))
                     ).into()
                 }))
+            .app_data(web::PayloadConfig::new(100 * 1024 * 1024))  // 100MB limit for web::Bytes
             .wrap(cors)
             .wrap(middleware::Logger::new("%a \"%r\" %s %b \"%{Referer}i\" %T"))
 
@@ -243,8 +244,18 @@ async fn main() -> std::io::Result<()> {
             .route("/verifyHmac", web::post().to(handlers::verify_hmac))
             .route("/verifySignature", web::post().to(handlers::verify_signature))
             .route("/createSignature", web::post().to(handlers::create_signature))
-            .route("/createAction", web::post().to(handlers::create_action))
-            .route("/signAction", web::post().to(handlers::sign_action))
+            // createAction needs large payload support for inputBEEF (100MB limit)
+            .service(
+                web::resource("/createAction")
+                    .app_data(web::PayloadConfig::new(100 * 1024 * 1024))
+                    .route(web::post().to(handlers::create_action))
+            )
+            // signAction also needs large payload support (100MB limit)
+            .service(
+                web::resource("/signAction")
+                    .app_data(web::PayloadConfig::new(100 * 1024 * 1024))
+                    .route(web::post().to(handlers::sign_action))
+            )
             .route("/processAction", web::post().to(handlers::process_action))
             .route("/abortAction", web::post().to(handlers::abort_action))
             .route("/listActions", web::post().to(handlers::list_actions))

@@ -16,6 +16,157 @@ pub use certificate_handlers::{
     discover_by_identity_key,
 };
 
+// ============================================================================
+// Fee Calculation Utilities
+// ============================================================================
+
+/// Default fee rate in satoshis per kilobyte (1 sat/byte = 1000 sat/kb)
+/// BSV miners currently accept 0.5-1 sat/byte. Using 1 sat/byte for safety margin.
+pub const DEFAULT_SATS_PER_KB: u64 = 1000;
+
+/// Minimum fee to ensure transaction relay (dust prevention)
+pub const MIN_FEE_SATS: u64 = 200;
+
+/// Calculate the byte size of a VarInt encoding
+fn varint_size(val: usize) -> usize {
+    if val <= 0xFC { 1 }
+    else if val <= 0xFFFF { 3 }
+    else if val <= 0xFFFFFFFF { 5 }
+    else { 9 }
+}
+
+/// Calculate the serialized size of a transaction input
+/// Format: 32 (txid) + 4 (vout) + varint(script_len) + script + 4 (sequence)
+fn input_size(script_len: usize) -> usize {
+    32 + 4 + varint_size(script_len) + script_len + 4
+}
+
+/// Calculate the serialized size of a transaction output
+/// Format: 8 (satoshis) + varint(script_len) + script
+fn output_size(script_len: usize) -> usize {
+    8 + varint_size(script_len) + script_len
+}
+
+/// Estimate transaction size in bytes from script lengths
+///
+/// # Arguments
+/// * `input_script_lengths` - Vec of unlocking script lengths (in bytes)
+/// * `output_script_lengths` - Vec of locking script lengths (in bytes)
+///
+/// # Returns
+/// Estimated transaction size in bytes
+pub fn estimate_transaction_size(
+    input_script_lengths: &[usize],
+    output_script_lengths: &[usize],
+) -> usize {
+    let mut size = 4; // Version (4 bytes)
+
+    // Input count (varint)
+    size += varint_size(input_script_lengths.len());
+
+    // All inputs
+    for script_len in input_script_lengths {
+        size += input_size(*script_len);
+    }
+
+    // Output count (varint)
+    size += varint_size(output_script_lengths.len());
+
+    // All outputs
+    for script_len in output_script_lengths {
+        size += output_size(*script_len);
+    }
+
+    size += 4; // Locktime (4 bytes)
+
+    size
+}
+
+/// Calculate transaction fee based on size and rate
+///
+/// # Arguments
+/// * `tx_size_bytes` - Transaction size in bytes
+/// * `sats_per_kb` - Fee rate in satoshis per kilobyte (1000 = 1 sat/byte)
+///
+/// # Returns
+/// Fee in satoshis (minimum MIN_FEE_SATS)
+pub fn calculate_fee(tx_size_bytes: usize, sats_per_kb: u64) -> u64 {
+    // Calculate: (size * rate + 999) / 1000 to round up
+    let fee = ((tx_size_bytes as u64 * sats_per_kb) + 999) / 1000;
+    std::cmp::max(fee, MIN_FEE_SATS)
+}
+
+/// Estimate fee for a transaction before it's fully built
+/// Uses typical script sizes for P2PKH inputs/outputs
+///
+/// P2PKH unlocking script: ~107 bytes (signature ~71-72 + pubkey 33 + push opcodes)
+/// P2PKH locking script: 25 bytes (OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG)
+///
+/// # Arguments
+/// * `num_inputs` - Number of inputs (will use P2PKH unlocking script size estimate)
+/// * `output_script_lengths` - Actual locking script lengths for outputs
+/// * `include_change` - Whether to include a P2PKH change output
+/// * `sats_per_kb` - Fee rate in satoshis per kilobyte
+///
+/// # Returns
+/// Estimated fee in satoshis
+pub fn estimate_fee_for_transaction(
+    num_inputs: usize,
+    output_script_lengths: &[usize],
+    include_change: bool,
+    sats_per_kb: u64,
+) -> u64 {
+    const P2PKH_UNLOCKING_SCRIPT_LEN: usize = 107; // Typical P2PKH signature + pubkey
+    const P2PKH_LOCKING_SCRIPT_LEN: usize = 25;    // P2PKH output script
+
+    // Build input script lengths (assume P2PKH for wallet inputs)
+    let input_script_lengths: Vec<usize> = vec![P2PKH_UNLOCKING_SCRIPT_LEN; num_inputs];
+
+    // Build output script lengths
+    let mut all_output_scripts: Vec<usize> = output_script_lengths.to_vec();
+    if include_change {
+        all_output_scripts.push(P2PKH_LOCKING_SCRIPT_LEN);
+    }
+
+    let size = estimate_transaction_size(&input_script_lengths, &all_output_scripts);
+    calculate_fee(size, sats_per_kb)
+}
+
+/// Get fee from a fully built transaction
+pub fn get_transaction_fee(tx: &crate::transaction::Transaction, sats_per_kb: u64) -> u64 {
+    match tx.serialize() {
+        Ok(bytes) => calculate_fee(bytes.len(), sats_per_kb),
+        Err(_) => {
+            // Fallback to estimation if serialization fails
+            log::warn!("   Failed to serialize transaction for fee calculation, using estimate");
+            estimate_fee_for_transaction(tx.inputs.len(), &[], true, sats_per_kb)
+        }
+    }
+}
+
+// TODO: Future enhancement - Dynamic fee rate fetching from MAPI
+//
+// BSV miners expose fee quotes via Merchant API (MAPI):
+// - TAAL: https://merchantapi.taal.com/mapi/feeQuote
+// - GorillaPool: Similar endpoint
+//
+// Response format:
+// {
+//   "fees": [{
+//     "feeType": "standard",
+//     "miningFee": { "satoshis": 500, "bytes": 1000 },
+//     "relayFee": { "satoshis": 250, "bytes": 1000 }
+//   }]
+// }
+//
+// Implementation plan:
+// 1. Add FeeRateCache struct with TTL (1 hour recommended)
+// 2. Add async fn fetch_mapi_fee_quote() -> Result<u64, Error>
+// 3. Store cached rate in AppState
+// 4. Fall back to DEFAULT_SATS_PER_KB on error
+//
+// See: https://github.com/bitcoin-sv-specs/brfc-merchantapi
+
 // Health check
 pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
@@ -1260,7 +1411,7 @@ pub async fn verify_signature(
 
     // Parse JSON body
     let body_str = String::from_utf8_lossy(&body);
-    log::info!("   Raw body: {}", body_str);
+    log::info!("   Raw body ({} bytes): {}...", body.len(), &body_str[..std::cmp::min(200, body_str.len())]);
 
     let req: VerifySignatureRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -1545,7 +1696,7 @@ pub async fn create_signature(
 
     // Parse JSON body
     let body_str = String::from_utf8_lossy(&body);
-    log::info!("   Raw body: {}", body_str);
+    log::info!("   Raw body ({} bytes): {}...", body.len(), &body_str[..std::cmp::min(200, body_str.len())]);
 
     let req: CreateSignatureRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -1801,21 +1952,139 @@ struct Brc29PaymentInfo {
     output_index: usize,
 }
 
+/// User input info for signing (when inputs come from inputBEEF)
+#[derive(Debug, Clone)]
+struct UserInputInfo {
+    txid: String,
+    vout: u32,
+    satoshis: i64,
+    locking_script: Vec<u8>,
+    source_tx: Option<Vec<u8>>,  // Raw source transaction bytes (from inputBEEF)
+    is_pre_signed: bool,  // true if unlocking script already set
+}
+
 // Pending transaction with metadata
 #[derive(Debug, Clone)]
 struct PendingTransaction {
     tx: Transaction,
-    input_utxos: Vec<UTXO>, // UTXOs being spent (for signing)
+    input_utxos: Vec<UTXO>, // Wallet UTXOs being spent (for signing)
+    user_input_infos: Vec<UserInputInfo>, // User-provided inputs (from inputBEEF)
     brc29_info: Option<Brc29PaymentInfo>, // BRC-29 payment metadata if applicable
+    input_beef: Option<crate::beef::Beef>, // Full inputBEEF for verification chain
 }
 
 // In-memory storage for pending transactions
 static PENDING_TRANSACTIONS: Lazy<StdMutex<HashMap<String, PendingTransaction>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 
+/// BRC-100 CreateAction input outpoint specification
+/// Can be deserialized from either:
+/// - Object format: {"txid": "abc...", "vout": 0}
+/// - String format: "abc...0" (txid.vout)
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateActionOutpoint {
+    pub txid: String,
+    pub vout: u32,
+}
+
+impl<'de> serde::Deserialize<'de> for CreateActionOutpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor, MapAccess};
+
+        struct OutpointVisitor;
+
+        impl<'de> Visitor<'de> for OutpointVisitor {
+            type Value = CreateActionOutpoint;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an outpoint object {txid, vout} or string 'txid.vout'")
+            }
+
+            // Handle string format: "txid.vout"
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // Find the last '.' to split txid and vout
+                if let Some(dot_pos) = value.rfind('.') {
+                    let txid = value[..dot_pos].to_string();
+                    let vout_str = &value[dot_pos + 1..];
+                    let vout = vout_str.parse::<u32>()
+                        .map_err(|_| de::Error::custom(format!("invalid vout in outpoint: {}", vout_str)))?;
+                    Ok(CreateActionOutpoint { txid, vout })
+                } else {
+                    Err(de::Error::custom(format!("invalid outpoint string format: {}", value)))
+                }
+            }
+
+            // Handle object format: {txid: "...", vout: 0}
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut txid: Option<String> = None;
+                let mut vout: Option<u32> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "txid" => {
+                            txid = Some(map.next_value()?);
+                        }
+                        "vout" => {
+                            vout = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde_json::Value = map.next_value()?;
+                        }
+                    }
+                }
+
+                let txid = txid.ok_or_else(|| de::Error::missing_field("txid"))?;
+                let vout = vout.ok_or_else(|| de::Error::missing_field("vout"))?;
+
+                Ok(CreateActionOutpoint { txid, vout })
+            }
+        }
+
+        deserializer.deserialize_any(OutpointVisitor)
+    }
+}
+
+/// BRC-100 CreateAction input specification
+/// When an app provides inputs, it's specifying UTXOs to spend (possibly pre-signed)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateActionInput {
+    /// The outpoint (txid + vout) of the UTXO to spend
+    #[serde(rename = "outpoint")]
+    pub outpoint: CreateActionOutpoint,
+
+    /// Hex-encoded unlocking script (if pre-signed, e.g., ANYONECANPAY)
+    #[serde(rename = "unlockingScript")]
+    pub unlocking_script: Option<String>,
+
+    /// Length of unlocking script (for fee calculation when script not yet known)
+    #[serde(rename = "unlockingScriptLength")]
+    pub unlocking_script_length: Option<usize>,
+
+    /// Sequence number (default: 0xFFFFFFFF)
+    #[serde(rename = "sequenceNumber")]
+    pub sequence_number: Option<u32>,
+
+    /// Satoshi value of this input (for fee calculation)
+    #[serde(rename = "inputSatoshis")]
+    pub input_satoshis: Option<i64>,
+}
+
 // Request structure for /createAction
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateActionRequest {
+    /// User-provided inputs (optional) - references UTXOs in inputBEEF
+    #[serde(rename = "inputs")]
+    pub inputs: Option<Vec<CreateActionInput>>,
+
     #[serde(rename = "outputs")]
     pub outputs: Vec<CreateActionOutput>,
 
@@ -1828,8 +2097,10 @@ pub struct CreateActionRequest {
     #[serde(rename = "options")]
     pub options: Option<CreateActionOptions>,
 
+    /// BEEF containing source transactions for inputs (BRC-62/95/96)
+    /// Can be either a hex string or a byte array [u8, u8, ...]
     #[serde(rename = "inputBEEF")]
-    pub input_beef: Option<String>, // Hex-encoded BEEF with input transaction proofs (BRC-100)
+    pub input_beef: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1916,7 +2187,9 @@ pub async fn create_action(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createAction called");
-    log::info!("📋 Raw request body: {}", String::from_utf8_lossy(&body));
+    log::info!("📋 Raw request body ({} bytes): {}...",
+        body.len(),
+        String::from_utf8_lossy(&body[..std::cmp::min(500, body.len())]));
 
     // Parse request
     let req: CreateActionRequest = match serde_json::from_slice(&body) {
@@ -1931,6 +2204,166 @@ pub async fn create_action(
 
     log::info!("   Description: {:?}", req.description);
     log::info!("   Outputs: {}", req.outputs.len());
+    log::info!("   Inputs provided: {}", req.inputs.as_ref().map(|i| i.len()).unwrap_or(0));
+    log::info!("   InputBEEF provided: {}", req.input_beef.is_some());
+
+    // Parse inputBEEF if provided (contains source transactions for user inputs)
+    // inputBEEF can be either a hex string or a byte array [u8, u8, ...]
+    let parsed_input_beef: Option<crate::beef::Beef> = if let Some(ref beef_value) = req.input_beef {
+        // Convert inputBEEF to bytes depending on format
+        let beef_bytes: Vec<u8> = if let Some(hex_str) = beef_value.as_str() {
+            // Format 1: Hex string
+            log::info!("   InputBEEF format: hex string ({} chars)", hex_str.len());
+            match hex::decode(hex_str) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log::error!("   ❌ Failed to decode inputBEEF hex: {}", e);
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("Invalid inputBEEF hex: {}", e)
+                    }));
+                }
+            }
+        } else if let Some(arr) = beef_value.as_array() {
+            // Format 2: Byte array [u8, u8, ...]
+            log::info!("   InputBEEF format: byte array ({} elements)", arr.len());
+            let mut bytes = Vec::with_capacity(arr.len());
+            for (i, val) in arr.iter().enumerate() {
+                match val.as_u64() {
+                    Some(n) if n <= 255 => bytes.push(n as u8),
+                    _ => {
+                        log::error!("   ❌ Invalid byte at position {}: {:?}", i, val);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Invalid inputBEEF: invalid byte at position {}", i)
+                        }));
+                    }
+                }
+            }
+            bytes
+        } else {
+            log::error!("   ❌ Invalid inputBEEF format: expected string or array");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid inputBEEF format: expected hex string or byte array"
+            }));
+        };
+
+        // Parse BEEF from bytes
+        match crate::beef::Beef::from_bytes(&beef_bytes) {
+            Ok(beef) => {
+                log::info!("   ✅ Parsed inputBEEF: {} transactions, {} BUMPs",
+                    beef.transactions.len(), beef.bumps.len());
+                for (i, tx_bytes) in beef.transactions.iter().enumerate() {
+                    // Calculate txid for logging
+                    use sha2::{Sha256, Digest};
+                    let first_hash = Sha256::digest(tx_bytes);
+                    let second_hash = Sha256::digest(&first_hash);
+                    let txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
+                    log::info!("      BEEF tx {}: {} ({} bytes)", i, &txid[..16], tx_bytes.len());
+                }
+                Some(beef)
+            }
+            Err(e) => {
+                log::error!("   ❌ Failed to parse inputBEEF: {}", e);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Invalid inputBEEF format: {}", e)
+                }));
+            }
+        }
+    } else {
+        None
+    };
+
+    // Process user-provided inputs (from args.inputs referencing inputBEEF)
+    struct UserProvidedInput {
+        txid: String,
+        vout: u32,
+        satoshis: i64,
+        source_tx: Option<Vec<u8>>,
+        locking_script: Vec<u8>,
+        unlocking_script: Option<Vec<u8>>,
+        sequence: u32,
+    }
+
+    let mut user_inputs: Vec<UserProvidedInput> = Vec::new();
+    let mut user_input_total: i64 = 0;
+
+    if let Some(ref inputs) = req.inputs {
+        log::info!("   Processing {} user-provided inputs...", inputs.len());
+
+        for (i, input) in inputs.iter().enumerate() {
+            log::info!("   Input {}: {}:{}", i, &input.outpoint.txid[..16], input.outpoint.vout);
+
+            // Look up source transaction from inputBEEF
+            let source_tx = parsed_input_beef.as_ref()
+                .and_then(|beef| beef.find_txid(&input.outpoint.txid))
+                .map(|idx| parsed_input_beef.as_ref().unwrap().transactions[idx].clone());
+
+            // Parse source transaction to get output value and locking script
+            let (satoshis, locking_script) = if let Some(ref tx_bytes) = source_tx {
+                match crate::beef::ParsedTransaction::from_bytes(tx_bytes) {
+                    Ok(parsed_tx) => {
+                        if let Some(output) = parsed_tx.outputs.get(input.outpoint.vout as usize) {
+                            log::info!("      Found output: {} satoshis", output.value);
+                            (output.value, output.script.clone())
+                        } else {
+                            log::error!("      Output index {} not found in source tx", input.outpoint.vout);
+                            return HttpResponse::BadRequest().json(serde_json::json!({
+                                "error": format!("Output index {} not found in source transaction {}",
+                                    input.outpoint.vout, input.outpoint.txid)
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("      Failed to parse source transaction: {}", e);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Failed to parse source transaction: {}", e)
+                        }));
+                    }
+                }
+            } else if let Some(sats) = input.input_satoshis {
+                // No source tx in BEEF, but satoshis provided - this is for pre-signed inputs
+                log::info!("      Using provided satoshis: {}", sats);
+                (sats, Vec::new()) // Empty locking script - will use unlocking script directly
+            } else {
+                log::error!("      Source tx not in inputBEEF and no satoshis provided");
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Input {}:{} not found in inputBEEF. Provide source transaction or inputSatoshis.",
+                        input.outpoint.txid, input.outpoint.vout)
+                }));
+            };
+
+            // Parse unlocking script if provided (pre-signed input)
+            let unlocking_script = if let Some(ref script_hex) = input.unlocking_script {
+                match hex::decode(script_hex) {
+                    Ok(bytes) => {
+                        log::info!("      Has pre-signed unlocking script ({} bytes)", bytes.len());
+                        Some(bytes)
+                    }
+                    Err(e) => {
+                        log::error!("      Invalid unlocking script hex: {}", e);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Invalid unlocking script: {}", e)
+                        }));
+                    }
+                }
+            } else {
+                None
+            };
+
+            user_input_total += satoshis;
+
+            user_inputs.push(UserProvidedInput {
+                txid: input.outpoint.txid.clone(),
+                vout: input.outpoint.vout,
+                satoshis,
+                source_tx,
+                locking_script,
+                unlocking_script,
+                sequence: input.sequence_number.unwrap_or(0xFFFFFFFF),
+            });
+        }
+
+        log::info!("   Total from user inputs: {} satoshis", user_input_total);
+    }
 
     // Calculate total output amount
     let mut total_output: i64 = 0;
@@ -1943,174 +2376,294 @@ pub async fn create_action(
 
     log::info!("   Total output amount: {} satoshis", total_output);
 
-    // Estimate fee (rough calculation: ~200 bytes per input + output + overhead)
-    let estimated_fee = 5000; // Increased fee: 5000 sats (~22 sat/byte for 225 byte tx)
-    let total_needed = total_output + estimated_fee;
+    // Collect output script lengths for fee estimation
+    let mut output_script_lengths: Vec<usize> = Vec::new();
+    for output in req.outputs.iter() {
+        let script_len = if let Some(ref script_hex) = output.script {
+            script_hex.len() / 2  // Hex string, so divide by 2 for bytes
+        } else if output.address.is_some() {
+            25  // P2PKH locking script length
+        } else {
+            25  // Default to P2PKH
+        };
+        output_script_lengths.push(script_len);
+    }
 
-    log::info!("   Estimated fee: {} satoshis", estimated_fee);
+    // Also account for user-provided inputs' unlocking scripts
+    let mut user_input_script_lengths: Vec<usize> = Vec::new();
+    for user_input in &user_inputs {
+        let script_len = user_input.unlocking_script.as_ref()
+            .map(|s| s.len())
+            .unwrap_or(107);  // Default to P2PKH unlocking script size
+        user_input_script_lengths.push(script_len);
+    }
+
+    // Estimate fee based on size:
+    // - User-provided inputs + estimated wallet inputs (assume 1-2 for simple tx)
+    // - All outputs + potential change output
+    let estimated_wallet_inputs = if user_inputs.is_empty() { 2 } else { 1 };
+    let total_estimated_inputs = user_inputs.len() + estimated_wallet_inputs;
+
+    // Calculate estimated fee (1 sat/byte = 1000 sat/kb)
+    let mut estimated_fee = estimate_fee_for_transaction(
+        total_estimated_inputs,
+        &output_script_lengths,
+        true,  // Include change output
+        DEFAULT_SATS_PER_KB
+    ) as i64;
+
+    log::info!("   📊 Fee estimation:");
+    log::info!("      Estimated inputs: {} (user: {}, wallet: ~{})",
+        total_estimated_inputs, user_inputs.len(), estimated_wallet_inputs);
+    log::info!("      Output count: {} + 1 change", output_script_lengths.len());
+    log::info!("      Estimated fee: {} satoshis ({} sat/byte)",
+        estimated_fee, DEFAULT_SATS_PER_KB / 1000);
+
+    let total_needed = total_output + estimated_fee;
     log::info!("   Total needed: {} satoshis", total_needed);
 
-    // Fetch UTXOs from WhatsOnChain - get addresses from database
-    let addresses = {
-        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+    // Determine if we need wallet's UTXOs
+    // If user provided inputs that cover the total, we don't need wallet UTXOs
+    let shortfall = total_needed - user_input_total;
+    let need_wallet_utxos = user_inputs.is_empty() || shortfall > 0;
 
-        let db = state.database.lock().unwrap();
-        let wallet_repo = WalletRepository::new(db.connection());
+    if !user_inputs.is_empty() && shortfall <= 0 {
+        log::info!("   ✅ User inputs cover total needed ({} >= {})", user_input_total, total_needed);
+    } else if !user_inputs.is_empty() {
+        log::info!("   User inputs don't cover total, need {} more from wallet", shortfall);
+    }
 
-        let wallet = match wallet_repo.get_primary_wallet() {
-            Ok(Some(w)) => w,
-            Ok(None) => {
-                log::error!("   No wallet found in database");
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "No wallet found"
-                }));
-            }
-            Err(e) => {
-                log::error!("   Failed to get wallet: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Database error: {}", e)
-                }));
+    // Wallet UTXOs - only fetch if we need them
+    let mut selected_utxos: Vec<crate::utxo_fetcher::UTXO> = Vec::new();
+    let addresses: Vec<crate::json_storage::AddressInfo>;
+
+    if need_wallet_utxos {
+        // Fetch UTXOs from WhatsOnChain - get addresses from database
+        addresses = {
+            use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+
+            let db = state.database.lock().unwrap();
+            let wallet_repo = WalletRepository::new(db.connection());
+
+            let wallet = match wallet_repo.get_primary_wallet() {
+                Ok(Some(w)) => w,
+                Ok(None) => {
+                    log::error!("   No wallet found in database");
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "No wallet found"
+                    }));
+                }
+                Err(e) => {
+                    log::error!("   Failed to get wallet: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Database error: {}", e)
+                    }));
+                }
+            };
+
+            let address_repo = AddressRepository::new(db.connection());
+            match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
+                Ok(db_addresses) => {
+                    db_addresses.iter()
+                        .map(|addr| address_to_address_info(addr))
+                        .collect::<Vec<_>>()
+                }
+                Err(e) => {
+                    log::error!("   Failed to get addresses: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get addresses: {}", e)
+                    }));
+                }
             }
         };
 
-        let address_repo = AddressRepository::new(db.connection());
-        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
-            Ok(db_addresses) => {
-                db_addresses.iter()
-                    .map(|addr| address_to_address_info(addr))
-                    .collect::<Vec<_>>()
-            }
-            Err(e) => {
-                log::error!("   Failed to get addresses: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to get addresses: {}", e)
-                }));
-            }
-        }
-    };
+        log::info!("   Checking {} addresses for UTXOs...", addresses.len());
 
-    log::info!("   Checking {} addresses for UTXOs...", addresses.len());
-
-    // Try to get UTXOs from database cache first
-    use crate::database::{UtxoRepository, AddressRepository, utxo_to_fetcher_utxo};
-    let db = state.database.lock().unwrap();
-    let address_repo = AddressRepository::new(db.connection());
-    let utxo_repo = UtxoRepository::new(db.connection());
-
-    // Get address IDs and create address index map
-    let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
-    let mut address_ids = Vec::new();
-
-    for addr in &addresses {
-        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-            if let Some(addr_id) = db_addr.id {
-                address_ids.push(addr_id);
-                address_id_map.insert(addr_id, addr.index as u32);
-            }
-        }
-    }
-
-    // Get UTXOs from database
-    let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
-        Ok(db_utxos) => {
-            // Convert database UTXOs to fetcher format
-            db_utxos.iter()
-                .filter_map(|db_utxo| {
-                    address_id_map.get(&db_utxo.address_id)
-                        .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
-                })
-                .collect::<Vec<_>>()
-        }
-        Err(e) => {
-            log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
-            Vec::new()
-        }
-    };
-
-    drop(db);
-
-    // Phase 4: Use cached UTXOs from database (primary source)
-    // Only fetch from API if cache is empty OR if we don't have enough balance
-    let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
-    if all_utxos.is_empty() {
-        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
-    } else if cached_balance < total_needed {
-        log::info!("   Insufficient cached balance ({} < {}), fetching from API to check for new UTXOs...", cached_balance, total_needed);
-    } else {
-        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
-    }
-
-    if all_utxos.is_empty() || cached_balance < total_needed {
-
-        // Fetch from API
-        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
-            Ok(utxos) => utxos,
-            Err(e) => {
-                log::error!("   Failed to fetch UTXOs from API: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to fetch UTXOs: {}", e)
-                }));
-            }
-        };
-
-        // Cache UTXOs to database
+        // Try to get UTXOs from database cache first
+        use crate::database::{UtxoRepository, AddressRepository, utxo_to_fetcher_utxo};
         let db = state.database.lock().unwrap();
         let address_repo = AddressRepository::new(db.connection());
         let utxo_repo = UtxoRepository::new(db.connection());
 
+        // Get address IDs and create address index map
+        let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+        let mut address_ids = Vec::new();
+
         for addr in &addresses {
             if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
                 if let Some(addr_id) = db_addr.id {
-                    // Get UTXOs for this address (clone to get owned values)
-                    let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index as u32)
-                        .cloned()
-                        .collect();
+                    address_ids.push(addr_id);
+                    address_id_map.insert(addr_id, addr.index as u32);
+                }
+            }
+        }
 
-                    if !addr_utxos.is_empty() {
-                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+        // Get UTXOs from database
+        let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
+            Ok(db_utxos) => {
+                // Convert database UTXOs to fetcher format
+                db_utxos.iter()
+                    .filter_map(|db_utxo| {
+                        address_id_map.get(&db_utxo.address_id)
+                            .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
+                    })
+                    .collect::<Vec<_>>()
+            }
+            Err(e) => {
+                log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
+                Vec::new()
+            }
+        };
+
+        drop(db);
+
+        // Amount needed from wallet (considering what user inputs provide)
+        let wallet_amount_needed = if shortfall > 0 { shortfall } else { total_needed };
+
+        // Phase 4: Use cached UTXOs from database (primary source)
+        // Only fetch from API if cache is empty OR if we don't have enough balance
+        let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
+        if all_utxos.is_empty() {
+            log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
+        } else if cached_balance < wallet_amount_needed {
+            log::info!("   Insufficient cached balance ({} < {}), fetching from API to check for new UTXOs...", cached_balance, wallet_amount_needed);
+        } else {
+            log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
+        }
+
+        if all_utxos.is_empty() || cached_balance < wallet_amount_needed {
+
+            // Fetch from API
+            let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
+                Ok(utxos) => utxos,
+                Err(e) => {
+                    log::error!("   Failed to fetch UTXOs from API: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to fetch UTXOs: {}", e)
+                    }));
+                }
+            };
+
+            // Cache UTXOs to database
+            let db = state.database.lock().unwrap();
+            let address_repo = AddressRepository::new(db.connection());
+            let utxo_repo = UtxoRepository::new(db.connection());
+
+            for addr in &addresses {
+                if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
+                    if let Some(addr_id) = db_addr.id {
+                        // Get UTXOs for this address (clone to get owned values)
+                        let addr_utxos: Vec<_> = api_utxos.iter()
+                            .filter(|u| u.address_index == addr.index as u32)
+                            .cloned()
+                            .collect();
+
+                        if !addr_utxos.is_empty() {
+                            if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
+                                log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
+                            }
                         }
                     }
                 }
             }
+            drop(db);
+
+            // Use API UTXOs (they're more up-to-date)
+            all_utxos = api_utxos;
         }
-        drop(db);
 
-        // Use API UTXOs (they're more up-to-date)
-        all_utxos = api_utxos;
+        if all_utxos.is_empty() && user_inputs.is_empty() {
+            log::error!("   No UTXOs available and no user inputs");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Insufficient funds: no UTXOs available"
+            }));
+        }
+
+        // Select UTXOs to cover the amount needed from wallet
+        if !all_utxos.is_empty() {
+            selected_utxos = select_utxos(&all_utxos, wallet_amount_needed);
+
+            if selected_utxos.is_empty() && user_inputs.is_empty() {
+                log::error!("   Insufficient funds");
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Insufficient funds: need {} sats, have {} sats",
+                        wallet_amount_needed,
+                        all_utxos.iter().map(|u| u.satoshis).sum::<i64>()
+                    )
+                }));
+            }
+
+            let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
+            log::info!("   Selected {} wallet UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+        }
+    } else {
+        // No wallet UTXOs needed - user inputs cover everything
+        addresses = Vec::new();
+        log::info!("   ✅ Skipping wallet UTXO fetch - user inputs cover all requirements");
     }
 
-    if all_utxos.is_empty() {
-        log::error!("   No UTXOs available");
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Insufficient funds: no UTXOs available"
-        }));
+    // Calculate total input (user inputs + wallet inputs)
+    let wallet_input_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
+    let total_input: i64 = user_input_total + wallet_input_total;
+    log::info!("   Total inputs: {} satoshis (user: {}, wallet: {})",
+        total_input, user_input_total, wallet_input_total);
+
+    // RECALCULATE fee now that we know actual input count
+    let actual_input_count = user_inputs.len() + selected_utxos.len();
+
+    // Build input script lengths for accurate size calculation
+    let mut actual_input_script_lengths: Vec<usize> = Vec::new();
+
+    // User inputs - use actual unlocking script size or estimate
+    for user_input in &user_inputs {
+        let script_len = user_input.unlocking_script.as_ref()
+            .map(|s| s.len())
+            .unwrap_or(107);  // Default P2PKH unlocking script
+        actual_input_script_lengths.push(script_len);
     }
 
-    // Select UTXOs to cover the amount
-    let selected_utxos = select_utxos(&all_utxos, total_needed);
-
-    if selected_utxos.is_empty() {
-        log::error!("   Insufficient funds");
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Insufficient funds: need {} sats, have {} sats",
-                total_needed,
-                all_utxos.iter().map(|u| u.satoshis).sum::<i64>()
-            )
-        }));
+    // Wallet inputs - P2PKH unlocking script size
+    for _ in &selected_utxos {
+        actual_input_script_lengths.push(107);
     }
 
-    let total_input: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
-    log::info!("   Selected {} UTXOs ({} satoshis)", selected_utxos.len(), total_input);
+    // Recalculate fee with accurate input count
+    let estimated_tx_size = estimate_transaction_size(&actual_input_script_lengths, &output_script_lengths)
+        + 25 + 9;  // Add P2PKH change output (25 script + 8 value + 1 varint)
+
+    estimated_fee = calculate_fee(estimated_tx_size, DEFAULT_SATS_PER_KB) as i64;
+
+    log::info!("   📊 Recalculated fee with actual {} inputs:", actual_input_count);
+    log::info!("      Estimated tx size: {} bytes", estimated_tx_size);
+    log::info!("      Recalculated fee: {} satoshis", estimated_fee);
 
     // Build transaction
     let mut tx = Transaction::new();
 
-    // Add inputs (unsigned)
+    // Add USER inputs first (may have pre-signed unlocking scripts)
+    for user_input in &user_inputs {
+        let outpoint = OutPoint::new(user_input.txid.clone(), user_input.vout);
+        let mut input = TxInput::new(outpoint);
+        input.sequence = user_input.sequence;
+
+        // If pre-signed, set the unlocking script
+        if let Some(ref unlock_script) = user_input.unlocking_script {
+            input.script_sig = unlock_script.clone();
+            log::info!("   Added user input {}:{} with pre-signed script ({} bytes)",
+                &user_input.txid[..16], user_input.vout, unlock_script.len());
+        } else {
+            log::info!("   Added user input {}:{} (will sign later)",
+                &user_input.txid[..16], user_input.vout);
+        }
+
+        tx.add_input(input);
+    }
+
+    // Add WALLET inputs (unsigned - we'll sign these)
     for utxo in &selected_utxos {
         let outpoint = OutPoint::new(utxo.txid.clone(), utxo.vout);
         tx.add_input(TxInput::new(outpoint));
+        log::info!("   Added wallet input {}:{}", &utxo.txid[..16], utxo.vout);
     }
 
     // Track BRC-29 payment info if present
@@ -2428,13 +2981,25 @@ pub async fn create_action(
     // Generate reference ID
     let reference = format!("action-{}", uuid::Uuid::new_v4());
 
+    // Build user input infos for signing
+    let user_input_infos: Vec<UserInputInfo> = user_inputs.iter().map(|ui| UserInputInfo {
+        txid: ui.txid.clone(),
+        vout: ui.vout,
+        satoshis: ui.satoshis,
+        locking_script: ui.locking_script.clone(),
+        source_tx: ui.source_tx.clone(),  // Include source tx bytes for BEEF building
+        is_pre_signed: ui.unlocking_script.is_some(),
+    }).collect();
+
     // Store transaction in memory with UTXO metadata for signing
     {
         let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
         pending.insert(reference.clone(), PendingTransaction {
             tx: tx.clone(),
             input_utxos: selected_utxos.clone(),
+            user_input_infos,
             brc29_info: brc29_info.clone(),
+            input_beef: parsed_input_beef.clone(),
         });
     }
 
@@ -2454,6 +3019,30 @@ pub async fn create_action(
     use crate::action_storage::{StoredAction, ActionStatus, ActionInput, ActionOutput};
     use chrono::Utc;
 
+    // Build inputs list for action storage (user inputs + wallet inputs)
+    let num_user_inputs = user_inputs.len();
+    let action_inputs: Vec<ActionInput> = tx.inputs.iter().enumerate().map(|(i, input)| {
+        if i < num_user_inputs {
+            // User input
+            let user_input = &user_inputs[i];
+            ActionInput {
+                txid: user_input.txid.clone(),
+                vout: user_input.vout,
+                satoshis: user_input.satoshis,
+                script: Some(hex::encode(&input.script_sig)),
+            }
+        } else {
+            // Wallet input
+            let wallet_idx = i - num_user_inputs;
+            ActionInput {
+                txid: selected_utxos.get(wallet_idx).map(|u| u.txid.clone()).unwrap_or_default(),
+                vout: selected_utxos.get(wallet_idx).map(|u| u.vout).unwrap_or(0),
+                satoshis: selected_utxos.get(wallet_idx).map(|u| u.satoshis).unwrap_or(0),
+                script: Some(hex::encode(&input.script_sig)),
+            }
+        }
+    }).collect();
+
     let stored_action = StoredAction {
         txid: txid.clone(),
         reference_number: reference.clone(),
@@ -2468,12 +3057,7 @@ pub async fn create_action(
         confirmations: 0,
         version: tx.version,
         lock_time: tx.lock_time,
-        inputs: tx.inputs.iter().enumerate().map(|(i, input)| ActionInput {
-            txid: selected_utxos.get(i).map(|u| u.txid.clone()).unwrap_or_default(),
-            vout: selected_utxos.get(i).map(|u| u.vout).unwrap_or(0),
-            satoshis: selected_utxos.get(i).map(|u| u.satoshis).unwrap_or(0),
-            script: Some(hex::encode(&input.script_sig)),
-        }).collect(),
+        inputs: action_inputs,
         outputs: tx.outputs.iter().enumerate().map(|(i, output)| ActionOutput {
             vout: i as u32,
             satoshis: output.value,
@@ -2595,17 +3179,32 @@ pub async fn create_action(
                    accept_delayed_broadcast, no_send);
     }
 
-    // Build response inputs array
-    let response_inputs: Vec<CreateActionResponseInput> = selected_utxos.iter().map(|utxo| {
-        CreateActionResponseInput {
+    // Build response inputs array (user inputs first, then wallet inputs)
+    let mut response_inputs: Vec<CreateActionResponseInput> = Vec::new();
+
+    // Add user-provided inputs
+    for user_input in &user_inputs {
+        response_inputs.push(CreateActionResponseInput {
+            txid: user_input.txid.clone(),
+            vout: user_input.vout,
+            output_index: user_input.vout,
+            script_length: user_input.unlocking_script.as_ref().map(|s| s.len()).unwrap_or(0),
+            script_offset: 0,
+            sequence: user_input.sequence,
+        });
+    }
+
+    // Add wallet inputs
+    for utxo in &selected_utxos {
+        response_inputs.push(CreateActionResponseInput {
             txid: utxo.txid.clone(),
             vout: utxo.vout,
             output_index: utxo.vout,
             script_length: utxo.script.len() / 2, // Hex length to byte length
             script_offset: 0, // Not used in simplified implementation
             sequence: 0xffffffff,
-        }
-    }).collect();
+        });
+    }
 
     // Build response outputs array
     let response_outputs: Vec<CreateActionResponseOutput> = tx.outputs.iter().enumerate().map(|(i, output)| {
@@ -2911,13 +3510,37 @@ pub async fn sign_action(
 
     let mut tx = pending_tx.tx;
     let input_utxos = pending_tx.input_utxos;
+    let user_input_infos = pending_tx.user_input_infos;
     let brc29_info = pending_tx.brc29_info;
+    let input_beef = pending_tx.input_beef;
 
-    log::info!("   Signing {} inputs...", tx.inputs.len());
+    let num_user_inputs = user_input_infos.len();
+    let num_wallet_inputs = input_utxos.len();
+    log::info!("   Signing {} inputs ({} user, {} wallet)...",
+        tx.inputs.len(), num_user_inputs, num_wallet_inputs);
 
-    // Sign each input
-    for (i, input_utxo) in input_utxos.iter().enumerate() {
-        log::info!("   Signing input {}: {}:{} (address index {})",
+    // Sign USER inputs that need signing (skip pre-signed ones)
+    for (i, user_input) in user_input_infos.iter().enumerate() {
+        if user_input.is_pre_signed {
+            log::info!("   Input {} (user): {}:{} - already pre-signed, skipping",
+                i, &user_input.txid[..16], user_input.vout);
+            continue;
+        }
+
+        log::info!("   Input {} (user): {}:{} - needs wallet signature",
+            i, &user_input.txid[..16], user_input.vout);
+
+        // User input without pre-signed script - wallet needs to sign it
+        // This would require the wallet to have the private key for this UTXO
+        // For now, we'll skip this case and log a warning
+        // TODO: Implement signing for user inputs when wallet has the key
+        log::warn!("   ⚠️  User input {} requires signing but no key available - skipping", i);
+    }
+
+    // Sign WALLET inputs
+    for (wallet_idx, input_utxo) in input_utxos.iter().enumerate() {
+        let i = num_user_inputs + wallet_idx;  // Actual input index in transaction
+        log::info!("   Signing input {} (wallet): {}:{} (address index {})",
             i, input_utxo.txid, input_utxo.vout, input_utxo.address_index);
 
         // Get the private key for THIS specific address (not always index 0!)
@@ -3046,13 +3669,66 @@ pub async fn sign_action(
     log::info!("   📝 Signed TX hex ({} bytes): {}...", signed_tx_bytes.len(), &signed_tx_hex[..std::cmp::min(80, signed_tx_hex.len())]);
 
     // Build BEEF (Background Evaluation Extended Format) with parent transactions
-    log::info!("   📦 Building BEEF format with {} parent transactions...", input_utxos.len());
+    log::info!("   📦 Building BEEF format with {} parent transactions ({} user, {} wallet)...",
+        num_user_inputs + input_utxos.len(), num_user_inputs, input_utxos.len());
 
     let mut beef = crate::beef::Beef::new();
 
-    // Fetch parent transactions and their Merkle proofs (with caching)
+    // First, copy ALL transactions and BUMPs from inputBEEF (if provided)
+    // This preserves the full verification chain for user-provided inputs
+    if let Some(ref ib) = input_beef {
+        log::info!("   📥 Copying {} transactions and {} BUMPs from inputBEEF",
+            ib.transactions.len(), ib.bumps.len());
+
+        // Copy all BUMPs first (they need to be indexed before transactions reference them)
+        for (i, bump) in ib.bumps.iter().enumerate() {
+            log::info!("      BUMP {}: block height {}", i, bump.block_height);
+            beef.bumps.push(bump.clone());
+        }
+
+        // Copy all transactions (except the last one which is the main tx we're building on)
+        // The inputBEEF contains parents in order, with the transaction being spent as last
+        for (i, tx_bytes) in ib.transactions.iter().enumerate() {
+            // Calculate txid for logging
+            use sha2::{Sha256, Digest};
+            let first_hash = Sha256::digest(tx_bytes);
+            let second_hash = Sha256::digest(&first_hash);
+            let txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
+
+            // Copy the tx_to_bump mapping if it exists
+            let has_bump = ib.tx_to_bump.get(i).and_then(|b| *b).is_some();
+
+            log::info!("      TX {}: {} ({} bytes, has_bump: {})",
+                i, &txid[..16], tx_bytes.len(), has_bump);
+
+            let tx_index = beef.add_parent_transaction(tx_bytes.clone());
+
+            // Copy the BUMP reference if this transaction has one
+            if let Some(Some(bump_idx)) = ib.tx_to_bump.get(i) {
+                beef.tx_to_bump[tx_index] = Some(*bump_idx);
+            }
+        }
+
+        log::info!("   ✅ Copied full inputBEEF chain ({} txs, {} bumps)",
+            beef.transactions.len(), beef.bumps.len());
+    } else {
+        // No inputBEEF - add individual user input source transactions if available
+        for (i, user_input) in user_input_infos.iter().enumerate() {
+            if let Some(ref source_tx) = user_input.source_tx {
+                log::info!("   📥 Adding user input {} source tx: {} ({} bytes)",
+                    i, &user_input.txid[..16], source_tx.len());
+                beef.add_parent_transaction(source_tx.clone());
+            } else {
+                log::warn!("   ⚠️  User input {} ({}) has no source transaction in BEEF",
+                    i, &user_input.txid[..16]);
+            }
+        }
+    }
+
+    // Fetch WALLET parent transactions and their Merkle proofs (with caching)
     let client = reqwest::Client::new();
-    for (i, utxo) in input_utxos.iter().enumerate() {
+    for (wallet_idx, utxo) in input_utxos.iter().enumerate() {
+        let i = wallet_idx; // Keep original variable name for compatibility
         log::info!("   📥 Processing parent tx {}/{}: {}", i + 1, input_utxos.len(), utxo.txid);
 
         // STEP 1: Try to get parent transaction from cache
@@ -3390,7 +4066,6 @@ pub async fn sign_action(
         }
     };
     log::info!("   📝 Standard BEEF hex ({} bytes): {}...", standard_beef_hex.len() / 2, &standard_beef_hex[..std::cmp::min(120, standard_beef_hex.len())]);
-    log::info!("   📝 FULL Standard BEEF hex: {}", standard_beef_hex);
 
     // Serialize to Atomic BEEF (BRC-95) format
     let beef_hex = match beef.to_atomic_beef_hex(&txid) {
@@ -3511,6 +4186,7 @@ pub async fn process_action(
 
     // Step 1: Create action (build unsigned transaction)
     let create_req = CreateActionRequest {
+        inputs: None,  // process_action doesn't use inputBEEF
         outputs: req.outputs,
         description: req.description,
         labels: req.labels,
@@ -4093,6 +4769,7 @@ pub async fn send_transaction(
 
     // Convert to CreateActionRequest format
     let create_req = CreateActionRequest {
+        inputs: None,  // send_transaction doesn't use inputBEEF
         outputs: vec![CreateActionOutput {
             satoshis: Some(req.amount),
             script: None,
