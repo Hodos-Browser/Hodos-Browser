@@ -164,6 +164,8 @@ async fn main() -> std::io::Result<()> {
     println!("   POST /isAuthenticated");
     println!("   POST /createHmac");
     println!("   POST /verifyHmac");
+    println!("   POST /encrypt");
+    println!("   POST /decrypt");
     println!("   POST /verifySignature");
     println!("   POST /.well-known/auth");
     println!("   GET  /wallet/status");
@@ -242,6 +244,8 @@ async fn main() -> std::io::Result<()> {
             .route("/waitForAuthentication", web::post().to(handlers::wait_for_authentication))  // BRC-100 Call Code 24
             .route("/createHmac", web::post().to(handlers::create_hmac))
             .route("/verifyHmac", web::post().to(handlers::verify_hmac))
+            .route("/encrypt", web::post().to(handlers::encrypt))
+            .route("/decrypt", web::post().to(handlers::decrypt))
             .route("/verifySignature", web::post().to(handlers::verify_signature))
             .route("/createSignature", web::post().to(handlers::create_signature))
             // createAction needs large payload support for inputBEEF (100MB limit)

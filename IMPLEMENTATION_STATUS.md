@@ -470,3 +470,124 @@ Successfully registered identity @18 on beta.zanaadu.com:
 - Dynamic fee calculation ensured sufficient fees for 78KB+ transactions
 
 **Notes on Broadcast Warnings**: Some SHIP overlay acknowledgment warnings appeared but these are Zanaadu-side configuration issues, not wallet bugs. The transaction still propagated successfully through standard miner broadcast.
+
+---
+
+## BRC-2 Encrypt/Decrypt Implementation - COMPLETED
+
+**Date**: December 27, 2024
+
+### Overview
+
+Successfully implemented BRC-100 `/encrypt` (Call Code 11) and `/decrypt` (Call Code 12) endpoints. These endpoints provide BRC-2 data encryption and decryption using AES-256-GCM with BRC-42 key derivation.
+
+### Problem Solved
+
+ToolBSV image generation was failing with "Failed to decrypt image" because the wallet lacked `/encrypt` and `/decrypt` endpoints. The HTTP interceptor wasn't recognizing these as wallet endpoints, and no handlers existed.
+
+### Implementation
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/handlers.rs` | Added `EncryptRequest`, `DecryptRequest`, `EncryptResponse`, `DecryptResponse` structs; implemented `encrypt` and `decrypt` handlers (~370 lines) |
+| `rust-wallet/src/main.rs` | Added `/encrypt` and `/decrypt` route registrations |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | Added `/encrypt` and `/decrypt` to `isWalletEndpoint()` |
+
+#### Key Features
+
+1. **BRC-42 Key Derivation**: Uses ECDH to derive symmetric keys from master private key and counterparty public key
+2. **BRC-43 Invoice Numbers**: Supports security levels 0-2 with protocol ID and key ID
+3. **Counterparty Support**: Handles "self", "anyone", and explicit hex public keys
+4. **Flexible Input Formats**: Accepts both byte arrays and base64/hex strings for plaintext/ciphertext
+5. **BRC-2 Encryption**: AES-256-GCM via existing `crypto/brc2.rs` module
+
+### Status
+
+**Implementation**: COMPLETED
+**Testing**: SUCCESSFUL (Dec 27, 2024) - ToolBSV image generation now working
+
+---
+
+## BRC-100 Implementation Summary
+
+### Current Status: 25/28 Methods Implemented (89%)
+
+#### Complete Method Groups
+
+| Group | Methods | Status |
+|-------|---------|--------|
+| **Group A: Identity & Auth** | getVersion, getPublicKey, isAuthenticated, createHmac, verifyHmac, createSignature, verifySignature | ✅ 7/7 |
+| **Group B: Transactions** | createAction, signAction, abortAction, listActions, internalizeAction | ✅ 5/5 |
+| **Group C: Outputs & Blockchain** | listOutputs, relinquishOutput, getHeight, getHeaderForHeight, getNetwork | ✅ 5/5 |
+| **Group C: Certificates** | acquireCertificate, listCertificates, proveCertificate, relinquishCertificate, discoverByIdentityKey | ✅ 5/5 |
+| **Group D: Encryption** | encrypt, decrypt | ✅ 2/2 |
+| **Group D: Key Linkage** | revealCounterpartyKeyLinkage, revealSpecificKeyLinkage | ❌ 0/2 |
+| **Group E: Auth Wait** | waitForAuthentication | ✅ 1/1 |
+| **Group E: Discovery** | discoverByAttributes | ❌ 0/1 |
+
+### All BRC-100 Methods Status
+
+| Code | Method | Status | Real-World Test |
+|------|--------|--------|-----------------|
+| 1 | `createAction` | ✅ | ✅ ToolBSV, Zanaadu |
+| 2 | `signAction` | ✅ | ✅ ToolBSV, Zanaadu |
+| 3 | `abortAction` | ✅ | ❌ |
+| 4 | `listActions` | ✅ | ❌ |
+| 5 | `internalizeAction` | ✅ | ❌ |
+| 6 | `listOutputs` | ✅ | ❌ |
+| 7 | `relinquishOutput` | ✅ | ❌ |
+| 8 | `getPublicKey` | ✅ | ✅ ToolBSV |
+| 9 | `revealCounterpartyKeyLinkage` | ❌ | ❌ |
+| 10 | `revealSpecificKeyLinkage` | ❌ | ❌ |
+| 11 | `encrypt` | ✅ | ✅ ToolBSV |
+| 12 | `decrypt` | ✅ | ✅ ToolBSV |
+| 13 | `createHmac` | ✅ | ✅ ToolBSV |
+| 14 | `verifyHmac` | ✅ | ✅ ToolBSV |
+| 15 | `createSignature` | ✅ | ✅ ToolBSV |
+| 16 | `verifySignature` | ✅ | ✅ ToolBSV |
+| 17 | `acquireCertificate` | ✅ | ✅ socialcert.net |
+| 18 | `listCertificates` | ✅ | ❌ |
+| 19 | `proveCertificate` | ✅ | ❌ |
+| 20 | `relinquishCertificate` | ✅ | ❌ |
+| 21 | `discoverByIdentityKey` | ✅ | ❌ |
+| 22 | `discoverByAttributes` | ❌ | ❌ |
+| 23 | `isAuthenticated` | ✅ | ✅ ToolBSV |
+| 24 | `waitForAuthentication` | ✅ | ❌ |
+| 25 | `getHeight` | ✅ | ❌ |
+| 26 | `getHeaderForHeight` | ✅ | ❌ |
+| 27 | `getNetwork` | ✅ | ❌ |
+| 28 | `getVersion` | ✅ | ✅ ToolBSV |
+
+### Additional Features Implemented
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `/.well-known/auth` (BRC-103/104) | ✅ | Mutual authentication |
+| BRC-33 Message Relay | ✅ | In-memory storage (3 endpoints) |
+| inputBEEF Support | ✅ | Collaborative transactions |
+| Dynamic Fee Calculation | ✅ | Size-based fees |
+| BEEF/SPV Caching | ✅ | Background sync |
+| Database Migration | ✅ | SQLite with backup/recovery |
+| Browser History | ✅ | CEF layer (separate from wallet) |
+
+### Remaining Work
+
+#### Priority 1: Real-World Testing
+- Test `listCertificates`, `proveCertificate`, `relinquishCertificate` with apps
+- Test `listOutputs`, `relinquishOutput` with basket-enabled apps
+- Test blockchain query methods with apps that use them
+
+#### Priority 2: Missing Methods (3 total)
+1. **`revealCounterpartyKeyLinkage`** (BRC-69) - Low priority, rarely used
+2. **`revealSpecificKeyLinkage`** (BRC-69) - Low priority, rarely used
+3. **`discoverByAttributes`** - Certificate attribute search
+
+#### Priority 3: Enhancements
+- BRC-33 database persistence (currently in-memory)
+- MAPI fee rate integration (currently uses hardcoded 1 sat/byte)
+
+---
+
+**Last Updated**: December 27, 2024

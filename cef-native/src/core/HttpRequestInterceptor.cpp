@@ -1168,6 +1168,8 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
             url.find("/relinquishOutput") != std::string::npos ||
             url.find("/createHmac") != std::string::npos ||
             url.find("/verifyHmac") != std::string::npos ||
+            url.find("/encrypt") != std::string::npos ||
+            url.find("/decrypt") != std::string::npos ||
             url.find("/verifySignature") != std::string::npos ||
             url.find("/getNetwork") != std::string::npos ||
             url.find("/getHeight") != std::string::npos ||

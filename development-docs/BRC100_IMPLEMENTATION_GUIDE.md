@@ -3,12 +3,12 @@
 > **Official Specification**: [BRC-100 Wallet Interface](https://bsv.brc.dev/wallet/0100)
 > **Full Spec Document**: `reference/BRC100_spec.md`
 
-## 🎯 Current Status: Database Migration Complete! 🎉
+## 🎯 Current Status: 25/28 BRC-100 Methods Implemented (89%)! 🎉
 
-**Latest Achievement**: Complete database migration with backup/recovery and performance optimization!
-**Previous Achievement**: BRC-29 payments working with ToolBSV - real-world tested ✅
+**Latest Achievement**: BRC-2 Encrypt/Decrypt endpoints (Call Codes 11, 12) - ToolBSV image generation working!
+**Previous Achievement**: Complete database migration with backup/recovery and performance optimization!
 
-**Current Focus**: All database phases complete (Phases 1-9). Browser database (Phase 8) deferred to separate sprint.
+**Current Focus**: Real-world testing of implemented methods. Only 3 methods remaining.
 
 ---
 
@@ -178,15 +178,15 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 - **HTTP Interceptor**: When implementing new endpoints, add them to `isWalletEndpoint()` in `cef-native/src/core/HttpRequestInterceptor.cpp` to ensure requests are intercepted.
 - **Migration Safety**: Migrations use `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` with existence checks - they won't overwrite existing data.
 
-#### **Group D: Encryption & Advanced Crypto (Priority 4)**
+#### **Group D: Encryption & Advanced Crypto (Priority 4)** ✅ **ENCRYPTION COMPLETE!**
 Privacy features and advanced cryptography.
 
 | Call Code | Method | Status | Internal Test | Real-World Test | Notes |
 |-----------|--------|--------|---------------|-----------------|-------|
 | 9 | `revealCounterpartyKeyLinkage` | ❌ | ❌ | ❌ | BRC-69 counterparty key linkage |
 | 10 | `revealSpecificKeyLinkage` | ❌ | ❌ | ❌ | BRC-69 specific key linkage |
-| 11 | `encrypt` | ❌ | ❌ | ❌ | BRC-2 encryption |
-| 12 | `decrypt` | ❌ | ❌ | ❌ | BRC-2 decryption |
+| 11 | `encrypt` | ✅ | ✅ | ✅ | **COMPLETE** - BRC-2 encryption with BRC-42 key derivation |
+| 12 | `decrypt` | ✅ | ✅ | ✅ | **COMPLETE** - BRC-2 decryption, ToolBSV image generation working |
 
 #### **Group E: Specialized Features (Priority 5)**
 Advanced wallet features for specific use cases.
@@ -301,15 +301,17 @@ Advanced wallet features for specific use cases.
 - ✅ Identity management complete
 - ✅ Certificate verification working
 
-### Phase 5: Encryption & Advanced Features (Week 5+)
+### ~~Phase 5: Encryption & Advanced Features~~ ✅ **MOSTLY COMPLETE!**
 **Goal**: Complete remaining methods.
 
-**Methods to Implement**:
-- `encrypt` / `decrypt` - BRC-2 encryption
-- `waitForAuthentication` - Async auth support
-- `getTransactionWithOutputs` - Full transaction retrieval
-- Key linkage revelation methods
-- Permission/restriction queries
+**Methods Implemented**:
+- ✅ `encrypt` / `decrypt` - BRC-2 encryption (Dec 27, 2024)
+- ✅ `waitForAuthentication` - Async auth support
+
+**Methods Remaining**:
+- ❌ `revealCounterpartyKeyLinkage` - BRC-69 (low priority)
+- ❌ `revealSpecificKeyLinkage` - BRC-69 (low priority)
+- ❌ `discoverByAttributes` - Certificate attribute search
 
 ---
 
@@ -756,10 +758,16 @@ mod tests {
 
 ---
 
-**Last Updated**: December 8, 2025
-**Current Focus**: Group C - Output/Basket & Certificate Management
+**Last Updated**: December 27, 2024
+**Current Status**: 25/28 BRC-100 methods implemented (89%)
 **Progress**:
-- ✅ Part 1: Output Management (`listOutputs`, `relinquishOutput`) - **COMPLETE**
-- ✅ Part 2: Blockchain Queries (`getHeight`, `getHeaderForHeight`, `getNetwork`) - **COMPLETE**
-- ⏳ Part 3: Certificate Management - **NEXT**
-**Next Milestone**: Complete Part 3 (Certificate Management)
+- ✅ Group A: Identity & Authentication - **COMPLETE** (7/7)
+- ✅ Group B: Transaction Operations - **COMPLETE** (5/5)
+- ✅ Group C: Output Management & Blockchain Queries - **COMPLETE** (5/5)
+- ✅ Group C: Certificate Management - **COMPLETE** (5/5)
+- ✅ Group D: Encryption - **COMPLETE** (2/2) - encrypt/decrypt working with ToolBSV
+- ❌ Group D: Key Linkage - NOT STARTED (0/2) - Low priority
+- ✅ Group E: waitForAuthentication - **COMPLETE** (1/1)
+- ❌ Group E: discoverByAttributes - NOT STARTED (0/1)
+
+**Next Milestone**: Real-world testing of remaining implemented methods

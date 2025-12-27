@@ -5,6 +5,7 @@ use crate::AppState;
 use crate::crypto::brc42::{derive_child_private_key, derive_child_public_key};
 use crate::crypto::brc43::{InvoiceNumber, SecurityLevel, normalize_protocol_id};
 use crate::crypto::signing::{sha256, hmac_sha256, verify_hmac_sha256};
+use crate::crypto::brc2::{derive_symmetric_key, encrypt_brc2, decrypt_brc2};
 
 // Certificate handlers (Group C - Part 3)
 mod certificate_handlers;
@@ -1073,6 +1074,480 @@ pub async fn verify_hmac(
     log::info!("   ✅ HMAC verification result: {}", is_valid);
 
     HttpResponse::Ok().json(VerifyHmacResponse { valid: is_valid })
+}
+
+// ============================================================================
+// BRC-2 Encryption / Decryption (Call Codes 11 and 12)
+// ============================================================================
+
+// Request structure for /encrypt
+#[derive(Debug, Deserialize)]
+pub struct EncryptRequest {
+    #[serde(rename = "protocolID")]
+    pub protocol_id: serde_json::Value, // [securityLevel, protocolString] or string
+    #[serde(rename = "keyID")]
+    pub key_id: serde_json::Value, // Can be string or various formats
+    pub plaintext: serde_json::Value, // Byte array OR base64 string
+    #[serde(rename = "counterparty")]
+    pub counterparty: Option<serde_json::Value>, // "self", "anyone", or hex pubkey (default: "self")
+}
+
+// Response structure for /encrypt
+#[derive(Debug, Serialize)]
+pub struct EncryptResponse {
+    pub ciphertext: Vec<u8>, // Array of bytes (BRC-2 format: IV + ciphertext + tag)
+}
+
+// Request structure for /decrypt
+#[derive(Debug, Deserialize)]
+pub struct DecryptRequest {
+    #[serde(rename = "protocolID")]
+    pub protocol_id: serde_json::Value, // [securityLevel, protocolString] or string
+    #[serde(rename = "keyID")]
+    pub key_id: serde_json::Value, // Can be string or various formats
+    pub ciphertext: serde_json::Value, // Byte array OR base64 string
+    #[serde(rename = "counterparty")]
+    pub counterparty: Option<serde_json::Value>, // "self", "anyone", or hex pubkey (default: "self")
+}
+
+// Response structure for /decrypt
+#[derive(Debug, Serialize)]
+pub struct DecryptResponse {
+    pub plaintext: Vec<u8>, // Decrypted data as array of bytes
+}
+
+/// Resolve counterparty public key for BRC-2 encryption/decryption
+/// Returns the counterparty's public key bytes (33 bytes compressed)
+fn resolve_counterparty_pubkey(
+    counterparty: &Option<serde_json::Value>,
+    our_master_pubkey: &[u8],
+) -> Result<Vec<u8>, String> {
+    match counterparty {
+        None => {
+            // Default to "self"
+            log::info!("   Counterparty: self (default)");
+            Ok(our_master_pubkey.to_vec())
+        }
+        Some(serde_json::Value::String(s)) if s == "self" => {
+            log::info!("   Counterparty: self");
+            Ok(our_master_pubkey.to_vec())
+        }
+        Some(serde_json::Value::String(s)) if s == "anyone" => {
+            log::info!("   Counterparty: anyone (public key from private key 1)");
+            // Private key 1 -> public key (generator point G)
+            // This is a well-known public key that anyone can derive
+            use secp256k1::{Secp256k1, SecretKey, PublicKey};
+            let secp = Secp256k1::new();
+            let mut anyone_privkey = [0u8; 32];
+            anyone_privkey[31] = 1; // Private key with value 1
+            let secret = SecretKey::from_slice(&anyone_privkey)
+                .map_err(|e| format!("Failed to create 'anyone' secret key: {}", e))?;
+            let pubkey = PublicKey::from_secret_key(&secp, &secret);
+            Ok(pubkey.serialize().to_vec()) // 33-byte compressed
+        }
+        Some(serde_json::Value::String(hex_key)) => {
+            log::info!("   Counterparty: {} (hex pubkey)", hex_key);
+            hex::decode(hex_key)
+                .map_err(|e| format!("Invalid counterparty public key hex: {}", e))
+        }
+        _ => Err("Counterparty must be 'self', 'anyone', or hex public key".to_string()),
+    }
+}
+
+/// Parse byte data from JSON (can be array of numbers, hex string, or base64 string)
+fn parse_byte_data(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    match value {
+        serde_json::Value::Array(arr) => {
+            // Array of numbers
+            Ok(arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect())
+        }
+        serde_json::Value::String(s) => {
+            // Try hex first, then base64
+            if let Ok(bytes) = hex::decode(s) {
+                Ok(bytes)
+            } else {
+                general_purpose::STANDARD
+                    .decode(s)
+                    .map_err(|e| format!("Invalid data encoding (not hex or base64): {}", e))
+            }
+        }
+        _ => Err("Data must be array of bytes or encoded string".to_string()),
+    }
+}
+
+// /encrypt - BRC-100 endpoint for encrypting data (Call Code 11)
+pub async fn encrypt(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 /encrypt called");
+
+    // Parse request body
+    let body_str = String::from_utf8_lossy(&body).to_string();
+    let req: EncryptRequest = match serde_json::from_str(&body_str) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse EncryptRequest: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid request format: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   Protocol ID: {:?}", req.protocol_id);
+    log::info!("   Key ID: {:?}", req.key_id);
+    log::info!("   Counterparty: {:?}", req.counterparty);
+
+    // Parse plaintext
+    let plaintext_bytes = match parse_byte_data(&req.plaintext) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::error!("   Failed to parse plaintext: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid plaintext: {}", e)
+            }));
+        }
+    };
+    log::info!("   Plaintext length: {} bytes", plaintext_bytes.len());
+
+    // Parse keyID (can be string or byte array)
+    let key_id_str: String = match &req.key_id {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            let bytes: Vec<u8> = arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
+            general_purpose::STANDARD.encode(&bytes)
+        }
+        _ => {
+            log::error!("   keyID must be string or byte array");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "keyID must be string or byte array"
+            }));
+        }
+    };
+
+    // Parse protocol ID and get security level
+    let (security_level, protocol_id_str) = match &req.protocol_id {
+        serde_json::Value::Array(arr) => {
+            if arr.len() >= 2 {
+                let level = arr[0].as_u64().unwrap_or(2) as u8;
+                let name = arr[1].as_str().unwrap_or("unknown").to_string();
+                (level, name)
+            } else {
+                log::error!("   Protocol ID array too short");
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Protocol ID array must have at least 2 elements"
+                }));
+            }
+        }
+        serde_json::Value::String(s) => {
+            // Parse string format: "level-protocol" or just "protocol" (defaults to level 2)
+            if let Some(idx) = s.find('-') {
+                let level = s[..idx].parse::<u8>().unwrap_or(2);
+                (level, s[idx + 1..].to_string())
+            } else {
+                (2, s.clone())
+            }
+        }
+        _ => {
+            log::error!("   Protocol ID must be array or string");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Protocol ID must be array or string"
+            }));
+        }
+    };
+
+    // Normalize protocol ID and build invoice number
+    let protocol_id = match normalize_protocol_id(&protocol_id_str) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("   Failed to normalize protocol ID: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid protocol ID: {}", e)
+            }));
+        }
+    };
+
+    let security = match security_level {
+        0 => SecurityLevel::NoPermissions,
+        1 => SecurityLevel::ProtocolLevel,
+        _ => SecurityLevel::CounterpartyLevel,
+    };
+
+    let invoice = match InvoiceNumber::new(security, &protocol_id, &key_id_str) {
+        Ok(inv) => inv,
+        Err(e) => {
+            log::error!("   Failed to create invoice number: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid invoice number: {}", e)
+            }));
+        }
+    };
+    let invoice_number = invoice.to_string();
+    log::info!("   BRC-43 invoice number: {}", invoice_number);
+
+    // Get master keys from database
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(key) => {
+            log::info!("   ✅ Master private key retrieved");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to get master private key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key retrieval error: {}", e)
+            }));
+        }
+    };
+    let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
+        Ok(key) => {
+            log::info!("   ✅ Master public key retrieved");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to get master public key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key retrieval error: {}", e)
+            }));
+        }
+    };
+    drop(db);
+
+    // Resolve counterparty public key
+    let counterparty_pubkey = match resolve_counterparty_pubkey(&req.counterparty, &master_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => {
+            log::error!("   Failed to resolve counterparty: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": e
+            }));
+        }
+    };
+
+    // Derive symmetric key using BRC-2
+    let symmetric_key = match derive_symmetric_key(&master_privkey, &counterparty_pubkey, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ Symmetric key derived");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to derive symmetric key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // Encrypt using AES-256-GCM (BRC-2)
+    let ciphertext = match encrypt_brc2(&plaintext_bytes, &symmetric_key) {
+        Ok(ct) => ct,
+        Err(e) => {
+            log::error!("   Encryption failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Encryption failed: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   ✅ Encrypted {} bytes -> {} bytes", plaintext_bytes.len(), ciphertext.len());
+
+    HttpResponse::Ok().json(EncryptResponse { ciphertext })
+}
+
+// /decrypt - BRC-100 endpoint for decrypting data (Call Code 12)
+pub async fn decrypt(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 /decrypt called");
+
+    // Parse request body
+    let body_str = String::from_utf8_lossy(&body).to_string();
+    let req: DecryptRequest = match serde_json::from_str(&body_str) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse DecryptRequest: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid request format: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   Protocol ID: {:?}", req.protocol_id);
+    log::info!("   Key ID: {:?}", req.key_id);
+    log::info!("   Counterparty: {:?}", req.counterparty);
+
+    // Parse ciphertext
+    let ciphertext_bytes = match parse_byte_data(&req.ciphertext) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::error!("   Failed to parse ciphertext: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid ciphertext: {}", e)
+            }));
+        }
+    };
+    log::info!("   Ciphertext length: {} bytes", ciphertext_bytes.len());
+
+    // Validate minimum ciphertext length (32 IV + 16 tag = 48 bytes minimum)
+    if ciphertext_bytes.len() < 48 {
+        log::error!("   Ciphertext too short: {} bytes (need at least 48)", ciphertext_bytes.len());
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Ciphertext too short: need at least 48 bytes (32 IV + 16 tag), got {}", ciphertext_bytes.len())
+        }));
+    }
+
+    // Parse keyID (can be string or byte array)
+    let key_id_str: String = match &req.key_id {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            let bytes: Vec<u8> = arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
+            general_purpose::STANDARD.encode(&bytes)
+        }
+        _ => {
+            log::error!("   keyID must be string or byte array");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "keyID must be string or byte array"
+            }));
+        }
+    };
+
+    // Parse protocol ID and get security level
+    let (security_level, protocol_id_str) = match &req.protocol_id {
+        serde_json::Value::Array(arr) => {
+            if arr.len() >= 2 {
+                let level = arr[0].as_u64().unwrap_or(2) as u8;
+                let name = arr[1].as_str().unwrap_or("unknown").to_string();
+                (level, name)
+            } else {
+                log::error!("   Protocol ID array too short");
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Protocol ID array must have at least 2 elements"
+                }));
+            }
+        }
+        serde_json::Value::String(s) => {
+            // Parse string format: "level-protocol" or just "protocol" (defaults to level 2)
+            if let Some(idx) = s.find('-') {
+                let level = s[..idx].parse::<u8>().unwrap_or(2);
+                (level, s[idx + 1..].to_string())
+            } else {
+                (2, s.clone())
+            }
+        }
+        _ => {
+            log::error!("   Protocol ID must be array or string");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Protocol ID must be array or string"
+            }));
+        }
+    };
+
+    // Normalize protocol ID and build invoice number
+    let protocol_id = match normalize_protocol_id(&protocol_id_str) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("   Failed to normalize protocol ID: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid protocol ID: {}", e)
+            }));
+        }
+    };
+
+    let security = match security_level {
+        0 => SecurityLevel::NoPermissions,
+        1 => SecurityLevel::ProtocolLevel,
+        _ => SecurityLevel::CounterpartyLevel,
+    };
+
+    let invoice = match InvoiceNumber::new(security, &protocol_id, &key_id_str) {
+        Ok(inv) => inv,
+        Err(e) => {
+            log::error!("   Failed to create invoice number: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid invoice number: {}", e)
+            }));
+        }
+    };
+    let invoice_number = invoice.to_string();
+    log::info!("   BRC-43 invoice number: {}", invoice_number);
+
+    // Get master keys from database
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(key) => {
+            log::info!("   ✅ Master private key retrieved");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to get master private key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key retrieval error: {}", e)
+            }));
+        }
+    };
+    let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
+        Ok(key) => {
+            log::info!("   ✅ Master public key retrieved");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to get master public key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key retrieval error: {}", e)
+            }));
+        }
+    };
+    drop(db);
+
+    // Resolve counterparty public key (for decrypt, this is the sender's key)
+    let counterparty_pubkey = match resolve_counterparty_pubkey(&req.counterparty, &master_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => {
+            log::error!("   Failed to resolve counterparty: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": e
+            }));
+        }
+    };
+
+    // Derive symmetric key using BRC-2
+    let symmetric_key = match derive_symmetric_key(&master_privkey, &counterparty_pubkey, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ Symmetric key derived");
+            key
+        }
+        Err(e) => {
+            log::error!("   Failed to derive symmetric key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // Decrypt using AES-256-GCM (BRC-2)
+    let plaintext = match decrypt_brc2(&ciphertext_bytes, &symmetric_key) {
+        Ok(pt) => pt,
+        Err(e) => {
+            log::error!("   Decryption failed: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Decryption failed: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   ✅ Decrypted {} bytes -> {} bytes", ciphertext_bytes.len(), plaintext.len());
+
+    HttpResponse::Ok().json(DecryptResponse { plaintext })
 }
 
 // Wallet status endpoint
