@@ -1,15 +1,16 @@
 cmake_minimum_required(VERSION 3.15)
-project(HodosBrowserShell)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# ============================================================================
+# IMPORTANT: vcpkg configuration MUST come BEFORE project() command
+# ============================================================================
 
-# Paths
-set(CEF_ROOT "../cef-binaries")
-set(WRAPPER_LIB_PATH "${CEF_ROOT}/libcef_dll/wrapper/build/Release")
-set(RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release")
-set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
-set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
+# Set vcpkg triplet (Windows uses x64-windows-static for static linking)
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    if(WIN32)
+        set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+    endif()
+endif()
+
 # Portable vcpkg toolchain configuration
 # Set via environment variable VCPKG_ROOT or pass via command line:
 # cmake -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -23,6 +24,24 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 else()
     message(STATUS "Using vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
+
+message(STATUS "vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
+
+# ============================================================================
+# Now safe to call project()
+# ============================================================================
+
+project(HodosBrowserShell)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Paths
+set(CEF_ROOT "../cef-binaries")
+set(WRAPPER_LIB_PATH "${CEF_ROOT}/libcef_dll/wrapper/build/Release")
+set(RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release")
+set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
+set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
 
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 # set(OPENSSL_MSVC_STATIC_RT TRUE)
