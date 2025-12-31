@@ -9,5 +9,10 @@
       "Bash(sqlite3:*)",
       "Bash(./kill-browser.sh)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "bsv-filesystem-context",
+    "bsv-mcp"
+  ],
+  "enableAllProjectMcpServers": true
 }
