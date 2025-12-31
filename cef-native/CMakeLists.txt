@@ -10,19 +10,31 @@ set(WRAPPER_LIB_PATH "${CEF_ROOT}/libcef_dll/wrapper/build/Release")
 set(RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
 set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
-set(CMAKE_TOOLCHAIN_FILE "C:/Users/archb/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+# Portable vcpkg toolchain configuration
+# Set via environment variable VCPKG_ROOT or pass via command line:
+# cmake -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(DEFINED ENV{VCPKG_ROOT})
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+        message(STATUS "Using vcpkg from VCPKG_ROOT: $ENV{VCPKG_ROOT}")
+    else()
+        message(WARNING "vcpkg not found. Set VCPKG_ROOT environment variable or pass -DCMAKE_TOOLCHAIN_FILE=...")
+    endif()
+else()
+    message(STATUS "Using vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
+endif()
+
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 # set(OPENSSL_MSVC_STATIC_RT TRUE)
+
+# Find required packages (vcpkg will locate them automatically)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 
-# Use the correct include path
-include_directories(${OpenSSL_INCLUDE_DIR} "C:/Users/archb/Dev/vcpkg/installed/x64-windows-static/include")
-
-
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
+message(STATUS "OpenSSL libraries: ${OPENSSL_LIBRARIES}")
 
 # Output
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -59,7 +71,8 @@ set_target_properties(HodosBrowserShell PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
-# Include CEF headers
+# Include CEF headers and project headers
+# Note: vcpkg packages (OpenSSL, nlohmann_json, sqlite3) automatically add their include paths
 target_include_directories(HodosBrowserShell PRIVATE
     ${CEF_ROOT}
     ${CEF_ROOT}/include
@@ -69,8 +82,6 @@ target_include_directories(HodosBrowserShell PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/handlers
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
-    ${OpenSSL_INCLUDE_DIR}
-    ${nlohmann_json_INCLUDE_DIRS}
 )
 
 # Link libs
