@@ -459,8 +459,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("markBackedUp", identityHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
-    // TODO: macOS implementation - identity API stubbed for now
-    LOG_DEBUG_RENDER("🔧 Identity API not available on macOS - stubbed");
+    // macOS: Provide stub identity API to prevent JavaScript errors
+    CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🔧 Identity API stubbed on macOS (empty object)");
 #endif
 
 #ifdef _WIN32
@@ -475,8 +477,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("navigate", navigationHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
-    // TODO: macOS implementation - navigation API stubbed for now
-    LOG_DEBUG_RENDER("🔧 Navigation API not available on macOS - stubbed");
+    // macOS: Provide stub navigation API
+    CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🔧 Navigation API stubbed on macOS (empty object)");
 #endif
 
     // overlayPanel object removed - now using process-per-overlay architecture
@@ -510,8 +514,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("generate", addressHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
-    // TODO: macOS implementation - address API stubbed for now
-    LOG_DEBUG_RENDER("🔧 Address API not available on macOS - stubbed");
+    // macOS: Provide stub address API to prevent JavaScript errors
+    CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🔧 Address API stubbed on macOS (empty object)");
 #endif
 
 #ifdef _WIN32
@@ -544,8 +550,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
 #else
-    // TODO: macOS implementation - history API stubbed for now
-    LOG_DEBUG_RENDER("🔧 History API not available on macOS - stubbed");
+    // macOS: Provide stub history API
+    CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🔧 History API stubbed on macOS (empty object)");
 #endif
 
     // Create the cefMessage object for process communication

@@ -501,9 +501,40 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("🧭 header browser initialized.");
         LOG_DEBUG_BROWSER("🧭 header browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+#ifdef __APPLE__
+        // macOS: Aggressively trigger paint for windowless rendering
+        LOG_DEBUG_BROWSER("🎨 Forcing header browser paint on macOS");
+        CefRefPtr<CefBrowser> browser_ref = browser;
+
+        // Immediate resize and invalidate
+        if (browser->GetHost()) {
+            browser->GetHost()->WasResized();
+            browser->GetHost()->Invalidate(PET_VIEW);
+            LOG_DEBUG_BROWSER("🎨 Called WasResized() and Invalidate() for header");
+        }
+
+        // Delayed paint trigger (ensure view is ready)
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+                LOG_DEBUG_BROWSER("🎨 Delayed WasResized() and Invalidate() for header");
+            }
+        }, browser_ref), 100);
+#else
+        // Windows code stays as-is
         // Trigger initial resize to ensure content renders on startup
         browser->GetHost()->WasResized();
         LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for header browser");
+
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+#endif
     } else if (role_ == "overlay") {
         overlay_browser_ = browser;
         LOG_DEBUG_BROWSER("🪟 Overlay browser initialized.");

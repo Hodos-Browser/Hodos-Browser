@@ -123,6 +123,14 @@ if(APPLE)
     list(APPEND SOURCES cef_browser_shell_mac.mm)
     message(STATUS "Adding macOS-specific source: cef_browser_shell_mac.mm")
 
+    # Helper process source files
+    set(HODOS_HELPER_SRCS
+        mac/process_helper_mac.mm
+    )
+
+    # Load CEF cmake utilities for helper generation
+    set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CEF_ROOT}/cmake")
+
     # TODO: Port these to macOS or create macOS equivalents
     # - TabManager (tab system)
     # - WalletService (HTTP client)
@@ -300,7 +308,103 @@ if(WIN32)
         COMMENT "Copying all CEF binaries and resources"
     )
 elseif(APPLE)
+    # ============================================================================
+    # macOS: Generate Helper App Bundles (5 variants for process isolation)
+    # ============================================================================
+
+    # Define helper suffixes (from CEF)
+    set(CEF_HELPER_APP_SUFFIXES
+        "::"                              # Base helper
+        " (Alerts):_alerts:.alerts"       # Alerts process
+        " (GPU):_gpu:.gpu"                # GPU process
+        " (Plugin):_plugin:.plugin"       # Plugin process
+        " (Renderer):_renderer:.renderer" # Renderer process
+    )
+
+    set(HODOS_HELPER_TARGET "HodosBrowser_Helper")
+    set(HODOS_HELPER_OUTPUT_NAME "HodosBrowser Helper")
+    set(HODOS_APP "$<TARGET_FILE_DIR:HodosBrowserShell>/..")
+
+    # Generate all 5 helper app bundles
+    foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})
+        # Parse the suffix triple
+        string(REPLACE ":" ";" _suffix_list ${_suffix_list})
+        list(GET _suffix_list 0 _name_suffix)
+        list(GET _suffix_list 1 _target_suffix)
+        list(GET _suffix_list 2 _plist_suffix)
+
+        # Define variant-specific names
+        set(_helper_target "${HODOS_HELPER_TARGET}${_target_suffix}")
+        set(_helper_output_name "${HODOS_HELPER_OUTPUT_NAME}${_name_suffix}")
+
+        # Generate custom Info.plist for this helper variant
+        set(_helper_info_plist "${CMAKE_CURRENT_BINARY_DIR}/helper-Info${_target_suffix}.plist")
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mac/helper-Info.plist.in" _plist_contents)
+        string(REPLACE "\${EXECUTABLE_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
+        string(REPLACE "\${PRODUCT_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
+        string(REPLACE "\${BUNDLE_ID_SUFFIX}" "${_plist_suffix}" _plist_contents ${_plist_contents})
+        file(WRITE ${_helper_info_plist} ${_plist_contents})
+
+        # Create helper executable target
+        add_executable(${_helper_target} MACOSX_BUNDLE ${HODOS_HELPER_SRCS})
+
+        # Link libraries (same as main app)
+        target_link_libraries(${_helper_target} PRIVATE
+            "${WRAPPER_LIB_PATH}/libcef_dll_wrapper.a"
+            "${CEF_LIBRARY}"
+            ${COCOA_LIBRARY}
+            ${APPKIT_LIBRARY}
+            ${FOUNDATION_LIBRARY}
+        )
+
+        # Include directories
+        target_include_directories(${_helper_target} PRIVATE
+            ${CEF_ROOT}
+            ${CEF_ROOT}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/handlers
+        )
+
+        # Set helper properties
+        set_target_properties(${_helper_target} PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST ${_helper_info_plist}
+            OUTPUT_NAME ${_helper_output_name}
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "@executable_path/../../../../Frameworks;@loader_path/../../../../Frameworks"
+            BUILD_RPATH "@executable_path/../../../../Frameworks;@loader_path/../../../../Frameworks"
+        )
+
+        # Fix CEF framework link path for helpers
+        add_custom_command(
+            TARGET ${_helper_target}
+            POST_BUILD
+            # Change the hardcoded @executable_path/../Frameworks to the correct path from helper's location
+            COMMAND install_name_tool -change
+                    "@executable_path/../Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+                    "@executable_path/../../../../Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+                    "$<TARGET_FILE:${_helper_target}>"
+            VERBATIM
+        )
+
+        # Main app depends on this helper
+        add_dependencies(HodosBrowserShell "${_helper_target}")
+
+        # Copy helper bundle into main app's Frameworks directory
+        add_custom_command(
+            TARGET HodosBrowserShell
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${_helper_output_name}.app"
+                    "${HODOS_APP}/Contents/Frameworks/${_helper_output_name}.app"
+            VERBATIM
+        )
+
+        message(STATUS "Configured helper: ${_helper_output_name}")
+    endforeach()
+
+    # ============================================================================
     # macOS: Copy CEF framework into app bundle
+    # ============================================================================
+
     add_custom_command(TARGET HodosBrowserShell POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Setting up macOS app bundle..."
 

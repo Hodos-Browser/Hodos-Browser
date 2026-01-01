@@ -7,6 +7,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <mach-o/dyld.h>
 
+#include "include/cef_application_mac.h"
 #include "cef_app.h"
 #include "cef_client.h"
 #include "cef_browser.h"
@@ -21,6 +22,7 @@
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
 #include "include/handlers/my_overlay_render_handler.h"
+#include "include/wrapper/cef_library_loader.h"
 
 #include <iostream>
 #include <fstream>
@@ -28,6 +30,43 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+
+// ============================================================================
+// Forward Declarations
+// ============================================================================
+void ShutdownApplication();
+
+// ============================================================================
+// Custom NSApplication for CEF (REQUIRED on macOS)
+// ============================================================================
+
+@interface HodosBrowserApplication : NSApplication <CefAppProtocol> {
+ @private
+  BOOL handlingSendEvent_;
+}
+@end
+
+@implementation HodosBrowserApplication
+
+- (BOOL)isHandlingSendEvent {
+  return handlingSendEvent_;
+}
+
+- (void)setHandlingSendEvent:(BOOL)handlingSendEvent {
+  handlingSendEvent_ = handlingSendEvent;
+}
+
+- (void)sendEvent:(NSEvent*)event {
+  CefScopedSendingEvent sendingEventScoper;
+  [super sendEvent:event];
+}
+
+- (void)terminate:(id)sender {
+  // Override to prevent immediate exit - let CEF shut down properly
+  ShutdownApplication();
+}
+
+@end
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -178,6 +217,29 @@ void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateSettingsMenuOverlay();
 void ShutdownApplication();
+
+// ============================================================================
+// Helper Functions (C++ callable from simple_app.cpp)
+// ============================================================================
+
+ViewDimensions GetViewDimensions(void* nsview) {
+    ViewDimensions dims = {0, 0};
+
+    if (!nsview) {
+        LOG_ERROR("GetViewDimensions: nsview is null");
+        return dims;
+    }
+
+    NSView* view = (__bridge NSView*)nsview;
+    NSRect bounds = [view bounds];
+
+    dims.width = (int)bounds.size.width;
+    dims.height = (int)bounds.size.height;
+
+    LOG_DEBUG("GetViewDimensions: " + std::to_string(dims.width) + "x" + std::to_string(dims.height));
+
+    return dims;
+}
 
 // ============================================================================
 // NSView Subclasses for Overlay Event Handling
@@ -759,9 +821,11 @@ void CreateMainWindow() {
         return;
     }
 
+    // SetAsChild mode - CEF creates its own view, don't add our own layer
+    // Just set autoresizing so CEF's child view follows window resizes
     [g_header_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
     [[g_main_window contentView] addSubview:g_header_view];
-    LOG_INFO("✅ Header view created and added to main window");
+    LOG_INFO("✅ Header view created (for CEF child view) and added to main window");
 
     // Create webview/content area (bottom portion for tabs/web content)
     NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width,
@@ -1239,19 +1303,58 @@ void ShutdownApplication() {
 // ============================================================================
 
 int main(int argc, char* argv[]) {
+    // CRITICAL: Load CEF framework before calling any CEF functions (macOS only)
+    // Get executable path
+    char exec_path[1024];
+    uint32_t exec_path_size = sizeof(exec_path);
+    if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) {
+        fprintf(stderr, "❌ Failed to get executable path\n");
+        return 1;
+    }
+
+    // Build framework path
+    NSString* execPath = [NSString stringWithUTF8String:exec_path];
+    NSString* execDir = [execPath stringByDeletingLastPathComponent];
+    NSString* frameworkPath = [execDir stringByAppendingPathComponent:@"../Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"];
+    frameworkPath = [frameworkPath stringByStandardizingPath];
+
+    // Load CEF framework library
+    if (!cef_load_library([frameworkPath UTF8String])) {
+        fprintf(stderr, "❌ Failed to load CEF framework at: %s\n", [frameworkPath UTF8String]);
+        return 1;
+    }
+
+    fprintf(stderr, "✅ CEF framework loaded successfully\n");
+
+    // CEF subprocess handling
+    CefMainArgs main_args(argc, argv);
+
     @autoreleasepool {
-        // CEF subprocess handling
-        CefMainArgs main_args(argc, argv);
+        // CRITICAL: Initialize NSApplication BEFORE CefExecuteProcess and CefInitialize
+        [HodosBrowserApplication sharedApplication];
+
+        // Verify we got the right NSApplication subclass
+        if (![NSApp isKindOfClass:[HodosBrowserApplication class]]) {
+            fprintf(stderr, "❌ NSApp is not HodosBrowserApplication!\n");
+            return 1;
+        }
+
+        fprintf(stderr, "✅ HodosBrowserApplication initialized\n");
+
         CefRefPtr<SimpleApp> app(new SimpleApp());
 
         // Handle subprocesses (render, GPU, plugin processes)
+        // CRITICAL: Helpers should NOT activate as regular apps
         int exit_code = CefExecuteProcess(main_args, app, nullptr);
         if (exit_code >= 0) {
-            // Subprocess - exit immediately
+            // Subprocess - exit immediately WITHOUT activating as regular app
+            // This prevents helper processes from appearing in Dock
             return exit_code;
         }
 
         // Main process continues...
+        // Only the main process should be a regular application
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
         // Initialize centralized logger
         Logger::Initialize(ProcessType::MAIN, "debug_output.log");
@@ -1265,6 +1368,9 @@ int main(int argc, char* argv[]) {
         settings.log_severity = LOGSEVERITY_INFO;
         settings.remote_debugging_port = 9222;
         settings.windowless_rendering_enabled = true;  // Required for overlays
+
+        // CRITICAL: Disable sandbox on macOS for development (requires code signing otherwise)
+        settings.no_sandbox = true;
 
         // Set macOS bundle paths
         NSBundle* mainBundle = [NSBundle mainBundle];
@@ -1298,21 +1404,15 @@ int main(int argc, char* argv[]) {
         // Enable JavaScript features
         CefString(&settings.javascript_flags).FromASCII("--expose-gc --allow-running-insecure-content");
 
-        // Set subprocess path (same executable)
-        char exe_path[1024];
-        uint32_t size = sizeof(exe_path);
-        if (_NSGetExecutablePath(exe_path, &size) == 0) {
-            CefString(&settings.browser_subprocess_path).FromASCII(exe_path);
-            LOG_INFO("📁 Subprocess path: " + std::string(exe_path));
-        } else {
-            LOG_WARNING("⚠️ Failed to get executable path");
-        }
+        // Set subprocess path to helper bundle
+        // On macOS, helpers are in Contents/Frameworks/HodosBrowser Helper.app/Contents/MacOS/HodosBrowser Helper
+        NSString* appPath = [[NSBundle mainBundle] bundlePath];
+        NSString* helperPath = [appPath stringByAppendingPathComponent:@"Contents/Frameworks/HodosBrowser Helper.app/Contents/MacOS/HodosBrowser Helper"];
+        std::string helper_path = [helperPath UTF8String];
+        CefString(&settings.browser_subprocess_path).FromString(helper_path);
+        LOG_INFO("📁 Subprocess path: " + helper_path);
 
-        // Create NSApplication
-        [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-
-        // Initialize CEF
+        // Initialize CEF first (before creating windows)
         LOG_INFO("🔄 Initializing CEF...");
         bool cef_success = CefInitialize(main_args, settings, app, nullptr);
         LOG_INFO("CefInitialize result: " + std::string(cef_success ? "✅ SUCCESS" : "❌ FAILED"));
@@ -1322,7 +1422,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Create main window and views
+        // Create windows after CEF is initialized
+        // (Activation policy already set above for main process only)
         CreateMainWindow();
 
         if (!g_main_window || !g_header_view || !g_webview_view) {
@@ -1331,14 +1432,116 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // TODO: Initialize HistoryManager on macOS
-        // HistoryManager is currently Windows-only (uses SQLite with Windows APIs)
-        LOG_INFO("🔧 HistoryManager not implemented on macOS yet");
-
-        // Pass window references to SimpleApp
+        // Store window references for later use
         app->SetMacOSWindow((__bridge void*)g_main_window,
                            (__bridge void*)g_header_view,
                            (__bridge void*)g_webview_view);
+
+        LOG_INFO("✅ Windows created, now manually creating header browser");
+
+        // Manually create header browser using SetAsChild (standard macOS approach)
+        NSView* headerView = (__bridge NSView*)g_header_view;
+        NSRect headerBounds = [headerView bounds];
+
+        LOG_INFO("🔧 Creating header browser with SetAsChild (child window rendering)");
+        LOG_INFO("📐 Header bounds: " + std::to_string((int)headerBounds.size.width) +
+                 "x" + std::to_string((int)headerBounds.size.height));
+
+        CefWindowInfo header_window_info;
+        // Use child window rendering (CEF handles rendering automatically)
+        CefRect headerRect(0, 0, (int)headerBounds.size.width, (int)headerBounds.size.height);
+        header_window_info.SetAsChild((__bridge void*)headerView, headerRect);
+
+        CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
+
+        CefBrowserSettings header_settings;
+        header_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+
+        bool browser_created = CefBrowserHost::CreateBrowser(
+            header_window_info,
+            header_handler,
+            "http://127.0.0.1:5137",  // Load React frontend (localhost now allowed)
+            header_settings,
+            nullptr,
+            CefRequestContext::GetGlobalContext()
+        );
+
+        LOG_INFO("✅ Header browser creation result: " + std::string(browser_created ? "SUCCESS" : "FAILED"));
+
+        // ===================================================================
+        // Create Webview Browser (for actual webpage content)
+        // ===================================================================
+
+        NSView* webviewView = (__bridge NSView*)g_webview_view;
+        NSRect webviewBounds = [webviewView bounds];
+
+        LOG_INFO("🔧 Creating webview browser with SetAsChild (for webpage content)");
+        LOG_INFO("📐 Webview bounds: " + std::to_string((int)webviewBounds.size.width) +
+                 "x" + std::to_string((int)webviewBounds.size.height));
+
+        CefWindowInfo webview_window_info;
+        CefRect webviewRect(0, 0, (int)webviewBounds.size.width, (int)webviewBounds.size.height);
+        webview_window_info.SetAsChild((__bridge void*)webviewView, webviewRect);
+
+        CefRefPtr<SimpleHandler> webview_handler = new SimpleHandler("webview");
+
+        CefBrowserSettings webview_settings;
+        webview_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+
+        bool webview_created = CefBrowserHost::CreateBrowser(
+            webview_window_info,
+            webview_handler,
+            "https://metanetapps.com",  // Default page
+            webview_settings,
+            nullptr,
+            CefRequestContext::GetGlobalContext()
+        );
+
+        LOG_INFO("✅ Webview browser creation result: " + std::string(webview_created ? "SUCCESS" : "FAILED"));
+
+        // Debug: Check if CEF added a child view to our header view
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            NSArray* subviews = [headerView subviews];
+            LOG_INFO("🔍 Header view has " + std::to_string([subviews count]) + " subviews");
+            for (NSView* subview in subviews) {
+                NSRect frame = [subview frame];
+                BOOL hidden = [subview isHidden];
+                CGFloat alpha = [subview alphaValue];
+                LOG_INFO("  Subview: " + std::string([[subview className] UTF8String]) +
+                         " origin: (" + std::to_string((int)frame.origin.x) + "," + std::to_string((int)frame.origin.y) + ")" +
+                         " size: " + std::to_string((int)frame.size.width) + "x" + std::to_string((int)frame.size.height) +
+                         " hidden: " + std::string(hidden ? "YES" : "NO") +
+                         " alpha: " + std::to_string(alpha));
+
+                // Force correct position and size
+                NSRect correctFrame = NSMakeRect(0, 0, [headerView bounds].size.width, [headerView bounds].size.height);
+                if (!NSEqualRects(frame, correctFrame)) {
+                    [subview setFrame:correctFrame];
+                    LOG_INFO("  → Corrected frame to: " + std::to_string((int)correctFrame.size.width) + "x" + std::to_string((int)correctFrame.size.height));
+                }
+
+                // Force subview to be visible
+                if (hidden) {
+                    [subview setHidden:NO];
+                    LOG_INFO("  → Unhid subview");
+                }
+                if (alpha < 1.0) {
+                    [subview setAlphaValue:1.0];
+                    LOG_INFO("  → Set alpha to 1.0");
+                }
+
+                // Force display update
+                [subview setNeedsDisplay:YES];
+                [subview displayIfNeeded];
+                [headerView setNeedsDisplay:YES];
+                [headerView displayIfNeeded];
+                LOG_INFO("  → Forced display update on CEF view and parent");
+            }
+        });
+
+        // TODO: Initialize HistoryManager on macOS
+        // HistoryManager is currently Windows-only (uses SQLite with Windows APIs)
+        LOG_INFO("🔧 HistoryManager not implemented on macOS yet");
 
         LOG_INFO("🚀 Entering CEF message loop...");
 

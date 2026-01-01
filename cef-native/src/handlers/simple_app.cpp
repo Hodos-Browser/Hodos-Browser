@@ -69,6 +69,18 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     // Fix first-render black screen issue - disable GPU compositing for reliable rendering
     command_line->AppendSwitch("disable-gpu-compositing");
 
+    // macOS: Use in-process GPU instead of separate GPU process
+    // This avoids GPU process launch failures during development
+#ifdef __APPLE__
+    command_line->AppendSwitch("in-process-gpu");
+    command_line->AppendSwitch("disable-gpu-sandbox");
+    // CRITICAL: Allow localhost connections for frontend dev server
+    command_line->AppendSwitch("allow-loopback-in-sandbox");
+    command_line->AppendSwitch("disable-web-security");  // Disable for development
+    command_line->AppendSwitch("allow-running-insecure-content");
+    LOG_INFO_APP("Using in-process GPU on macOS; web security disabled for localhost dev");
+#endif
+
     // Additional GPU flags (keep commented for now):
     // command_line->AppendSwitch("disable-gpu");
     // command_line->AppendSwitch("disable-gpu-shader-disk-cache");
@@ -178,35 +190,12 @@ void SimpleApp::OnContextInitialized() {
     std::cout << "✅ OnContextInitialized CALLED (macOS)" << std::endl;
     LOG_INFO_APP("✅ OnContextInitialized CALLED (macOS)");
 
-    // Create header browser
-    if (header_view_) {
-        // Use fixed dimensions for now - will be resized by the view
-        CefWindowInfo header_window_info;
-        CefRect header_rect(0, 0, 1024, 100); // x, y, width, height
-        header_window_info.SetAsChild(header_view_, header_rect);
+    // On macOS, browsers are created manually in main() after windows are set up
+    // This callback runs too early (before windows exist), so we skip it
+    LOG_INFO_APP("🔧 Browsers will be created manually after window setup");
 
-        CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
-        CefBrowserSettings header_settings;
-
-        CefBrowserHost::CreateBrowser(
-            header_window_info,
-            header_handler,
-            "http://127.0.0.1:5137",
-            header_settings,
-            nullptr,
-            CefRequestContext::GetGlobalContext()
-        );
-
-        LOG_INFO_APP("✅ Header browser created (macOS)");
-        std::cout << "✅ Header browser created (macOS)" << std::endl;
-    } else {
-        LOG_ERROR_APP("❌ Header view is null (macOS)");
-        std::cout << "❌ Header view is null (macOS)" << std::endl;
-    }
-
-    // TODO: Create initial webview/tab on macOS
+    // Tab system not implemented on macOS yet
     LOG_INFO_APP("🔧 Tab system not implemented on macOS yet");
-    std::cout << "🔧 Tab system not implemented on macOS yet" << std::endl;
 #endif
 }
 

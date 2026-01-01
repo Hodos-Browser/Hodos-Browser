@@ -24,6 +24,11 @@ if (!window.hodosBrowser.overlay?.show) {
   if (!window.hodosBrowser.overlay) {
     (window.hodosBrowser as any).overlay = {};
   }
+  // Ensure overlay object exists (defensive for macOS/non-overlay contexts)
+  if (!window.hodosBrowser.overlay) {
+    window.hodosBrowser.overlay = {} as any;
+  }
+
   window.hodosBrowser.overlay.show = () => {
     console.log("🧠 JS: Sending overlay_show to native");
     console.log("Bridge is executing from URL:", window.location.href);
@@ -88,6 +93,29 @@ if (!window.hodosBrowser.overlay?.close) {
 
 console.log("🔍 initWindowBridge: Setting up hodosBrowser.address");
 console.log("🔍 initWindowBridge: window.hodosBrowser.address exists:", !!window.hodosBrowser.address);
+
+// Ensure address object exists (defensive for macOS where APIs are stubbed)
+if (!window.hodosBrowser.address) {
+  console.log("⚠️ initWindowBridge: address API not available, creating stub");
+  window.hodosBrowser.address = {} as any;
+}
+
+// Ensure overlay has all required functions (defensive for macOS)
+if (!window.hodosBrowser.overlay?.toggleInput) {
+  console.log("⚠️ initWindowBridge: overlay.toggleInput not available, creating stub");
+  if (!window.hodosBrowser.overlay) {
+    window.hodosBrowser.overlay = {} as any;
+  }
+  window.hodosBrowser.overlay.toggleInput = (enable: boolean) => {
+    console.log("⚠️ overlay.toggleInput called but not implemented on this platform");
+  };
+}
+
+if (!window.hodosBrowser.overlay?.hide) {
+  window.hodosBrowser.overlay.hide = () => {
+    console.log("⚠️ overlay.hide called but not implemented on this platform");
+  };
+}
 
 // Force override the existing function
 console.log("🔍 initWindowBridge: Forcing override of address.generate function");

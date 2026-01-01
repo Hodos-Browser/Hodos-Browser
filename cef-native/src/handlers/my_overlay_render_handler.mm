@@ -95,6 +95,10 @@ MyOverlayRenderHandler::MyOverlayRenderHandler(void* nsview, int width, int heig
 
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
     rect = CefRect(0, 0, width_, height_);
+    std::cout << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
+    std::ofstream debugLog("debug_output.log", std::ios::app);
+    debugLog << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
+    debugLog.close();
 }
 
 // ============================================================================

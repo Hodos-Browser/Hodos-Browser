@@ -55,6 +55,13 @@
     void CreateBackupOverlayWithSeparateProcess();
     void CreateBRC100AuthOverlayWithSeparateProcess();
     void CreateSettingsMenuOverlay();
+
+    // Helper function to get NSView dimensions (implemented in cef_browser_shell_mac.mm)
+    struct ViewDimensions {
+        int width;
+        int height;
+    };
+    ViewDimensions GetViewDimensions(void* nsview);
 #endif
 
 
