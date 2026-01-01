@@ -5,7 +5,11 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <windows.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
 #include "include/cef_browser.h"
 #include "Tab.h"
 
@@ -68,7 +72,11 @@ public:
      * @note The browser is created asynchronously. The CefRefPtr<CefBrowser>
      *       will be set later in RegisterTabBrowser() when OnAfterCreated is called
      */
+#ifdef _WIN32
     int CreateTab(const std::string& url, HWND parent_hwnd, int x, int y, int width, int height);
+#else
+    int CreateTab(const std::string& url, void* parent_view, int x, int y, int width, int height);
+#endif
 
     /**
      * @brief Close a tab

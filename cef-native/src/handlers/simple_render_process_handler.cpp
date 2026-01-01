@@ -1,10 +1,15 @@
 // cef_native/src/simple_render_process_handler.cpp
 #include "../../include/handlers/simple_render_process_handler.h"
-#include "../../include/core/IdentityHandler.h"
-#include "../../include/core/NavigationHandler.h"
-#include "../../include/core/AddressHandler.h"
-#include "../../include/core/HistoryManager.h"
-#include "BRC100Handler.h"
+
+// Platform-specific V8 handlers (Windows-only currently)
+#ifdef _WIN32
+    #include "../../include/core/IdentityHandler.h"
+    #include "../../include/core/NavigationHandler.h"
+    #include "../../include/core/AddressHandler.h"
+    #include "../../include/core/HistoryManager.h"
+    #include "BRC100Handler.h"
+#endif
+
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
 #include <iostream>
@@ -194,7 +199,8 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
-// Handler for history operations
+#ifdef _WIN32
+// Handler for history operations (Windows-only)
 class HistoryV8Handler : public CefV8Handler {
 public:
     HistoryV8Handler() {}
@@ -380,13 +386,16 @@ public:
 private:
     IMPLEMENT_REFCOUNTING(HistoryV8Handler);
 };
+#endif // _WIN32
 
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 SimpleRenderProcessHandler constructor called!");
+
+#ifdef _WIN32
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
 
-    // Initialize HistoryManager for render process
+    // Initialize HistoryManager for render process (Windows-only)
     std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
     std::string user_data_path = appdata_path + "\\HodosBrowser\\Default";
 
@@ -396,6 +405,9 @@ SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     } else {
         LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
     }
+#else
+    LOG_DEBUG_RENDER("🔧 HistoryManager not available on macOS - stubbed");
+#endif
 }
 
 void SimpleRenderProcessHandler::OnContextCreated(
@@ -407,8 +419,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     LOG_DEBUG_RENDER("🔧 OnContextCreated called for browser ID: " + std::to_string(browser->GetIdentifier()));
     LOG_DEBUG_RENDER("🔧 Frame URL: " + frame->GetURL().ToString());
+#ifdef _WIN32
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
+#endif
     LOG_DEBUG_RENDER("🔧 RENDER PROCESS HANDLER IS WORKING!");
     LOG_DEBUG_RENDER("🔧 THIS IS THE RENDER PROCESS HANDLER!");
 
@@ -429,7 +443,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
     global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-    // Create the identity object inside hodosBrowser
+#ifdef _WIN32
+    // Create the identity object inside hodosBrowser (Windows-only)
     CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -443,8 +458,13 @@ void SimpleRenderProcessHandler::OnContextCreated(
     identityObject->SetValue("markBackedUp",
         CefV8Value::CreateFunction("markBackedUp", identityHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // TODO: macOS implementation - identity API stubbed for now
+    LOG_DEBUG_RENDER("🔧 Identity API not available on macOS - stubbed");
+#endif
 
-    // Create the navigation object inside hodosBrowser
+#ifdef _WIN32
+    // Create the navigation object inside hodosBrowser (Windows-only)
     CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -454,6 +474,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
     navigationObject->SetValue("navigate",
         CefV8Value::CreateFunction("navigate", navigationHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // TODO: macOS implementation - navigation API stubbed for now
+    LOG_DEBUG_RENDER("🔧 Navigation API not available on macOS - stubbed");
+#endif
 
     // overlayPanel object removed - now using process-per-overlay architecture
 
@@ -475,7 +499,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
         LOG_DEBUG_RENDER("🎯 isMainBrowser: " + std::string(isMainBrowser ? "true" : "false"));
     }
 
-    // Create the address object
+#ifdef _WIN32
+    // Create the address object (Windows-only)
     CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -484,8 +509,13 @@ void SimpleRenderProcessHandler::OnContextCreated(
     addressObject->SetValue("generate",
         CefV8Value::CreateFunction("generate", addressHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // TODO: macOS implementation - address API stubbed for now
+    LOG_DEBUG_RENDER("🔧 Address API not available on macOS - stubbed");
+#endif
 
-    // Create the history object
+#ifdef _WIN32
+    // Create the history object (Windows-only)
     LOG_DEBUG_RENDER("📚 Creating history object for V8 context");
     CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
@@ -513,6 +543,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
         V8_PROPERTY_ATTRIBUTE_NONE);
 
     LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
+#else
+    // TODO: macOS implementation - history API stubbed for now
+    LOG_DEBUG_RENDER("🔧 History API not available on macOS - stubbed");
+#endif
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);
@@ -522,8 +556,13 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> sendFunction = CefV8Value::CreateFunction("send", new CefMessageSendHandler());
     cefMessageObject->SetValue("send", sendFunction, V8_PROPERTY_ATTRIBUTE_NONE);
 
-    // Register BRC-100 API
+#ifdef _WIN32
+    // Register BRC-100 API (Windows-only)
     BRC100Handler::RegisterBRC100API(context);
+#else
+    // TODO: macOS implementation - BRC-100 API stubbed for now
+    LOG_DEBUG_RENDER("🔧 BRC-100 API not available on macOS - stubbed");
+#endif
 
     // For overlay browsers, signal that all systems are ready
     if (isOverlayBrowser) {

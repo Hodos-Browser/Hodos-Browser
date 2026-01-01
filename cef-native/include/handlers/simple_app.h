@@ -8,25 +8,54 @@
 #include "simple_render_process_handler.h"
 #include "simple_handler.h"
 
-// 🧭 Temporary global HWNDs for startup wiring
-extern HWND g_hwnd;
-extern HWND g_header_hwnd;
-extern HWND g_webview_hwnd;
+#ifdef _WIN32
+    #include <windows.h>
+#elif defined(__APPLE__)
+    #ifdef __OBJC__
+        #import <Cocoa/Cocoa.h>
+    #else
+        // Forward declarations for C++ files
+        struct NSWindow;
+        struct NSView;
+    #endif
+#endif
 
-// Global overlay HWNDs for shutdown cleanup
-extern HWND g_settings_overlay_hwnd;
-extern HWND g_wallet_overlay_hwnd;
-extern HWND g_backup_overlay_hwnd;
-extern HWND g_brc100_auth_overlay_hwnd;
-extern HWND g_settings_menu_overlay_hwnd;
+// Platform-specific global window/view references
+#ifdef _WIN32
+    // Windows: HWNDs
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    extern HWND g_webview_hwnd;
+    extern HWND g_settings_overlay_hwnd;
+    extern HWND g_wallet_overlay_hwnd;
+    extern HWND g_backup_overlay_hwnd;
+    extern HWND g_brc100_auth_overlay_hwnd;
+    extern HWND g_settings_menu_overlay_hwnd;
+    extern HINSTANCE g_hInstance;
 
-// globals.h
-extern HINSTANCE g_hInstance;
+    // Windows overlay creation functions
+    void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance);
+    void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
+    void CreateSettingsMenuOverlay(HINSTANCE hInstance);
 
-// Global functions
-void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance);
-void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
-void CreateSettingsMenuOverlay(HINSTANCE hInstance);
+#elif defined(__APPLE__)
+    // macOS: NSWindow* and NSView* (forward declared as void*)
+    extern NSWindow* g_main_window;
+    extern NSView* g_header_view;
+    extern NSView* g_webview_view;
+    extern NSWindow* g_settings_overlay_window;
+    extern NSWindow* g_wallet_overlay_window;
+    extern NSWindow* g_backup_overlay_window;
+    extern NSWindow* g_brc100_auth_overlay_window;
+    extern NSWindow* g_settings_menu_overlay_window;
+
+    // macOS overlay creation functions
+    void CreateSettingsOverlayWithSeparateProcess();
+    void CreateWalletOverlayWithSeparateProcess();
+    void CreateBackupOverlayWithSeparateProcess();
+    void CreateBRC100AuthOverlayWithSeparateProcess();
+    void CreateSettingsMenuOverlay();
+#endif
 
 
 class SimpleApp : public CefApp,
@@ -43,11 +72,18 @@ public:
 
     void OnContextInitialized() override;
 
+    // Platform-specific window handle methods
+#ifdef _WIN32
     void SetWindowHandles(HWND hwnd, HWND shell, HWND webview);
     HWND hwnd_ = nullptr;
     HWND header_hwnd_ = nullptr;
     HWND webview_hwnd_ = nullptr;
-    // HWND overlay_hwnd_ = nullptr;
+#elif defined(__APPLE__)
+    void SetMacOSWindow(void* main_window, void* header_view, void* webview_view);
+    void* main_window_ = nullptr;
+    void* header_view_ = nullptr;
+    void* webview_view_ = nullptr;
+#endif
 
 
 private:

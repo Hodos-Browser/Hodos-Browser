@@ -2,9 +2,18 @@
 #include "include/cef_render_handler.h"
 #include "simple_app.h"
 
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
 class MyOverlayRenderHandler : public CefRenderHandler {
 public:
+    // Platform-agnostic constructor (void* for HWND or NSView*)
+#ifdef _WIN32
     MyOverlayRenderHandler(HWND hwnd, int width, int height);
+#elif defined(__APPLE__)
+    MyOverlayRenderHandler(void* nsview, int width, int height);
+#endif
 
     void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
     void OnPaint(CefRefPtr<CefBrowser> browser,
@@ -20,13 +29,17 @@ public:
     void OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect& rect) override;
 
 private:
-    HWND hwnd_;      // ✅ store HWND
     int width_;
     int height_;
 
-    HDC hdc_mem_;        // Our reusable memory DC
-    HBITMAP hbitmap_;    // The bitmap CEF will draw into
-    void* dib_data_;     // Pointer to the raw bitmap memory
+#ifdef _WIN32
+    HWND hwnd_;           // Windows window handle
+    HDC hdc_mem_;         // Memory DC for GDI rendering
+    HBITMAP hbitmap_;     // Bitmap for DIB section
+    void* dib_data_;      // Pointer to raw bitmap memory
+#elif defined(__APPLE__)
+    void* nsview_;        // macOS NSView pointer (bridged)
+#endif
 
     IMPLEMENT_REFCOUNTING(MyOverlayRenderHandler);
 };

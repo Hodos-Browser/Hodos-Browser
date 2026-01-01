@@ -7,11 +7,14 @@
 #include "include/cef_browser.h"
 #include "include/cef_frame.h"
 #include "include/cef_process_message.h"
+#include <iostream>
+#include <fstream>
+
+#ifdef _WIN32
 #include "../../include/core/WebSocketServerHandler.h"
 #include "../../include/core/WalletService.h"
 #include "../../include/core/TabManager.h"
-#include <iostream>
-#include <fstream>
+#endif
 
 // Forward declaration of Logger class from main shell
 class Logger {
@@ -25,11 +28,13 @@ public:
 #define LOG_WARNING_APP(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_APP(msg) Logger::Log(msg, 3, 2)
 
+#ifdef _WIN32
 // External global HWND declarations for shutdown cleanup
 extern HWND g_settings_overlay_hwnd;
 extern HWND g_wallet_overlay_hwnd;
 extern HWND g_backup_overlay_hwnd;
 extern HWND g_brc100_auth_overlay_hwnd;
+#endif
 
 SimpleApp::SimpleApp()
     : render_process_handler_(new SimpleRenderProcessHandler()) {
@@ -78,16 +83,25 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
 
 }
 
+#ifdef _WIN32
 void SimpleApp::SetWindowHandles(HWND hwnd, HWND header, HWND webview) {
     hwnd_ = hwnd;
     header_hwnd_ = header;
     webview_hwnd_ = webview;
 }
+#elif defined(__APPLE__)
+void SimpleApp::SetMacOSWindow(void* main_window, void* header_view, void* webview_view) {
+    main_window_ = main_window;
+    header_view_ = header_view;
+    webview_view_ = webview_view;
+}
+#endif
 
 void SimpleApp::OnContextInitialized() {
     CEF_REQUIRE_UI_THREAD();
-    std::cout << "✅ OnContextInitialized CALLED" << std::endl;
-    // Sleep(500);
+
+#ifdef _WIN32
+    std::cout << "✅ OnContextInitialized CALLED (Windows)" << std::endl;
 
     std::ofstream log("startup_log.txt", std::ios::app);
     log << "🚀 OnContextInitialized entered\n";
@@ -95,7 +109,6 @@ void SimpleApp::OnContextInitialized() {
     log << "→ IsWindow(header_hwnd_): " << IsWindow(header_hwnd_) << "\n";
     log << "→ webview_hwnd_: " << webview_hwnd_ << "\n";
     log << "→ IsWindow(webview_hwnd_): " << IsWindow(webview_hwnd_) << "\n";
-
     log.close();
 
     // ───── WebSocket Server Setup ─────
@@ -116,18 +129,20 @@ void SimpleApp::OnContextInitialized() {
     std::string header_url = "http://127.0.0.1:5137";
     std::cout << "Loading React header at: " << header_url << std::endl;
 
-    try{
+    try {
         bool header_result = CefBrowserHost::CreateBrowser(
-        header_window_info,
-        header_handler,
-        header_url,
-        header_settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
-    std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
+            header_window_info,
+            header_handler,
+            header_url,
+            header_settings,
+            nullptr,
+            CefRequestContext::GetGlobalContext()
+        );
+        std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
     } catch (...) {
-        log << "❌ header browser creation threw an exception!\n";
+        std::ofstream errLog("startup_log.txt", std::ios::app);
+        errLog << "❌ header browser creation threw an exception!\n";
+        errLog.close();
     }
 
     // ───── Initial Tab Creation (replaces single webview) ─────
@@ -153,9 +168,46 @@ void SimpleApp::OnContextInitialized() {
         LOG_INFO_APP("✅ Initial tab created: ID " + std::to_string(initial_tab_id));
         std::cout << "Initial tab created: ID " << initial_tab_id << std::endl;
     } catch (...) {
-        log << "❌ Initial tab creation threw an exception!\n";
+        std::ofstream errLog("startup_log.txt", std::ios::app);
+        errLog << "❌ Initial tab creation threw an exception!\n";
+        errLog.close();
         LOG(ERROR) << "Failed to create initial tab";
     }
+
+#elif defined(__APPLE__)
+    std::cout << "✅ OnContextInitialized CALLED (macOS)" << std::endl;
+    LOG_INFO_APP("✅ OnContextInitialized CALLED (macOS)");
+
+    // Create header browser
+    if (header_view_) {
+        // Use fixed dimensions for now - will be resized by the view
+        CefWindowInfo header_window_info;
+        CefRect header_rect(0, 0, 1024, 100); // x, y, width, height
+        header_window_info.SetAsChild(header_view_, header_rect);
+
+        CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
+        CefBrowserSettings header_settings;
+
+        CefBrowserHost::CreateBrowser(
+            header_window_info,
+            header_handler,
+            "http://127.0.0.1:5137",
+            header_settings,
+            nullptr,
+            CefRequestContext::GetGlobalContext()
+        );
+
+        LOG_INFO_APP("✅ Header browser created (macOS)");
+        std::cout << "✅ Header browser created (macOS)" << std::endl;
+    } else {
+        LOG_ERROR_APP("❌ Header view is null (macOS)");
+        std::cout << "❌ Header view is null (macOS)" << std::endl;
+    }
+
+    // TODO: Create initial webview/tab on macOS
+    LOG_INFO_APP("🔧 Tab system not implemented on macOS yet");
+    std::cout << "🔧 Tab system not implemented on macOS yet" << std::endl;
+#endif
 }
 
 
@@ -285,6 +337,7 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     debugLog2.close();
 }
 
+#ifdef _WIN32
 void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "🪟 Creating settings overlay with separate process" << std::endl;
     std::ofstream debugLog("debug_output.log", std::ios::app);
@@ -446,7 +499,9 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance) {
         debugLog5.close();
     }
 }
+#endif // _WIN32
 
+#ifdef _WIN32
 void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "💰 Creating wallet overlay with separate process" << std::endl;
     std::ofstream debugLog("debug_output.log", std::ios::app);
@@ -570,7 +625,9 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance) {
         debugLog5.close();
     }
 }
+#endif // _WIN32
 
+#ifdef _WIN32
 void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "💾 Creating backup overlay with separate process" << std::endl;
     std::ofstream debugLog("debug_output.log", std::ios::app);
@@ -654,7 +711,9 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
         debugLog5.close();
     }
 }
+#endif // _WIN32
 
+#ifdef _WIN32
 void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "🔐 Creating BRC-100 auth overlay with separate process" << std::endl;
     std::ofstream debugLog("debug_output.log", std::ios::app);
@@ -748,7 +807,9 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
         debugLog5.close();
     }
 }
+#endif // _WIN32
 
+#ifdef _WIN32
 void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     LOG_INFO_APP("📋 Creating settings menu dropdown overlay");
 
@@ -831,3 +892,4 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
         LOG_ERROR_APP("❌ Failed to create settings menu browser");
     }
 }
+#endif // _WIN32

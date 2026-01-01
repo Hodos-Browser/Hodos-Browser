@@ -8,7 +8,8 @@
       "Bash(find:*)",
       "Bash(sqlite3:*)",
       "Bash(./kill-browser.sh)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(brew install:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -3,7 +3,11 @@
 
 #include <string>
 #include <chrono>
-#include <windows.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
 #include "include/cef_browser.h"
 
 // Forward declaration to avoid circular dependency
@@ -35,8 +39,12 @@ struct Tab {
     std::string favicon_url;
 
     // Window handle for this tab's browser container
-    // Each tab gets its own HWND which is shown/hidden on tab switch
+    // Each tab gets its own HWND (Windows) or NSView* (macOS)
+#ifdef _WIN32
     HWND hwnd;
+#else
+    void* view_ptr;  // NSView* on macOS (void* for cross-platform compatibility)
+#endif
 
     // CEF browser instance for this tab
     // Each tab runs in a separate render process for security isolation
@@ -73,7 +81,11 @@ struct Tab {
           title("New Tab"),
           url(""),
           favicon_url(""),
+#ifdef _WIN32
           hwnd(nullptr),
+#else
+          view_ptr(nullptr),
+#endif
           browser(nullptr),
           handler(nullptr),
           is_visible(false),
@@ -93,7 +105,11 @@ struct Tab {
           title("New Tab"),
           url(initial_url),
           favicon_url(""),
+#ifdef _WIN32
           hwnd(nullptr),
+#else
+          view_ptr(nullptr),
+#endif
           browser(nullptr),
           handler(nullptr),
           is_visible(false),
