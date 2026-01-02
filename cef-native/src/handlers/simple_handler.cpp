@@ -9,6 +9,14 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include <windows.h>
+#else
+    #include "../../include/core/TabManager.h"
+    // Forward declarations (no Cocoa.h in .cpp files)
+    #ifdef __OBJC__
+        #import <Cocoa/Cocoa.h>
+    #else
+        struct NSView;
+    #endif
 #endif
 
 #include "include/wrapper/cef_helpers.h"
@@ -46,6 +54,9 @@ public:
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
+#else
+    // macOS global views
+    extern NSView* g_webview_view;
 #endif
 
 // Global backup modal state management
@@ -141,10 +152,10 @@ void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
 }
 
 // Static method to notify frontend of tab list changes (called from TabManager)
+// Available on both platforms now
 void SimpleHandler::NotifyTabListChanged() {
     CEF_REQUIRE_UI_THREAD();
 
-#ifdef _WIN32
     std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
     int active_tab_id = TabManager::GetInstance().GetActiveTabId();
 
@@ -177,17 +188,12 @@ void SimpleHandler::NotifyTabListChanged() {
         header->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
         LOG_DEBUG_BROWSER("📑 Tab list updated and sent to header: " + json_str);
     }
-#else
-    // TODO(macOS): Implement tab list notification for macOS
-    LOG_DEBUG_BROWSER("⚠️ NotifyTabListChanged not implemented on macOS");
-#endif
 }
 
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
     CEF_REQUIRE_UI_THREAD();
 
-#ifdef _WIN32
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabTitle(tab_id, title.ToString());
@@ -195,10 +201,6 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString
 
 #if defined(OS_WIN)
     SetWindowText(browser->GetHost()->GetWindowHandle(), std::wstring(title).c_str());
-#endif
-#else
-    // TODO(macOS): Implement title change handling for macOS
-    LOG_DEBUG_BROWSER("OnTitleChange: " + title.ToString());
 #endif
 }
 
@@ -212,17 +214,12 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-#ifdef _WIN32
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabURL(tab_id, url.ToString());
         LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url.ToString());
     }
-#else
-    // TODO(macOS): Implement address change handling for macOS
-    LOG_DEBUG_BROWSER("OnAddressChange: " + url.ToString());
-#endif
 }
 
 void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
@@ -234,8 +231,7 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-#ifdef _WIN32
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         // Use the first favicon URL (usually the most appropriate)
@@ -243,10 +239,6 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
         TabManager::GetInstance().UpdateTabFavicon(tab_id, favicon_url);
         LOG_DEBUG_BROWSER("🖼️ Tab " + std::to_string(tab_id) + " favicon updated: " + favicon_url);
     }
-#else
-    // TODO(macOS): Implement favicon change handling for macOS
-    LOG_DEBUG_BROWSER("OnFaviconURLChange: favicon URLs received");
-#endif
 }
 
 void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -285,8 +277,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                                          bool canGoForward) {
     CEF_REQUIRE_UI_THREAD();
 
-#ifdef _WIN32
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabLoadingState(tab_id, isLoading, canGoBack, canGoForward);
@@ -294,7 +285,8 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
 
-    // Track history when page finishes loading (for main tabs only)
+#ifdef _WIN32
+    // Track history when page finishes loading (for main tabs only) - Windows only for now
     if (!isLoading && tab_id != -1) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
         if (frame && frame->IsValid()) {
@@ -320,6 +312,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             }
         }
     }
+#endif
 
     // Special debug for BRC-100 auth overlay
     if (role_ == "brc100auth") {
@@ -338,6 +331,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         LOG_DEBUG_BROWSER("📡 Backup URL: " + browser->GetMainFrame()->GetURL().ToString());
     }
 
+    // API injection logic (cross-platform)
     if (!isLoading) {
         if (role_ == "overlay") {
             // Log that we're about to inject the API
@@ -373,10 +367,14 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             // Send pending auth request data to the overlay after React app loads
             // Add a small delay to ensure React is fully mounted
+#ifdef _WIN32
             CefPostDelayedTask(TID_UI, base::BindOnce([]() {
                 extern void sendAuthRequestDataToOverlay();
                 sendAuthRequestDataToOverlay();
             }), 500);
+#else
+            // TODO: Implement BRC-100 auth on macOS
+#endif
         } else if (ExtractTabIdFromRole(role_) != -1) {
             // Inject the hodosBrowser API into tab browsers
             LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
@@ -410,53 +408,6 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             }
         }
     }
-#else
-    // macOS: Just log loading state, no TabManager/HistoryManager
-    LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
-
-    // Keep the cross-platform overlay/webview/header/settings/brc100auth/tab browser API injection
-    if (!isLoading) {
-        if (role_ == "overlay") {
-            LOG_DEBUG_BROWSER("🔧 OVERLAY LOADED - About to inject hodosBrowser API");
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
-        } else if (role_ == "webview") {
-            LOG_DEBUG_BROWSER("🔧 WEBVIEW BROWSER LOADED - Injecting hodosBrowser API");
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
-        } else if (role_ == "header") {
-            LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
-        } else if (role_ == "settings") {
-            LOG_DEBUG_BROWSER("🔧 SETTINGS BROWSER LOADED - Injecting hodosBrowser API");
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
-        } else if (role_ == "brc100auth") {
-            LOG_DEBUG_BROWSER("🔧 BRC-100 AUTH BROWSER LOADED - Injecting hodosBrowser API");
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
-        }
-
-        // Overlay-specific logic
-        if (role_ == "overlay") {
-            if (needs_overlay_reload_) {
-                LOG_DEBUG_BROWSER("🔄 Overlay finished loading, now reloading React app");
-                needs_overlay_reload_ = false;
-                browser->GetMainFrame()->LoadURL("http://127.0.0.1:5137/overlay");
-                LOG_DEBUG_BROWSER("🔄 LoadURL called for overlay reload");
-                return;
-            }
-
-            if (!pending_panel_.empty()) {
-                std::string panel = pending_panel_;
-                LOG_DEBUG_BROWSER("🕒 OnLoadingStateChange: Creating deferred trigger for panel: " + panel);
-                SimpleHandler::pending_panel_.clear();
-                CefPostDelayedTask(TID_UI, base::BindOnce(&SimpleHandler::TriggerDeferredPanel, panel), 100);
-            }
-        }
-    }
-#endif
 }
 
 void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
@@ -464,8 +415,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
     LOG_DEBUG_BROWSER("✅ OnAfterCreated for role: " + role_);
 
-#ifdef _WIN32
-    // Check if this is a tab browser - register with TabManager first
+    // Check if this is a tab browser - register with TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         // This is a tab browser - register with TabManager
@@ -474,7 +424,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                          ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
         // Delayed WasResized() + Invalidate() to fix first-render black screen
-        // CEF needs time for HWND to be fully initialized before rendering
+        // CEF needs time for view to be fully initialized before rendering
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -482,11 +432,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
                 LOG(INFO) << "Tab browser delayed resize/invalidate completed";
             }
-        }, browser_ref), 150);  // 150ms delay for window initialization
+        }, browser_ref), 150);  // 150ms delay for view initialization
 
         return;  // Tab browsers don't need the overlay/header/webview handling below
     }
-#endif
 
     if (role_ == "webview") {
         webview_browser_ = browser;
@@ -626,8 +575,7 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     std::cout << "  → Not a popup, checking if tab browser..." << std::endl;
 
-#ifdef _WIN32
-    // Check if this is a tab browser
+    // Check if this is a tab browser (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     std::cout << "  → Extracted tab ID: " << tab_id << std::endl;
 
@@ -638,7 +586,6 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
         std::cout << "🔴 OnBeforeClose EXITING (tab)" << std::endl;
         return;
     }
-#endif
 
     std::cout << "  → Not a tab, checking overlays..." << std::endl;
 
@@ -773,13 +720,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
     // ========== TAB MANAGEMENT MESSAGES ==========
+    // Tab management available on both platforms now
 
-#ifdef _WIN32
     if (message_name == "tab_create") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
 
-        // Get main window dimensions for tab size
+#ifdef _WIN32
+        // Windows: Get main window dimensions for tab size
         extern HWND g_hwnd;
         RECT rect;
         GetClientRect(g_hwnd, &rect);
@@ -791,6 +739,19 @@ bool SimpleHandler::OnProcessMessageReceived(
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+#else
+        // macOS: Get webview dimensions through helper function
+        // g_webview_view is already void*, no bridge cast needed
+        ViewDimensions dims = GetViewDimensions(g_webview_view);
+
+        int tab_id = TabManager::GetInstance().CreateTab(
+            url,
+            g_webview_view,  // Already void*, no cast needed
+            0, 0,
+            dims.width,
+            dims.height
+        );
+#endif
 
         LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id));
 
@@ -864,11 +825,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         SendTabListToFrontend();
         return true;
     }
-#endif  // _WIN32
 
     // ========== NAVIGATION MESSAGES ==========
+    // Navigation now uses TabManager on both platforms
 
-#ifdef _WIN32
     if (message_name == "navigate") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string path = args->GetString(0);
@@ -928,7 +888,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         return true;
     }
-#endif  // _WIN32
 
     // Duplicate address_generate handler removed - keeping the one at line 489
 

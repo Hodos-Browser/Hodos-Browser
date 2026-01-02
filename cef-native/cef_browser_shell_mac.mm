@@ -69,6 +69,12 @@ void ShutdownApplication();
 @end
 
 // ============================================================================
+// Shared Logger and TabManager
+// ============================================================================
+#include "include/core/Logger.h"
+#include "include/core/TabManager.h"
+
+// ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
 // ============================================================================
 
@@ -82,118 +88,6 @@ NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
-
-// ============================================================================
-// Logger (shared with Windows implementation)
-// ============================================================================
-
-// Log levels
-enum class LogLevel {
-    DEBUG = 0,
-    INFO = 1,
-    WARNING = 2,
-    ERROR_LEVEL = 3
-};
-
-// Process types for identification
-enum class ProcessType {
-    MAIN = 0,
-    RENDER = 1,
-    BROWSER = 2
-};
-
-// Centralized Logger class (identical to Windows version)
-class Logger {
-private:
-    static std::ofstream logFile;
-    static bool initialized;
-    static ProcessType currentProcess;
-    static std::string logFilePath;
-
-    static std::string GetTimestamp() {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
-
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
-        ss << "." << std::setfill('0') << std::setw(3) << ms.count();
-        return ss.str();
-    }
-
-    static std::string GetProcessName(ProcessType process) {
-        switch (process) {
-            case ProcessType::MAIN: return "MAIN";
-            case ProcessType::RENDER: return "RENDER";
-            case ProcessType::BROWSER: return "BROWSER";
-            default: return "UNKNOWN";
-        }
-    }
-
-    static std::string GetLogLevelName(LogLevel level) {
-        switch (level) {
-            case LogLevel::DEBUG: return "DEBUG";
-            case LogLevel::INFO: return "INFO";
-            case LogLevel::WARNING: return "WARN";
-            case LogLevel::ERROR_LEVEL: return "ERROR";
-            default: return "UNKNOWN";
-        }
-    }
-
-public:
-    static void Initialize(ProcessType process, const std::string& filePath = "debug_output.log") {
-        if (initialized) return;
-
-        currentProcess = process;
-        logFilePath = filePath;
-
-        logFile.open(logFilePath, std::ios::app);
-        if (logFile.is_open()) {
-            initialized = true;
-            Log("Logger initialized for " + GetProcessName(process), 1);
-        } else {
-            std::cout << "WARNING: Could not open log file: " << filePath << std::endl;
-        }
-    }
-
-    static void Log(const std::string& message, int level = 1, int process = 0) {
-        LogLevel logLevel = static_cast<LogLevel>(level);
-        ProcessType processType = static_cast<ProcessType>(process);
-
-        if (!initialized) {
-            std::cout << "[" << GetTimestamp() << "] [" << GetProcessName(processType) << "] [" << GetLogLevelName(logLevel) << "] " << message << std::endl;
-            return;
-        }
-
-        std::string logEntry = "[" + GetTimestamp() + "] [" + GetProcessName(processType) + "] [" + GetLogLevelName(logLevel) + "] " + message;
-
-        if (logFile.is_open()) {
-            logFile << logEntry << std::endl;
-            logFile.flush();
-        }
-
-        std::cout << logEntry << std::endl;
-    }
-
-    static void Shutdown() {
-        if (initialized && logFile.is_open()) {
-            Log("Logger shutting down", 1);
-            logFile.close();
-            initialized = false;
-        }
-    }
-
-    static bool IsInitialized() {
-        return initialized;
-    }
-};
-
-// Static member definitions
-std::ofstream Logger::logFile;
-bool Logger::initialized = false;
-ProcessType Logger::currentProcess = ProcessType::MAIN;
-std::string Logger::logFilePath = "";
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -768,6 +662,17 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    // Safety check: Only shut down if window is actually being closed by user
+    // Tab browser closes should NOT trigger window close
+    LOG_INFO("⚠️ windowShouldClose called");
+
+    // Check if this is a spurious close event (from tab removal)
+    // If we still have tabs, don't shut down
+    if (TabManager::GetInstance().GetTabCount() > 0) {
+        LOG_WARNING("⚠️ windowShouldClose called but tabs still exist - ignoring");
+        return NO;  // Don't close window
+    }
+
     LOG_INFO("❌ Main window closing - shutting down application");
     ShutdownApplication();
     return YES;
@@ -807,8 +712,8 @@ void CreateMainWindow() {
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 
-    // Calculate header height (12% of content area, minimum 100px)
-    int shellHeight = MAX(100, (int)(screenRect.size.height * 0.12));
+    // Calculate header height (smaller for cleaner UI)
+    int shellHeight = 80;  // Fixed 80px for toolbar + tabs
     LOG_INFO("📐 Header height: " + std::to_string(shellHeight) + "px");
 
     // Create header view (top portion for React UI)

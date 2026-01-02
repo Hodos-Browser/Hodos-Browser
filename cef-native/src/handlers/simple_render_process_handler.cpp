@@ -4,11 +4,13 @@
 // Platform-specific V8 handlers (Windows-only currently)
 #ifdef _WIN32
     #include "../../include/core/IdentityHandler.h"
-    #include "../../include/core/NavigationHandler.h"
     #include "../../include/core/AddressHandler.h"
     #include "../../include/core/HistoryManager.h"
     #include "BRC100Handler.h"
 #endif
+
+// Cross-platform handlers (work on both platforms)
+#include "../../include/core/NavigationHandler.h"
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -477,10 +479,29 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("navigate", navigationHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
-    // macOS: Provide stub navigation API
+    // macOS: Navigation handler is cross-platform, inject it
+    std::cout << "🔧 macOS: Injecting navigation API..." << std::endl;
+    LOG_DEBUG_RENDER("🔧 macOS: Injecting navigation API...");
+
     CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
-    hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🔧 Navigation API stubbed on macOS (empty object)");
+    if (!navigationObject) {
+        std::cout << "❌ Failed to create navigationObject!" << std::endl;
+        LOG_ERROR_RENDER("❌ Failed to create navigationObject!");
+    } else {
+        std::cout << "✅ navigationObject created" << std::endl;
+    }
+
+    bool setResult = hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    std::cout << "🔧 SetValue('navigation') result: " << setResult << std::endl;
+
+    CefRefPtr<NavigationHandler> navHandler = new NavigationHandler();
+    CefRefPtr<CefV8Value> navFunction = CefV8Value::CreateFunction("navigate", navHandler);
+
+    bool setFuncResult = navigationObject->SetValue("navigate", navFunction, V8_PROPERTY_ATTRIBUTE_NONE);
+    std::cout << "🔧 SetValue('navigate' function) result: " << setFuncResult << std::endl;
+
+    LOG_DEBUG_RENDER("✅ Navigation API injection completed on macOS");
+    std::cout << "✅ Navigation API injection completed on macOS" << std::endl;
 #endif
 
     // overlayPanel object removed - now using process-per-overlay architecture
@@ -623,14 +644,17 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             // Send message to React component
             std::string js = R"(
+                console.log('🔔 Dispatching tab_list_response event');
                 window.dispatchEvent(new MessageEvent('message', {
                     data: {
                         type: 'tab_list_response',
                         data: ')" + escaped_json + R"('
                     }
                 }));
+                console.log('✅ tab_list_response event dispatched');
             )";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_DEBUG_RENDER("✅ tab_list_response JavaScript executed");
             return true;
         }
 

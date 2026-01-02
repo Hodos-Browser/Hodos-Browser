@@ -108,6 +108,10 @@ set(SOURCES
     src/handlers/simple_handler.cpp
     src/handlers/simple_render_process_handler.cpp
     src/handlers/simple_app.cpp
+    # Navigation handler (cross-platform - no Windows dependencies)
+    src/core/NavigationHandler.cpp
+    # Logger (cross-platform)
+    src/core/Logger.cpp
 )
 
 # Platform-specific handler files
@@ -120,12 +124,18 @@ endif()
 # Platform-specific sources
 if(APPLE)
     # macOS-specific files
-    list(APPEND SOURCES cef_browser_shell_mac.mm)
-    message(STATUS "Adding macOS-specific source: cef_browser_shell_mac.mm")
+    list(APPEND SOURCES
+        cef_browser_shell_mac.mm
+        src/core/TabManager_mac.mm
+    )
+    message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm")
 
-    # Helper process source files
+    # Helper process source files (minimal - only need render process handler)
     set(HODOS_HELPER_SRCS
         mac/process_helper_mac.mm
+        src/handlers/simple_render_process_handler.cpp
+        src/core/NavigationHandler.cpp
+        src/core/Logger.cpp
     )
 
     # Load CEF cmake utilities for helper generation
@@ -357,11 +367,16 @@ elseif(APPLE)
             ${FOUNDATION_LIBRARY}
         )
 
-        # Include directories
+        # Include directories (need same as main app for SimpleApp)
         target_include_directories(${_helper_target} PRIVATE
             ${CEF_ROOT}
             ${CEF_ROOT}/include
+            ${CEF_ROOT}/include/base
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/core
             ${CMAKE_CURRENT_SOURCE_DIR}/include/handlers
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/handlers
+            ${NLOHMANN_JSON_INCLUDE_DIR}
         )
 
         # Set helper properties
