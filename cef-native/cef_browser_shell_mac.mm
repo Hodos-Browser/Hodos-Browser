@@ -69,10 +69,11 @@ void ShutdownApplication();
 @end
 
 // ============================================================================
-// Shared Logger and TabManager
+// Shared Core Components
 // ============================================================================
 #include "include/core/Logger.h"
 #include "include/core/TabManager.h"
+#include "include/core/HistoryManager.h"
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -1403,6 +1404,17 @@ int main(int argc, char* argv[]) {
         );
 
         LOG_INFO("✅ Webview browser creation result: " + std::string(webview_created ? "SUCCESS" : "FAILED"));
+
+        // ===================================================================
+        // Initialize HistoryManager
+        // ===================================================================
+
+        LOG_INFO("🔄 Initializing HistoryManager...");
+        if (HistoryManager::GetInstance().Initialize(cache_path)) {
+            LOG_INFO("✅ HistoryManager initialized successfully");
+        } else {
+            LOG_ERROR("❌ Failed to initialize HistoryManager");
+        }
 
         // Debug: Check if CEF added a child view to our header view
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{

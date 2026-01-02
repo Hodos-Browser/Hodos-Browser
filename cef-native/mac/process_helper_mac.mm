@@ -6,10 +6,13 @@
 // Entry point for CEF helper processes on macOS
 // Uses minimal approach - helpers don't need full SimpleApp
 
+#import <Foundation/Foundation.h>
+
 #include "include/cef_app.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "include/cef_render_process_handler.h"
 #include "../include/handlers/simple_render_process_handler.h"
+#include "../include/core/HistoryManager.h"
 #include "../include/core/Logger.h"
 
 // Minimal CefApp for helpers (only provides render process handler)
@@ -39,6 +42,19 @@ int main(int argc, char* argv[]) {
 
   // Create main args
   CefMainArgs main_args(argc, argv);
+
+  // Initialize HistoryManager for render processes (so V8 API can access it)
+  // Use same path as main process
+  NSArray* paths = NSSearchPathForDirectoriesInDomains(
+      NSApplicationSupportDirectory, NSUserDomainMask, YES);
+  if (paths && [paths count] > 0) {
+      NSString* appSupport = [paths firstObject];
+      NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
+      NSString* defaultDir = [hodosBrowserDir stringByAppendingPathComponent:@"Default"];
+      std::string cache_path = [defaultDir UTF8String];
+
+      HistoryManager::GetInstance().Initialize(cache_path);
+  }
 
   // Use minimal app with only render process handler (for V8 injections)
   CefRefPtr<HelperApp> app(new HelperApp);

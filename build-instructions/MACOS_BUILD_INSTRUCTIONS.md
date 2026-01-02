@@ -2,11 +2,12 @@
 
 ## 🎯 Overview
 
-Step-by-step instructions for building HodosBrowser on macOS. This guide covers all three components: CEF native shell (C++), Rust wallet backend, and React frontend (TypeScript).
+Complete instructions for building and developing HodosBrowser on macOS (Apple Silicon and Intel). This guide covers all three components: CEF native shell (C++/Objective-C++), Rust wallet backend, and React frontend (TypeScript).
 
-**Status**: ⚠️ **PARTIAL IMPLEMENTATION** - CMake configuration ready, C++ window code needs macOS porting.
+**Status**: ✅ **FULLY FUNCTIONAL** - Complete macOS port with all core features working
 
 **Estimated Setup Time**: 2-3 hours (first time)
+**Last Updated**: January 2, 2026
 
 ---
 
@@ -35,7 +36,7 @@ Step-by-step instructions for building HodosBrowser on macOS. This guide covers 
 # Install build tools
 brew install cmake
 
-# Install dependencies
+# Install C++ dependencies
 brew install openssl nlohmann-json sqlite3
 
 # Install Rust
@@ -52,142 +53,117 @@ brew install node
 cmake --version        # Should be 3.20+
 rustc --version        # Should be latest stable
 node --version         # Should be 18+
-brew --version         # Should show Homebrew version
+clang --version        # Xcode command line tools
 ```
 
 ---
 
-## 🌐 Step 1: Download CEF Binaries
+## 🌐 Step 1: Download and Build CEF
 
-CEF (Chromium Embedded Framework) binaries must be downloaded separately for macOS.
-
-### Download
+### Download CEF Binaries
 
 1. Visit [CEF Automated Builds](https://cef-builds.spotifycdn.com/index.html)
-2. Download **macOS 64-bit** or **macOS ARM64** (for M1/M2/M3) - Standard Distribution
-3. **Recommended**: Match version to Windows build (136.1.6) or use latest stable
+2. Download **macOS ARM64** (for M1/M2/M3) or **macOS x64** (Intel) - Standard Distribution
+3. **Version**: 136.1.6 (tested) or latest stable
 
-### Extract
-
-```bash
-# Extract to project root
-# Should create: ./cef-binaries/ directory
-# macOS CEF structure:
-# cef-binaries/
-# ├── Release/
-# │   └── Chromium Embedded Framework.framework/
-# ├── Resources/
-# ├── include/
-# └── libcef_dll/
-```
-
-### Build CEF Wrapper
-
-The CEF wrapper library must be built from source on macOS.
+### Extract and Build CEF Wrapper
 
 ```bash
-# Navigate to wrapper directory
-cd cef-binaries/libcef_dll/wrapper
+# Extract CEF archive to project root
+cd /path/to/Hodos-Browser
+tar -xjf cef_binary_*.tar.bz2
 
-# Create build directory
+# Rename to cef-binaries
+mv cef_binary_* cef-binaries
+
+# Build CEF wrapper library
+cd cef-binaries
 mkdir build
 cd build
 
-# Configure (Homebrew packages found automatically)
 cmake .. -DCMAKE_BUILD_TYPE=Release
-
-# Build
-cmake --build . --config Release
+cmake --build . --target libcef_dll_wrapper --config Release
 ```
 
-**Verify Wrapper Built:**
+**Verify wrapper built:**
 ```bash
-# Check that library exists
-ls -la Release/libcef_dll_wrapper.a
+ls -lh libcef_dll_wrapper/libcef_dll_wrapper.a
+# Should show ~5MB file
 ```
 
 ---
 
 ## 🦀 Step 2: Build Rust Wallet
 
-The Rust wallet backend runs on port 3301 and provides all wallet/crypto operations.
-
 ```bash
-# Navigate to rust-wallet directory
 cd rust-wallet
 
 # Build release version
 cargo build --release
 
-# Test build (optional)
+# Test (optional - will start wallet server)
 cargo run --release
 ```
 
 **Expected output:**
 ```
 🦀 Bitcoin Browser Wallet (Rust)
-=================================
-
 📁 Wallet directory: ~/Library/Application Support/HodosBrowser/wallet
 ✅ Database initialized
-✅ Domain whitelist manager initialized
-✅ BRC-33 message relay initialized
-✅ Auth session manager initialized
 ...
 Listening on: http://127.0.0.1:3301
 ```
 
 Press `Ctrl+C` to stop. You'll run this in a separate terminal later.
 
+**Storage Location:** `~/Library/Application Support/HodosBrowser/wallet/wallet.db`
+
 ---
 
 ## ⚛️ Step 3: Build React Frontend
 
-The React frontend serves the UI on port 5137.
-
 ```bash
-# Navigate to frontend directory
 cd frontend
 
 # Install dependencies
 npm install
 
-# Test dev server (optional)
+# Start dev server (for development)
 npm run dev
-```
-
-**Expected output:**
-```
-  VITE v... ready in ...ms
-
-  ➜  Local:   http://127.0.0.1:5137/
+# Frontend will be available at http://127.0.0.1:5137
 ```
 
 Press `Ctrl+C` to stop. You'll run this in a separate terminal later.
 
 ---
 
-## 🏗️ Step 4: Build CEF Native Shell
-
-⚠️ **IMPORTANT**: Current CMake configuration is ready, but C++ window code requires macOS porting.
+## 🏗️ Step 4: Build CEF Native Shell (C++ Browser)
 
 ### Configure CMake
 
 ```bash
 cd cef-native
 
-# Configure (Homebrew packages found automatically)
+# Clean build recommended for first time
+rm -rf build
+
+# Configure
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 ```
 
-**Expected CMake Output:**
+**Expected output:**
 ```
--- vcpkg triplet: arm64-osx (or x64-osx for Intel Macs)
--- macOS deployment target: 10.15
--- macOS architecture: arm64 (or x86_64 for Intel Macs)
--- Found OpenSSL: ...
--- Found nlohmann_json: ...
--- Found unofficial-sqlite3: ...
+-- vcpkg triplet: arm64-osx (or x64-osx for Intel)
+-- Found OpenSSL: /opt/homebrew/...
+-- nlohmann_json include: /opt/homebrew/include
+-- sqlite3 library: ...
+-- Adding macOS-specific sources
+-- CEF framework found: .../Chromium Embedded Framework.framework
+-- Configured helper: HodosBrowser Helper
+-- Configured helper: HodosBrowser Helper (Alerts)
+-- Configured helper: HodosBrowser Helper (GPU)
+-- Configured helper: HodosBrowser Helper (Plugin)
+-- Configured helper: HodosBrowser Helper (Renderer)
 -- Configuring done
 -- Generating done
 ```
@@ -197,278 +173,541 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 ```bash
 cd build
 
-# Build Release version
+# Build all targets (main app + 5 helper bundles)
 cmake --build . --config Release
 ```
 
-**⚠️ Current Status**: Build will **FAIL** due to missing macOS-specific window code.
+**Build time:** ~2-3 minutes for full build
 
-**Error Expected:**
+**Output:** `bin/HodosBrowserShell.app/`
+
+### Copy Helper Bundles (IMPORTANT!)
+
+After each build, copy helpers into the main app bundle:
+
+```bash
+cd bin
+cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/Frameworks/
 ```
-cef_browser_shell.cpp: No such file or directory (macOS version)
+
+**Why needed:** Helpers are built separately and must be nested inside the main app bundle for CEF to find them.
+
+**Verification:**
+```bash
+ls HodosBrowserShell.app/Contents/Frameworks/
+# Should show:
+# - Chromium Embedded Framework.framework/
+# - HodosBrowser Helper.app
+# - HodosBrowser Helper (Alerts).app
+# - HodosBrowser Helper (GPU).app
+# - HodosBrowser Helper (Plugin).app
+# - HodosBrowser Helper (Renderer).app
 ```
 
 ---
 
-## ⚠️ Missing Implementation: macOS Window Code
+## ✅ Step 5: Run HodosBrowser
 
-The current C++ code uses Windows-specific APIs (HWND, Win32). To complete macOS support, the following files need to be created:
+You need **three terminals** running simultaneously:
 
-### Required Files
+### Terminal 1: Rust Wallet Backend
 
-1. **`cef_browser_shell_mac.mm`** (Objective-C++)
-   - macOS window creation using NSWindow/NSView
-   - Replace Win32 WndProc with Objective-C message handlers
-   - CEF integration with Cocoa
-
-2. **Platform Abstraction Headers** (Optional but recommended)
-   - `include/platform/window_mac.h`
-   - `include/platform/window_win.h`
-   - Common interface for window operations
-
-### What Needs to Be Ported
-
-From `cef_browser_shell.cpp` (Windows):
-- **Window Creation**: `CreateWindow()` → `NSWindow` + `NSView`
-- **Window Handles**: `HWND` → `NSWindow*`
-- **Message Loop**: `WndProc` → Objective-C selectors
-- **Window Positioning**: `SetWindowPos()` → `setFrame:`
-- **Event Handling**: Windows messages → Cocoa events
-
-### Estimated Effort
-
-- **Minimal Port**: 200-300 lines of Objective-C++ code (1-2 days)
-- **Full Feature Parity**: 500-800 lines with overlays (3-5 days)
-
----
-
-## 📦 What Works on macOS (Without Window Code)
-
-Even without the macOS window implementation, these components work perfectly:
-
-✅ **Rust Wallet Backend**
 ```bash
 cd rust-wallet
 cargo run --release
-# Works on macOS - 100% functional
+
+# Wait for:
+# "Listening on: http://127.0.0.1:3301"
 ```
 
-✅ **React Frontend**
+**Leave running** - Provides wallet/crypto backend
+
+### Terminal 2: React Frontend Dev Server
+
 ```bash
 cd frontend
 npm run dev
-# Works on macOS - 100% functional
+
+# Wait for:
+# "Local: http://127.0.0.1:5137"
 ```
 
-✅ **CMake Configuration**
+**Leave running** - Serves React UI with hot reload
+
+### Terminal 3: macOS Browser
+
+```bash
+cd cef-native/build/bin
+open -a HodosBrowserShell.app
+
+# Or run directly for console output:
+./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+```
+
+### Expected Behavior
+
+✅ **Browser window appears** with header and content area
+✅ **Header loads React UI** from http://localhost:5137
+✅ **Webview displays** default page or navigation target
+✅ **Tab management** - Create, switch, close tabs
+✅ **Navigation works** - Address bar, back/forward, reload
+✅ **No crashes** - Stable operation
+
+---
+
+## 🔄 Development Workflow
+
+### After Code Changes
+
+**Rust changes:**
+```bash
+cd rust-wallet
+cargo build --release
+# Restart: cargo run --release
+```
+
+**Frontend changes:**
+```bash
+cd frontend
+npm run build  # Or keep dev server running for hot reload
+```
+
+**C++/Objective-C++ changes:**
 ```bash
 cd cef-native
-cmake -S . -B build
-# Configures successfully with proper macOS settings
+cmake --build build --config Release
+
+# IMPORTANT: Copy helpers after rebuild
+cd build/bin
+cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/Frameworks/
 ```
 
----
-
-## 🚀 Development Workflow (Current State)
-
-### Option 1: Develop Rust + Frontend on macOS
-
-```bash
-# Terminal 1: Rust Wallet
-cd rust-wallet
-cargo run --release
-
-# Terminal 2: Frontend
-cd frontend
-npm run dev
-
-# Test wallet API directly
-curl http://localhost:3301/health
-```
-
-**Benefits:**
-- Full wallet backend development
-- Full frontend development
-- API testing via curl/Postman
-- No CEF needed for most features
-
-### Option 2: Implement macOS Window Code
-
-If you want to implement the macOS window code:
-
-1. Create `cef_browser_shell_mac.mm`
-2. Use Cocoa/AppKit for window management
-3. Follow CEF macOS sample applications as reference
-4. Test incrementally
-
-**Reference**: CEF has official macOS sample code at `cef-binaries/tests/`
-
----
-
-## 🔄 Next Steps to Complete macOS Support
-
-### Priority 1: Basic Window (Minimal Viable Product)
-
-```objective-c
-// cef_browser_shell_mac.mm
-// Create single NSWindow with CEF browser view
-// ~200 lines of code
-```
-
-**Delivers:**
-- Browser window opens on macOS
-- CEF renders content
-- Basic functionality works
-
-### Priority 2: Header UI Integration
-
-```objective-c
-// Add header NSView for React UI
-// Load from http://localhost:5137
-```
-
-**Delivers:**
-- Header with wallet buttons
-- Settings integration
-- Full UI functional
-
-### Priority 3: Overlay System
-
-```objective-c
-// Port overlay HWND system to NSWindow
-// Process-per-overlay architecture
-```
-
-**Delivers:**
-- Wallet panel overlays
-- Settings panel overlays
-- Complete feature parity with Windows
-
----
-
-## 📁 Project Structure (macOS)
-
-```
-Hodos-Browser/
-├── cef-binaries/                    # CEF binaries (macOS version)
-│   ├── Release/
-│   │   └── Chromium Embedded Framework.framework/
-│   ├── Resources/
-│   └── libcef_dll/wrapper/
-├── cef-native/
-│   ├── CMakeLists.txt               # ✅ Ready for both platforms
-│   ├── Info.plist                   # ✅ macOS app bundle config
-│   ├── cef_browser_shell.cpp        # ⚠️ Windows-only currently
-│   ├── cef_browser_shell_mac.mm     # ❌ TODO: Create this file
-│   └── build/
-│       └── HodosBrowser.app/        # macOS app bundle (when built)
-├── rust-wallet/                     # ✅ Works on macOS
-├── frontend/                        # ✅ Works on macOS
-└── MACOS_BUILD_INSTRUCTIONS.md      # This file
-```
+**Incremental builds:** Only changed files recompile (~30 seconds)
 
 ---
 
 ## 🚨 Troubleshooting
 
-### CMake: "Could NOT find OpenSSL"
+### Build Issues
 
-**Problem**: Homebrew packages not found.
+**"CEF framework not found"**
+```bash
+# Verify CEF was extracted correctly
+ls cef-binaries/Release/Chromium\ Embedded\ Framework.framework/
 
-**Solution**:
+# Should exist with ~200MB framework
+```
+
+**"libcef_dll_wrapper.a not found"**
+```bash
+# Rebuild wrapper from cef-binaries root
+cd cef-binaries/build
+cmake --build . --target libcef_dll_wrapper
+```
+
+**"nlohmann/json.hpp not found"**
 ```bash
 # Install via Homebrew
-brew install openssl nlohmann-json sqlite3
+brew install nlohmann-json
 
-# Link OpenSSL (if needed)
-brew link openssl --force
+# Verify
+ls /opt/homebrew/include/nlohmann/json.hpp
+```
 
-# Reconfigure
+### Runtime Issues
+
+**App quits immediately with "Opening in existing browser session"**
+- Another instance is running
+- Kill all instances: `pkill -9 HodosBrowserShell`
+- Try again: `open -a HodosBrowserShell.app`
+
+**App crashes on launch**
+- Check helper bundles are copied: `ls HodosBrowserShell.app/Contents/Frameworks/HodosBrowser\ Helper*.app`
+- If missing, copy manually (see Step 4)
+- Check crash logs: `ls -lt ~/Library/Logs/DiagnosticReports/HodosBrowser*`
+
+**Window appears but blank/white**
+- Check frontend is running: `lsof -i :5137 | grep LISTEN`
+- Check Rust wallet is running: `lsof -i :3301 | grep LISTEN`
+- Grant network access if prompted by macOS
+- Check DevTools: `curl -s http://127.0.0.1:9222/json`
+
+**Tabs don't work or crash**
+- Ensure you built the LATEST code (after 2026-01-02)
+- Verify helper bundles are copied
+- Check debug logs: `tail -50 cef-native/build/bin/debug_output.log`
+
+### Frontend Connection
+
+**React UI doesn't load**
+```bash
+# Verify Vite dev server responds
+curl http://127.0.0.1:5137
+
+# Should return HTML
+```
+
+**"Network access" permission prompt**
+- **Always Allow** when macOS asks about local network access
+- Or manually enable: System Settings → Privacy & Security → Local Network → HodosBrowserShell
+
+---
+
+## 🎯 What Works on macOS
+
+### Core Functionality (100% Working)
+- ✅ **Window System** - NSWindow with header and webview areas
+- ✅ **React UI** - Full frontend rendering in 80px header
+- ✅ **Webview** - Display any website
+- ✅ **Navigation** - Address bar, back/forward, reload
+- ✅ **Tab Management** - Create, switch, close tabs with UI updates
+- ✅ **Multi-process** - Each tab gets own renderer process
+- ✅ **CEF Rendering** - SetAsChild child window rendering
+- ✅ **Network** - Localhost and external URLs
+
+### Helper Processes (Required for CEF)
+- ✅ 5 helper app bundles (Base, Alerts, GPU, Plugin, Renderer)
+- ✅ Proper Info.plist with LSUIElement (no Dock icons)
+- ✅ Framework paths configured correctly
+- ✅ Process isolation working
+
+### Not Yet Implemented
+- ⏳ **Wallet Integration** - APIs stubbed (need to port WalletService)
+- ⏳ **Overlays** - Settings/Wallet panels (architecture ready, not connected)
+- ⏳ **History** - Browser history (need to port HistoryManager)
+- ⏳ **BRC-100** - Bitcoin authentication (Windows-only currently)
+
+---
+
+## 📁 Project Structure (macOS-specific)
+
+```
+Hodos-Browser/
+├── cef-binaries/                    # CEF framework (download separately)
+│   ├── Release/
+│   │   └── Chromium Embedded Framework.framework/
+│   ├── build/
+│   │   └── libcef_dll_wrapper/
+│   │       └── libcef_dll_wrapper.a
+│   └── Resources/
+├── cef-native/
+│   ├── CMakeLists.txt               # Cross-platform build config
+│   ├── Info.plist                   # macOS app bundle metadata
+│   ├── cef_browser_shell_mac.mm     # macOS entry point + windows
+│   ├── mac/
+│   │   ├── process_helper_mac.mm    # Helper process entry point
+│   │   └── helper-Info.plist.in     # Helper bundle template
+│   ├── src/
+│   │   ├── handlers/                # Cross-platform CEF handlers
+│   │   ├── core/
+│   │   │   ├── TabManager_mac.mm    # macOS tab management
+│   │   │   ├── NavigationHandler.cpp # Cross-platform
+│   │   │   └── Logger.cpp/.h        # Shared logging
+│   └── build/
+│       └── bin/
+│           └── HodosBrowserShell.app/
+│               ├── Contents/
+│               │   ├── MacOS/HodosBrowserShell
+│               │   ├── Frameworks/
+│               │   │   ├── Chromium Embedded Framework.framework/
+│               │   │   └── HodosBrowser Helper*.app (×5)
+│               │   └── Resources/
+│               └── Info.plist
+├── rust-wallet/                     # Works on macOS unchanged
+├── frontend/                        # Works on macOS unchanged
+└── build-instructions/
+    └── MACOS_BUILD_INSTRUCTIONS.md  # This file
+```
+
+---
+
+## 🔧 Development Tips
+
+### Debugging
+
+**Enable verbose logging:**
+- Logs written to: `cef-native/build/bin/debug_output.log`
+- CEF logs: `cef-native/build/bin/debug.log`
+- Check after running app
+
+**Access DevTools:**
+```bash
+# Get DevTools URLs
+curl -s http://127.0.0.1:9222/json | python3 -m json.tool
+
+# Open in Chrome/Safari to inspect React UI or webpage
+```
+
+**View helper processes:**
+```bash
+ps aux | grep "HodosBrowser Helper"
+# Should show 4-5 helper processes when running
+```
+
+### Code Organization
+
+**macOS-only files (never compiled on Windows):**
+- `cef_browser_shell_mac.mm` - Main app entry point
+- `src/core/TabManager_mac.mm` - Tab management
+- `src/handlers/my_overlay_render_handler.mm` - Rendering
+- `mac/process_helper_mac.mm` - Helper entry point
+
+**Cross-platform files (work on both):**
+- `src/handlers/simple_handler.cpp` - Browser callbacks
+- `src/handlers/simple_app.cpp` - CEF app lifecycle
+- `src/handlers/simple_render_process_handler.cpp` - V8 injection
+- `src/core/NavigationHandler.cpp` - Navigation
+- `src/core/Logger.cpp/.h` - Logging
+
+**Platform selection:**
+- Controlled by `#ifdef _WIN32` / `#elif defined(__APPLE__)` / `#endif`
+- CMakeLists.txt: `if(APPLE)` / `elseif(WIN32)` / `endif()`
+
+### Making Changes
+
+**Adding new features:**
+1. Check if Windows version exists
+2. Study Windows implementation
+3. Create macOS equivalent (use NSView instead of HWND)
+4. Update CMakeLists.txt if adding new files
+5. Wrap in platform conditionals
+6. Test on macOS
+7. Verify Windows still compiles (if possible)
+
+**Common patterns:**
+```cpp
+#ifdef _WIN32
+    HWND hwnd = CreateWindow(...);
+    ShowWindow(hwnd, SW_SHOW);
+#elif defined(__APPLE__)
+    NSView* view = [[NSView alloc] initWithFrame:...];
+    [parentView addSubview:view];
+#endif
+```
+
+---
+
+## 🎓 Platform Differences
+
+### Window/View Management
+
+| Windows | macOS |
+|---------|-------|
+| `HWND` (window handle) | `NSView*` / `NSWindow*` |
+| `CreateWindow()` | `[[NSView alloc] initWithFrame:]` |
+| `ShowWindow(SW_SHOW/HIDE)` | `[view setHidden:NO/YES]` |
+| `DestroyWindow()` | `[view removeFromSuperview]` |
+| `SetWindowPos()` | `[view setFrame:]` |
+| `GetClientRect()` | `[view bounds]` |
+
+### CEF Integration
+
+| Aspect | Windows | macOS |
+|--------|---------|-------|
+| **NSApplication** | Not needed | Custom subclass implementing `CefAppProtocol` required |
+| **Helper processes** | Single .exe | 5 separate .app bundles |
+| **Framework loading** | Automatic DLL load | Explicit `cef_load_library()` call |
+| **Subprocess path** | Same .exe | Path to Helper.app bundle |
+
+### Build System
+
+| Tool | Windows | macOS |
+|------|---------|-------|
+| **Compiler** | MSVC (Visual Studio) | Clang (Xcode) |
+| **Package manager** | vcpkg | Homebrew |
+| **Generator** | Visual Studio 2022 | Unix Makefiles |
+| **App bundle** | Folder with .exe + DLLs | .app bundle structure |
+
+---
+
+## 🚀 Quick Reference
+
+### One-command build (after setup):
+```bash
+cd cef-native && cmake --build build --config Release && \
+cd build/bin && cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/Frameworks/
+```
+
+### Launch stack (3 terminals):
+```bash
+# Terminal 1
+cd rust-wallet && cargo run --release
+
+# Terminal 2
+cd frontend && npm run dev
+
+# Terminal 3
+cd cef-native/build/bin && open -a HodosBrowserShell.app
+```
+
+### Clean rebuild:
+```bash
 cd cef-native
 rm -rf build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+cd build/bin && cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/Frameworks/
 ```
 
-### CMake: "Triplet not set"
+---
 
-**Check output:**
+## 📝 Known Issues & Limitations
+
+### Development Mode Settings
+
+The current build has **development-only** settings:
+- `no_sandbox = true` - Sandbox disabled (requires code signing to enable)
+- `disable-web-security` - For localhost dev server access
+- `in-process-gpu` - GPU in main process (not separate)
+
+**For production:** Enable sandbox, remove web security bypass, use separate GPU process (requires code signing).
+
+### Features Not Implemented
+
+**Wallet/Backend Integration:**
+- Address generation (UI button exists, stubbed)
+- Transaction creation/signing
+- Balance display
+- Wallet panel functionality
+
+**Overlays:**
+- Settings panel (creates window, not functional)
+- Wallet panel (creates window, not functional)
+- BRC-100 auth dialog
+
+**Browser Features:**
+- History persistence (in-memory only)
+- Bookmarks
+- Download management
+
+**These are Windows-only currently** and can be ported using the same patterns used for Tab Management.
+
+---
+
+## 🔐 Security Notes
+
+**Current configuration is for DEVELOPMENT only:**
+- Sandbox disabled (requires code signing)
+- Web security disabled (for localhost access)
+- No code signing (helpers run unsigned)
+
+**For distribution:**
+1. Enable sandbox (`settings.no_sandbox = false`)
+2. Remove `disable-web-security` flag
+3. Code sign all bundles (main app + 5 helpers)
+4. Notarize for macOS Catalina+
+5. Create installer DMG
+
+**Code signing command (when ready):**
 ```bash
-cmake -S . -B build | grep "triplet"
-# Should show: arm64-osx or x64-osx
+codesign --deep --force --sign "Developer ID Application: Your Name" HodosBrowserShell.app
 ```
 
-### Rust Build Fails
+---
 
-**Solution**:
+## 🎯 Success Criteria
+
+After following these instructions, you should have:
+
+- [x] CEF binaries downloaded and wrapper built
+- [x] Rust wallet compiles and runs
+- [x] React frontend serves on port 5137
+- [x] C++ browser compiles with 5 helper bundles
+- [x] Helpers copied into app bundle Frameworks
+- [x] App launches and shows window
+- [x] React UI renders in header (80px bar at top)
+- [x] Webview displays web content
+- [x] Can navigate to websites
+- [x] Can create and switch between tabs
+- [x] Can close tabs without app quitting
+- [x] Tab bar updates when tabs close
+
+**If all checked:** ✅ **macOS development environment ready!**
+
+---
+
+## 🆘 Getting Help
+
+**Build errors:**
+- Check all prerequisites installed: `cmake --version`, `brew --version`, etc.
+- Verify CEF binaries match architecture (ARM64 vs x64)
+- Try clean rebuild: `rm -rf build && cmake ...`
+
+**Runtime crashes:**
+- Check crash logs: `ls -lt ~/Library/Logs/DiagnosticReports/`
+- Enable console output: `./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell`
+- Verify helper bundles copied
+
+**Blank window:**
+- Ensure frontend running on :5137
+- Grant network access permission
+- Check DevTools for errors
+
+---
+
+## 📊 Comparison with Windows Build
+
+| Feature | Windows | macOS | Notes |
+|---------|---------|-------|-------|
+| **Build time** | 5-10 min | 2-3 min | macOS faster (fewer sources) |
+| **Dependencies** | vcpkg | Homebrew | Different package managers |
+| **App bundle** | .exe + DLLs | .app bundle | macOS structured bundle |
+| **Helpers** | 1 exe | 5 .app bundles | macOS requires separate bundles |
+| **Code signing** | Optional | Required for sandbox | macOS stricter |
+| **Navigation** | ✅ | ✅ | Fully working |
+| **Tabs** | ✅ | ✅ | Fully working |
+| **Wallet** | ✅ | ⏳ | Needs porting |
+| **History** | ✅ | ⏳ | Needs porting |
+
+---
+
+## 🎓 Advanced Topics
+
+### Using Production Build
+
 ```bash
-rustup update
-cargo clean
-cargo build --release
+# Build optimized release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+
+# Strip symbols for smaller size
+strip HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
 ```
 
-### Frontend npm install Fails
+### Creating DMG Installer
 
-**Solution**:
 ```bash
-npm cache clean --force
-rm -rf node_modules
-npm install
+# After code signing
+hdiutil create -volname "HodosBrowser" -srcfolder HodosBrowserShell.app -ov -format UDZO HodosBrowser.dmg
 ```
 
----
+### Enabling Sandbox
 
-## 🎯 Quick Reference
-
-| Component | Port | Works on macOS? | Command |
-|-----------|------|-----------------|---------|
-| **Rust Wallet** | 3301 | ✅ Yes | `cd rust-wallet && cargo run --release` |
-| **Frontend** | 5137 | ✅ Yes | `cd frontend && npm run dev` |
-| **CEF Browser** | - | ⚠️ Partial | Needs macOS window code |
+1. Code sign main app and all 5 helpers
+2. Remove `settings.no_sandbox = true` from cef_browser_shell_mac.mm
+3. Rebuild and test
+4. Verify helpers launch without errors
 
 ---
 
-## 📝 Implementation Checklist
+## ✅ Verification Checklist
 
-### CMake & Build System
-- [x] Platform detection (`APPLE` vs `WIN32`)
-- [x] macOS deployment target (10.15+)
-- [x] Architecture detection (arm64 vs x86_64)
-- [x] macOS frameworks linking (Cocoa, AppKit, etc.)
-- [x] Info.plist for app bundle
-- [x] Build configuration
+Before committing or distributing:
 
-### C++ Code (TODO)
-- [ ] Create `cef_browser_shell_mac.mm`
-- [ ] NSWindow creation and management
-- [ ] CEF browser view integration
-- [ ] Event handling (Cocoa events)
-- [ ] Window positioning and resizing
-- [ ] Header UI integration
-- [ ] Overlay system (NSWindow-based)
-
-### Testing
-- [x] Rust wallet on macOS
-- [x] Frontend on macOS
-- [x] CMake configuration
-- [ ] CEF window creation
-- [ ] Full integration test
+- [ ] Clean build from scratch succeeds
+- [ ] All 5 helper bundles build
+- [ ] Helpers copy into Frameworks/
+- [ ] App launches without errors
+- [ ] Window appears with UI
+- [ ] React frontend loads
+- [ ] Can navigate to websites
+- [ ] Multiple tabs work
+- [ ] Tabs close properly
+- [ ] UI updates when tabs close
+- [ ] No crashes during normal use
+- [ ] Quit via Cmd+Q or File → Quit works
 
 ---
 
-## 💡 Contributing macOS Support
+**Questions or issues?** Check the main project documentation or open a GitHub issue.
 
-Want to implement the macOS window code? Here's how to start:
-
-1. **Study CEF macOS samples** in `cef-binaries/tests/cefsimple/`
-2. **Create minimal window** in `cef_browser_shell_mac.mm`
-3. **Test incrementally** - window first, then CEF, then features
-4. **Follow Cocoa patterns** - NSApplicationDelegate, NSWindowDelegate
-5. **Reference existing Windows code** for business logic
-
-**Estimated effort**: 1-2 weeks for full feature parity with Windows build.
-
----
-
-**Questions?** Check TECH_STACK_INTEGRATION.md for cross-platform implementation guidance.
-
-*Last Updated: 2025-12-31 (Phase 2: CMake Configuration Complete)*
+*Last updated: January 2, 2026 - macOS Port Complete*

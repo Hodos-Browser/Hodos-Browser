@@ -108,10 +108,10 @@ set(SOURCES
     src/handlers/simple_handler.cpp
     src/handlers/simple_render_process_handler.cpp
     src/handlers/simple_app.cpp
-    # Navigation handler (cross-platform - no Windows dependencies)
+    # Core functionality (cross-platform)
     src/core/NavigationHandler.cpp
-    # Logger (cross-platform)
     src/core/Logger.cpp
+    src/core/HistoryManager.cpp
 )
 
 # Platform-specific handler files
@@ -130,12 +130,13 @@ if(APPLE)
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm")
 
-    # Helper process source files (minimal - only need render process handler)
+    # Helper process source files (need render process handler + dependencies)
     set(HODOS_HELPER_SRCS
         mac/process_helper_mac.mm
         src/handlers/simple_render_process_handler.cpp
         src/core/NavigationHandler.cpp
         src/core/Logger.cpp
+        src/core/HistoryManager.cpp
     )
 
     # Load CEF cmake utilities for helper generation
@@ -358,13 +359,14 @@ elseif(APPLE)
         # Create helper executable target
         add_executable(${_helper_target} MACOSX_BUNDLE ${HODOS_HELPER_SRCS})
 
-        # Link libraries (same as main app)
+        # Link libraries (need SQLite for HistoryManager)
         target_link_libraries(${_helper_target} PRIVATE
             "${WRAPPER_LIB_PATH}/libcef_dll_wrapper.a"
             "${CEF_LIBRARY}"
             ${COCOA_LIBRARY}
             ${APPKIT_LIBRARY}
             ${FOUNDATION_LIBRARY}
+            ${SQLITE3_LIBRARY}
         )
 
         # Include directories (need same as main app for SimpleApp)

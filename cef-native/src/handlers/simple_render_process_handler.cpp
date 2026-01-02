@@ -5,12 +5,12 @@
 #ifdef _WIN32
     #include "../../include/core/IdentityHandler.h"
     #include "../../include/core/AddressHandler.h"
-    #include "../../include/core/HistoryManager.h"
     #include "BRC100Handler.h"
 #endif
 
 // Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
+#include "../../include/core/HistoryManager.h"
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -201,8 +201,7 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
-#ifdef _WIN32
-// Handler for history operations (Windows-only)
+// Handler for history operations (cross-platform)
 class HistoryV8Handler : public CefV8Handler {
 public:
     HistoryV8Handler() {}
@@ -388,7 +387,6 @@ public:
 private:
     IMPLEMENT_REFCOUNTING(HistoryV8Handler);
 };
-#endif // _WIN32
 
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 SimpleRenderProcessHandler constructor called!");
@@ -541,8 +539,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
     LOG_DEBUG_RENDER("🔧 Address API stubbed on macOS (empty object)");
 #endif
 
-#ifdef _WIN32
-    // Create the history object (Windows-only)
+    // Create the history object (cross-platform)
     LOG_DEBUG_RENDER("📚 Creating history object for V8 context");
     CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
@@ -570,12 +567,6 @@ void SimpleRenderProcessHandler::OnContextCreated(
         V8_PROPERTY_ATTRIBUTE_NONE);
 
     LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
-#else
-    // macOS: Provide stub history API
-    CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
-    hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🔧 History API stubbed on macOS (empty object)");
-#endif
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);

@@ -4,13 +4,16 @@
 
 // Platform-specific includes
 #ifdef _WIN32
-    #include "../../include/core/TabManager.h"
-    #include "../../include/core/HistoryManager.h"
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include <windows.h>
-#else
-    #include "../../include/core/TabManager.h"
+#endif
+
+// Cross-platform includes (available on both platforms)
+#include "../../include/core/TabManager.h"
+#include "../../include/core/HistoryManager.h"
+
+#ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
     #ifdef __OBJC__
         #import <Cocoa/Cocoa.h>
@@ -285,8 +288,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
 
-#ifdef _WIN32
-    // Track history when page finishes loading (for main tabs only) - Windows only for now
+    // Track history when page finishes loading (for tabs - both platforms)
     if (!isLoading && tab_id != -1) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
         if (frame && frame->IsValid()) {
@@ -312,7 +314,6 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             }
         }
     }
-#endif
 
     // Special debug for BRC-100 auth overlay
     if (role_ == "brc100auth") {
