@@ -594,8 +594,8 @@ These methods are fully implemented but await real-world app testing or third-pa
 | relinquishCertificate | Marks certificate as relinquished |
 | discoverByIdentityKey | Searches certificates by subject public key |
 | discoverByAttributes | Searches certificates by decrypted field values |
-| listOutputs | Lists UTXOs with basket/tag filtering, BEEF support |
-| relinquishOutput | Removes output from basket tracking |
+| listOutputs | ✅ Verified against BRC-100 spec - Lists UTXOs with basket/tag filtering, BEEF support |
+| relinquishOutput | ✅ Verified against BRC-100 spec - Removes output from basket tracking |
 | abortAction | Cancels pending transactions |
 | listActions | Lists transaction history |
 | internalizeAction | Accepts incoming BEEF transactions |

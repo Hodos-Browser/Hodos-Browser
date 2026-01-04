@@ -158,8 +158,8 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 
 | Call Code | Method | Status | Internal Test | Real-World Test | Notes |
 |-----------|--------|--------|---------------|-----------------|-------|
-| 6 | `listOutputs` | ⏳ | ❌ | ❌ | **Database schema ready** - Will support basket filtering<br>⚠️ **Note**: Add `/listOutputs` to HTTP interceptor when implementing |
-| 7 | `relinquishOutput` | ❌ | ❌ | ❌ | Release UTXO control<br>⚠️ **Note**: Add `/relinquishOutput` to HTTP interceptor when implementing |
+| 6 | `listOutputs` | ✅ | ✅ | ⏳ | **COMPLETE & VERIFIED** - All BRC-100 parameters implemented<br>✅ Basket/tag filtering, BEEF support, pagination<br>⏳ Needs real-world app testing |
+| 7 | `relinquishOutput` | ✅ | ✅ | ⏳ | **COMPLETE & VERIFIED** - Removes output from basket tracking<br>⏳ Needs real-world app testing |
 | 17 | `acquireCertificate` | ✅ | ✅ | ✅ | **COMPLETE** - Working with socialcert.net<br>✅ Supports 'direct' and 'issuance' protocols<br>✅ Certifier creates transaction, we verify and store<br>✅ Fixed "Not on Chain" issue (extract txid from revocationOutpoint) |
 | 18 | `listCertificates` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real-world apps |
 | 19 | `proveCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real verifiers |
@@ -252,8 +252,8 @@ Advanced wallet features for specific use cases.
 - ✅ Balance calculation from database cache
 - ✅ UTXO spending tracking
 - ✅ New address detection (pending cache)
-- ⏳ `listOutputs` - List available UTXOs (database ready, endpoint pending)
-- ⏳ `relinquishOutput` - Release UTXO control (database ready, endpoint pending)
+- ✅ `listOutputs` - **VERIFIED** - List UTXOs with basket/tag filtering, BEEF support
+- ✅ `relinquishOutput` - **VERIFIED** - Remove output from basket tracking
 
 **BEEF/SPV Caching**:
 - ✅ Parent transaction caching
