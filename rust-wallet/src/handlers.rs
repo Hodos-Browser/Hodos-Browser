@@ -15,6 +15,7 @@ pub use certificate_handlers::{
     acquire_certificate,
     prove_certificate,
     discover_by_identity_key,
+    discover_by_attributes,
 };
 
 // ============================================================================

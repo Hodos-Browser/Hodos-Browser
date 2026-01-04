@@ -512,7 +512,7 @@ ToolBSV image generation was failing with "Failed to decrypt image" because the 
 
 ## BRC-100 Implementation Summary
 
-### Current Status: 25/28 Methods Implemented (89%)
+### Current Status: 26/28 Methods Implemented (93%)
 
 #### Complete Method Groups
 
@@ -521,11 +521,10 @@ ToolBSV image generation was failing with "Failed to decrypt image" because the 
 | **Group A: Identity & Auth** | getVersion, getPublicKey, isAuthenticated, createHmac, verifyHmac, createSignature, verifySignature | ✅ 7/7 |
 | **Group B: Transactions** | createAction, signAction, abortAction, listActions, internalizeAction | ✅ 5/5 |
 | **Group C: Outputs & Blockchain** | listOutputs, relinquishOutput, getHeight, getHeaderForHeight, getNetwork | ✅ 5/5 |
-| **Group C: Certificates** | acquireCertificate, listCertificates, proveCertificate, relinquishCertificate, discoverByIdentityKey | ✅ 5/5 |
+| **Group C: Certificates** | acquireCertificate, listCertificates, proveCertificate, relinquishCertificate, discoverByIdentityKey, discoverByAttributes | ✅ 6/6 |
 | **Group D: Encryption** | encrypt, decrypt | ✅ 2/2 |
 | **Group D: Key Linkage** | revealCounterpartyKeyLinkage, revealSpecificKeyLinkage | ❌ 0/2 |
 | **Group E: Auth Wait** | waitForAuthentication | ✅ 1/1 |
-| **Group E: Discovery** | discoverByAttributes | ❌ 0/1 |
 
 ### All BRC-100 Methods Status
 
@@ -551,8 +550,8 @@ ToolBSV image generation was failing with "Failed to decrypt image" because the 
 | 18 | `listCertificates` | ✅ | ❌ |
 | 19 | `proveCertificate` | ✅ | ❌ |
 | 20 | `relinquishCertificate` | ✅ | ❌ |
-| 21 | `discoverByIdentityKey` | ✅ | ❌ |
-| 22 | `discoverByAttributes` | ❌ | ❌ |
+| 21 | `discoverByIdentityKey` | ✅ | ⏳ Needs testing |
+| 22 | `discoverByAttributes` | ✅ | ⏳ Needs testing |
 | 23 | `isAuthenticated` | ✅ | ✅ ToolBSV |
 | 24 | `waitForAuthentication` | ✅ | ❌ |
 | 25 | `getHeight` | ✅ | ❌ |
@@ -572,17 +571,55 @@ ToolBSV image generation was failing with "Failed to decrypt image" because the 
 | Database Migration | ✅ | SQLite with backup/recovery |
 | Browser History | ✅ | CEF layer (separate from wallet) |
 
+### Testing Status
+
+#### Real-World Tested ✅
+These methods have been tested with actual BSV applications:
+
+| Method | Tested With |
+|--------|-------------|
+| getVersion, getPublicKey, isAuthenticated | ToolBSV |
+| createHmac, verifyHmac, createSignature, verifySignature | ToolBSV |
+| createAction, signAction | ToolBSV, Zanaadu |
+| encrypt, decrypt | ToolBSV (image generation) |
+| acquireCertificate | socialcert.net |
+
+#### Implementation Complete, Testing Pending ⏳
+These methods are fully implemented but await real-world app testing or third-party test vectors:
+
+| Method | Notes |
+|--------|-------|
+| listCertificates | Queries certificates from local database |
+| proveCertificate | Generates selective disclosure keyring |
+| relinquishCertificate | Marks certificate as relinquished |
+| discoverByIdentityKey | Searches certificates by subject public key |
+| discoverByAttributes | Searches certificates by decrypted field values |
+| listOutputs | Lists UTXOs with basket/tag filtering, BEEF support |
+| relinquishOutput | Removes output from basket tracking |
+| abortAction | Cancels pending transactions |
+| listActions | Lists transaction history |
+| internalizeAction | Accepts incoming BEEF transactions |
+| getHeight, getHeaderForHeight, getNetwork | Blockchain queries |
+| waitForAuthentication | Wallet initialization wait |
+
+#### Not Implemented (Low Priority) ❌
+These methods are deferred due to low usage in real-world apps:
+
+| Method | Reason |
+|--------|--------|
+| revealCounterpartyKeyLinkage | BRC-69 key linkage - rarely used |
+| revealSpecificKeyLinkage | BRC-69 key linkage - rarely used |
+
 ### Remaining Work
 
-#### Priority 1: Real-World Testing
-- Test `listCertificates`, `proveCertificate`, `relinquishCertificate` with apps
-- Test `listOutputs`, `relinquishOutput` with basket-enabled apps
-- Test blockchain query methods with apps that use them
+#### Priority 1: Third-Party Test Vectors
+- Coordinate with BSV ecosystem developers for test vectors
+- Validate certificate methods against reference implementations
+- Test basket/output methods with apps that use them
 
-#### Priority 2: Missing Methods (3 total)
+#### Priority 2: Missing Methods (2 total)
 1. **`revealCounterpartyKeyLinkage`** (BRC-69) - Low priority, rarely used
 2. **`revealSpecificKeyLinkage`** (BRC-69) - Low priority, rarely used
-3. **`discoverByAttributes`** - Certificate attribute search
 
 #### Priority 3: Enhancements
 - BRC-33 database persistence (currently in-memory)
@@ -590,4 +627,4 @@ ToolBSV image generation was failing with "Failed to decrypt image" because the 
 
 ---
 
-**Last Updated**: December 27, 2024
+**Last Updated**: January 4, 2025

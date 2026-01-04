@@ -279,6 +279,7 @@ async fn main() -> std::io::Result<()> {
             .route("/proveCertificate", web::post().to(handlers::prove_certificate))  // Group C - Part 3
             .route("/relinquishCertificate", web::post().to(handlers::relinquish_certificate))  // Group C - Part 3
             .route("/discoverByIdentityKey", web::post().to(handlers::discover_by_identity_key))  // Group C - Part 4
+            .route("/discoverByAttributes", web::post().to(handlers::discover_by_attributes))  // Group C - Part 4
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

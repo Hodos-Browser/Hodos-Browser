@@ -3,12 +3,12 @@
 > **Official Specification**: [BRC-100 Wallet Interface](https://bsv.brc.dev/wallet/0100)
 > **Full Spec Document**: `reference/BRC100_spec.md`
 
-## 🎯 Current Status: 25/28 BRC-100 Methods Implemented (89%)! 🎉
+## 🎯 Current Status: 26/28 BRC-100 Methods Implemented (93%)! 🎉
 
-**Latest Achievement**: BRC-2 Encrypt/Decrypt endpoints (Call Codes 11, 12) - ToolBSV image generation working!
-**Previous Achievement**: Complete database migration with backup/recovery and performance optimization!
+**Latest Achievement**: `discoverByAttributes` (Call Code 22) - Certificate attribute search complete!
+**Previous Achievement**: BRC-2 Encrypt/Decrypt endpoints (Call Codes 11, 12) - ToolBSV image generation working!
 
-**Current Focus**: Real-world testing of implemented methods. Only 3 methods remaining.
+**Current Focus**: Third-party test vectors for validation. Only 2 BRC-69 methods remaining (low priority).
 
 ---
 
@@ -164,8 +164,8 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 | 18 | `listCertificates` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real-world apps |
 | 19 | `proveCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real verifiers |
 | 20 | `relinquishCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing |
-| 21 | `discoverByIdentityKey` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **CRITICAL**: Add `/discoverByIdentityKey` to HTTP interceptor (microblog.bitspv.com uses this!) |
-| 22 | `discoverByAttributes` | ⏳ | ❌ | ❌ | **Database schema ready** - `certificates` table added<br>⚠️ **Note**: Add `/discoverByAttributes` to HTTP interceptor when implementing |
+| 21 | `discoverByIdentityKey` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Searches certificates by subject public key |
+| 22 | `discoverByAttributes` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Searches certificates by decrypted field values |
 | 24 | `waitForAuthentication` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Validates wallet exists in database<br>✅ **Already in HTTP interceptor** |
 | 25 | `getHeight` | ✅ | ✅ | ❌ | Get blockchain height<br>✅ **COMPLETE** - Fetches from WhatsOnChain `/chain/info`<br>✅ **Already in HTTP interceptor** |
 | 26 | `getHeaderForHeight` | ✅ | ✅ | ❌ | Get block header by height<br>✅ **COMPLETE** - Cache-first with API fallback, constructs 80-byte header<br>✅ **Already in HTTP interceptor** |
@@ -308,10 +308,9 @@ Advanced wallet features for specific use cases.
 - ✅ `encrypt` / `decrypt` - BRC-2 encryption (Dec 27, 2024)
 - ✅ `waitForAuthentication` - Async auth support
 
-**Methods Remaining**:
-- ❌ `revealCounterpartyKeyLinkage` - BRC-69 (low priority)
-- ❌ `revealSpecificKeyLinkage` - BRC-69 (low priority)
-- ❌ `discoverByAttributes` - Certificate attribute search
+**Methods Remaining** (Low Priority):
+- ❌ `revealCounterpartyKeyLinkage` - BRC-69 key linkage (rarely used)
+- ❌ `revealSpecificKeyLinkage` - BRC-69 key linkage (rarely used)
 
 ---
 
@@ -758,16 +757,15 @@ mod tests {
 
 ---
 
-**Last Updated**: December 27, 2024
-**Current Status**: 25/28 BRC-100 methods implemented (89%)
+**Last Updated**: January 4, 2025
+**Current Status**: 26/28 BRC-100 methods implemented (93%)
 **Progress**:
 - ✅ Group A: Identity & Authentication - **COMPLETE** (7/7)
 - ✅ Group B: Transaction Operations - **COMPLETE** (5/5)
 - ✅ Group C: Output Management & Blockchain Queries - **COMPLETE** (5/5)
-- ✅ Group C: Certificate Management - **COMPLETE** (5/5)
+- ✅ Group C: Certificate Management - **COMPLETE** (6/6) - including discoverByAttributes
 - ✅ Group D: Encryption - **COMPLETE** (2/2) - encrypt/decrypt working with ToolBSV
-- ❌ Group D: Key Linkage - NOT STARTED (0/2) - Low priority
+- ❌ Group D: Key Linkage - NOT STARTED (0/2) - Low priority, rarely used
 - ✅ Group E: waitForAuthentication - **COMPLETE** (1/1)
-- ❌ Group E: discoverByAttributes - NOT STARTED (0/1)
 
-**Next Milestone**: Real-world testing of remaining implemented methods
+**Next Milestone**: Third-party test vectors for validation of certificate and output methods

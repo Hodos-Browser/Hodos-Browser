@@ -8,6 +8,7 @@
 
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use crate::AppState;
 use crate::certificate::types::CertificateError;
 use crate::database::CertificateRepository;
@@ -3292,6 +3293,243 @@ pub async fn discover_by_identity_key(
     log::info!("   ✅ Returning {} certificates", cert_responses.len());
 
     HttpResponse::Ok().json(DiscoverByIdentityKeyResponse {
+        total_certificates: total,
+        certificates: cert_responses,
+    })
+}
+
+// ============================================================================
+// Method 22: discoverByAttributes (Call Code 22)
+// ============================================================================
+
+/// Request structure for discoverByAttributes
+#[derive(Debug, Deserialize)]
+pub struct DiscoverByAttributesRequest {
+    /// Attributes to search for (fieldName → decrypted value)
+    /// All attributes must match for a certificate to be included
+    pub attributes: HashMap<String, String>,
+
+    /// Maximum number of certificates to return (optional, default 10, max 10000)
+    pub limit: Option<i64>,
+
+    /// Number of certificates to skip for pagination (optional)
+    pub offset: Option<i64>,
+}
+
+/// Response structure for discoverByAttributes
+/// Uses same format as discoverByIdentityKey
+#[derive(Debug, Serialize)]
+pub struct DiscoverByAttributesResponse {
+    /// Total number of certificates found
+    #[serde(rename = "totalCertificates")]
+    pub total_certificates: i64,
+
+    /// Array of discovered certificates
+    pub certificates: Vec<CertificateResponse>,
+}
+
+/// discoverByAttributes - BRC-100 endpoint (Call Code 22)
+///
+/// Discovers certificates by attribute values. Searches for certificates where
+/// the decrypted field values match the provided attributes.
+///
+/// **Note**: This can only search certificates stored in our wallet (where we have
+/// the decryption keys). Certificates issued to us by certifiers can be searched.
+///
+/// All attributes must match for a certificate to be included in results.
+pub async fn discover_by_attributes(
+    state: web::Data<AppState>,
+    req: web::Json<DiscoverByAttributesRequest>,
+) -> HttpResponse {
+    log::info!("📋 /discoverByAttributes called");
+    log::info!("   Searching for {} attributes", req.attributes.len());
+
+    // Validate request
+    if req.attributes.is_empty() {
+        log::warn!("   No attributes provided");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "attributes must not be empty"
+        }));
+    }
+
+    // Get database connection
+    let db = state.database.lock().unwrap();
+    let cert_repo = CertificateRepository::new(db.connection());
+
+    // Get master private key for decryption
+    let master_private_key = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(key) => key,
+        Err(e) => {
+            log::error!("   Failed to get master private key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to get master private key: {}", e)
+            }));
+        }
+    };
+
+    // Get all active certificates
+    let all_certificates = match cert_repo.list_certificates(
+        None,  // type_filter
+        None,  // certifier_filter
+        None,  // subject_filter
+        Some(false),  // is_deleted = false (only active certificates)
+        None,  // no limit - we filter locally
+        None,  // no offset - we filter locally
+    ) {
+        Ok(certs) => certs,
+        Err(e) => {
+            log::error!("   Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   Found {} total certificates to search", all_certificates.len());
+
+    // Filter certificates by matching decrypted field values
+    let mut matching_certs = Vec::new();
+
+    for cert in all_certificates {
+        // Get certificate fields
+        let fields = match cert.id {
+            Some(cert_id) => {
+                match cert_repo.get_certificate_fields(cert_id) {
+                    Ok(f) => f,
+                    Err(_) => continue, // Skip if can't get fields
+                }
+            }
+            None => continue, // Skip if no cert ID
+        };
+
+        // Try to decrypt and match all requested attributes
+        let mut all_match = true;
+        for (attr_name, attr_value) in req.attributes.iter() {
+            // Get field for this attribute
+            let field = match fields.get(attr_name) {
+                Some(f) => f,
+                None => {
+                    // Field doesn't exist in this certificate
+                    all_match = false;
+                    break;
+                }
+            };
+
+            // Try to decrypt the field value
+            // Step 1: Decrypt master keyring entry to get revelation key
+            let revelation_key = match crate::crypto::brc2::decrypt_certificate_field(
+                &master_private_key,
+                &cert.certifier, // Certifier public key
+                attr_name,
+                None, // Master keyring uses fieldName only (no serialNumber)
+                &field.master_key,
+            ) {
+                Ok(key) => key,
+                Err(_) => {
+                    // Can't decrypt this certificate's keyring (not issued to us)
+                    all_match = false;
+                    break;
+                }
+            };
+
+            // Step 2: Use revelation key to decrypt the field value
+            // The field value is encrypted with revelation_key as the AES key
+            // For BRC-52 fields, the actual decryption uses the revelation key directly
+            let decrypted_value = match crate::crypto::brc2::decrypt_brc2(
+                &field.field_value,
+                &revelation_key,
+            ) {
+                Ok(val) => val,
+                Err(_) => {
+                    // Can't decrypt field value
+                    all_match = false;
+                    break;
+                }
+            };
+
+            // Compare decrypted value with search attribute
+            let decrypted_str = String::from_utf8_lossy(&decrypted_value);
+            if decrypted_str != *attr_value {
+                all_match = false;
+                break;
+            }
+        }
+
+        if all_match {
+            matching_certs.push(cert);
+        }
+    }
+
+    log::info!("   Found {} matching certificates", matching_certs.len());
+
+    // Apply pagination
+    let limit = req.limit.unwrap_or(10).min(10000) as usize;
+    let offset = req.offset.unwrap_or(0) as usize;
+
+    let total = matching_certs.len() as i64;
+    let paginated: Vec<_> = matching_certs.into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    // Convert to response format
+    let mut cert_responses = Vec::new();
+    for cert in paginated {
+        // Get certificate fields for response
+        let fields_map = if let Some(cert_id) = cert.id {
+            match cert_repo.get_certificate_fields(cert_id) {
+                Ok(fields) => {
+                    let mut fields_json = serde_json::Map::new();
+                    for (field_name, field) in fields.iter() {
+                        let field_value_base64 = BASE64.encode(&field.field_value);
+                        fields_json.insert(
+                            field_name.clone(),
+                            serde_json::Value::String(field_value_base64),
+                        );
+                    }
+                    serde_json::Value::Object(fields_json)
+                }
+                Err(_) => serde_json::json!({}),
+            }
+        } else {
+            serde_json::json!({})
+        };
+
+        // Get keyring from certificate fields' master_key
+        let keyring_map = if let Some(cert_id) = cert.id {
+            match cert_repo.get_certificate_fields(cert_id) {
+                Ok(fields) => {
+                    let mut keyring_json = serde_json::Map::new();
+                    for (field_name, field) in fields.iter() {
+                        let master_key_base64 = BASE64.encode(&field.master_key);
+                        keyring_json.insert(
+                            field_name.clone(),
+                            serde_json::Value::String(master_key_base64),
+                        );
+                    }
+                    serde_json::Value::Object(keyring_json)
+                }
+                Err(_) => serde_json::json!({}),
+            }
+        } else {
+            serde_json::json!({})
+        };
+
+        cert_responses.push(CertificateResponse {
+            type_: BASE64.encode(&cert.type_),
+            serial_number: BASE64.encode(&cert.serial_number),
+            subject: hex::encode(&cert.subject),
+            certifier: hex::encode(&cert.certifier),
+            revocation_outpoint: cert.revocation_outpoint.clone(),
+            signature: hex::encode(&cert.signature),
+            fields: fields_map,
+            keyring: keyring_map,
+        });
+    }
+
+    log::info!("   ✅ Returning {} certificates (total matching: {})", cert_responses.len(), total);
+
+    HttpResponse::Ok().json(DiscoverByAttributesResponse {
         total_certificates: total,
         certificates: cert_responses,
     })

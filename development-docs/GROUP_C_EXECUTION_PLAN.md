@@ -484,19 +484,26 @@ Group C consists of **10 BRC-100 methods** covering:
 
 #### Method 22: `discoverByAttributes`
 **Call Code**: 22
-**Status**: ⏳ Database ready, endpoint pending
+**Status**: ✅ IMPLEMENTED (January 4, 2025)
 **Complexity**: High
 
 **What It Does**:
 - Discovers certificates by attribute values
 - Searches certificate fields for matching attributes
-- Supports complex queries (multiple attributes)
+- Decrypts fields using master keyring, compares with search values
+- Supports pagination (limit, offset)
 
-**Research Needed**:
-- [ ] Review BRC-100 spec for `discoverByAttributes`
-- [ ] Understand attribute query format
-- [ ] Check if fields are encrypted (need decryption for search?)
-- [ ] Review reference implementation
+**Implementation Details**:
+- ✅ Implemented in `rust-wallet/src/handlers/certificate_handlers.rs`
+- ✅ Route registered in `main.rs` at `/discoverByAttributes`
+- ✅ HTTP interceptor already includes this endpoint
+- ⏳ **Needs testing** with third-party test vectors
+
+**How It Works**:
+1. Query all active certificates from database
+2. For each certificate, decrypt field values using master keyring
+3. Compare decrypted values with search attributes
+4. Return matching certificates with pagination
 
 **Dependencies**:
 - ✅ Database `certificates` table (exists, has `fields` JSON column)
@@ -695,17 +702,17 @@ loop {
 
 ---
 
-### Phase 4: Certificate Discovery (Week 3-4)
+### ~~Phase 4: Certificate Discovery~~ ✅ COMPLETE
 **Goal**: Complete certificate search functionality
 
 **Methods**:
-10. `discoverByIdentityKey` (Call Code 21) - 2-3 hours
-11. `discoverByAttributes` (Call Code 22) - 4-6 hours
+10. ✅ `discoverByIdentityKey` (Call Code 21) - IMPLEMENTED
+11. ✅ `discoverByAttributes` (Call Code 22) - IMPLEMENTED (January 4, 2025)
 
 **Deliverables**:
 - ✅ Identity key search
-- ✅ Attribute-based search
-- ✅ Field decryption for search (if needed)
+- ✅ Attribute-based search with decryption
+- ⏳ Testing with third-party test vectors
 - ✅ Unit tests
 
 **Success Criteria**:
@@ -1026,20 +1033,20 @@ loop {
 
 ---
 
-### Phase 4: Certificate Discovery
+### Phase 4: Certificate Discovery ✅ COMPLETE
 
-- [ ] **Research**
-  - [ ] Review BRC-100 spec for `discoverByIdentityKey` (Call Code 21)
-  - [ ] Review BRC-100 spec for `discoverByAttributes` (Call Code 22)
-  - [ ] Understand attribute query format
+- [x] **Research**
+  - [x] Review BRC-100 spec for `discoverByIdentityKey` (Call Code 21)
+  - [x] Review BRC-100 spec for `discoverByAttributes` (Call Code 22)
+  - [x] Understand attribute query format
 
-- [ ] **Implementation**
-  - [ ] Implement `discoverByIdentityKey`
-  - [ ] Implement `discoverByAttributes` with JSON field matching
+- [x] **Implementation**
+  - [x] Implement `discoverByIdentityKey`
+  - [x] Implement `discoverByAttributes` with field decryption and matching
 
 - [ ] **Testing**
-  - [ ] Unit tests for both methods
-  - [ ] Test with encrypted fields (if applicable)
+  - [ ] Third-party test vectors for validation
+  - [ ] Integration testing with real certificate data
 
 ---
 
