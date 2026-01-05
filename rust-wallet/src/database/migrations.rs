@@ -747,3 +747,58 @@ pub fn create_schema_v7(conn: &Connection) -> Result<()> {
     info!("   ✅ Schema version 7 migration complete");
     Ok(())
 }
+
+/// Create schema version 8 (BRC-33 Message Relay Persistence)
+///
+/// Adds persistent storage for the message relay system:
+/// - relay_messages table (replaces in-memory storage)
+///
+/// This migration ensures messages survive wallet restarts.
+pub fn create_schema_v8(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 8 (BRC-33 Message Relay Persistence)...");
+
+    // Check if relay_messages table exists
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='relay_messages'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !table_exists {
+        info!("   Creating relay_messages table...");
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS relay_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient TEXT NOT NULL,
+                message_box TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                expires_at INTEGER
+            )",
+            [],
+        )?;
+        info!("   ✅ Created relay_messages table");
+    } else {
+        info!("   ✅ relay_messages table already exists");
+    }
+
+    // Create indexes for efficient queries
+    info!("   Creating indexes for relay_messages...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_relay_recipient_box ON relay_messages(recipient, message_box)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_relay_created_at ON relay_messages(created_at)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_relay_expires ON relay_messages(expires_at) WHERE expires_at IS NOT NULL",
+        [],
+    )?;
+    info!("   ✅ Created relay_messages indexes");
+
+    info!("   ✅ Schema version 8 migration complete");
+    Ok(())
+}

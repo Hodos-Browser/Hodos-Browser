@@ -11,6 +11,7 @@ This document outlines user experience design considerations for HodosBrowser wa
 3. [Wallet Interface and Rendering](#3-wallet-interface-and-rendering)
 4. [Privileged Identity Access](#4-privileged-identity-access)
 5. [Blind Message Attacks](#5-blind-message-attacks)
+6. [Wallet Management](#6-wallet-management)
 
 ---
 
@@ -257,6 +258,117 @@ When applications request access to the user's master identity key (privileged a
 
 ---
 
+## 6. Wallet Management
+
+### Overview
+
+Wallet management concerns the behind-the-scenes infrastructure that affects user experience indirectly. A slow, bloated database degrades all wallet operations. Cloud storage introduces sync complexity but enables multi-device access.
+
+### 6.1 Local Database Performance
+
+**Problem**: Over time, the SQLite database grows with transaction history, UTXOs, certificates, and cached data. Large databases slow wallet operations.
+
+**TODO**: Design solutions for:
+
+- [ ] **Database size monitoring**: Track and display current size in settings
+- [ ] **Pruning old data**: Archive/remove old transaction history beyond N months
+- [ ] **UTXO consolidation**: Combine small UTXOs to reduce record count
+- [ ] **Index optimization**: Ensure proper indexes for common queries
+- [ ] **Vacuum scheduling**: Periodic database maintenance
+
+**Thresholds to Consider**:
+
+| Size | Action |
+|------|--------|
+| < 50 MB | Normal operation |
+| 50-200 MB | Show info in settings, suggest cleanup |
+| 200-500 MB | Warn user, recommend archiving |
+| > 500 MB | Prompt for maintenance action |
+
+---
+
+### 6.2 Cloud Storage
+
+**Problem**: Users may want to access their wallet from multiple devices or ensure backup beyond local mnemonic.
+
+**Considerations**:
+
+| Aspect | Challenge |
+|--------|-----------|
+| Security | Private keys must NEVER leave encrypted local storage |
+| What to sync | Transaction history, labels, preferences, certificates (NOT keys) |
+| Encryption | All cloud data must be encrypted with user-derived key |
+| Provider options | User-controlled (WebDAV), integrated (iCloud/GDrive), or BSV overlay |
+
+**TODO**: Design cloud storage approach:
+
+- [ ] **Encryption scheme**: Derive cloud encryption key from master key + passphrase
+- [ ] **Data partitioning**: Define what syncs vs. what stays local-only
+- [ ] **Conflict resolution**: How to handle edits from multiple devices
+- [ ] **Provider abstraction**: Support multiple storage backends
+- [ ] **Opt-in only**: Cloud sync must be explicitly enabled, never default
+
+**Security Requirements**:
+
+- Master private key and mnemonic NEVER synced to cloud
+- Cloud storage failure must not break local wallet operation
+- User must be able to disable cloud sync and delete cloud data
+
+---
+
+### 6.3 Multi-Device Sync
+
+**Problem**: If cloud storage is enabled, how do we keep wallet state consistent across devices?
+
+**Sync Scenarios**:
+
+| Scenario | Challenge | Resolution |
+|----------|-----------|------------|
+| New transaction on Device A | Device B needs to learn about it | Push notification or polling |
+| Label edited on both devices | Conflict | Last-write-wins or merge UI |
+| Certificate acquired on Device A | Device B needs access | Sync certificate (encrypted) |
+| UTXO spent on Device A | Device B has stale cache | Invalidate and re-fetch |
+
+**Eventual Consistency Model**:
+
+Since blockchain is the source of truth for funds, sync can be eventually consistent:
+
+1. **Core funds**: Re-derivable from mnemonic + blockchain scan (slow but always correct)
+2. **Metadata**: Labels, preferences, basket names (sync via cloud)
+3. **Certificates**: Sync encrypted blobs (may need re-acquisition if sync fails)
+4. **Transaction cache**: Rebuild from blockchain if inconsistent
+
+**TODO**: Design multi-device experience:
+
+- [ ] **Device registration**: Show list of linked devices in settings
+- [ ] **Sync status indicator**: Show last sync time, pending changes
+- [ ] **Force sync button**: Manual trigger for immediate sync
+- [ ] **Device removal**: Revoke access from lost/old devices
+- [ ] **Conflict UI**: When manual resolution needed, present clear options
+
+---
+
+### 6.4 Data Portability
+
+**Problem**: Users may want to export wallet data for backup or migration.
+
+**Export Options**:
+
+| Format | Contents | Use Case |
+|--------|----------|----------|
+| Mnemonic only | 12/24 words | Minimal backup, fund recovery |
+| Full export | Mnemonic + labels + history + certs | Complete backup |
+| History only | Transaction log (no keys) | Accounting/tax purposes |
+
+**TODO**: Design export/import flows:
+
+- [ ] **Export wizard**: Guide user through backup options
+- [ ] **Import validation**: Verify backup integrity before restore
+- [ ] **Selective import**: Choose what data to restore
+- [ ] **Format versioning**: Handle old backup formats gracefully
+
+---
+
 ## Implementation Priority
 
 | Feature | Priority | Complexity | Status |
@@ -268,6 +380,10 @@ When applications request access to the user's master identity key (privileged a
 | Wallet Creation Flow | Medium | Medium | Basic |
 | Wallet Recovery Flow | Medium | Medium | Basic |
 | Blind Message Detection | Low | High | Not Started |
+| Database Performance Monitoring | Low | Low | Not Started |
+| Cloud Storage Integration | Low | High | Not Started |
+| Multi-Device Sync | Low | Very High | Not Started |
+| Data Export/Import | Low | Medium | Not Started |
 
 ---
 

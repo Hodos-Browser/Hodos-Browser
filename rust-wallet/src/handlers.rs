@@ -5636,19 +5636,25 @@ pub async fn send_message(
     log::info!("   Sender: {}", sender);
     log::info!("   Body length: {} bytes", request.body.len());
 
-    // Store the message
-    let message_id = state.message_store.send_message(
-        &request.recipient,
-        &request.message_box,
-        &sender,
-        &request.body,
-    );
+    // Store the message in database
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::MessageRelayRepository::new(db.connection());
 
-    log::info!("✅ Message sent successfully with ID: {}", message_id);
-
-    HttpResponse::Ok().json(SendMessageResponse {
-        status: "success".to_string(),
-    })
+    match repo.send_message(&request.recipient, &request.message_box, &sender, &request.body) {
+        Ok(message_id) => {
+            log::info!("✅ Message sent successfully with ID: {}", message_id);
+            HttpResponse::Ok().json(SendMessageResponse {
+                status: "success".to_string(),
+            })
+        }
+        Err(e) => {
+            log::error!("❌ Failed to store message: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "description": format!("Failed to store message: {}", e)
+            }))
+        }
+    }
 }
 
 /// Request structure for /listMessages endpoint
@@ -5658,11 +5664,20 @@ struct ListMessagesRequest {
     message_box: String,
 }
 
+/// Message format for API response (compatible with existing clients)
+#[derive(Debug, Serialize)]
+struct ApiMessage {
+    #[serde(rename = "messageId")]
+    message_id: i64,
+    sender: String,
+    body: String,
+}
+
 /// Response structure for /listMessages endpoint
 #[derive(Debug, Serialize)]
 struct ListMessagesResponse {
     status: String,
-    messages: Vec<crate::message_relay::Message>,
+    messages: Vec<ApiMessage>,
 }
 
 /// POST /listMessages - List all messages in a message box
@@ -5712,15 +5727,37 @@ pub async fn list_messages(
     log::info!("   Recipient: {}", recipient);
     log::info!("   Message Box: {}", request.message_box);
 
-    // Retrieve messages
-    let messages = state.message_store.list_messages(&recipient, &request.message_box);
+    // Retrieve messages from database
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::MessageRelayRepository::new(db.connection());
 
-    log::info!("✅ Found {} messages", messages.len());
+    match repo.list_messages(&recipient, &request.message_box) {
+        Ok(db_messages) => {
+            // Convert to API format
+            let messages: Vec<ApiMessage> = db_messages
+                .into_iter()
+                .map(|m| ApiMessage {
+                    message_id: m.id,
+                    sender: m.sender,
+                    body: m.body,
+                })
+                .collect();
 
-    HttpResponse::Ok().json(ListMessagesResponse {
-        status: "success".to_string(),
-        messages,
-    })
+            log::info!("✅ Found {} messages", messages.len());
+
+            HttpResponse::Ok().json(ListMessagesResponse {
+                status: "success".to_string(),
+                messages,
+            })
+        }
+        Err(e) => {
+            log::error!("❌ Failed to list messages: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "description": format!("Failed to list messages: {}", e)
+            }))
+        }
+    }
 }
 
 /// Request structure for /acknowledgeMessage endpoint
@@ -5786,18 +5823,28 @@ pub async fn acknowledge_message(
     log::info!("   Message Box: {}", request.message_box);
     log::info!("   Message IDs to acknowledge: {:?}", request.message_ids);
 
-    // Acknowledge the messages
-    state.message_store.acknowledge_messages(
-        &recipient,
-        &request.message_box,
-        &request.message_ids,
-    );
+    // Acknowledge the messages in database
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::MessageRelayRepository::new(db.connection());
 
-    log::info!("✅ Messages acknowledged successfully");
+    // Convert u64 to i64 for database (SQLite uses i64)
+    let message_ids_i64: Vec<i64> = request.message_ids.iter().map(|&id| id as i64).collect();
 
-    HttpResponse::Ok().json(AcknowledgeMessageResponse {
-        status: "success".to_string(),
-    })
+    match repo.acknowledge_messages(&recipient, &message_ids_i64) {
+        Ok(deleted) => {
+            log::info!("✅ Acknowledged {} messages successfully", deleted);
+            HttpResponse::Ok().json(AcknowledgeMessageResponse {
+                status: "success".to_string(),
+            })
+        }
+        Err(e) => {
+            log::error!("❌ Failed to acknowledge messages: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "description": format!("Failed to acknowledge messages: {}", e)
+            }))
+        }
+    }
 }
 
 // ============================================================================

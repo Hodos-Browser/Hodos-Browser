@@ -475,6 +475,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 8 (BRC-33 Message Relay Persistence)
+        if current_version < 8 {
+            info!("   Applying migration to version 8...");
+            match migrations::create_schema_v8(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 8...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (8)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 8 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 8 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 
