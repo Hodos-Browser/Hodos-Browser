@@ -341,6 +341,40 @@ pub async fn well_known_auth(
 
     log::info!("   Our MASTER identity key: {}", master_pubkey_hex);
 
+    // === APP-SCOPED IDENTITY KEY DERIVATION ===
+    // Privacy feature: Derive a unique identity key for each app using BRC-42
+    // This prevents cross-app tracking - each app sees a different identity key
+    // Invoice: "2-identity" (Security Level 2, protocol "identity")
+    // Counterparty: The app's identity key (from request)
+    let app_identity_key_bytes = match hex::decode(&req.identity_key) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("   Failed to decode app identity key for scoping: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid identity key"
+            }));
+        }
+    };
+
+    let app_scoped_identity_pubkey_hex = match crate::crypto::brc42::derive_child_public_key(
+        &master_privkey,           // Our master private key
+        &app_identity_key_bytes,   // App's identity key as counterparty
+        "2-identity"               // Fixed invoice number for identity derivation
+    ) {
+        Ok(pubkey_bytes) => {
+            let pubkey_hex = hex::encode(&pubkey_bytes);
+            log::info!("   ✅ Derived app-scoped identity key: {}", pubkey_hex);
+            log::info!("   📍 For app: {}...", &req.identity_key[..16.min(req.identity_key.len())]);
+            pubkey_hex
+        },
+        Err(e) => {
+            log::error!("   Failed to derive app-scoped identity key: {}", e);
+            log::warn!("   ⚠️  Falling back to master key (BRC-42 derivation failed)");
+            // Fallback to master key if derivation fails (shouldn't happen normally)
+            master_pubkey_hex.clone()
+        }
+    };
+
     // CRITICAL: TypeScript SDK does Utils.toArray(nonce1_base64 + nonce2_base64, 'base64')
     // This concatenates the BASE64 STRINGS first, THEN decodes the concatenated string!
     // NOT: decode(nonce1) + decode(nonce2)
@@ -465,16 +499,18 @@ pub async fn well_known_auth(
     // - "initialNonce": B_Nonce (our new session nonce)
     // - "yourNonce": A_Nonce (their initial nonce echoed back)
     // NOTE: signature must be returned as an array of bytes (like TypeScript SDK does), not hex string
+    // PRIVACY: identityKey is now APP-SCOPED (derived via BRC-42) to prevent cross-app tracking
     let response = serde_json::json!({
         "version": "0.1",
         "messageType": "initialResponse",
-        "identityKey": master_pubkey_hex,  // MASTER public key (m), not m/0
-        "initialNonce": our_nonce,          // Our new nonce (B_Nonce)
-        "yourNonce": req.initial_nonce,     // Their initial nonce echoed back (A_Nonce)
-        "signature": sig_bytes              // DER signature as byte array (not hex string!)
+        "identityKey": app_scoped_identity_pubkey_hex,  // APP-SCOPED identity key (privacy feature)
+        "initialNonce": our_nonce,                       // Our new nonce (B_Nonce)
+        "yourNonce": req.initial_nonce,                  // Their initial nonce echoed back (A_Nonce)
+        "signature": sig_bytes                           // DER signature as byte array (not hex string!)
     });
 
     log::info!("✅ Returning auth response with BRC-42 signature");
+    log::info!("   🔒 Using APP-SCOPED identity key (privacy: prevents cross-app tracking)");
     log::info!("   📤 Response fields: initialNonce=[ourNew], yourNonce=[theirInitialEchoed]");
     log::info!("   📤 FULL RESPONSE JSON: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "error".to_string()));
 

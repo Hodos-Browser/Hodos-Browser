@@ -610,6 +610,24 @@ These methods are deferred due to low usage in real-world apps:
 | revealCounterpartyKeyLinkage | BRC-69 key linkage - rarely used |
 | revealSpecificKeyLinkage | BRC-69 key linkage - rarely used |
 
+### Privacy Improvements
+
+#### App-Scoped Identity Keys (January 2025)
+
+The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity keys** instead of the master identity key. This privacy enhancement:
+
+- Prevents passive cross-app tracking
+- Each app receives a unique identity key derived via BRC-42
+- Uses invoice number `"2-identity"` with app's identity key as counterparty
+- Cross-app linking now requires explicit user consent
+
+**Files Modified:**
+- `rust-wallet/src/handlers.rs` - `well_known_auth` function
+
+**Known Limitation:**
+- `/getPublicKey(identityKey=true)` still returns master key (deferred for UX design)
+- See `development-docs/UX_DESIGN_CONSIDERATIONS.md` for future privileged access prompt design
+
 ### Remaining Work
 
 #### Priority 1: Third-Party Test Vectors
@@ -627,4 +645,4 @@ These methods are deferred due to low usage in real-world apps:
 
 ---
 
-**Last Updated**: January 4, 2025
+**Last Updated**: January 5, 2025
