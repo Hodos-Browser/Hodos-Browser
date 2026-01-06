@@ -4,13 +4,13 @@
 // Platform-specific V8 handlers (Windows-only currently)
 #ifdef _WIN32
     #include "../../include/core/IdentityHandler.h"
-    #include "../../include/core/AddressHandler.h"
     #include "BRC100Handler.h"
 #endif
 
 // Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
 #include "../../include/core/HistoryManager.h"
+#include "../../include/core/AddressHandler.h"
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -523,7 +523,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
     }
 
 #ifdef _WIN32
-    // Create the address object (Windows-only)
+    // Create the address object (Windows)
     CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -533,10 +533,25 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("generate", addressHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
-    // macOS: Provide stub address API to prevent JavaScript errors
+    // macOS: AddressHandler is cross-platform now
     CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🔧 Address API stubbed on macOS (empty object)");
+
+    CefRefPtr<AddressHandler> addressHandler = new AddressHandler();
+
+    addressObject->SetValue("generate",
+        CefV8Value::CreateFunction("generate", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    addressObject->SetValue("getAll",
+        CefV8Value::CreateFunction("getAll", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    addressObject->SetValue("getCurrent",
+        CefV8Value::CreateFunction("getCurrent", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    LOG_DEBUG_RENDER("✅ Address API enabled on macOS");
 #endif
 
     // Create the history object (cross-platform)

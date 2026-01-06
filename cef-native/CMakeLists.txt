@@ -110,6 +110,7 @@ set(SOURCES
     src/handlers/simple_app.cpp
     # Core functionality (cross-platform)
     src/core/NavigationHandler.cpp
+    src/core/AddressHandler.cpp
     src/core/Logger.cpp
     src/core/HistoryManager.cpp
 )
@@ -127,14 +128,17 @@ if(APPLE)
     list(APPEND SOURCES
         cef_browser_shell_mac.mm
         src/core/TabManager_mac.mm
+        src/core/WalletService_mac.cpp
     )
-    message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm")
+    message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp")
 
     # Helper process source files (need render process handler + dependencies)
     set(HODOS_HELPER_SRCS
         mac/process_helper_mac.mm
         src/handlers/simple_render_process_handler.cpp
         src/core/NavigationHandler.cpp
+        src/core/AddressHandler.cpp
+        src/core/WalletService_mac.cpp
         src/core/Logger.cpp
         src/core/HistoryManager.cpp
     )
@@ -213,12 +217,13 @@ if(APPLE)
         "${WRAPPER_LIB_PATH}"
     )
 
-    # Find macOS frameworks
+    # Find macOS frameworks and libraries
     find_library(COCOA_LIBRARY Cocoa)
     find_library(APPKIT_LIBRARY AppKit)
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COREGRAPHICS_LIBRARY CoreGraphics)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
+    find_library(CURL_LIBRARY curl)
 
     # Link CEF Framework (special handling for .framework bundle)
     # Note: Framework name has spaces, use find_library to handle properly
@@ -242,6 +247,7 @@ if(APPLE)
         ${FOUNDATION_LIBRARY}
         ${COREGRAPHICS_LIBRARY}
         ${QUARTZCORE_LIBRARY}
+        ${CURL_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto
         ${SQLITE3_LIBRARY}
@@ -359,7 +365,7 @@ elseif(APPLE)
         # Create helper executable target
         add_executable(${_helper_target} MACOSX_BUNDLE ${HODOS_HELPER_SRCS})
 
-        # Link libraries (need SQLite for HistoryManager)
+        # Link libraries (need SQLite for HistoryManager, curl for WalletService)
         target_link_libraries(${_helper_target} PRIVATE
             "${WRAPPER_LIB_PATH}/libcef_dll_wrapper.a"
             "${CEF_LIBRARY}"
@@ -367,6 +373,7 @@ elseif(APPLE)
             ${APPKIT_LIBRARY}
             ${FOUNDATION_LIBRARY}
             ${SQLITE3_LIBRARY}
+            ${CURL_LIBRARY}
         )
 
         # Include directories (need same as main app for SimpleApp)

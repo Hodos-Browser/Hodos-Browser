@@ -9,6 +9,10 @@
     #include <windows.h>
 #endif
 
+#ifdef __APPLE__
+    #include "../../include/core/WalletService.h"
+#endif
+
 // Cross-platform includes (available on both platforms)
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
@@ -903,8 +907,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-#ifdef _WIN32
-    // ========== WALLET SERVICE MESSAGES (Windows only) ==========
+    // ========== WALLET SERVICE MESSAGES (Cross-platform) ==========
     if (message_name == "wallet_status_check") {
         LOG_DEBUG_BROWSER("🔍 Wallet status check requested");
 
@@ -1334,7 +1337,6 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         return true;
     }
-#endif  // _WIN32 - end of wallet service messages
 
 #ifdef _WIN32
     // ========== OVERLAY MESSAGES (Windows only) ==========
@@ -1744,21 +1746,42 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 #else
     if (message_name == "address_generate") {
-        LOG_DEBUG_BROWSER("⚠️ address_generate not implemented on macOS");
+        LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-        // Send error response
-        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
-        CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-        responseArgs->SetString(0, "Wallet operations not implemented on macOS");
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        try {
+            // Call WalletService to generate address
+            WalletService walletService;
+            nlohmann::json addressData = walletService.generateAddress();
+
+            LOG_DEBUG_BROWSER("✅ Address generated successfully: " + addressData.dump());
+
+            // Send result back to the requesting browser
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_response");
+            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
+            responseArgs->SetString(0, addressData.dump());
+
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+            LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
+            LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+
+        } catch (const std::exception& e) {
+            LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
+
+            // Send error response
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
+            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
+            responseArgs->SetString(0, e.what());
+
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        }
 
         return true;
     }
 #endif
 
-    // Transaction Message Handlers
+    // Transaction Message Handlers (Cross-platform)
 
-#ifdef _WIN32
     if (message_name == "create_transaction") {
         LOG_DEBUG_BROWSER("💰 Create transaction requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -2113,29 +2136,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         return true;
     }
-#else
-    // macOS stubs for all transaction-related messages
-    if (message_name == "create_transaction" ||
-        message_name == "sign_transaction" ||
-        message_name == "broadcast_transaction" ||
-        message_name == "get_balance" ||
-        message_name == "send_transaction" ||
-        message_name == "get_transaction_history") {
-
-        LOG_DEBUG_BROWSER("⚠️ " + message_name + " not implemented on macOS");
-
-        // Send error response
-        nlohmann::json errorResponse;
-        errorResponse["error"] = "Wallet operations not implemented on macOS";
-
-        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(message_name + "_error");
-        CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-        responseArgs->SetString(0, errorResponse.dump());
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-
-        return true;
-    }
-#endif
+    // All wallet handlers now cross-platform (WalletService has platform implementations)
 
     return false;
 }

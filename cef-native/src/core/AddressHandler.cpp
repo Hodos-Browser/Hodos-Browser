@@ -22,10 +22,12 @@ bool AddressHandler::Execute(const CefString& name,
     std::cout << "💡 AddressHandler - Frame URL: " << CefV8Context::GetCurrentContext()->GetFrame()->GetURL().ToString() << std::endl;
     std::cout.flush(); // Force flush
 
-    // Also try OutputDebugString for Windows
+    // Platform-specific debug output
+#ifdef _WIN32
     std::string debugMsg = "💡 AddressHandler started - Function: " + name.ToString();
     OutputDebugStringA(debugMsg.c_str());
     OutputDebugStringA("\n");
+#endif
 
     WalletService walletService;
 
@@ -114,6 +116,56 @@ bool AddressHandler::Execute(const CefString& name,
                     }
                 }
             }
+
+    if (name == "getAll") {
+        std::cout << "📋 Get all addresses requested" << std::endl;
+
+        // Send process message to browser process
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        CefRefPtr<CefBrowser> browser = context->GetBrowser();
+
+        if (browser) {
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("get_all_addresses");
+            browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, message);
+            std::cout << "✅ get_all_addresses message sent to browser process" << std::endl;
+
+            // Return promise-like object (matches generate pattern)
+            CefRefPtr<CefV8Value> promise = CefV8Value::CreateObject(nullptr, nullptr);
+            promise->SetValue("then", CefV8Value::CreateFunction("then", this), V8_PROPERTY_ATTRIBUTE_NONE);
+            promise->SetValue("catch", CefV8Value::CreateFunction("catch", this), V8_PROPERTY_ATTRIBUTE_NONE);
+
+            retval = promise;
+            return true;
+        } else {
+            exception = "Browser not available";
+            return false;
+        }
+    }
+
+    if (name == "getCurrent") {
+        std::cout << "📍 Get current address requested" << std::endl;
+
+        // Send process message to browser process
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        CefRefPtr<CefBrowser> browser = context->GetBrowser();
+
+        if (browser) {
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("get_current_address");
+            browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, message);
+            std::cout << "✅ get_current_address message sent to browser process" << std::endl;
+
+            // Return promise-like object (matches generate pattern)
+            CefRefPtr<CefV8Value> promise = CefV8Value::CreateObject(nullptr, nullptr);
+            promise->SetValue("then", CefV8Value::CreateFunction("then", this), V8_PROPERTY_ATTRIBUTE_NONE);
+            promise->SetValue("catch", CefV8Value::CreateFunction("catch", this), V8_PROPERTY_ATTRIBUTE_NONE);
+
+            retval = promise;
+            return true;
+        } else {
+            exception = "Browser not available";
+            return false;
+        }
+    }
 
     exception = "Unknown function: " + name.ToString();
     return false;

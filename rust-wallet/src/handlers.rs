@@ -5058,7 +5058,7 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
     log::info!("🔑 /wallet/address/generate called");
 
     // Get current index and master keys from database
-    let (wallet_id, current_index, master_privkey, master_pubkey) = {
+    let (wallet_id, next_index, master_privkey, master_pubkey) = {
         use crate::database::{WalletRepository, get_master_private_key_from_db, get_master_public_key_from_db};
 
         let db = state.database.lock().unwrap();
@@ -5081,7 +5081,10 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
         };
 
         let wallet_id = wallet.id.unwrap();
-        let index = wallet.current_index;
+        let current_index = wallet.current_index;
+
+        // Increment index for new address
+        let next_index = current_index + 1;
 
         let privkey = match get_master_private_key_from_db(&db) {
             Ok(k) => k,
@@ -5103,13 +5106,24 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
             }
         };
 
+        // Update wallet's current_index BEFORE deriving address
+        // This ensures we don't retry with same index if derivation fails
+        if let Err(e) = wallet_repo.update_current_index(wallet_id, next_index) {
+            log::error!("   Failed to update wallet index: {}", e);
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to update wallet index: {}", e)
+            }));
+        }
+
         drop(db);
-        (wallet_id, index, privkey, pubkey)
+        (wallet_id, next_index, privkey, pubkey)
     };
 
     // Create BRC-43 invoice number: "2-receive address-{index}"
-    let invoice_number = format!("2-receive address-{}", current_index);
+    let invoice_number = format!("2-receive address-{}", next_index);
     log::info!("   Invoice number: {}", invoice_number);
+    log::info!("   Using index: {}", next_index);
 
     // Derive child public key using BRC-42 (self-derivation)
     let derived_pubkey = match derive_child_public_key(&master_privkey, &master_pubkey, &invoice_number) {
@@ -5155,7 +5169,7 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
         let address_model = Address {
             id: None,
             wallet_id,
-            index: current_index,
+            index: next_index,
             address: address.clone(),
             public_key: hex::encode(&derived_pubkey),
             used: false,
@@ -5164,17 +5178,15 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
             created_at,
         };
 
+        // Index already updated above before derivation
         match address_repo.create(&address_model) {
             Ok(addr_id) => {
-                // Update wallet's current_index
-                if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
-                    log::warn!("   Failed to update wallet index: {}", e);
-                }
-                log::info!("   ✅ Address saved to database (ID: {}, index: {}, address: {})", addr_id, current_index, address);
+                log::info!("   ✅ Address saved to database (ID: {}, index: {}, address: {})", addr_id, next_index, address);
             }
             Err(e) => {
                 log::error!("   ❌ Failed to save address to database: {}", e);
-                log::error!("   Address: {}, Index: {}", address, current_index);
+                log::error!("   Address: {}, Index: {}", address, next_index);
+                // Index already incremented above, so next attempt will use new index
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to save address: {}", e)
                 }));
@@ -5185,9 +5197,132 @@ pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
     // Return response in Go wallet format
     HttpResponse::Ok().json(serde_json::json!({
         "address": address,
-        "index": current_index,
+        "index": next_index,
         "publicKey": hex::encode(&derived_pubkey)
     }))
+}
+
+/// GET /wallet/addresses - Get all addresses in wallet
+pub async fn get_all_addresses(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("📋 GET /wallet/addresses called");
+
+    use crate::database::{WalletRepository, AddressRepository};
+
+    let db = state.database.lock().unwrap();
+    let wallet_repo = WalletRepository::new(db.connection());
+    let address_repo = AddressRepository::new(db.connection());
+
+    // Get primary wallet
+    let wallet = match wallet_repo.get_primary_wallet() {
+        Ok(Some(w)) => w,
+        Ok(None) => {
+            log::error!("   No wallet found");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": "No wallet found"
+            }));
+        }
+        Err(e) => {
+            log::error!("   Failed to get wallet: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    let wallet_id = wallet.id.unwrap();
+
+    // Get all addresses
+    match address_repo.get_all_by_wallet(wallet_id) {
+        Ok(addresses) => {
+            log::info!("   ✅ Retrieved {} addresses", addresses.len());
+
+            // Convert to JSON array
+            let addresses_json: Vec<serde_json::Value> = addresses.iter().map(|addr| {
+                serde_json::json!({
+                    "index": addr.index,
+                    "address": addr.address,
+                    "publicKey": addr.public_key,
+                    "used": addr.used,
+                    "balance": addr.balance,
+                    "createdAt": addr.created_at
+                })
+            }).collect();
+
+            HttpResponse::Ok().json(addresses_json)
+        }
+        Err(e) => {
+            log::error!("   ❌ Failed to get addresses: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get addresses: {}", e)
+            }))
+        }
+    }
+}
+
+/// GET /wallet/address/current - Get current active address
+pub async fn get_current_address(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("📍 GET /wallet/address/current called");
+
+    use crate::database::{WalletRepository, AddressRepository};
+
+    let db = state.database.lock().unwrap();
+    let wallet_repo = WalletRepository::new(db.connection());
+    let address_repo = AddressRepository::new(db.connection());
+
+    // Get primary wallet
+    let wallet = match wallet_repo.get_primary_wallet() {
+        Ok(Some(w)) => w,
+        Ok(None) => {
+            log::error!("   No wallet found");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "No wallet found"
+            }));
+        }
+        Err(e) => {
+            log::error!("   Failed to get wallet: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    let wallet_id = wallet.id.unwrap();
+
+    // Get all addresses and find current one (highest index)
+    match address_repo.get_all_by_wallet(wallet_id) {
+        Ok(mut addresses) => {
+            if addresses.is_empty() {
+                log::warn!("   No addresses in wallet");
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "No addresses found"
+                }));
+            }
+
+            // Sort by index descending to get latest
+            addresses.sort_by(|a, b| b.index.cmp(&a.index));
+            let current = &addresses[0];
+
+            log::info!("   ✅ Current address: {} (index: {})", current.address, current.index);
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "index": current.index,
+                "address": current.address,
+                "publicKey": current.public_key,
+                "used": current.used,
+                "balance": current.balance,
+                "createdAt": current.created_at
+            }))
+        }
+        Err(e) => {
+            log::error!("   ❌ Failed to get addresses: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to get addresses: {}", e)
+            }))
+        }
+    }
 }
 
 // Request structure for /transaction/send (frontend wallet)
