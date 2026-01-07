@@ -33,9 +33,11 @@ public:
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
     static CefRefPtr<CefBrowser> header_browser_;
+    static CefRefPtr<CefBrowser> wallet_panel_browser_;
     static CefRefPtr<CefBrowser> GetOverlayBrowser();
     static CefRefPtr<CefBrowser> GetHeaderBrowser();
     static CefRefPtr<CefBrowser> GetWebviewBrowser();
+    static CefRefPtr<CefBrowser> GetWalletPanelBrowser();
     static CefRefPtr<CefBrowser> GetSettingsBrowser();
     static CefRefPtr<CefBrowser> GetWalletBrowser();
     static CefRefPtr<CefBrowser> GetBackupBrowser();

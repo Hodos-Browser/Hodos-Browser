@@ -112,6 +112,7 @@ CefRefPtr<CefLoadHandler> SimpleHandler::GetLoadHandler() {
 
 CefRefPtr<CefBrowser> SimpleHandler::webview_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::header_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::wallet_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
@@ -127,6 +128,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetHeaderBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetWebviewBrowser() {
     return webview_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetWalletPanelBrowser() {
+    return wallet_panel_browser_;
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsBrowser() {
@@ -489,6 +494,13 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
 #endif
+    } else if (role_ == "wallet_panel") {
+        wallet_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("💰 Wallet panel browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Trigger initial resize
+        browser->GetHost()->WasResized();
+        LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for wallet panel browser");
     } else if (role_ == "overlay") {
         overlay_browser_ = browser;
         LOG_DEBUG_BROWSER("🪟 Overlay browser initialized.");
@@ -613,6 +625,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "webview" && browser == webview_browser_) {
         std::cout << "  → Webview browser cleanup" << std::endl;
         webview_browser_ = nullptr;
+    } else if (role_ == "wallet_panel" && browser == wallet_panel_browser_) {
+        std::cout << "  → Wallet panel browser cleanup" << std::endl;
+        wallet_panel_browser_ = nullptr;
     } else if (role_ == "header" && browser == header_browser_) {
         std::cout << "  → Header browser cleanup" << std::endl;
         header_browser_ = nullptr;
@@ -1411,6 +1426,37 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "toggle_wallet_panel") {
+        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
+        std::cout << "💰 Toggle wallet panel message received!" << std::endl;
+
+#ifdef __APPLE__
+        extern NSView* g_wallet_panel_view;
+        extern bool g_wallet_panel_visible;
+
+        std::cout << "💰 g_wallet_panel_view pointer: " << g_wallet_panel_view << std::endl;
+        std::cout << "💰 Current visibility: " << g_wallet_panel_visible << std::endl;
+
+        if (g_wallet_panel_view) {
+            NSView* panel = (__bridge NSView*)g_wallet_panel_view;
+            std::cout << "💰 NSView casted successfully" << std::endl;
+
+            // Toggle visibility
+            g_wallet_panel_visible = !g_wallet_panel_visible;
+            std::cout << "💰 New visibility: " << g_wallet_panel_visible << std::endl;
+
+            [panel setHidden:!g_wallet_panel_visible];
+            std::cout << "💰 setHidden called: " << (!g_wallet_panel_visible ? "YES" : "NO") << std::endl;
+            LOG_DEBUG_BROWSER("💰 Wallet panel " + std::string(g_wallet_panel_visible ? "shown" : "hidden"));
+        } else {
+            std::cout << "❌ g_wallet_panel_view is NULL!" << std::endl;
+        }
+#else
+        std::cout << "⚠️ Not on macOS, toggle not implemented for Windows yet" << std::endl;
+#endif
+        return true;
+    }
+
     if (message_name == "overlay_show_backup") {
         LOG_DEBUG_BROWSER("💾 overlay_show_backup message received from role: " + role_);
         LOG_DEBUG_BROWSER("💾 Creating backup overlay with separate process");
@@ -1709,6 +1755,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 #endif  // _WIN32 - end of overlay messages
+
+    // ========== WALLET PANEL TOGGLE (macOS only for now) ==========
+    if (message_name == "toggle_wallet_panel") {
+        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
+
+#ifdef __APPLE__
+        // Call Objective-C++ function in cef_browser_shell_mac.mm
+        extern void ToggleWalletPanel();
+        ToggleWalletPanel();
+#else
+        LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on Windows yet");
+#endif
+        return true;
+    }
 
 #ifdef _WIN32
     if (message_name == "address_generate") {

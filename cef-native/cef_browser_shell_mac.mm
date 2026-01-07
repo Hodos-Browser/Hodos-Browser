@@ -81,6 +81,7 @@ void ShutdownApplication();
 
 NSWindow* g_main_window = nullptr;
 NSView* g_header_view = nullptr;
+NSView* g_wallet_panel_view = nullptr;  // NEW: Wallet panel between header and webview
 NSView* g_webview_view = nullptr;
 
 // Overlay windows (created on-demand)
@@ -89,6 +90,9 @@ NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
+
+// Wallet panel state
+bool g_wallet_panel_visible = true;  // Default visible
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -105,6 +109,7 @@ void DebugLog(const std::string& message) {
 // Forward Declarations
 // ============================================================================
 
+void ToggleWalletPanel();  // C++ callable function
 void CreateMainWindow();
 void CreateSettingsOverlayWithSeparateProcess();
 void CreateWalletOverlayWithSeparateProcess();
@@ -605,23 +610,39 @@ ViewDimensions GetViewDimensions(void* nsview) {
     LOG_DEBUG("🔄 Main window resized - updating layout");
 
     NSRect contentRect = [[g_main_window contentView] bounds];
-    int shellHeight = MAX(100, contentRect.size.height * 0.12);
+    int headerHeight = 99;
+    int walletPanelWidth = 250;    // Vertical panel width
+    int walletPanelHeight = 200;   // Vertical panel height
+    int webviewHeight = contentRect.size.height - headerHeight;  // Full height
 
-    // Resize header view (12% of height, min 100px)
-    NSRect headerRect = NSMakeRect(0, contentRect.size.height - shellHeight,
-                                   contentRect.size.width, shellHeight);
+    // Resize header view (fixed 80px at top)
+    NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
+                                   contentRect.size.width, headerHeight);
     [g_header_view setFrame:headerRect];
 
-    // Resize webview (remaining space)
-    NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width,
-                                    contentRect.size.height - shellHeight);
+    // Resize webview (60px gap for diagnostic)
+    int diagnosticGap = 60;
+    NSRect webviewRect = NSMakeRect(0, diagnosticGap, contentRect.size.width, webviewHeight - diagnosticGap);
     [g_webview_view setFrame:webviewRect];
+
+    // Resize wallet panel view (top-right corner box)
+    int walletPanelX = contentRect.size.width - walletPanelWidth;  // 20px from right
+    int walletPanelY = contentRect.size.height - headerHeight - walletPanelHeight;  // 10px below header
+    NSRect walletPanelRect = NSMakeRect(walletPanelX, walletPanelY,
+                                        walletPanelWidth, walletPanelHeight);
+    [g_wallet_panel_view setFrame:walletPanelRect];
 
     // Notify CEF browsers of resize
     CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
     if (header) {
         header->GetHost()->WasResized();
         LOG_DEBUG("🔄 Header browser notified of resize");
+    }
+
+    CefRefPtr<CefBrowser> wallet_panel = SimpleHandler::GetWalletPanelBrowser();
+    if (wallet_panel) {
+        wallet_panel->GetHost()->WasResized();
+        LOG_DEBUG("🔄 Wallet panel browser notified of resize");
     }
 
     CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
@@ -686,6 +707,25 @@ ViewDimensions GetViewDimensions(void* nsview) {
 @end
 
 // ============================================================================
+// Wallet Panel Toggle (C++ callable)
+// ============================================================================
+
+void ToggleWalletPanel() {
+    if (!g_wallet_panel_view) {
+        LOG_WARNING("ToggleWalletPanel called but g_wallet_panel_view is null");
+        return;
+    }
+
+    NSView* panel = (__bridge NSView*)g_wallet_panel_view;
+
+    // Toggle visibility
+    g_wallet_panel_visible = !g_wallet_panel_visible;
+
+    [panel setHidden:!g_wallet_panel_visible];
+    LOG_INFO("💰 Wallet panel toggled: " + std::string(g_wallet_panel_visible ? "visible" : "hidden"));
+}
+
+// ============================================================================
 // Main Window Creation
 // ============================================================================
 
@@ -713,13 +753,19 @@ void CreateMainWindow() {
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 
-    // Calculate header height (smaller for cleaner UI)
-    int shellHeight = 80;  // Fixed 80px for toolbar + tabs
-    LOG_INFO("📐 Header height: " + std::to_string(shellHeight) + "px");
+    // Calculate heights and panel dimensions
+    int headerHeight = 99;         // Header with tabs/address bar
+    int walletPanelWidth = 200;    // Compact vertical panel
+    int walletPanelHeight = 140;   // Enough for balance + 3 buttons
+    int webviewHeight = screenRect.size.height - headerHeight;  // Full height below header
 
-    // Create header view (top portion for React UI)
-    NSRect headerRect = NSMakeRect(0, screenRect.size.height - shellHeight,
-                                   screenRect.size.width, shellHeight);
+    LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px");
+    LOG_INFO("📐 Wallet panel height: " + std::to_string(walletPanelHeight) + "px (overlay mode)");
+    LOG_INFO("📐 Webview height: " + std::to_string(webviewHeight) + "px (full)");
+
+    // Create header view (at very top)
+    NSRect headerRect = NSMakeRect(0, screenRect.size.height - headerHeight,
+                                   screenRect.size.width, headerHeight);
     g_header_view = [[NSView alloc] initWithFrame:headerRect];
 
     if (!g_header_view) {
@@ -727,15 +773,14 @@ void CreateMainWindow() {
         return;
     }
 
-    // SetAsChild mode - CEF creates its own view, don't add our own layer
-    // Just set autoresizing so CEF's child view follows window resizes
     [g_header_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
     [[g_main_window contentView] addSubview:g_header_view];
-    LOG_INFO("✅ Header view created (for CEF child view) and added to main window");
+    LOG_INFO("✅ Header view created at Y=" + std::to_string((int)headerRect.origin.y));
 
-    // Create webview/content area (bottom portion for tabs/web content)
-    NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width,
-                                    screenRect.size.height - shellHeight);
+    // Create webview/content area (60px gap for diagnostic)
+    // This gap will show if issue is from header or webview positioning
+    int diagnosticGap = 60;
+    NSRect webviewRect = NSMakeRect(0, diagnosticGap, screenRect.size.width, webviewHeight - diagnosticGap);
     g_webview_view = [[NSView alloc] initWithFrame:webviewRect];
 
     if (!g_webview_view) {
@@ -745,7 +790,23 @@ void CreateMainWindow() {
 
     [g_webview_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [[g_main_window contentView] addSubview:g_webview_view];
-    LOG_INFO("✅ Webview created and added to main window");
+    LOG_INFO("✅ Webview created (full height)");
+
+    // Create wallet panel view (top-right corner box)
+    int walletPanelX = screenRect.size.width - walletPanelWidth - 20;  // 20px from right edge
+    int walletPanelY = screenRect.size.height - headerHeight - walletPanelHeight - 10;  // 10px below header
+    NSRect walletPanelRect = NSMakeRect(walletPanelX, walletPanelY,
+                                        walletPanelWidth, walletPanelHeight);
+    g_wallet_panel_view = [[NSView alloc] initWithFrame:walletPanelRect];
+
+    if (!g_wallet_panel_view) {
+        LOG_ERROR("❌ Failed to create wallet panel view");
+        return;
+    }
+
+    [g_wallet_panel_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+    [[g_main_window contentView] addSubview:g_wallet_panel_view];  // Added AFTER webview = on top
+    LOG_INFO("✅ Wallet panel view created at Y=" + std::to_string(walletPanelY) + " (overlay mode)");
 
     // Show window
     [g_main_window makeKeyAndOrderFront:nil];
@@ -1404,6 +1465,52 @@ int main(int argc, char* argv[]) {
         );
 
         LOG_INFO("✅ Webview browser creation result: " + std::string(webview_created ? "SUCCESS" : "FAILED"));
+
+        // ===================================================================
+        // Create Wallet Panel Browser (dedicated wallet info panel)
+        // ===================================================================
+
+        NSView* walletPanelView = (__bridge NSView*)g_wallet_panel_view;
+        NSRect walletPanelBounds = [walletPanelView bounds];
+
+        LOG_INFO("🔧 Creating wallet panel browser with SetAsChild");
+        LOG_INFO("📐 Wallet panel bounds: " + std::to_string((int)walletPanelBounds.size.width) +
+                 "x" + std::to_string((int)walletPanelBounds.size.height));
+
+        CefWindowInfo wallet_panel_window_info;
+        CefRect walletPanelCefRect(0, 0, (int)walletPanelBounds.size.width, (int)walletPanelBounds.size.height);
+        wallet_panel_window_info.SetAsChild((__bridge void*)walletPanelView, walletPanelCefRect);
+
+        CefRefPtr<SimpleHandler> wallet_panel_handler = new SimpleHandler("wallet_panel");
+
+        CefBrowserSettings wallet_panel_settings;
+        wallet_panel_settings.background_color = CefColorSetARGB(255, 245, 245, 245);  // Light gray
+
+        bool wallet_panel_created = CefBrowserHost::CreateBrowser(
+            wallet_panel_window_info,
+            wallet_panel_handler,
+            "http://127.0.0.1:5137/wallet-panel",  // Load wallet panel React component
+            wallet_panel_settings,
+            nullptr,
+            CefRequestContext::GetGlobalContext()
+        );
+
+        LOG_INFO("✅ Wallet panel browser creation result: " + std::string(wallet_panel_created ? "SUCCESS" : "FAILED"));
+
+        // Debug: Check webview hierarchy after browsers created
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            NSView* webview = (__bridge NSView*)g_webview_view;
+            LOG_INFO("🔍 Webview has " + std::to_string([[webview subviews] count]) + " subviews");
+            LOG_INFO("🔍 Webview frame: Y=" + std::to_string((int)[webview frame].origin.y) +
+                     " H=" + std::to_string((int)[webview frame].size.height));
+
+            for (NSView* subview in [webview subviews]) {
+                NSRect frame = [subview frame];
+                LOG_INFO("  CEF subview: " + std::string([[subview className] UTF8String]) +
+                         " Y=" + std::to_string((int)frame.origin.y) +
+                         " H=" + std::to_string((int)frame.size.height));
+            }
+        });
 
         // ===================================================================
         // Initialize HistoryManager
