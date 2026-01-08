@@ -380,6 +380,124 @@ Apps like Coinflip and Thryll use message boxes to:
 
 ---
 
+## 🔌 **Socket.IO & Real-Time Notifications**
+
+### What is Socket.IO?
+Socket.IO is a protocol for **real-time, bidirectional communication** between clients and servers.
+
+**Two ways apps can check for messages:**
+
+| Method | How It Works | Pros | Cons |
+|--------|--------------|------|------|
+| **HTTP Polling** | App repeatedly asks "any messages?" | Simple | Wasteful, delayed |
+| **Socket.IO** | Server pushes "you have a message!" | Efficient, instant | Requires persistent connection |
+
+Socket.IO uses two transports:
+1. **Long-polling** (`/socket.io/?transport=polling`) - HTTP fallback
+2. **WebSocket** - Persistent TCP connection for true real-time
+
+### Architecture: Who Runs the Socket.IO Server?
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MESSAGE RELAY ARCHITECTURE                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+When someone pays you:
+1. Their wallet creates a transaction
+2. Their wallet sends a message to messagebox.babbage.systems:
+   "Tell recipient X that I just paid them"
+
+When you want to know about payments:
+
+┌──────────────┐         ┌─────────────────────────────┐
+│  Your App    │ ──────► │ messagebox.babbage.systems  │  ◄── Babbage runs this!
+│  (PeerPay)   │         │   (Socket.IO Server)        │
+└──────────────┘         └─────────────────────────────┘
+       │                            │
+       │  Socket.IO connection      │
+       │ ◄────────────────────────► │
+       │                            │
+       │  "New message arrived!"    │
+       │ ◄──────────────────────────│  (push notification)
+```
+
+### Do We Need a Socket.IO Server?
+
+**As a CLIENT wallet (current focus): NO**
+
+We are a client wallet that:
+- **Connects TO** PeerServ servers (like messagebox.babbage.systems)
+- **Receives** push notifications about payments
+- Uses **Babbage's infrastructure** for the heavy lifting
+
+Our implementation:
+- ✅ HTTP REST endpoints for local message storage (`/sendMessage`, `/listMessages`)
+- ✅ SQLite persistence for messages (`relay_messages` table)
+- ✅ Let Socket.IO requests pass through to real Babbage servers
+- ❌ No Socket.IO server needed
+
+**As a SERVER-SIDE wallet (future): YES, in Rust**
+
+If building server-side wallet functionality (your own PeerServ):
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                  SERVER-SIDE WALLET (Future)                       │
+└────────────────────────────────────────────────────────────────────┘
+
+                    ┌────────────────────────────────┐
+                    │   YOUR MESSAGE RELAY SERVER    │
+                    │   (Rust - Actix-web + WS)      │
+                    │                                │
+                    │  - Store messages for users    │
+                    │  - Push notifications via WS   │
+                    │  - Handle federation (BRC-34)  │
+                    └────────────────────────────────┘
+                              ▲           │
+                              │           │ Socket.IO/WebSocket
+                              │           ▼
+              ┌───────────────┴───────────────────────┐
+              │                                       │
+        ┌─────┴─────┐                           ┌─────┴─────┐
+        │  User A   │                           │  User B   │
+        │  Wallet   │                           │  Wallet   │
+        └───────────┘                           └───────────┘
+```
+
+**Implementation location**: Rust wallet (Actix-web has excellent WebSocket support)
+**NOT in C++**: The C++ layer is for browser functionality, not wallet services
+
+### What Was Removed
+
+Previously we had a **stubbed C++ WebSocket server** on port 3302 that:
+- Only echoed messages back or returned 404
+- Had TODO comments: "we'll implement proper proxying later"
+- Was never functional
+
+This has been **removed** (January 2025) because:
+1. Client wallets don't need to run a Socket.IO server
+2. If we need server-side functionality, it belongs in Rust
+3. Keeping dead code causes confusion
+
+### Future Implementation (If Needed)
+
+If we build server-side PeerServ functionality:
+
+```rust
+// rust-wallet/src/websocket.rs (FUTURE - NOT IMPLEMENTED)
+// Would use actix-web-actors for WebSocket support
+//
+// Features needed:
+// - Socket.IO protocol (Engine.IO + Socket.IO layers)
+// - Message push notifications
+// - Connection management
+// - Integration with relay_messages table
+```
+
+**Status**: Not implemented. Will build if/when needed for server-side apps.
+
+---
+
 ## 📋 **BRC-33 Implementation Questions**
 
 ### Critical Questions to Answer:
@@ -401,18 +519,21 @@ Apps like Coinflip and Thryll use message boxes to:
 
 4. **Federation (BRC-34/35)**:
    - ❓ Do we need to implement federation NOW?
-   - ❓ Is this what the port 3302 WebSocket server is for?
+   - ✅ **Answer**: No - federation is for multi-server setups, not needed for client wallet
    - ❓ Can we start without federation and add it later?
+   - ✅ **Answer**: Yes - implement locally first, add federation if building server-side
 
 5. **WebSocket vs HTTP**:
    - ✅ BRC-33 core endpoints are **HTTP POST** (port 3301)
-   - ❓ Is WebSocket (port 3302) for real-time notifications?
-   - ❓ Do apps poll `/listMessages` or get push notifications?
+   - ✅ Socket.IO is for real-time push notifications from PeerServ SERVERS
+   - ✅ Apps use Socket.IO to connect to messagebox.babbage.systems for push notifications
+   - ✅ We pass Socket.IO requests through to real Babbage servers
 
 6. **Implementation**:
-   - ✅ BRC-33 uses **HTTP POST**, not WebSocket
-   - ✅ **Decision**: Implement BRC-33 in Rust wallet (port 3301) as HTTP POST endpoints
-   - ❓ WebSocket (port 3302?) for real-time push notifications (optional enhancement)
+   - ✅ BRC-33 uses **HTTP POST** for message operations
+   - ✅ **Decision**: Implement BRC-33 REST endpoints in Rust wallet (port 3301)
+   - ✅ Socket.IO passthrough to messagebox.babbage.systems for real-time notifications
+   - ✅ No local Socket.IO server needed for client wallet
 
 ---
 
@@ -447,25 +568,22 @@ Apps like Coinflip and Thryll use message boxes to:
 
 ## 🏗️ **BRC-33 Implementation Architecture**
 
-### Option 1: Rust Wallet Handles Everything (Port 3301) ⭐ RECOMMENDED
+### Implementation: Rust Wallet (Port 3301) ✅ IMPLEMENTED
 ```
 App → HTTP POST → Rust Wallet (3301)
                   ├─ BRC-100 endpoints (✅ working)
                   ├─ /.well-known/auth (✅ working)
-                  └─ BRC-33 message relay (❌ add these)
+                  └─ BRC-33 message relay (✅ implemented)
+                       ├─ /sendMessage
+                       ├─ /listMessages
+                       └─ /acknowledgeMessage
+
+App → Socket.IO → messagebox.babbage.systems (passthrough)
+                  └─ Real-time push notifications
 ```
 
-**Pros**: Simple, all in one place, Rust performance
-**Cons**: Need to implement storage system
-
-
-### Option 3: CEF C++ Backend (Port 3302)
-```
-App → HTTP POST → C++ Backend (3302) → Message Storage
-```
-
-**Pros**: Centralized message handling
-**Cons**: C++ implementation, separate from wallet
+**Pros**: Simple, all in one place, Rust performance, SQLite storage
+**Implementation**: `rust-wallet/src/handlers.rs` + `database/message_relay_repo.rs`
 
 ---
 

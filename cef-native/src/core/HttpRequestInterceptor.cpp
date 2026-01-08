@@ -9,7 +9,6 @@
 #include "include/cef_frame.h"
 #include "../handlers/simple_handler.h"
 #include "../handlers/simple_app.h"
-#include "../../include/core/WebSocketServerHandler.h"
 #include <iostream>
 #include <regex>
 
@@ -915,6 +914,16 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
         LOG_DEBUG_HTTP("🌐 Method: " + method);
         LOG_DEBUG_HTTP("🌐 Full URL: " + url);
 
+        // Check if this is a Socket.IO request - let these pass through to real Babbage servers
+        // We don't have a Socket.IO server implementation, so real-time notifications should
+        // go to the actual messagebox.babbage.systems infrastructure
+        bool isSocketIORequest = url.find("/socket.io/") != std::string::npos;
+        if (isSocketIORequest) {
+            LOG_DEBUG_HTTP("🌐 Socket.IO request to messagebox.babbage.systems - passing through to real server");
+            LOG_DEBUG_HTTP("🌐 (We don't have Socket.IO server, letting CEF handle normally)");
+            return nullptr; // Let CEF handle it normally - goes to real Babbage server
+        }
+
         // Log all headers
         CefRequest::HeaderMap messageboxHeaders;
         request->GetHeaderMap(messageboxHeaders);
@@ -947,23 +956,10 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
 
         if (isWebSocketUpgrade) {
             LOG_DEBUG_HTTP("🌐 WebSocket upgrade request detected for messagebox.babbage.systems");
-            LOG_DEBUG_HTTP("🌐 Redirecting WebSocket to Go daemon on localhost:3301");
-
-            // Redirect WebSocket connections to Go daemon
-            std::string redirectedUrl = url;
-            size_t pos = redirectedUrl.find("messagebox.babbage.systems");
-            if (pos != std::string::npos) {
-                redirectedUrl.replace(pos, 26, "localhost:3301");
-                // Change wss to ws for WebSocket connections
-                if (redirectedUrl.find("wss://") == 0) {
-                    redirectedUrl.replace(0, 6, "ws://");
-                }
-                LOG_DEBUG_HTTP("🌐 WebSocket redirection: " + url + " -> " + redirectedUrl);
-                request->SetURL(redirectedUrl);
-                url = redirectedUrl;
-            }
+            LOG_DEBUG_HTTP("🌐 Passing through to real Babbage server (no local WebSocket support)");
+            return nullptr; // Let CEF handle it normally - goes to real Babbage server
         } else {
-            // Redirect HTTP requests to Go daemon
+            // Redirect HTTP REST requests (sendMessage, listMessages, etc.) to local daemon
             std::string redirectedUrl = url;
             size_t pos = redirectedUrl.find("messagebox.babbage.systems");
             if (pos != std::string::npos) {

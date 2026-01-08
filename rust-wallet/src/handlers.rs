@@ -2668,6 +2668,8 @@ pub struct CreateActionResponse {
     pub txid: Option<String>,
     #[serde(rename = "tx", skip_serializing_if = "Option::is_none")]
     pub tx: Option<Vec<u8>>, // Atomic BEEF (BRC-95) as byte array per BRC-100 spec
+    #[serde(rename = "sendResult", skip_serializing_if = "Option::is_none")]
+    pub send_result: Option<serde_json::Value>, // Result of broadcasting when noSend=false
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3683,9 +3685,35 @@ pub async fn create_action(
         (txid, tx_bytes)
     };
 
+    // Track broadcast result for response
+    let mut send_result: Option<serde_json::Value> = None;
+
     if should_broadcast {
-        log::info!("   📡 Would broadcast transaction (not yet implemented)");
-        // TODO: Call processAction here to broadcast
+        if let Some(ref tx_bytes) = raw_tx {
+            let beef_hex = hex::encode(tx_bytes);
+            log::info!("   📡 Broadcasting transaction to network...");
+
+            match broadcast_transaction(&beef_hex).await {
+                Ok(txid) => {
+                    log::info!("   ✅ Broadcast successful: {}", txid);
+                    send_result = Some(serde_json::json!({
+                        "status": "success",
+                        "txid": txid
+                    }));
+                }
+                Err(e) => {
+                    log::error!("   ❌ Broadcast failed: {}", e);
+                    send_result = Some(serde_json::json!({
+                        "status": "error",
+                        "description": e
+                    }));
+                    // Don't return error - still return the signed tx
+                    // The app might want to retry broadcasting
+                }
+            }
+        } else {
+            log::warn!("   ⚠️  No transaction bytes available for broadcast");
+        }
     } else {
         log::info!("   ℹ️  Skipping broadcast (acceptDelayedBroadcast={}, noSend={})",
                    accept_delayed_broadcast, no_send);
@@ -3748,6 +3776,7 @@ pub async fn create_action(
         input_beef: None,
         txid: Some(final_txid),
         tx: raw_tx,
+        send_result,
     })
 }
 
@@ -4871,14 +4900,37 @@ pub async fn process_action(
 }
 
 // Broadcast transaction to BSV network (multiple broadcasters for redundancy)
-async fn broadcast_transaction(raw_tx_hex: &str) -> Result<String, String> {
+async fn broadcast_transaction(beef_or_raw_hex: &str) -> Result<String, String> {
+    // Extract raw transaction from BEEF if needed
+    // BEEF starts with 0100beef, 0200beef, or 01010101 (Atomic)
+    // Raw transaction starts with version (typically 01000000 or 02000000)
+    let raw_tx_hex = if beef_or_raw_hex.starts_with("0100beef")
+        || beef_or_raw_hex.starts_with("0200beef")
+        || beef_or_raw_hex.starts_with("01010101")
+    {
+        log::info!("   📦 Input is BEEF format, extracting raw transaction...");
+        match crate::beef::Beef::extract_raw_tx_hex(beef_or_raw_hex) {
+            Ok(raw_hex) => {
+                log::info!("   ✅ Extracted raw tx ({} bytes)", raw_hex.len() / 2);
+                raw_hex
+            }
+            Err(e) => {
+                log::error!("   ❌ Failed to extract raw tx from BEEF: {}", e);
+                return Err(format!("Failed to extract raw tx from BEEF: {}", e));
+            }
+        }
+    } else {
+        log::info!("   📦 Input appears to be raw transaction hex");
+        beef_or_raw_hex.to_string()
+    };
+
     let client = reqwest::Client::new();
     let mut success_count = 0;
     let mut last_error = String::new();
 
     // Broadcaster 1: GorillaPool
     log::info!("   📡 Broadcasting to GorillaPool...");
-    match broadcast_to_gorillapool(&client, raw_tx_hex).await {
+    match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
         Ok(response) => {
             log::info!("   ✅ GorillaPool: {}", response);
             success_count += 1;
@@ -4895,7 +4947,7 @@ async fn broadcast_transaction(raw_tx_hex: &str) -> Result<String, String> {
 
     // Broadcaster 2: WhatsOnChain
     log::info!("   📡 Broadcasting to WhatsOnChain...");
-    match broadcast_to_whatsonchain(&client, raw_tx_hex).await {
+    match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
         Ok(response) => {
             log::info!("   ✅ WhatsOnChain: {}", response);
             success_count += 1;

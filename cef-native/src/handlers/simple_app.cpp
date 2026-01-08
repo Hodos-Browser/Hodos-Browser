@@ -7,7 +7,6 @@
 #include "include/cef_browser.h"
 #include "include/cef_frame.h"
 #include "include/cef_process_message.h"
-#include "../../include/core/WebSocketServerHandler.h"
 #include "../../include/core/WalletService.h"
 #include "../../include/core/TabManager.h"
 #include <iostream>
@@ -97,10 +96,6 @@ void SimpleApp::OnContextInitialized() {
     log << "→ IsWindow(webview_hwnd_): " << IsWindow(webview_hwnd_) << "\n";
 
     log.close();
-
-    // ───── WebSocket Server Setup ─────
-    LOG_INFO_APP("🌐 Starting WebSocket server for Babbage connections...");
-    WebSocketServerHandler::StartWebSocketServer();
 
     // ───── header Browser Setup ─────
     RECT headerRect;

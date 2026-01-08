@@ -41,7 +41,6 @@ set(SOURCES
     src/core/BRC100Bridge.cpp
     src/core/BRC100Handler.cpp
     src/core/HttpRequestInterceptor.cpp
-    src/core/WebSocketServerHandler.cpp
     # Tab management (Phase 1)
     include/core/Tab.h
     include/core/TabManager.h

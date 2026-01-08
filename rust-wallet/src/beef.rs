@@ -18,6 +18,9 @@ pub const BEEF_V1_MARKER: [u8; 4] = [0x01, 0x00, 0xbe, 0xef];
 /// BEEF V2 version marker (4 bytes: 0x0200beef per BRC-96) - DEFAULT
 pub const BEEF_V2_MARKER: [u8; 4] = [0x02, 0x00, 0xbe, 0xef];
 
+/// Atomic BEEF marker (4 bytes: 0x01010101 per BRC-95)
+pub const ATOMIC_BEEF_MARKER: [u8; 4] = [0x01, 0x01, 0x01, 0x01];
+
 /// Use BEEF V2 as default (matches TypeScript SDK)
 pub const BEEF_VERSION_MARKER: [u8; 4] = BEEF_V2_MARKER;
 
@@ -89,9 +92,41 @@ impl Beef {
         Ok((txid_hex, beef))
     }
 
+    /// Extract the main (broadcastable) raw transaction hex from BEEF hex string
+    ///
+    /// This is useful when you need to broadcast to miners who don't understand BEEF format.
+    /// Works with both Atomic BEEF (01010101...) and Standard BEEF (0100beef/0200beef).
+    pub fn extract_raw_tx_hex(beef_hex: &str) -> Result<String, String> {
+        let bytes = hex::decode(beef_hex)
+            .map_err(|e| format!("Invalid hex: {}", e))?;
+
+        let beef = Self::from_bytes(&bytes)?;
+
+        let main_tx = beef.main_transaction()
+            .ok_or_else(|| "No transactions in BEEF".to_string())?;
+
+        Ok(hex::encode(main_tx))
+    }
+
     /// Parse BEEF format from raw bytes
+    ///
+    /// Handles both standard BEEF (0100beef/0200beef) and Atomic BEEF (01010101) formats.
+    /// For Atomic BEEF, the 36-byte header (4 bytes marker + 32 bytes txid) is stripped.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let mut cursor = Cursor::new(bytes);
+        // Check if this is Atomic BEEF format (BRC-95)
+        // Atomic BEEF starts with 01010101 followed by 32-byte txid, then standard BEEF
+        let actual_bytes = if bytes.len() >= 36 && bytes[0..4] == ATOMIC_BEEF_MARKER {
+            log::info!("📦 Detected Atomic BEEF format, stripping 36-byte header");
+            let txid_bytes = &bytes[4..36];
+            let mut txid_le = txid_bytes.to_vec();
+            txid_le.reverse(); // Convert to little-endian for display
+            log::info!("   Atomic BEEF subject txid: {}", hex::encode(&txid_le));
+            &bytes[36..] // Skip the 36-byte Atomic header
+        } else {
+            bytes
+        };
+
+        let mut cursor = Cursor::new(actual_bytes);
 
         // Read 4-byte version marker
         let mut version = [0u8; 4];
