@@ -195,8 +195,121 @@ impl WalletDatabase {
 
         address_repo.create(&address_model)?;
 
-        info!("   ✅ Wallet created successfully with first address");
+        // Also create an entry for the master pubkey address (index -1)
+        // This allows UTXO sync to detect payments sent directly to the master pubkey
+        let master_sha_hash = Sha256::digest(&master_pubkey);
+        let master_pubkey_hash = Ripemd160::digest(&master_sha_hash);
+
+        let mut master_addr_bytes = vec![0x00]; // Mainnet prefix
+        master_addr_bytes.extend_from_slice(master_pubkey_hash.as_slice());
+
+        let master_checksum_full = Sha256::digest(&Sha256::digest(&master_addr_bytes));
+        let master_checksum = &master_checksum_full[0..4];
+        master_addr_bytes.extend_from_slice(master_checksum);
+
+        let master_address = bs58::encode(&master_addr_bytes).into_string();
+        info!("   ✅ Master pubkey address: {}", master_address);
+
+        let master_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -1,  // Special index for master pubkey address
+            address: master_address.clone(),
+            public_key: hex::encode(&master_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: true,  // Check this address for UTXOs
+            created_at,
+        };
+
+        address_repo.create(&master_address_model)?;
+        info!("   ✅ Master pubkey address stored with index -1");
+
+        info!("   ✅ Wallet created successfully with first address and master address");
         Ok((wallet_id, mnemonic_phrase, address))
+    }
+
+    /// Ensure the master pubkey address exists in the database
+    /// This should be called on startup for existing wallets that were created
+    /// before we started storing the master address.
+    pub fn ensure_master_address_exists(&self) -> Result<()> {
+        use super::{WalletRepository, AddressRepository};
+        use crate::database::helpers::get_master_public_key_from_db;
+        use sha2::{Sha256, Digest};
+        use ripemd::Ripemd160;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use bs58;
+
+        info!("🔑 Checking if master pubkey address exists...");
+
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let address_repo = AddressRepository::new(&self.conn);
+
+        // Get the primary wallet
+        let wallet = match wallet_repo.get_primary_wallet()? {
+            Some(w) => w,
+            None => {
+                info!("   No wallet found, skipping master address check");
+                return Ok(());
+            }
+        };
+        let wallet_id = wallet.id.ok_or_else(|| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+            Some("Wallet has no ID".to_string())
+        ))?;
+
+        // Check if master address already exists (index -1)
+        match address_repo.get_by_wallet_and_index(wallet_id, -1) {
+            Ok(Some(_)) => {
+                info!("   ✅ Master pubkey address already exists");
+                return Ok(());
+            }
+            Ok(None) => {
+                info!("   Master pubkey address not found, creating...");
+            }
+            Err(e) => {
+                info!("   Error checking for master address: {}, will try to create", e);
+            }
+        }
+
+        // Get master public key
+        let master_pubkey = get_master_public_key_from_db(self)?;
+
+        // Calculate master pubkey address
+        let sha_hash = Sha256::digest(&master_pubkey);
+        let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+        let mut addr_bytes = vec![0x00]; // Mainnet prefix
+        addr_bytes.extend_from_slice(pubkey_hash.as_slice());
+
+        let checksum_full = Sha256::digest(&Sha256::digest(&addr_bytes));
+        let checksum = &checksum_full[0..4];
+        addr_bytes.extend_from_slice(checksum);
+
+        let master_address = bs58::encode(&addr_bytes).into_string();
+        info!("   Master pubkey address: {}", master_address);
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let master_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -1,  // Special index for master pubkey address
+            address: master_address,
+            public_key: hex::encode(&master_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: true,  // Check this address for UTXOs
+            created_at,
+        };
+
+        address_repo.create(&master_address_model)?;
+        info!("   ✅ Master pubkey address created with index -1");
+
+        Ok(())
     }
 
     /// Get the database file path

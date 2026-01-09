@@ -41,28 +41,39 @@
 
 ---
 
-## ⚠️ **BRC-33 Message Relay - IMPLEMENTED (Needs Real-World Testing)**
+## ✅ **BRC-33 Message Relay - COMPLETE (Core Implementation)**
 
-**Status**: ✅ Endpoints implemented (in-memory storage), ❓ Real-world testing unknown
+**Status**: ✅ Core implementation complete with SQLite persistence
 **Note**: BRC-33 is **separate from BRC-100** but required by many apps
 
 ### BRC-33 Message Relay Endpoints
 
-| Endpoint | Status | Real-World Test | Spec | Notes |
-|----------|--------|-----------------|------|-------|
-| `/sendMessage` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Send messages to recipients - **Implemented, needs testing** |
-| `/listMessages` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | List messages from inbox - **Implemented, needs testing** |
-| `/acknowledgeMessage` | ✅ | ❓ Unknown | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Acknowledge received messages - **Implemented, needs testing** |
+| Endpoint | Status | Spec | Notes |
+|----------|--------|------|-------|
+| `/sendMessage` | ✅ Complete | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Send messages to recipients |
+| `/listMessages` | ✅ Complete | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | List messages from inbox |
+| `/acknowledgeMessage` | ✅ Complete | [BRC-33](https://bsv.brc.dev/peer-to-peer/0033) | Acknowledge and delete messages |
 
 **Authentication**: Uses BRC-31 (Authrite) - same as `/.well-known/auth` ✅
-**Storage**: Currently in-memory (`MessageStore`) - database persistence optional enhancement
+**Storage**: SQLite persistence (`relay_messages` table) ✅
 **Implementation**: `rust-wallet/src/message_relay.rs` and handlers in `handlers.rs`
 
-**Real-World Testing Needed**:
-- Test with apps that use BRC-33 (Coinflip, Thryll, etc.)
-- Verify message delivery and retrieval
-- Test message acknowledgment flow
-- Verify authentication works correctly
+### Implementation Details
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| HTTP endpoints | ✅ Complete | All 3 endpoints working |
+| SQLite persistence | ✅ Complete | `relay_messages` table with indexes |
+| Message expiry | ✅ Complete | Auto-cleanup of expired messages |
+| `MessageRelayRepository` | ✅ Complete | Full CRUD operations |
+| WebSocket push | ❌ Not implemented | Optional - polling works for now |
+| End-to-end encryption | ❌ Not implemented | BRC-2 primitives available if needed |
+| Federation (BRC-34/35) | ❌ Not implemented | Future enhancement |
+
+### Remaining Work (Optional Enhancements)
+- **WebSocket/Socket.IO**: Real-time push notifications instead of polling
+- **End-to-end encryption**: Encrypt message bodies using BRC-2 (primitives exist in `crypto/brc2.rs`)
+- **Federation**: Cross-relay discovery via BRC-34/35 (not needed for single-relay use)
 
 ---
 
@@ -875,7 +886,7 @@ mod tests {
 
 ---
 
-**Last Updated**: January 4, 2025
+**Last Updated**: January 9, 2025
 **Current Status**: 26/28 BRC-100 methods implemented (93%)
 **Progress**:
 - ✅ Group A: Identity & Authentication - **COMPLETE** (7/7)
@@ -887,3 +898,63 @@ mod tests {
 - ✅ Group E: waitForAuthentication - **COMPLETE** (1/1)
 
 **Next Milestone**: Third-party test vectors for validation of certificate and output methods
+
+---
+
+## 📋 Not Implemented: Server-Side Features
+
+The following features are **not implemented** in HodosBrowser. These are primarily useful for **applications running servers** (relays, certificate authorities, hosted services) rather than client-side wallets.
+
+### Why These Aren't Needed for Client Wallets
+
+A client wallet's job is to:
+- Store keys securely and sign transactions
+- Authenticate with apps using BRC-100/104
+- Send/receive messages through existing relays
+- Store/present certificates issued by external certifiers
+
+A client wallet does NOT need to:
+- Host a message relay server
+- Run a certificate authority
+- Provide discovery services
+- Handle multi-server federation
+
+### Server-Side Features (Not Implemented)
+
+| Feature | BRC Spec | Purpose | Why Server-Only |
+|---------|----------|---------|-----------------|
+| **Message Relay Server** | BRC-33 | Host relay for other users | Clients connect to existing relays, they don't run one |
+| **WebSocket Push** | BRC-33 | Real-time message delivery | Server feature; clients use polling |
+| **Federation** | BRC-34/35 | Multi-relay discovery/redundancy | Infrastructure concern for relay operators |
+| **Certificate Authority** | BRC-52 | Issue identity certificates | Certifiers like socialcert.net do this, not wallets |
+| **Key Linkage Revelation** | BRC-69 | Audit/compliance key disclosure | Specialized auditing feature, rarely used |
+| `revealCounterpartyKeyLinkage` | BRC-69 | Reveal linkage to counterparty | Compliance/audit scenarios |
+| `revealSpecificKeyLinkage` | BRC-69 | Reveal specific key derivation | Compliance/audit scenarios |
+
+### End-to-End Encryption Note
+
+**Q: Does E2E encryption require coordination between both parties?**
+
+**A: Yes, but it's an APPLICATION-level concern, not a wallet/relay concern.**
+
+How it works:
+1. The BRC-33 relay just stores/delivers message bodies as-is (it's a dumb pipe)
+2. Applications decide whether to encrypt their message bodies before sending
+3. Both apps must agree ahead of time (typically by convention of the protocol they're using)
+4. The wallet provides BRC-2 encryption primitives (`crypto/brc2.rs`) that apps CAN use
+5. The relay doesn't need to know or care if messages are encrypted
+
+Example: If CoinflipApp and ThryllGame both use encrypted messages, they:
+- Define "messages in our protocol are always BRC-2 encrypted"
+- Sender encrypts with recipient's public key before calling `/sendMessage`
+- Recipient decrypts after calling `/listMessages`
+- The relay never sees plaintext
+
+**For HodosBrowser**: Our BRC-2 encryption (`/encrypt`, `/decrypt` endpoints) already supports this. Apps can encrypt message bodies before sending. No additional wallet work needed.
+
+### Future SDK Consideration
+
+If this codebase is converted to a general-purpose SDK/library:
+- **Client SDK**: Current implementation is sufficient
+- **Server SDK**: Would need to add relay hosting, WebSocket, federation, certificate issuance
+- **Hybrid**: Could split into `hodos-wallet-client` and `hodos-wallet-server` crates

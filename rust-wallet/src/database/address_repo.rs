@@ -167,12 +167,13 @@ impl<'a> AddressRepository<'a> {
         Ok(())
     }
 
-    /// Get all addresses that need UTXO checking (pending_utxo_check = 1)
+    /// Get all addresses that need UTXO checking (pending_utxo_check = 1 OR master address)
+    /// The master pubkey address (index = -1) is always checked regardless of pending flag
     pub fn get_pending_utxo_check(&self, wallet_id: i64) -> Result<Vec<Address>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
              FROM addresses
-             WHERE wallet_id = ?1 AND pending_utxo_check = 1
+             WHERE wallet_id = ?1 AND (pending_utxo_check = 1 OR \"index\" = -1)
              ORDER BY \"index\" ASC"
         )?;
 

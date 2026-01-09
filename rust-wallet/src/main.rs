@@ -123,6 +123,10 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
+            // Ensure master pubkey address exists (for existing wallets created before this feature)
+            if let Err(e) = db.ensure_master_address_exists() {
+                eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
+            }
 
             Arc::new(Mutex::new(db))
         }

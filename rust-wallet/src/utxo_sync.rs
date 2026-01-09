@@ -120,7 +120,7 @@ async fn sync_utxos(db: &Arc<Mutex<WalletDatabase>>) -> Result<(), String> {
             if let Some(addr_id) = db_addr.id {
                 // Get UTXOs for this address
                 let addr_utxos: Vec<_> = api_utxos.iter()
-                    .filter(|u| u.address_index == addr_info.index as u32)
+                    .filter(|u| u.address_index == addr_info.index)
                     .cloned()
                     .collect();
 

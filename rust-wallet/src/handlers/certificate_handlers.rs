@@ -2556,14 +2556,14 @@ async fn create_certificate_transaction(
     let utxo_repo = UtxoRepository::new(db.connection());
 
     // Get address IDs and create address index map
-    let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+    let mut address_id_map: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
     let mut address_ids = Vec::new();
 
     for addr in &addresses {
         if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
             if let Some(addr_id) = db_addr.id {
                 address_ids.push(addr_id);
-                address_id_map.insert(addr_id, addr.index as u32);
+                address_id_map.insert(addr_id, addr.index);
             }
         }
     }
@@ -2610,7 +2610,7 @@ async fn create_certificate_transaction(
             if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
                 if let Some(addr_id) = db_addr.id {
                     let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index as u32)
+                        .filter(|u| u.address_index == addr.index)
                         .cloned()
                         .collect();
 
@@ -2757,7 +2757,7 @@ async fn create_certificate_transaction(
     for (i, utxo) in selected_utxos.iter().enumerate() {
         // Get private key for this address index (same as signAction)
         let db = state.database.lock().unwrap();
-        let private_key_bytes = crate::database::derive_private_key_from_db(&db, utxo.address_index)
+        let private_key_bytes = crate::database::derive_private_key_for_utxo(&db, utxo.address_index, utxo.custom_instructions.as_deref())
             .map_err(|e| CertificateError::Database(format!("Failed to derive private key for address {}: {}", utxo.address_index, e)))?;
         drop(db);
 

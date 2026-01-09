@@ -595,17 +595,6 @@ pub async fn create_hmac(
         }
     };
 
-    // If keyID is a string and data is an array, use data for keyID
-    if let Some(obj) = req_value.as_object_mut() {
-        if let (Some(key_id), Some(data)) = (obj.get("keyID"), obj.get("data")) {
-            if key_id.is_string() && data.is_array() {
-                // Replace keyID with data array to avoid Unicode issues
-                log::info!("   Replacing string keyID with data array");
-                obj.insert("keyID".to_string(), data.clone());
-            }
-        }
-    }
-
     // Now parse into our struct
     let req: CreateHmacRequest = match serde_json::from_value(req_value) {
         Ok(r) => r,
@@ -618,41 +607,29 @@ pub async fn create_hmac(
     };
 
     log::info!("   Protocol ID: {:?}", req.protocol_id);
-    log::info!("   Key ID: {:?}", req.key_id);
     log::info!("   Counterparty: {:?}", req.counterparty);
-    log::info!("   Data: {:?}", req.data);
 
-    // Parse keyID - use data bytes as fallback since keyID often contains the nonce
-    // which is the same as the data for "server hmac" protocol
+    // Parse keyID - should be a string or small byte array (max 800 bytes per BRC-43 spec)
+    // For "server hmac" protocol, keyID is typically a nonce (16-32 bytes)
     let key_id_str: String = match &req.key_id {
-        serde_json::Value::String(s) if !s.is_empty() => s.clone(),
+        serde_json::Value::String(s) if !s.is_empty() => {
+            log::info!("   Key ID (string): {} bytes", s.len());
+            s.clone()
+        },
         serde_json::Value::Array(arr) => {
             // Byte array - convert to base64 to preserve binary data
             let bytes: Vec<u8> = arr.iter()
                 .filter_map(|v| v.as_u64().map(|n| n as u8))
                 .collect();
-            // Use base64 encoding to preserve all bytes (not UTF-8 lossy!)
+            log::info!("   Key ID (array): {} bytes", bytes.len());
+            // Use base64 encoding to preserve all bytes
             general_purpose::STANDARD.encode(&bytes)
         },
         _ => {
-            // Fallback: For "server hmac" protocol, keyID is often the same as data
-            // Use data bytes as keyID if keyID parsing fails
-            log::info!("   keyID parsing failed or empty, using data bytes as fallback");
-            match &req.data {
-                serde_json::Value::Array(arr) => {
-                    let bytes: Vec<u8> = arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u8))
-                        .collect();
-                    // Use base64 encoding to preserve all bytes (not UTF-8 lossy!)
-                    general_purpose::STANDARD.encode(&bytes)
-                },
-                _ => {
-                    log::error!("   keyID and data parsing both failed");
-                    return HttpResponse::BadRequest().json(serde_json::json!({
-                        "error": "keyID must be string or byte array"
-                    }));
-                }
-            }
+            log::error!("   keyID is missing or invalid type");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "keyID must be string or byte array"
+            }));
         }
     };
 
@@ -1720,7 +1697,7 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
                 if let Some(addr_id) = db_addr.id {
                     // Get UTXOs for this address (clone to get owned values)
                     let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index as u32)
+                        .filter(|u| u.address_index == addr.index)
                         .cloned()
                         .collect();
 
@@ -1815,7 +1792,7 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
             if let Some(addr_id) = addr.id {
                 // Get UTXOs for this address
                 let addr_utxos: Vec<_> = api_utxos.iter()
-                    .filter(|u| u.address_index == addr.index as u32)
+                    .filter(|u| u.address_index == addr.index)
                     .cloned()
                     .collect();
 
@@ -3000,14 +2977,14 @@ pub async fn create_action(
         let utxo_repo = UtxoRepository::new(db.connection());
 
         // Get address IDs and create address index map
-        let mut address_id_map: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+        let mut address_id_map: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
         let mut address_ids = Vec::new();
 
         for addr in &addresses {
             if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
                 if let Some(addr_id) = db_addr.id {
                     address_ids.push(addr_id);
-                    address_id_map.insert(addr_id, addr.index as u32);
+                    address_id_map.insert(addr_id, addr.index);
                 }
             }
         }
@@ -3068,7 +3045,7 @@ pub async fn create_action(
                     if let Some(addr_id) = db_addr.id {
                         // Get UTXOs for this address (clone to get owned values)
                         let addr_utxos: Vec<_> = api_utxos.iter()
-                            .filter(|u| u.address_index == addr.index as u32)
+                            .filter(|u| u.address_index == addr.index)
                             .cloned()
                             .collect();
 
@@ -3804,6 +3781,35 @@ async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), Strin
     Ok((confirmations, block_height))
 }
 
+/// Check if a transaction exists on-chain via WhatsOnChain API
+///
+/// Returns Ok(true) if tx exists (even with 0 confirmations - in mempool)
+/// Returns Ok(false) if tx doesn't exist (404)
+/// Returns Err if API error
+async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+
+    log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
+
+    let client = reqwest::Client::new();
+    let response = client.get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error checking tx: {}", e))?;
+
+    let status = response.status();
+
+    if status.is_success() {
+        log::info!("   ✅ Transaction exists on-chain");
+        Ok(true)
+    } else if status.as_u16() == 404 {
+        log::info!("   ⚠️  Transaction NOT found on-chain (404)");
+        Ok(false)
+    } else {
+        Err(format!("WhatsOnChain API returned status: {}", status))
+    }
+}
+
 // Update confirmation status for all unconfirmed/pending actions
 pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, String> {
     let mut updated_count = 0;
@@ -3971,6 +3977,232 @@ fn is_output_ours(script_bytes: &[u8], our_addresses: &[crate::json_storage::Add
     false
 }
 
+/// Derive address from BRC-29 payment remittance using BRC-42
+///
+/// This derives the child private key that corresponds to where the sender
+/// sent the payment. Uses BRC-42 with:
+/// - Our master private key as recipient
+/// - Sender's identity key as counterparty
+/// - BRC-29 invoice number format: "2-3241645161d8-{derivationPrefix} {derivationSuffix}"
+///   where "3241645161d8" is the BRC-29 payment protocol ID and 2 is security level
+///
+/// Reference: BRC-29 spec https://brc.dev/29
+/// Reference: TypeScript SDK ScriptTemplateBRC29.ts
+///
+/// Returns (pubkey_hash, pubkey_bytes) for verification and spending
+fn derive_address_from_payment_remittance(
+    our_master_privkey: &[u8],
+    remittance: &PaymentRemittance,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    use crate::crypto::brc42::derive_child_private_key;
+    use secp256k1::{Secp256k1, SecretKey, PublicKey};
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+
+    // Parse sender's public key from hex
+    let sender_pubkey_bytes = hex::decode(&remittance.sender_identity_key)
+        .map_err(|e| format!("Invalid sender identity key hex: {}", e))?;
+
+    if sender_pubkey_bytes.len() != 33 {
+        return Err(format!(
+            "Invalid sender identity key length: expected 33, got {}",
+            sender_pubkey_bytes.len()
+        ));
+    }
+
+    // BRC-29 invoice number format: "2-3241645161d8-{derivationPrefix} {derivationSuffix}"
+    // - Security level 2 (counterparty-specific permission)
+    // - Protocol ID "3241645161d8" (BRC-29 payment protocol magic number)
+    // - Key ID is "{derivationPrefix} {derivationSuffix}" (space-separated)
+    let key_id = format!("{} {}", remittance.derivation_prefix, remittance.derivation_suffix);
+    let invoice_number = format!("2-3241645161d8-{}", key_id);
+    log::info!("      BRC-29 invoice number: {}", invoice_number);
+
+    // Derive our child private key using BRC-42
+    // Recipient derives: derive_child_private_key(our_privkey, sender_pubkey, invoice)
+    let child_privkey = derive_child_private_key(our_master_privkey, &sender_pubkey_bytes, &invoice_number)
+        .map_err(|e| format!("BRC-42 derivation failed: {}", e))?;
+
+    // Convert child private key to public key
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&child_privkey)
+        .map_err(|e| format!("Invalid derived private key: {}", e))?;
+    let pubkey = PublicKey::from_secret_key(&secp, &secret);
+    let pubkey_bytes = pubkey.serialize().to_vec();
+
+    // Calculate pubkey hash: RIPEMD160(SHA256(pubkey))
+    let sha_hash = Sha256::digest(&pubkey_bytes);
+    let pubkey_hash = Ripemd160::digest(&sha_hash).to_vec();
+
+    Ok((pubkey_hash, pubkey_bytes))
+}
+
+/// Verify that a P2PKH output script matches a derived pubkey hash
+fn verify_output_matches_derived_address(script_bytes: &[u8], expected_pubkey_hash: &[u8]) -> bool {
+    // P2PKH script: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
+    if script_bytes.len() == 25 &&
+       script_bytes[0] == 0x76 &&  // OP_DUP
+       script_bytes[1] == 0xa9 &&  // OP_HASH160
+       script_bytes[2] == 0x14 &&  // Push 20 bytes
+       script_bytes[23] == 0x88 && // OP_EQUALVERIFY
+       script_bytes[24] == 0xac {  // OP_CHECKSIG
+        let script_pubkey_hash = &script_bytes[3..23];
+        return script_pubkey_hash == expected_pubkey_hash;
+    }
+
+    false
+}
+
+/// Store a BRC-42 derived UTXO in the database
+///
+/// For BRC-29 payment UTXOs, we store:
+/// - The actual Bitcoin address (derived from the child public key)
+/// - The actual derived public key (hex)
+/// - A negative index to distinguish from HD wallet addresses
+/// - Derivation info in custom_instructions for spending later
+///
+/// Index scheme:
+/// - Positive indices (0, 1, 2, ...): HD wallet addresses (m/{index})
+/// - Index -1: Master public key address
+/// - Negative indices (-2, -3, ...): BRC-42 derived addresses (payments, etc.)
+fn store_derived_utxo(
+    db: &crate::database::WalletDatabase,
+    txid: &str,
+    vout: u32,
+    satoshis: i64,
+    script_hex: &str,
+    derived_pubkey: &[u8],
+    custom_instructions: &serde_json::Value,
+) -> Result<(), String> {
+    use crate::database::WalletRepository;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+
+    let conn = db.connection();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Get wallet ID
+    let wallet_repo = WalletRepository::new(conn);
+    let wallet = wallet_repo.get_primary_wallet()
+        .map_err(|e| format!("Failed to get wallet: {}", e))?
+        .ok_or("No wallet found")?;
+    let wallet_id = wallet.id.ok_or("Wallet has no ID")?;
+
+    // Calculate pubkey hash: RIPEMD160(SHA256(pubkey))
+    let sha_hash = Sha256::digest(derived_pubkey);
+    let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+    // Convert pubkey hash to Bitcoin address (mainnet P2PKH: version byte 0x00)
+    let mut address_bytes = vec![0x00]; // Mainnet version byte
+    address_bytes.extend_from_slice(&pubkey_hash);
+
+    // Double SHA256 for checksum
+    let checksum_hash1 = Sha256::digest(&address_bytes);
+    let checksum_hash2 = Sha256::digest(&checksum_hash1);
+    address_bytes.extend_from_slice(&checksum_hash2[0..4]);
+
+    // Base58 encode
+    let bitcoin_address = bs58::encode(&address_bytes).into_string();
+    let pubkey_hex = hex::encode(derived_pubkey);
+
+    log::info!("      Derived Bitcoin address: {}", bitcoin_address);
+    log::info!("      Derived public key: {}", pubkey_hex);
+
+    // Check if this address already exists (by address string)
+    let existing_address_id: Option<i64> = conn.query_row(
+        "SELECT id FROM addresses WHERE wallet_id = ?1 AND address = ?2",
+        rusqlite::params![wallet_id, bitcoin_address],
+        |row| row.get(0),
+    ).ok();
+
+    let address_id = if let Some(id) = existing_address_id {
+        log::info!("      Address already exists (ID: {}), updating balance", id);
+        // Update balance
+        conn.execute(
+            "UPDATE addresses SET balance = balance + ?1, used = 1 WHERE id = ?2",
+            rusqlite::params![satoshis, id],
+        ).map_err(|e| format!("Failed to update address balance: {}", e))?;
+        id
+    } else {
+        // Find next available negative index (starting from -2, since -1 is master)
+        let next_derived_index: i32 = conn.query_row(
+            "SELECT COALESCE(MIN(\"index\"), 0) - 1 FROM addresses WHERE wallet_id = ?1 AND \"index\" < 0",
+            rusqlite::params![wallet_id],
+            |row| row.get(0),
+        ).unwrap_or(-2);
+
+        // Ensure we start at -2 or lower (not -1 which is master)
+        let derived_index = if next_derived_index > -2 { -2 } else { next_derived_index };
+
+        log::info!("      Using derived index: {}", derived_index);
+
+        // Insert the derived address with real Bitcoin address and pubkey
+        conn.execute(
+            "INSERT INTO addresses (wallet_id, \"index\", address, public_key, used, balance, created_at, pending_utxo_check)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0)",
+            rusqlite::params![
+                wallet_id,
+                derived_index,
+                bitcoin_address,
+                pubkey_hex,
+                satoshis,
+                now
+            ],
+        ).map_err(|e| format!("Failed to insert derived address: {}", e))?;
+
+        // Get the inserted address ID
+        conn.query_row(
+            "SELECT id FROM addresses WHERE wallet_id = ?1 AND address = ?2",
+            rusqlite::params![wallet_id, bitcoin_address],
+            |row| row.get(0),
+        ).map_err(|e| format!("Failed to get derived address ID: {}", e))?
+    };
+
+    // Check if UTXO already exists
+    let utxo_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM utxos WHERE txid = ?1 AND vout = ?2)",
+        rusqlite::params![txid, vout as i32],
+        |row| row.get(0),
+    ).unwrap_or(false);
+
+    if utxo_exists {
+        log::info!("      UTXO {}:{} already exists, updating custom_instructions", txid, vout);
+        conn.execute(
+            "UPDATE utxos SET custom_instructions = ?1, last_updated = ?2, address_id = ?3 WHERE txid = ?4 AND vout = ?5",
+            rusqlite::params![
+                custom_instructions.to_string(),
+                now,
+                address_id,
+                txid,
+                vout as i32
+            ],
+        ).map_err(|e| format!("Failed to update UTXO: {}", e))?;
+    } else {
+        // Insert the UTXO with derivation info
+        conn.execute(
+            "INSERT INTO utxos (address_id, txid, vout, satoshis, script, first_seen, last_updated, is_spent, custom_instructions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+            rusqlite::params![
+                address_id,
+                txid,
+                vout as i32,
+                satoshis,
+                script_hex,
+                now,
+                now,
+                custom_instructions.to_string()
+            ],
+        ).map_err(|e| format!("Failed to insert UTXO: {}", e))?;
+    }
+
+    log::info!("      ✅ Stored derived UTXO with real address and custom_instructions");
+    Ok(())
+}
+
 // Select UTXOs to cover required amount (simple greedy algorithm)
 fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
     let mut selected = Vec::new();
@@ -4086,7 +4318,7 @@ pub async fn sign_action(
 
         // Get the private key for THIS specific address (not always index 0!)
         let db = state.database.lock().unwrap();
-        let private_key_bytes = match crate::database::derive_private_key_from_db(&db, input_utxo.address_index as u32) {
+        let private_key_bytes = match crate::database::derive_private_key_for_utxo(&db, input_utxo.address_index, input_utxo.custom_instructions.as_deref()) {
             Ok(key) => key,
             Err(e) => {
                 log::error!("   Failed to derive private key for address index {}: {}", input_utxo.address_index, e);
@@ -5991,7 +6223,7 @@ pub async fn abort_action(
 /// Accept incoming BEEF transaction
 #[derive(Deserialize)]
 pub struct InternalizeActionRequest {
-    pub tx: String,  // BEEF hex string
+    pub tx: serde_json::Value,  // BEEF as byte array OR hex/base64 string
     #[serde(rename = "outputs")]
     pub outputs: Option<Vec<InternalizeOutput>>,
     pub description: Option<String>,
@@ -6004,7 +6236,22 @@ pub struct InternalizeOutput {
     pub output_index: u32,
     pub protocol: Option<String>,
     #[serde(rename = "paymentRemittance")]
-    pub payment_remittance: Option<serde_json::Value>,
+    pub payment_remittance: Option<PaymentRemittance>,
+}
+
+/// BRC-29 Payment Remittance information
+/// Contains derivation info for incoming payments
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PaymentRemittance {
+    /// Sender's identity public key (hex)
+    #[serde(rename = "senderIdentityKey")]
+    pub sender_identity_key: String,
+    /// Derivation prefix (base64)
+    #[serde(rename = "derivationPrefix")]
+    pub derivation_prefix: String,
+    /// Derivation suffix (base64)
+    #[serde(rename = "derivationSuffix")]
+    pub derivation_suffix: String,
 }
 
 #[derive(Serialize)]
@@ -6020,7 +6267,35 @@ pub async fn internalize_action(
     log::info!("📥 /internalizeAction called (Phase 2: Full BEEF support)");
     log::info!("   Description: {:?}", req.description);
     log::info!("   Labels: {:?}", req.labels);
-    log::info!("   BEEF/TX length: {} chars", req.tx.len());
+
+    // Parse tx field - can be byte array or string (hex/base64)
+    let tx_string: String = match &req.tx {
+        serde_json::Value::Array(arr) => {
+            // Byte array format - convert to hex string for existing parsing logic
+            let bytes: Vec<u8> = arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
+            log::info!("   TX format: byte array ({} bytes)", bytes.len());
+            // Check if it looks like Atomic BEEF (starts with 0x01010101)
+            if bytes.len() >= 4 && bytes[0..4] == [0x01, 0x01, 0x01, 0x01] {
+                log::info!("   Detected Atomic BEEF magic prefix");
+            }
+            hex::encode(&bytes)
+        },
+        serde_json::Value::String(s) => {
+            log::info!("   TX format: string ({} chars)", s.len());
+            s.clone()
+        },
+        _ => {
+            log::error!("   TX field has invalid type: {:?}", req.tx);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "status": "error",
+                "code": "ERR_INVALID_TX_FORMAT",
+                "description": "tx must be a byte array or string"
+            }));
+        }
+    };
+    log::info!("   BEEF/TX length: {} chars (hex)", tx_string.len());
 
     // ******************************************************************************
     // ** UNTESTED CODE - REAL IMPLEMENTATION, NOT PSEUDO CODE **
@@ -6033,7 +6308,7 @@ pub async fn internalize_action(
 
     let (main_tx_bytes, parsed_beef, has_beef, is_atomic_beef) = {
         // Try Atomic BEEF from base64 first
-        if let Ok((subject_txid, beef)) = crate::beef::Beef::from_atomic_beef_base64(&req.tx) {
+        if let Ok((subject_txid, beef)) = crate::beef::Beef::from_atomic_beef_base64(&tx_string) {
             log::info!("   ✅ Atomic BEEF format detected (base64)");
             log::info!("   Subject TXID: {}", subject_txid);
             log::info!("   BEEF version: {}", hex::encode(beef.version));
@@ -6065,7 +6340,7 @@ pub async fn internalize_action(
             }
         }
         // Try hex decoding - could be Atomic BEEF (hex), standard BEEF (hex), or raw transaction (hex)
-        else if let Ok(hex_bytes) = hex::decode(&req.tx) {
+        else if let Ok(hex_bytes) = hex::decode(&tx_string) {
             // Check for Atomic BEEF magic prefix
             if hex_bytes.len() >= 36 && &hex_bytes[0..4] == &[0x01, 0x01, 0x01, 0x01] {
                 match crate::beef::Beef::from_atomic_beef_bytes(&hex_bytes) {
@@ -6102,7 +6377,7 @@ pub async fn internalize_action(
                     }
                     Err(_) => {
                         // Not valid Atomic BEEF, try standard BEEF
-                        match crate::beef::Beef::from_hex(&req.tx) {
+                        match crate::beef::Beef::from_hex(&tx_string) {
                             Ok(beef) => {
                                 log::info!("   ✅ Standard BEEF format detected");
                                 log::info!("   BEEF version: {}", hex::encode(beef.version));
@@ -6132,7 +6407,7 @@ pub async fn internalize_action(
             }
             // Try standard BEEF from hex (no Atomic BEEF magic prefix)
             else {
-                match crate::beef::Beef::from_hex(&req.tx) {
+                match crate::beef::Beef::from_hex(&tx_string) {
                     Ok(beef) => {
                         log::info!("   ✅ Standard BEEF format detected");
                         log::info!("   BEEF version: {}", hex::encode(beef.version));
@@ -6162,7 +6437,7 @@ pub async fn internalize_action(
         // Not hex, try base64 as raw transaction
         else {
             use base64::{Engine as _, engine::general_purpose};
-            match general_purpose::STANDARD.decode(&req.tx) {
+            match general_purpose::STANDARD.decode(&tx_string) {
                 Ok(bytes) => {
                     log::info!("   Parsing as raw transaction (base64)");
                     (bytes, None, false, false)
@@ -6300,6 +6575,47 @@ pub async fn internalize_action(
 
     log::info!("   TXID: {}", txid);
 
+    // ========================================================================
+    // SECURITY: Verify transaction exists on-chain before storing
+    // This prevents attackers from sending fake BEEF that was never broadcast
+    // ========================================================================
+    let tx_exists = match check_tx_exists_on_chain(&txid).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            log::error!("   ❌ Failed to verify transaction on-chain: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "code": "ERR_VERIFICATION_FAILED",
+                "description": format!("Failed to verify transaction on-chain: {}", e)
+            }));
+        }
+    };
+
+    if !tx_exists {
+        log::info!("   📡 Transaction not on-chain, broadcasting...");
+
+        // Broadcast the transaction ourselves
+        let raw_tx_hex = hex::encode(&main_tx_bytes);
+        match broadcast_transaction(&raw_tx_hex).await {
+            Ok(broadcast_txid) => {
+                if broadcast_txid != txid {
+                    log::warn!("   ⚠️  Broadcast TXID mismatch: expected {}, got {}", txid, broadcast_txid);
+                }
+                log::info!("   ✅ Transaction broadcast successfully: {}", broadcast_txid);
+            }
+            Err(e) => {
+                log::error!("   ❌ Failed to broadcast transaction: {}", e);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "status": "error",
+                    "code": "ERR_BROADCAST_FAILED",
+                    "description": format!("Transaction not on-chain and broadcast failed: {}", e)
+                }));
+            }
+        }
+    } else {
+        log::info!("   ✅ Transaction verified on-chain");
+    }
+
     // Get our wallet addresses to check output ownership
     let our_addresses = {
         use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
@@ -6346,21 +6662,116 @@ pub async fn internalize_action(
     };
 
     // Calculate total received by checking output ownership
+    // This handles both:
+    // 1. Outputs to known addresses (in our database)
+    // 2. Outputs to BRC-42 derived addresses (from paymentRemittance)
     let mut total_received = 0i64;
     let mut our_output_indices = Vec::new();
 
+    // Track derived UTXOs to store later (output_index, remittance, satoshis, script, derived_pubkey)
+    let mut derived_utxos: Vec<(u32, PaymentRemittance, i64, Vec<u8>, Vec<u8>)> = Vec::new();
+
+    // Build a map of output index -> paymentRemittance for quick lookup
+    let mut remittance_map: std::collections::HashMap<u32, PaymentRemittance> = std::collections::HashMap::new();
+    if let Some(ref outputs) = req.outputs {
+        for output_spec in outputs {
+            if let Some(ref remittance) = output_spec.payment_remittance {
+                remittance_map.insert(output_spec.output_index, remittance.clone());
+                log::info!("   📩 Output {} has paymentRemittance from sender: {}",
+                    output_spec.output_index,
+                    &remittance.sender_identity_key[..std::cmp::min(16, remittance.sender_identity_key.len())]);
+            }
+        }
+    }
+
+    // Get our master keys for BRC-42 derivation (only if we have remittances)
+    let master_keys = if !remittance_map.is_empty() {
+        let db = state.database.lock().unwrap();
+        match (
+            crate::database::get_master_private_key_from_db(&db),
+            crate::database::get_master_public_key_from_db(&db)
+        ) {
+            (Ok(privkey), Ok(pubkey)) => Some((privkey, pubkey)),
+            _ => {
+                log::error!("   Failed to get master keys for BRC-42 derivation");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     for (i, output) in parsed_tx.outputs.iter().enumerate() {
+        let output_index = i as u32;
+
+        // First, check if output matches a known address in our database
         if is_output_ours(&output.script, &our_addresses) {
             total_received += output.value;
-            our_output_indices.push(i as u32);
-            log::info!("   ✅ Output {} is ours: {} satoshis", i, output.value);
+            our_output_indices.push(output_index);
+            log::info!("   ✅ Output {} is ours (known address): {} satoshis", i, output.value);
+            continue;
+        }
+
+        // If not a known address, check if we have paymentRemittance for this output
+        if let Some(remittance) = remittance_map.get(&output_index) {
+            if let Some((ref master_privkey, ref _master_pubkey)) = master_keys {
+                // Derive the expected address using BRC-42
+                match derive_address_from_payment_remittance(master_privkey, remittance) {
+                    Ok((derived_pubkey_hash, derived_pubkey)) => {
+                        // Check if output script matches the derived address
+                        if verify_output_matches_derived_address(&output.script, &derived_pubkey_hash) {
+                            total_received += output.value;
+                            our_output_indices.push(output_index);
+                            log::info!("   ✅ Output {} is ours (BRC-42 derived): {} satoshis", i, output.value);
+                            log::info!("      Sender: {}...", &remittance.sender_identity_key[..std::cmp::min(16, remittance.sender_identity_key.len())]);
+                            log::info!("      Derived pubkey: {}", hex::encode(&derived_pubkey));
+
+                            // Track for UTXO storage (include derived pubkey for address calculation)
+                            derived_utxos.push((output_index, remittance.clone(), output.value, output.script.clone(), derived_pubkey.clone()));
+                        } else {
+                            log::warn!("   ⚠️  Output {} paymentRemittance doesn't match output script!", i);
+                            log::warn!("      Expected pubkey hash: {}", hex::encode(&derived_pubkey_hash));
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("   ❌ Failed to derive address from paymentRemittance for output {}: {}", i, e);
+                    }
+                }
+            }
         }
     }
 
     log::info!("   Total received: {} satoshis ({} outputs)", total_received, our_output_indices.len());
+    if !derived_utxos.is_empty() {
+        log::info!("   BRC-42 derived outputs: {}", derived_utxos.len());
+    }
 
     if total_received == 0 {
         log::warn!("   ⚠️  No outputs belong to our wallet!");
+    }
+
+    // Store derived UTXOs with their derivation info
+    if !derived_utxos.is_empty() {
+        let db = state.database.lock().unwrap();
+
+        for (vout, remittance, satoshis, script, pubkey) in &derived_utxos {
+            // Store the UTXO with derivation info in custom_instructions
+            let custom_instructions = serde_json::json!({
+                "type": "brc29_payment",
+                "senderIdentityKey": remittance.sender_identity_key,
+                "derivationPrefix": remittance.derivation_prefix,
+                "derivationSuffix": remittance.derivation_suffix
+            });
+
+            match store_derived_utxo(&db, &txid, *vout, *satoshis, &hex::encode(script), pubkey, &custom_instructions) {
+                Ok(_) => {
+                    log::info!("   💾 Stored BRC-42 derived UTXO {}:{} ({} sats)", txid, vout, satoshis);
+                }
+                Err(e) => {
+                    log::error!("   ❌ Failed to store derived UTXO {}:{}: {}", txid, vout, e);
+                }
+            }
+        }
     }
 
     // Store in action storage
@@ -6397,21 +6808,47 @@ pub async fn internalize_action(
         }).collect(),
     };
 
-    // Store the action in database
+    // Store the action in database (idempotent - check if exists first)
     {
         use crate::database::TransactionRepository;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
-        match tx_repo.add_transaction(&stored_action) {
-            Ok(_) => {
-                log::info!("   💾 Action stored in database with status: unconfirmed");
+
+        // Check if transaction already exists (idempotent handling)
+        match tx_repo.get_by_txid(&txid) {
+            Ok(Some(_)) => {
+                log::info!("   ℹ️  Transaction {} already exists in database (idempotent success)", txid);
+                // Continue - this is fine, the tx was already internalized
+            }
+            Ok(None) => {
+                // Transaction doesn't exist, insert it
+                match tx_repo.add_transaction(&stored_action) {
+                    Ok(_) => {
+                        log::info!("   💾 Action stored in database with status: unconfirmed");
+                    }
+                    Err(e) => {
+                        // Check if it's a UNIQUE constraint error (race condition - another process inserted)
+                        let error_str = e.to_string();
+                        if error_str.contains("UNIQUE constraint failed") {
+                            log::info!("   ℹ️  Transaction inserted by concurrent process (idempotent success)");
+                            // Continue - this is fine
+                        } else {
+                            log::error!("   Failed to store action in database: {}", e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "status": "error",
+                                "code": "ERR_STORAGE",
+                                "description": format!("Failed to store action: {}", e)
+                            }));
+                        }
+                    }
+                }
             }
             Err(e) => {
-                log::error!("   Failed to store action in database: {}", e);
+                log::error!("   Failed to check if transaction exists: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "status": "error",
                     "code": "ERR_STORAGE",
-                    "description": format!("Failed to store action: {}", e)
+                    "description": format!("Database error: {}", e)
                 }));
             }
         }

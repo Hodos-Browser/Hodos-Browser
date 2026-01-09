@@ -61,12 +61,99 @@ pub fn get_master_public_key_from_db(db: &WalletDatabase) -> Result<Vec<u8>> {
     Ok(public_key.serialize().to_vec())
 }
 
-/// Derive private key for a specific address index
+/// Derive private key for spending a UTXO
+///
+/// This is the main entry point for deriving private keys for spending.
+/// It handles all address types:
+/// - index >= 0: HD wallet addresses (BIP32 or BRC-42 "receive address")
+/// - index == -1: Master public key address (return master private key)
+/// - index < -1: BRC-29 derived addresses (use custom_instructions for derivation)
+///
+/// For index < -1, custom_instructions MUST be provided (contains BRC-29 derivation info).
+pub fn derive_private_key_for_utxo(
+    db: &WalletDatabase,
+    index: i32,
+    custom_instructions: Option<&str>,
+) -> Result<Vec<u8>> {
+    use crate::crypto::brc42::derive_child_private_key;
+
+    // Handle special cases for negative indices
+    if index == -1 {
+        // Master address - return master private key directly
+        log::info!("   🔑 Index -1: Using master private key directly");
+        return get_master_private_key_from_db(db);
+    }
+
+    if index < -1 {
+        // BRC-29 derived address - parse custom_instructions for derivation
+        log::info!("   🔑 Index {}: BRC-29 derived address, parsing custom_instructions", index);
+
+        let instructions = custom_instructions.ok_or_else(|| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(format!("BRC-29 derived address (index {}) requires custom_instructions for spending", index))
+        ))?;
+
+        // Parse the JSON custom_instructions
+        let instr: serde_json::Value = serde_json::from_str(instructions)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid custom_instructions JSON: {}", e))
+            ))?;
+
+        // Extract BRC-29 fields
+        let sender_identity_key = instr["senderIdentityKey"].as_str()
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("custom_instructions missing senderIdentityKey".to_string())
+            ))?;
+
+        let derivation_prefix = instr["derivationPrefix"].as_str()
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("custom_instructions missing derivationPrefix".to_string())
+            ))?;
+
+        let derivation_suffix = instr["derivationSuffix"].as_str()
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("custom_instructions missing derivationSuffix".to_string())
+            ))?;
+
+        // Parse sender's public key
+        let sender_pubkey_bytes = hex::decode(sender_identity_key)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid senderIdentityKey hex: {}", e))
+            ))?;
+
+        // Build BRC-29 invoice number: "2-3241645161d8-{prefix} {suffix}"
+        let key_id = format!("{} {}", derivation_prefix, derivation_suffix);
+        let invoice_number = format!("2-3241645161d8-{}", key_id);
+        log::info!("   BRC-29 invoice number: {}", invoice_number);
+
+        // Get master private key and derive child private key using BRC-42
+        let master_privkey = get_master_private_key_from_db(db)?;
+
+        let child_privkey = derive_child_private_key(&master_privkey, &sender_pubkey_bytes, &invoice_number)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 derivation failed for BRC-29 address: {}", e))
+            ))?;
+
+        log::info!("   ✅ BRC-29 derived private key ready for signing");
+        return Ok(child_privkey);
+    }
+
+    // Positive index - use original logic for HD wallet addresses
+    derive_private_key_from_db_positive(db, index as u32)
+}
+
+/// Derive private key for a specific positive address index
 ///
 /// Automatically detects whether to use BRC-42 or BIP32 by verifying which method
 /// produces the address stored in the database. This is more robust than using
 /// a hardcoded threshold.
-pub fn derive_private_key_from_db(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
+fn derive_private_key_from_db_positive(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
     use super::AddressRepository;
     use crate::crypto::brc42::derive_child_public_key;
     use sha2::{Sha256, Digest};
@@ -254,12 +341,13 @@ pub fn address_to_address_info(addr: &super::Address) -> crate::json_storage::Ad
 }
 
 /// Convert database Utxo to utxo_fetcher::UTXO (for compatibility with existing code)
-pub fn utxo_to_fetcher_utxo(utxo: &super::Utxo, address_index: u32) -> crate::utxo_fetcher::UTXO {
+pub fn utxo_to_fetcher_utxo(utxo: &super::Utxo, address_index: i32) -> crate::utxo_fetcher::UTXO {
     crate::utxo_fetcher::UTXO {
         txid: utxo.txid.clone(),
         vout: utxo.vout as u32,
         satoshis: utxo.satoshis,
         script: utxo.script.clone(),
         address_index,
+        custom_instructions: utxo.custom_instructions.clone(),
     }
 }

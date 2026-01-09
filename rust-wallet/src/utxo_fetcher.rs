@@ -12,7 +12,9 @@ pub struct UTXO {
     pub vout: u32,
     pub satoshis: i64,
     pub script: String, // Hex-encoded locking script
-    pub address_index: u32, // Which HD wallet address owns this UTXO
+    pub address_index: i32, // Which address owns this UTXO (negative = derived, -1 = master)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_instructions: Option<String>, // BRC-29 derivation info for spending derived UTXOs
 }
 
 /// WhatsOnChain API response format
@@ -30,7 +32,7 @@ struct WhatsOnChainUTXO {
 /// API: https://api.whatsonchain.com/v1/bsv/main/address/{address}/unspent
 ///
 /// Retries on 500 errors (server errors) with exponential backoff.
-pub async fn fetch_utxos_for_address(address: &str, address_index: u32) -> Result<Vec<UTXO>, String> {
+pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
     const MAX_RETRIES: u32 = 3;
     const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
@@ -80,6 +82,7 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: u32) -> Resul
                 satoshis: u.value,
                 script: p2pkh_script.clone(), // Use generated P2PKH script
                 address_index, // Track which address owns this UTXO
+                custom_instructions: None, // HD wallet addresses don't need custom instructions
             }).collect();
 
             log::info!("   ✅ Fetched {} UTXOs ({} satoshis total)",
@@ -154,7 +157,7 @@ pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> 
 
     for (idx, addr) in addresses.iter().enumerate() {
         // Always check all addresses - balance cache may be stale
-        match fetch_utxos_for_address(&addr.address, addr.index as u32).await {
+        match fetch_utxos_for_address(&addr.address, addr.index).await {
             Ok(mut utxos) => {
                 all_utxos.append(&mut utxos);
             }

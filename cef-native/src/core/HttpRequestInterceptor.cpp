@@ -914,65 +914,16 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
         LOG_DEBUG_HTTP("🌐 Method: " + method);
         LOG_DEBUG_HTTP("🌐 Full URL: " + url);
 
-        // Check if this is a Socket.IO request - let these pass through to real Babbage servers
-        // We don't have a Socket.IO server implementation, so real-time notifications should
-        // go to the actual messagebox.babbage.systems infrastructure
-        bool isSocketIORequest = url.find("/socket.io/") != std::string::npos;
-        if (isSocketIORequest) {
-            LOG_DEBUG_HTTP("🌐 Socket.IO request to messagebox.babbage.systems - passing through to real server");
-            LOG_DEBUG_HTTP("🌐 (We don't have Socket.IO server, letting CEF handle normally)");
-            return nullptr; // Let CEF handle it normally - goes to real Babbage server
-        }
-
-        // Log all headers
-        CefRequest::HeaderMap messageboxHeaders;
-        request->GetHeaderMap(messageboxHeaders);
-        LOG_DEBUG_HTTP("🌐 Headers (" + std::to_string(messageboxHeaders.size()) + " total):");
-        for (const auto& header : messageboxHeaders) {
-            LOG_DEBUG_HTTP("🌐   " + header.first.ToString() + ": " + header.second.ToString());
-        }
-
-        // Log POST body if present
-        CefRefPtr<CefPostData> postData = request->GetPostData();
-        if (postData) {
-            CefPostData::ElementVector elements;
-            postData->GetElements(elements);
-            for (auto& element : elements) {
-                if (element->GetType() == PDE_TYPE_BYTES) {
-                    size_t size = element->GetBytesCount();
-                    std::vector<char> buffer(size);
-                    element->GetBytes(size, buffer.data());
-                    std::string bodyContent(buffer.data(), size);
-                    LOG_DEBUG_HTTP("🌐 POST Body: " + bodyContent);
-                }
-            }
-        }
-        LOG_DEBUG_HTTP("🌐 ========================================");
-
-        // Check if this is a WebSocket upgrade request
-        std::string connection = request->GetHeaderByName("Connection");
-        std::string upgrade = request->GetHeaderByName("Upgrade");
-        bool isWebSocketUpgrade = (connection == "upgrade" && upgrade == "websocket");
-
-        if (isWebSocketUpgrade) {
-            LOG_DEBUG_HTTP("🌐 WebSocket upgrade request detected for messagebox.babbage.systems");
-            LOG_DEBUG_HTTP("🌐 Passing through to real Babbage server (no local WebSocket support)");
-            return nullptr; // Let CEF handle it normally - goes to real Babbage server
-        } else {
-            // Redirect HTTP REST requests (sendMessage, listMessages, etc.) to local daemon
-            std::string redirectedUrl = url;
-            size_t pos = redirectedUrl.find("messagebox.babbage.systems");
-            if (pos != std::string::npos) {
-                redirectedUrl.replace(pos, 26, "localhost:3301");
-                // Also change https to http since our daemon only supports HTTP
-                if (redirectedUrl.find("https://") == 0) {
-                    redirectedUrl.replace(0, 8, "http://");
-                }
-                LOG_DEBUG_HTTP("🌐 HTTP redirection: " + url + " -> " + redirectedUrl);
-                request->SetURL(redirectedUrl);
-                url = redirectedUrl;
-            }
-        }
+        // Let ALL messagebox.babbage.systems requests pass through to the real server
+        // Messages (containing BEEF + paymentRemittance) are stored on Babbage's infrastructure.
+        // The flow is:
+        // 1. Sender calls sendMessage to messagebox.babbage.systems - message stored there
+        // 2. Recipient calls listMessages to messagebox.babbage.systems - gets message
+        // 3. App calls internalizeAction on LOCAL wallet - we store the UTXO
+        // We don't intercept messagebox - we only handle wallet-specific BRC-100 endpoints.
+        LOG_DEBUG_HTTP("🌐 Messagebox request - passing through to real Babbage server");
+        LOG_DEBUG_HTTP("🌐 (Messages are stored on Babbage infrastructure, not locally)");
+        return nullptr; // Let CEF handle it normally - goes to real Babbage server
     }
 
     // Check if this is a Socket.IO connection first
@@ -1156,6 +1107,9 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
             url.find("/createAction") != std::string::npos ||
             url.find("/signAction") != std::string::npos ||
             url.find("/processAction") != std::string::npos ||
+            url.find("/internalizeAction") != std::string::npos ||
+            url.find("/abortAction") != std::string::npos ||
+            url.find("/listActions") != std::string::npos ||
             url.find("/isAuthenticated") != std::string::npos ||
             url.find("/createSignature") != std::string::npos ||
             url.find("/api/brc-100/") != std::string::npos ||

@@ -148,7 +148,7 @@ pub async fn recover_wallet_from_mnemonic(
 
         // Check BIP32 address
         if let Some(ref addr) = bip32_address {
-            match fetch_utxos_for_address(&addr.address, current_index).await {
+            match fetch_utxos_for_address(&addr.address, current_index as i32).await {
                 Ok(utxos) if !utxos.is_empty() => {
                     let address_balance = utxos.iter().map(|u| u.satoshis).sum();
                     info!("   ✅ Found {} UTXO(s) on BIP32 address {} ({} satoshis)",
@@ -177,7 +177,7 @@ pub async fn recover_wallet_from_mnemonic(
         // Check BRC-42 address (only if BIP32 didn't find anything)
         if !found_utxos {
             if let Some(ref addr) = brc42_address {
-                match fetch_utxos_for_address(&addr.address, current_index).await {
+                match fetch_utxos_for_address(&addr.address, current_index as i32).await {
                 Ok(utxos) if !utxos.is_empty() => {
                     let address_balance = utxos.iter().map(|u| u.satoshis).sum();
                     info!("   ✅ Found {} UTXO(s) on BRC-42 address {} ({} satoshis)",

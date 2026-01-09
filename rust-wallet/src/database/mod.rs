@@ -27,7 +27,7 @@ pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;
 pub use utxo_repo::UtxoRepository;
 pub use migration::migrate_json_to_database;
-pub use helpers::{get_master_private_key_from_db, get_master_public_key_from_db, derive_private_key_from_db, address_to_address_info, utxo_to_fetcher_utxo};
+pub use helpers::{get_master_private_key_from_db, get_master_public_key_from_db, derive_private_key_for_utxo, address_to_address_info, utxo_to_fetcher_utxo};
 pub use parent_transaction_repo::ParentTransactionRepository;
 pub use merkle_proof_repo::MerkleProofRepository;
 pub use block_header_repo::BlockHeaderRepository;

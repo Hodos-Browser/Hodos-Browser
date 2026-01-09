@@ -84,10 +84,10 @@ impl InvoiceNumber {
         // Validate protocol ID
         let normalized_protocol_id = normalize_protocol_id(&protocol_id)?;
         
-        // Validate key ID length (1-1033 bytes)
-        if key_id.is_empty() || key_id.len() > 1033 {
+        // Validate key ID length (1-800 bytes per BRC-43 spec)
+        if key_id.is_empty() || key_id.len() > 800 {
             return Err(format!(
-                "Key ID must be 1-1033 bytes, got {} bytes",
+                "Key ID must be 1-800 bytes, got {} bytes",
                 key_id.len()
             ));
         }
@@ -313,11 +313,11 @@ mod tests {
     
     #[test]
     fn test_invoice_number_key_id_validation() {
-        // BRC-43: Key ID must be 1-1033 bytes
+        // BRC-43: Key ID must be 1-800 bytes
         let result = InvoiceNumber::new(SecurityLevel::NoPermissions, "hello world", "");
         assert!(result.is_err());
-        
-        let long_key = "a".repeat(1034);
+
+        let long_key = "a".repeat(801);
         let result = InvoiceNumber::new(SecurityLevel::NoPermissions, "hello world", long_key);
         assert!(result.is_err());
     }
