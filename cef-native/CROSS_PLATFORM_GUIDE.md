@@ -349,3 +349,4 @@ std::unique_ptr<Platform::Window> Platform::Window::Create(const WindowParams& p
 - This hybrid approach is what most professional cross-platform projects use
 
 **One repository, multiple platforms** - This is the standard approach, not an exception!
+

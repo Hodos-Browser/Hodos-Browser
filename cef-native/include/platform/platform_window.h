@@ -66,3 +66,4 @@ struct WorkArea {
 WorkArea GetWorkArea();
 
 } // namespace Platform
+
