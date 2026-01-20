@@ -15,6 +15,9 @@ public:
     MyOverlayRenderHandler(void* nsview, int width, int height);
 #endif
 
+    // Destructor for proper resource cleanup
+    ~MyOverlayRenderHandler();
+
     void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
     void OnPaint(CefRefPtr<CefBrowser> browser,
                  PaintElementType type,

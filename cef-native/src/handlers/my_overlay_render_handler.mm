@@ -93,6 +93,34 @@ MyOverlayRenderHandler::MyOverlayRenderHandler(void* nsview, int width, int heig
 
 #endif
 
+// ============================================================================
+// Destructor - Platform-Specific Implementations
+// ============================================================================
+
+#ifdef _WIN32
+
+MyOverlayRenderHandler::~MyOverlayRenderHandler() {
+    // Clean up Windows GDI resources
+    if (hbitmap_) {
+        DeleteObject(hbitmap_);
+        hbitmap_ = nullptr;
+    }
+    if (hdc_mem_) {
+        DeleteDC(hdc_mem_);
+        hdc_mem_ = nullptr;
+    }
+    std::cout << "🧹 MyOverlayRenderHandler destructor: Windows resources cleaned up" << std::endl;
+}
+
+#elif defined(__APPLE__)
+
+MyOverlayRenderHandler::~MyOverlayRenderHandler() {
+    // macOS: NSView and CALayer are managed by ARC, no manual cleanup needed
+    std::cout << "🧹 MyOverlayRenderHandler destructor: macOS (no manual cleanup needed)" << std::endl;
+}
+
+#endif
+
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
     rect = CefRect(0, 0, width_, height_);
     std::cout << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
