@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Complete macOS Wallet UI** - Finish wallet panel and advanced features UI, wire to Rust backend
 - [x] **Phase 2: DevTools Integration** - Add keyboard shortcuts and UI access for CEF DevTools
-- [ ] **Phase 3: Windows Overlay Migration** - Port new overlay system from Mac to Windows
+- [x] **Phase 3: Windows Overlay Migration** - Port new overlay system from Mac to Windows
 - [ ] **Phase 4: Cross-Platform Testing & Polish** - Test both platforms, fix issues, validate parity
 
 ## Phase Details
@@ -50,12 +50,13 @@ Plans:
 **Goal**: Replace Windows' old overlay with the new unified system from macOS
 **Depends on**: Phase 2
 **Research**: Unlikely (porting existing Mac overlay to Windows, patterns already established in codebase)
-**Status**: In progress
-**Plans**: 2 total, 1 complete
+**Status**: Complete
+**Completed**: 2026-01-20
+**Plans**: 2 total, 2 complete
 
 Plans:
 - [x] 03-01: Port Overlay Rendering System
-- [ ] 03-02: Build and Functional Verification
+- [x] 03-02: Build and Functional Verification
 
 ### Phase 4: Cross-Platform Testing & Polish
 **Goal**: Validate cross-platform consistency and fix remaining issues
@@ -75,5 +76,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Complete macOS Wallet UI | 2/2 | Complete | 2026-01-20 |
 | 2. DevTools Integration | 1/1 | Complete | 2026-01-20 |
-| 3. Windows Overlay Migration | 1/2 | In progress | - |
+| 3. Windows Overlay Migration | 2/2 | Complete | 2026-01-20 |
 | 4. Cross-Platform Testing & Polish | 0/TBD | Not started | - |
