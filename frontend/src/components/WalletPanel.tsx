@@ -68,16 +68,36 @@ export default function WalletPanel() {
   const handleReceive = async () => {
     try {
       const addressData = await wallet.getCurrentAddress();
-      if (addressData && addressData.address) {
-        console.log('Current receive address:', addressData.address);
-        window.alert(`Receive address:\n${addressData.address}`);
+      console.log('Receive address data:', addressData);
+
+      // Handle different possible response formats
+      let address: string | undefined;
+      if (typeof addressData === 'string') {
+        address = addressData;
+      } else if (addressData && typeof addressData === 'object') {
+        // Check for address field in the response
+        address = (addressData as any).address;
+      }
+
+      if (address) {
+        console.log('Displaying receive address:', address);
+        window.alert(`Receive address:\n${address}`);
       } else {
         // Fallback: generate new address if none exists
         console.log('No current address, generating new one...');
         const newAddressData = await wallet.generateAddress();
-        if (newAddressData && newAddressData.address) {
-          console.log('Generated new receive address:', newAddressData.address);
-          window.alert(`Receive address:\n${newAddressData.address}`);
+        console.log('New address data:', newAddressData);
+
+        let newAddress: string | undefined;
+        if (typeof newAddressData === 'string') {
+          newAddress = newAddressData;
+        } else if (newAddressData && typeof newAddressData === 'object') {
+          newAddress = (newAddressData as any).address;
+        }
+
+        if (newAddress) {
+          console.log('Displaying generated address:', newAddress);
+          window.alert(`Receive address:\n${newAddress}`);
         }
       }
     } catch (error) {
