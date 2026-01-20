@@ -374,8 +374,12 @@ const WalletOverlayRoot: React.FC = () => {
             </Box>
           ) : actions.length === 0 ? (
             <Paper sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="body1" color="text.secondary">
-                No transactions found. Your transaction history will appear here.
+              <Typography variant="body1" color="text.secondary" gutterBottom>
+                No sent transactions found.
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                Note: This tab shows transactions sent using the BRC-100 protocol.
+                Funds received from external sources may not appear here yet.
               </Typography>
             </Paper>
           ) : (
