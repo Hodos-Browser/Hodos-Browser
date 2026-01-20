@@ -209,10 +209,7 @@ const WalletPanel = () => {
         <div className="navigation-grid">
           <button
             className={`nav-grid-button ${clickedButtons.has('certificates') ? 'clicked' : ''}`}
-            onClick={() => {
-              handleNavButtonClick('certificates');
-              window.cefMessage?.send('tab_create', 'http://127.0.0.1:5137/wallet');
-            }}
+            onClick={() => handleNavButtonClick('certificates')}
           >
             Certificates
           </button>
