@@ -2330,15 +2330,13 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
                                         CefRefPtr<CefContextMenuParams> params,
                                         CefRefPtr<CefMenuModel> model) {
-    // Enable DevTools for overlay windows in development
-    if (role_ == "settings" || role_ == "wallet" || role_ == "backup" || role_ == "brc100auth") {
-        // Add Inspect Element option - use custom menu ID
-        const int MENU_ID_DEV_TOOLS_INSPECT = MENU_ID_USER_FIRST + 1;
-        model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
-        model->AddSeparator();
+    // Enable DevTools for all windows
+    // Add Inspect Element option - use custom menu ID
+    const int MENU_ID_DEV_TOOLS_INSPECT = MENU_ID_USER_FIRST + 1;
+    model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
+    model->AddSeparator();
 
-        LOG_DEBUG_BROWSER("🔧 Context menu enabled for " + role_ + " overlay - DevTools available");
-    }
+    LOG_DEBUG_BROWSER("🔧 Context menu enabled - DevTools available");
 }
 
 bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
@@ -2349,11 +2347,11 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
     // Log all context menu commands for debugging
     LOG_DEBUG_BROWSER("🔘 Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
 
-    // Handle DevTools for overlay windows
-    if ((role_ == "settings" || role_ == "wallet" || role_ == "backup" || role_ == "brc100auth") && command_id == (MENU_ID_USER_FIRST + 1)) {
-        // Open DevTools
-        browser->GetHost()->ShowDevTools(CefWindowInfo(), nullptr, CefBrowserSettings(), CefPoint());
-        LOG_DEBUG_BROWSER("🔧 DevTools opened for " + role_ + " overlay");
+    // Handle DevTools for all windows
+    if (command_id == (MENU_ID_USER_FIRST + 1)) {
+        // Open DevTools using helper
+        ShowOrFocusDevTools(browser);
+        LOG_DEBUG_BROWSER("🔧 DevTools opened via context menu");
         return true;
     }
 
