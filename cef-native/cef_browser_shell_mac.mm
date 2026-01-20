@@ -620,9 +620,8 @@ ViewDimensions GetViewDimensions(void* nsview) {
                                    contentRect.size.width, headerHeight);
     [g_header_view setFrame:headerRect];
 
-    // Resize webview (60px gap for diagnostic)
-    int diagnosticGap = 60;
-    NSRect webviewRect = NSMakeRect(0, diagnosticGap, contentRect.size.width, webviewHeight - diagnosticGap);
+    // Resize webview (full height below header)
+    NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width, webviewHeight);
     [g_webview_view setFrame:webviewRect];
 
     // Resize wallet panel view (top-right corner box)
@@ -777,10 +776,8 @@ void CreateMainWindow() {
     [[g_main_window contentView] addSubview:g_header_view];
     LOG_INFO("✅ Header view created at Y=" + std::to_string((int)headerRect.origin.y));
 
-    // Create webview/content area (60px gap for diagnostic)
-    // This gap will show if issue is from header or webview positioning
-    int diagnosticGap = 60;
-    NSRect webviewRect = NSMakeRect(0, diagnosticGap, screenRect.size.width, webviewHeight - diagnosticGap);
+    // Create webview/content area (full height below header)
+    NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width, webviewHeight);
     g_webview_view = [[NSView alloc] initWithFrame:webviewRect];
 
     if (!g_webview_view) {
