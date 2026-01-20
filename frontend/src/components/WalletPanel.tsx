@@ -3,33 +3,22 @@ import { Button } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SendIcon from '@mui/icons-material/Send';
 import CallReceivedIcon from '@mui/icons-material/CallReceived';
+import { useWallet } from '../hooks/useWallet';
 
 export default function WalletPanel() {
   const [balance, setBalance] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const wallet = useWallet();
 
   // Fetch balance on component mount
   useEffect(() => {
     const fetchBalance = async () => {
       try {
-        if (window.hodosBrowser?.wallet?.getBalance) {
-          // Set up callback for balance response
-          window.onGetBalanceResponse = (data: any) => {
-            console.log('Balance received:', data);
-            if (data && typeof data.balance === 'number') {
-              setBalance(data.balance);
-            }
-            setLoading(false);
-          };
-
-          window.onGetBalanceError = (error: any) => {
-            console.error('Balance error:', error);
-            setLoading(false);
-          };
-
-          // Request balance
-          window.hodosBrowser.wallet.getBalance();
+        const balanceData = await wallet.getBalance();
+        if (balanceData && typeof balanceData.balance === 'number') {
+          setBalance(balanceData.balance);
         }
+        setLoading(false);
       } catch (error) {
         console.error('Failed to fetch balance:', error);
         setLoading(false);
@@ -37,16 +26,64 @@ export default function WalletPanel() {
     };
 
     fetchBalance();
-  }, []);
+  }, [wallet]);
 
-  const handleSend = () => {
-    console.log('Send button clicked (not implemented yet)');
-    // TODO: Implement send functionality
+  const handleSend = async () => {
+    try {
+      const recipient = window.prompt('Enter recipient BSV address:');
+      if (!recipient) return;
+
+      const amountStr = window.prompt('Enter amount in satoshis:');
+      if (!amountStr) return;
+
+      const amount = parseInt(amountStr, 10);
+      if (isNaN(amount) || amount <= 0) {
+        console.error('Invalid amount. Must be a positive number.');
+        window.alert('Invalid amount. Must be a positive number.');
+        return;
+      }
+
+      // Basic validation for BSV address (starts with 1 or 3, length 26-35)
+      if (!recipient.match(/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/)) {
+        console.error('Invalid BSV address format.');
+        window.alert('Invalid BSV address format.');
+        return;
+      }
+
+      const result = await wallet.sendTransaction(recipient, amount);
+      console.log('Transaction sent successfully:', result);
+      window.alert('Transaction sent successfully!');
+
+      // Refresh balance after sending
+      const balanceData = await wallet.getBalance();
+      if (balanceData && typeof balanceData.balance === 'number') {
+        setBalance(balanceData.balance);
+      }
+    } catch (error) {
+      console.error('Failed to send transaction:', error);
+      window.alert(`Failed to send transaction: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
-  const handleReceive = () => {
-    console.log('Receive button clicked (not implemented yet)');
-    // TODO: Implement receive functionality
+  const handleReceive = async () => {
+    try {
+      const addressData = await wallet.getCurrentAddress();
+      if (addressData && addressData.address) {
+        console.log('Current receive address:', addressData.address);
+        window.alert(`Receive address:\n${addressData.address}`);
+      } else {
+        // Fallback: generate new address if none exists
+        console.log('No current address, generating new one...');
+        const newAddressData = await wallet.generateAddress();
+        if (newAddressData && newAddressData.address) {
+          console.log('Generated new receive address:', newAddressData.address);
+          window.alert(`Receive address:\n${newAddressData.address}`);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to get receive address:', error);
+      window.alert(`Failed to get receive address: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const handleAdvanced = () => {
@@ -88,7 +125,6 @@ export default function WalletPanel() {
         color="primary"
         startIcon={<SendIcon />}
         onClick={handleSend}
-        disabled
         fullWidth
         size="small"
         sx={{ fontSize: '12px' }}
@@ -102,7 +138,6 @@ export default function WalletPanel() {
         color="secondary"
         startIcon={<CallReceivedIcon />}
         onClick={handleReceive}
-        disabled
         fullWidth
         size="small"
         sx={{ fontSize: '12px' }}
