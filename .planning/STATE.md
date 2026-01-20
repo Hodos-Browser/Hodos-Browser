@@ -5,33 +5,34 @@
 See: .planning/PROJECT.md (updated 2026-01-20)
 
 **Core value:** Functional cross-platform parity with enhanced wallet UI - users on both macOS and Windows can access wallet operations, BRC-100 authentication, and developer tools through a modern overlay interface.
-**Current focus:** Phase 1 — Complete macOS Wallet UI
+**Current focus:** Phase 2 — DevTools Integration
 
 ## Current Position
 
-Phase: 1 of 4 (Complete macOS Wallet UI)
-Plan: 2 of 2 in current phase
+Phase: 2 of 4 (DevTools Integration)
+Plan: 1 of 1 in current phase
 Status: Phase complete
-Last activity: 2026-01-20 — Completed 01-02-PLAN.md
+Last activity: 2026-01-20 — Completed 02-01-PLAN.md
 
-Progress: ██████████ 100% (Phase 1)
+Progress: ███████░░░ 100% (Phase 2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 21 min
-- Total execution time: 0.70 hours
+- Total plans completed: 3
+- Average duration: 19 min
+- Total execution time: 0.95 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 2 | 42 min | 21 min |
+| 2 | 1 | 15 min | 15 min |
 
 **Recent Trend:**
-- Last plan: 01-02 (23 min)
-- Trend: Consistent (~20 min avg)
+- Last plan: 02-01 (15 min)
+- Trend: Improving efficiency (19 min avg)
 
 ## Accumulated Context
 
@@ -49,6 +50,10 @@ Recent decisions affecting current work:
 | 01-02 | Lazy load tab data when selected | Performance optimization - only fetch data when user views tab |
 | 01-02 | Document limitations rather than block | Phase 1 goal is UI completion, backend improvements can be Phase 2+ work |
 | 01-02 | Open advanced features in new tab | Matches history page pattern, allows side-by-side comparison |
+| 02-01 | F12 key code 123 works cross-platform | Works on both Windows and macOS without platform-specific constants |
+| 02-01 | SetAsPopup for DevTools windows on Windows | Prevents blank DevTools windows on Windows platform |
+| 02-01 | nullptr client for DevTools | Prevents lifecycle issues when DevTools closes |
+| 02-01 | All windows get DevTools | Not just overlays - improves developer experience everywhere |
 
 ### Deferred Issues
 
@@ -60,6 +65,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-20T22:52:14Z
-Stopped at: Completed 01-02-PLAN.md (Advanced Features & Verification) - Phase 1 complete
+Last session: 2026-01-20T23:30:12Z
+Stopped at: Completed 02-01-PLAN.md (DevTools Integration) - Phase 2 complete
 Resume file: None

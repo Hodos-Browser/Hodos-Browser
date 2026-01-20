@@ -17,7 +17,7 @@ None
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Complete macOS Wallet UI** - Finish wallet panel and advanced features UI, wire to Rust backend
-- [ ] **Phase 2: DevTools Integration** - Add keyboard shortcuts and UI access for CEF DevTools
+- [x] **Phase 2: DevTools Integration** - Add keyboard shortcuts and UI access for CEF DevTools
 - [ ] **Phase 3: Windows Overlay Migration** - Port new overlay system from Mac to Windows
 - [ ] **Phase 4: Cross-Platform Testing & Polish** - Test both platforms, fix issues, validate parity
 
@@ -38,12 +38,13 @@ Plans:
 ### Phase 2: DevTools Integration
 **Goal**: Enable CEF DevTools access via keyboard shortcuts and UI on both platforms
 **Depends on**: Phase 1
-**Research**: Likely (CEF DevTools configuration)
-**Research topics**: CEF remote debugging setup, keyboard shortcut registration across platforms, DevTools window management in CEF
-**Plans**: TBD
+**Research**: Completed (CEF DevTools configuration)
+**Status**: Complete
+**Completed**: 2026-01-20
+**Plans**: 1 total, 1 complete
 
 Plans:
-- [ ] TBD during phase planning
+- [x] 02-01: DevTools keyboard shortcuts and context menu access
 
 ### Phase 3: Windows Overlay Migration
 **Goal**: Replace Windows' old overlay with the new unified system from macOS
@@ -71,6 +72,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Complete macOS Wallet UI | 2/2 | Complete | 2026-01-20 |
-| 2. DevTools Integration | 0/TBD | Not started | - |
+| 2. DevTools Integration | 1/1 | Complete | 2026-01-20 |
 | 3. Windows Overlay Migration | 0/TBD | Not started | - |
 | 4. Cross-Platform Testing & Polish | 0/TBD | Not started | - |
