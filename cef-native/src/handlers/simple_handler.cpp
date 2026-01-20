@@ -2263,13 +2263,59 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
 
-    // For overlay windows, we want normal input processing, not shortcuts
-    if (role_ == "wallet" || role_ == "settings") {
-        *is_keyboard_shortcut = false;
-        return false; // Let the event be processed normally
+    // Handle DevTools keyboard shortcuts for all windows
+    if (event.type == KEYEVENT_RAWKEYDOWN) {
+        // F12 - universal DevTools shortcut (cross-platform)
+        // Key code 123 is F12 on both Windows and macOS
+        if (event.windows_key_code == 123) {
+            ShowOrFocusDevTools(browser);
+            return true; // Consume the event
+        }
+
+        // Check for 'I' key shortcuts
+        if (event.windows_key_code == 'I') {
+#ifdef __APPLE__
+            // macOS: Cmd+Option+I
+            if ((event.modifiers & EVENTFLAG_COMMAND_DOWN) && (event.modifiers & EVENTFLAG_ALT_DOWN)) {
+                ShowOrFocusDevTools(browser);
+                return true; // Consume the event
+            }
+#endif
+#ifdef _WIN32
+            // Windows: Ctrl+Shift+I
+            if ((event.modifiers & EVENTFLAG_CONTROL_DOWN) && (event.modifiers & EVENTFLAG_SHIFT_DOWN)) {
+                ShowOrFocusDevTools(browser);
+                return true; // Consume the event
+            }
+#endif
+        }
     }
 
     return false; // Let other handlers process the event
+}
+
+void SimpleHandler::ShowOrFocusDevTools(CefRefPtr<CefBrowser> browser) {
+    if (!browser || !browser->GetHost()) {
+        LOG_DEBUG_BROWSER("⚠️ Cannot show DevTools - invalid browser");
+        return;
+    }
+
+    // Check if DevTools already open
+    if (!browser->GetHost()->HasDevTools()) {
+        CefWindowInfo windowInfo;
+        CefBrowserSettings settings;
+
+#ifdef _WIN32
+        // Windows: Use SetAsPopup for detached DevTools window (prevents blank window issues)
+        windowInfo.SetAsPopup(NULL, "DevTools");
+#endif
+        // macOS: Default CefWindowInfo creates a popup window automatically
+
+        browser->GetHost()->ShowDevTools(windowInfo, browser->GetHost()->GetClient(), settings, CefPoint());
+        LOG_DEBUG_BROWSER("🔧 DevTools opened via keyboard shortcut");
+    } else {
+        LOG_DEBUG_BROWSER("🔧 DevTools already open - focusing existing window");
+    }
 }
 
 void SimpleHandler::SetRenderHandler(CefRefPtr<CefRenderHandler> handler) {

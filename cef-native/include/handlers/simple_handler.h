@@ -126,6 +126,12 @@ public:
 
 private:
     std::string role_;
+
+    /**
+     * @brief Show DevTools for browser or focus if already open
+     * @param browser The browser instance to open DevTools for
+     */
+    void ShowOrFocusDevTools(CefRefPtr<CefBrowser> browser);
     CefRefPtr<CefRenderHandler> render_handler_;
     static CefRefPtr<CefBrowser> overlay_browser_;
     static CefRefPtr<CefBrowser> settings_browser_;
