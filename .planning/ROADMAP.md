@@ -27,10 +27,12 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Goal**: Deliver fully functional wallet panel and advanced features overlay on macOS
 **Depends on**: Nothing (first phase)
 **Research**: Unlikely (internal UI work, React patterns already established, wallet bridge API already tested)
-**Plans**: TBD
+**Status**: In progress
+**Plans**: 2 total, 1 complete
 
 Plans:
-- [ ] TBD during phase planning
+- [x] 01-01: Core Wallet Panel Operations (balance, send, receive)
+- [ ] 01-02: Advanced Features and Final Verification
 
 ### Phase 2: DevTools Integration
 **Goal**: Enable CEF DevTools access via keyboard shortcuts and UI on both platforms
@@ -67,7 +69,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Complete macOS Wallet UI | 0/TBD | Not started | - |
+| 1. Complete macOS Wallet UI | 1/2 | In progress | - |
 | 2. DevTools Integration | 0/TBD | Not started | - |
 | 3. Windows Overlay Migration | 0/TBD | Not started | - |
 | 4. Cross-Platform Testing & Polish | 0/TBD | Not started | - |
