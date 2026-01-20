@@ -14,9 +14,13 @@ import {
   Alert,
   AppBar,
   Toolbar,
-  IconButton
+  IconButton,
+  Tabs,
+  Tab,
+  Chip
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
+import RefreshIcon from '@mui/icons-material/Refresh';
 
 interface Certificate {
   type: string;
@@ -29,21 +33,219 @@ interface Certificate {
   keyring: Record<string, string>;
 }
 
+interface Action {
+  txid: string;
+  referenceNumber: string;
+  status: string;
+  isOutgoing: boolean;
+  satoshis: number;
+  description?: string;
+  labels?: string[];
+  version?: number;
+  lockTime?: number;
+  inputs?: any[];
+  outputs?: any[];
+}
+
+interface Address {
+  address: string;
+  derivationIndex: number;
+  isUsed: boolean;
+  balance?: number;
+}
+
+interface Output {
+  txid: string;
+  vout: number;
+  satoshis: number;
+  lockingScript: string;
+  spendable: boolean;
+  customInstructions?: string;
+  tags?: string[];
+}
+
+interface TabPanelProps {
+  children?: React.ReactNode;
+  index: number;
+  value: number;
+}
+
+function TabPanel(props: TabPanelProps) {
+  const { children, value, index, ...other } = props;
+
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`wallet-tabpanel-${index}`}
+      aria-labelledby={`wallet-tab-${index}`}
+      {...other}
+      style={{ height: '100%' }}
+    >
+      {value === index && (
+        <Box sx={{ p: 3, height: '100%' }}>
+          {children}
+        </Box>
+      )}
+    </div>
+  );
+}
+
 const WalletOverlayRoot: React.FC = () => {
+  const [tabValue, setTabValue] = useState(0);
+
+  // Transactions state
+  const [actions, setActions] = useState<Action[]>([]);
+  const [actionsLoading, setActionsLoading] = useState(false);
+  const [actionsError, setActionsError] = useState<string | null>(null);
+
+  // Addresses state
+  const [addresses, setAddresses] = useState<Address[]>([]);
+  const [addressesLoading, setAddressesLoading] = useState(false);
+  const [addressesError, setAddressesError] = useState<string | null>(null);
+
+  // Outputs state
+  const [outputs, setOutputs] = useState<Output[]>([]);
+  const [outputsLoading, setOutputsLoading] = useState(false);
+  const [outputsError, setOutputsError] = useState<string | null>(null);
+
+  // Certificates state
   const [certificates, setCertificates] = useState<Certificate[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [totalCertificates, setTotalCertificates] = useState(0);
+  const [certificatesLoading, setCertificatesLoading] = useState(false);
+  const [certificatesError, setCertificatesError] = useState<string | null>(null);
 
   useEffect(() => {
     console.log("💰 WalletOverlayRoot (Advanced Features) mounted");
-    fetchCertificates();
+    // Load initial tab data
+    fetchActions();
   }, []);
+
+  const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
+    setTabValue(newValue);
+
+    // Lazy load data when tab is selected
+    switch (newValue) {
+      case 0:
+        if (actions.length === 0 && !actionsLoading) fetchActions();
+        break;
+      case 1:
+        if (addresses.length === 0 && !addressesLoading) fetchAddresses();
+        break;
+      case 2:
+        if (outputs.length === 0 && !outputsLoading) fetchOutputs();
+        break;
+      case 3:
+        if (certificates.length === 0 && !certificatesLoading) fetchCertificates();
+        break;
+    }
+  };
+
+  const fetchActions = async () => {
+    try {
+      setActionsLoading(true);
+      setActionsError(null);
+
+      console.log('Fetching actions from Rust backend...');
+      const response = await fetch('http://localhost:3301/listActions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          limit: 50,
+          offset: 0,
+          includeLabels: true,
+          includeInputs: false,
+          includeOutputs: false
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch actions: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('Actions data:', data);
+
+      setActions(data.actions || []);
+    } catch (err) {
+      console.error('Failed to fetch actions:', err);
+      setActionsError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setActionsLoading(false);
+    }
+  };
+
+  const fetchAddresses = async () => {
+    try {
+      setAddressesLoading(true);
+      setAddressesError(null);
+
+      console.log('Fetching addresses from Rust backend...');
+      const response = await fetch('http://localhost:3301/wallet/addresses', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch addresses: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('Addresses data:', data);
+
+      setAddresses(data.addresses || []);
+    } catch (err) {
+      console.error('Failed to fetch addresses:', err);
+      setAddressesError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setAddressesLoading(false);
+    }
+  };
+
+  const fetchOutputs = async () => {
+    try {
+      setOutputsLoading(true);
+      setOutputsError(null);
+
+      console.log('Fetching outputs from Rust backend...');
+      const response = await fetch('http://localhost:3301/listOutputs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          basket: 'default-basket',
+          includeEnvelope: false,
+          includeCustomInstructions: false,
+          includeTags: true,
+          limit: 50,
+          offset: 0
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch outputs: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('Outputs data:', data);
+
+      setOutputs(data.outputs || []);
+    } catch (err) {
+      console.error('Failed to fetch outputs:', err);
+      setOutputsError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setOutputsLoading(false);
+    }
+  };
 
   const fetchCertificates = async () => {
     try {
-      setLoading(true);
-      setError(null);
+      setCertificatesLoading(true);
+      setCertificatesError(null);
 
       console.log('Fetching certificates from Rust backend...');
       const response = await fetch('http://localhost:3301/listCertificates', {
@@ -65,23 +267,43 @@ const WalletOverlayRoot: React.FC = () => {
       console.log('Certificates data:', data);
 
       setCertificates(data.certificates || []);
-      setTotalCertificates(data.total_certificates || 0);
     } catch (err) {
       console.error('Failed to fetch certificates:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setCertificatesError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
-      setLoading(false);
+      setCertificatesLoading(false);
     }
-  };
-
-  const handleAcquireCertificate = () => {
-    console.log('Acquire certificate clicked - feature not yet implemented');
-    alert('Certificate acquisition feature coming soon!');
   };
 
   const handleClose = () => {
     console.log("💰 Advanced features closing");
-    window.cefMessage?.send('overlay_close', []);
+    window.close();
+  };
+
+  const handleRefresh = () => {
+    switch (tabValue) {
+      case 0:
+        fetchActions();
+        break;
+      case 1:
+        fetchAddresses();
+        break;
+      case 2:
+        fetchOutputs();
+        break;
+      case 3:
+        fetchCertificates();
+        break;
+    }
+  };
+
+  const formatSatoshis = (sats: number): string => {
+    return (sats / 100000000).toFixed(8) + ' BSV';
+  };
+
+  const truncateHash = (hash: string, start = 8, end = 8): string => {
+    if (!hash || hash.length <= start + end) return hash;
+    return `${hash.substring(0, start)}...${hash.substring(hash.length - end)}`;
   };
 
   return (
@@ -89,8 +311,18 @@ const WalletOverlayRoot: React.FC = () => {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            Advanced Features - BRC-100 Certificates
+            Advanced Wallet Features
           </Typography>
+          <IconButton
+            size="large"
+            edge="end"
+            color="inherit"
+            aria-label="refresh"
+            onClick={handleRefresh}
+            sx={{ mr: 1 }}
+          >
+            <RefreshIcon />
+          </IconButton>
           <IconButton
             size="large"
             edge="end"
@@ -103,95 +335,303 @@ const WalletOverlayRoot: React.FC = () => {
         </Toolbar>
       </AppBar>
 
+      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+        <Tabs value={tabValue} onChange={handleTabChange} aria-label="wallet tabs">
+          <Tab label="Transactions" />
+          <Tab label="Addresses" />
+          <Tab label="UTXOs" />
+          <Tab label="Certificates" />
+        </Tabs>
+      </Box>
+
       <Box
         sx={{
           flex: 1,
-          padding: 3,
           backgroundColor: '#f5f5f5',
           overflow: 'auto'
         }}
       >
-        <Box sx={{ mb: 2, display: 'flex', gap: 2, alignItems: 'center' }}>
-          <Button
-            variant="contained"
-            color="primary"
-            onClick={handleAcquireCertificate}
-            disabled
-          >
-            Acquire Certificate (Coming Soon)
-          </Button>
-          <Button
-            variant="outlined"
-            onClick={fetchCertificates}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
-        </Box>
+        {/* Transactions Tab */}
+        <TabPanel value={tabValue} index={0}>
+          {actionsError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {actionsError}
+            </Alert>
+          )}
 
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
-
-        {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-            <CircularProgress />
-          </Box>
-        ) : certificates.length === 0 ? (
-          <Paper sx={{ p: 3, textAlign: 'center' }}>
-            <Typography variant="body1" color="text.secondary">
-              No certificates found. Click "Acquire Certificate" to get your first identity certificate.
-            </Typography>
-          </Paper>
-        ) : (
-          <>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Total certificates: {totalCertificates}
-            </Typography>
-            <TableContainer component={Paper}>
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Type</TableCell>
-                    <TableCell>Certifier</TableCell>
-                    <TableCell>Subject</TableCell>
-                    <TableCell>Fields</TableCell>
-                    <TableCell>Serial Number</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {certificates.map((cert, index) => (
-                    <TableRow key={index}>
-                      <TableCell>
-                        {cert.type ? atob(cert.type) : 'N/A'}
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                          {cert.certifier.substring(0, 16)}...
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                          {cert.subject.substring(0, 16)}...
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        {Object.keys(cert.fields).length} field(s)
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                          {cert.serial_number ? cert.serial_number.substring(0, 16) : 'N/A'}...
-                        </Typography>
-                      </TableCell>
+          {actionsLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : actions.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No transactions found. Your transaction history will appear here.
+              </Typography>
+            </Paper>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Total transactions: {actions.length}
+              </Typography>
+              <TableContainer component={Paper}>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>TxID</TableCell>
+                      <TableCell>Type</TableCell>
+                      <TableCell>Status</TableCell>
+                      <TableCell>Amount</TableCell>
+                      <TableCell>Labels</TableCell>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </>
-        )}
+                  </TableHead>
+                  <TableBody>
+                    {actions.map((action, index) => (
+                      <TableRow key={index}>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {truncateHash(action.txid)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            label={action.isOutgoing ? 'Outgoing' : 'Incoming'}
+                            color={action.isOutgoing ? 'warning' : 'success'}
+                            size="small"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            label={action.status}
+                            color={action.status === 'completed' ? 'success' : 'default'}
+                            size="small"
+                          />
+                        </TableCell>
+                        <TableCell>{formatSatoshis(action.satoshis)}</TableCell>
+                        <TableCell>
+                          {action.labels && action.labels.length > 0 ? (
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                              {action.labels.map((label, i) => (
+                                <Chip key={i} label={label} size="small" variant="outlined" />
+                              ))}
+                            </Box>
+                          ) : (
+                            <Typography variant="body2" color="text.secondary">None</Typography>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          )}
+        </TabPanel>
+
+        {/* Addresses Tab */}
+        <TabPanel value={tabValue} index={1}>
+          {addressesError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {addressesError}
+            </Alert>
+          )}
+
+          {addressesLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : addresses.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No addresses found. Generate an address to get started.
+              </Typography>
+            </Paper>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Total addresses: {addresses.length}
+              </Typography>
+              <TableContainer component={Paper}>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Address</TableCell>
+                      <TableCell>Index</TableCell>
+                      <TableCell>Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {addresses.map((addr, index) => (
+                      <TableRow key={index}>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                            {addr.address}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>{addr.derivationIndex}</TableCell>
+                        <TableCell>
+                          <Chip
+                            label={addr.isUsed ? 'Used' : 'Unused'}
+                            color={addr.isUsed ? 'default' : 'primary'}
+                            size="small"
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          )}
+        </TabPanel>
+
+        {/* UTXOs Tab */}
+        <TabPanel value={tabValue} index={2}>
+          {outputsError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {outputsError}
+            </Alert>
+          )}
+
+          {outputsLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : outputs.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No UTXOs found. Your unspent outputs will appear here.
+              </Typography>
+            </Paper>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Total UTXOs: {outputs.length} | Total value: {formatSatoshis(outputs.reduce((sum, o) => sum + o.satoshis, 0))}
+              </Typography>
+              <TableContainer component={Paper}>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>TxID</TableCell>
+                      <TableCell>Vout</TableCell>
+                      <TableCell>Amount</TableCell>
+                      <TableCell>Spendable</TableCell>
+                      <TableCell>Tags</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {outputs.map((output, index) => (
+                      <TableRow key={index}>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {truncateHash(output.txid)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>{output.vout}</TableCell>
+                        <TableCell>{formatSatoshis(output.satoshis)}</TableCell>
+                        <TableCell>
+                          <Chip
+                            label={output.spendable ? 'Yes' : 'No'}
+                            color={output.spendable ? 'success' : 'default'}
+                            size="small"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          {output.tags && output.tags.length > 0 ? (
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                              {output.tags.map((tag, i) => (
+                                <Chip key={i} label={tag} size="small" variant="outlined" />
+                              ))}
+                            </Box>
+                          ) : (
+                            <Typography variant="body2" color="text.secondary">None</Typography>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          )}
+        </TabPanel>
+
+        {/* Certificates Tab */}
+        <TabPanel value={tabValue} index={3}>
+          <Box sx={{ mb: 2 }}>
+            <Button
+              variant="contained"
+              color="primary"
+              disabled
+            >
+              Acquire Certificate (Coming Soon)
+            </Button>
+          </Box>
+
+          {certificatesError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {certificatesError}
+            </Alert>
+          )}
+
+          {certificatesLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : certificates.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No certificates found. Click "Acquire Certificate" to get your first identity certificate.
+              </Typography>
+            </Paper>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Total certificates: {certificates.length}
+              </Typography>
+              <TableContainer component={Paper}>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Type</TableCell>
+                      <TableCell>Certifier</TableCell>
+                      <TableCell>Subject</TableCell>
+                      <TableCell>Fields</TableCell>
+                      <TableCell>Serial Number</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {certificates.map((cert, index) => (
+                      <TableRow key={index}>
+                        <TableCell>
+                          {cert.type ? atob(cert.type) : 'N/A'}
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {truncateHash(cert.certifier)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {truncateHash(cert.subject)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          {Object.keys(cert.fields).length} field(s)
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {cert.serial_number ? truncateHash(cert.serial_number) : 'N/A'}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          )}
+        </TabPanel>
       </Box>
     </Box>
   );
