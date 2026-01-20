@@ -49,9 +49,11 @@ interface Action {
 
 interface Address {
   address: string;
-  derivationIndex: number;
-  isUsed: boolean;
+  index: number;
+  publicKey: string;
+  used: boolean;
   balance?: number;
+  createdAt?: number;
 }
 
 interface Output {
@@ -196,7 +198,8 @@ const WalletOverlayRoot: React.FC = () => {
       const data = await response.json();
       console.log('Addresses data:', data);
 
-      setAddresses(data.addresses || []);
+      // Response is an array directly, not { addresses: [...] }
+      setAddresses(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to fetch addresses:', err);
       setAddressesError(err instanceof Error ? err.message : 'Unknown error');
@@ -474,18 +477,18 @@ const WalletOverlayRoot: React.FC = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {addresses.map((addr, index) => (
-                      <TableRow key={index}>
+                    {addresses.map((addr, idx) => (
+                      <TableRow key={idx}>
                         <TableCell>
                           <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>
                             {addr.address}
                           </Typography>
                         </TableCell>
-                        <TableCell>{addr.derivationIndex}</TableCell>
+                        <TableCell>{addr.index}</TableCell>
                         <TableCell>
                           <Chip
-                            label={addr.isUsed ? 'Used' : 'Unused'}
-                            color={addr.isUsed ? 'default' : 'primary'}
+                            label={addr.used ? 'Used' : 'Unused'}
+                            color={addr.used ? 'default' : 'primary'}
                             size="small"
                           />
                         </TableCell>
