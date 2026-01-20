@@ -2311,7 +2311,9 @@ void SimpleHandler::ShowOrFocusDevTools(CefRefPtr<CefBrowser> browser) {
 #endif
         // macOS: Default CefWindowInfo creates a popup window automatically
 
-        browser->GetHost()->ShowDevTools(windowInfo, browser->GetHost()->GetClient(), settings, CefPoint());
+        // Use nullptr for client - CEF will create default handler for DevTools
+        // This prevents lifecycle issues when DevTools window closes
+        browser->GetHost()->ShowDevTools(windowInfo, nullptr, settings, CefPoint());
         LOG_DEBUG_BROWSER("🔧 DevTools opened via keyboard shortcut");
     } else {
         LOG_DEBUG_BROWSER("🔧 DevTools already open - focusing existing window");
