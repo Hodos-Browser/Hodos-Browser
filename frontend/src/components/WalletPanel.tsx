@@ -70,13 +70,10 @@ export default function WalletPanel() {
       const addressData = await wallet.getCurrentAddress();
       console.log('Receive address data:', addressData);
 
-      // Handle different possible response formats
+      // Parse the nested response structure: { success: true, address: { address: "...", ... } }
       let address: string | undefined;
-      if (typeof addressData === 'string') {
-        address = addressData;
-      } else if (addressData && typeof addressData === 'object') {
-        // Check for address field in the response
-        address = (addressData as any).address;
+      if (addressData && (addressData as any).success && (addressData as any).address) {
+        address = (addressData as any).address.address;
       }
 
       if (address) {
@@ -88,10 +85,11 @@ export default function WalletPanel() {
         const newAddressData = await wallet.generateAddress();
         console.log('New address data:', newAddressData);
 
+        // Handle same nested structure for generated address
         let newAddress: string | undefined;
-        if (typeof newAddressData === 'string') {
-          newAddress = newAddressData;
-        } else if (newAddressData && typeof newAddressData === 'object') {
+        if (newAddressData && (newAddressData as any).success && (newAddressData as any).address) {
+          newAddress = (newAddressData as any).address.address;
+        } else if (newAddressData && (newAddressData as any).address) {
           newAddress = (newAddressData as any).address;
         }
 
