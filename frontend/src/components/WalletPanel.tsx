@@ -1,32 +1,50 @@
-import React, { useState, useEffect } from 'react';
-import { Button } from '@mui/material';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, IconButton } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SendIcon from '@mui/icons-material/Send';
 import CallReceivedIcon from '@mui/icons-material/CallReceived';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { useWallet } from '../hooks/useWallet';
 
 export default function WalletPanel() {
   const [balance, setBalance] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const wallet = useWallet();
 
-  // Fetch balance on component mount
-  useEffect(() => {
-    const fetchBalance = async () => {
-      try {
-        const balanceData = await wallet.getBalance();
-        if (balanceData && typeof balanceData.balance === 'number') {
-          setBalance(balanceData.balance);
-        }
-        setLoading(false);
-      } catch (error) {
-        console.error('Failed to fetch balance:', error);
-        setLoading(false);
+  // Fetch balance function that can be called manually or automatically
+  const fetchBalance = useCallback(async () => {
+    try {
+      const balanceData = await wallet.getBalance();
+      if (balanceData && typeof balanceData.balance === 'number') {
+        setBalance(balanceData.balance);
       }
-    };
-
-    fetchBalance();
+      setLoading(false);
+      setRefreshing(false);
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, [wallet]);
+
+  // Fetch balance on component mount and refresh every 30 seconds
+  useEffect(() => {
+    // Fetch immediately
+    fetchBalance();
+
+    // Set up auto-refresh every 30 seconds
+    const intervalId = setInterval(fetchBalance, 30000);
+
+    // Cleanup interval on unmount
+    return () => clearInterval(intervalId);
+  }, [fetchBalance]);
+
+  // Manual refresh handler
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await fetchBalance();
+  };
 
   const handleSend = async () => {
     try {
@@ -126,15 +144,30 @@ export default function WalletPanel() {
       boxSizing: 'border-box',
       gap: '8px'
     }}>
-      {/* Balance at top */}
+      {/* Balance at top with refresh button */}
       <div style={{
-        fontSize: '14px',
-        fontWeight: 600,
-        color: '#333',
-        textAlign: 'center',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '8px',
         marginBottom: '4px'
       }}>
-        Balance: {loading ? '...' : `${balance.toLocaleString()} sats`}
+        <div style={{
+          fontSize: '14px',
+          fontWeight: 600,
+          color: '#333'
+        }}>
+          Balance: {loading ? '...' : `${balance.toLocaleString()} sats`}
+        </div>
+        <IconButton
+          size="small"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          sx={{ padding: '2px' }}
+          title="Refresh balance"
+        >
+          <RefreshIcon sx={{ fontSize: '16px' }} />
+        </IconButton>
       </div>
 
       {/* Send button */}
