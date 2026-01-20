@@ -123,10 +123,10 @@ export default function WalletPanel() {
   };
 
   const handleAdvanced = () => {
-    console.log('Advanced button clicked - opening wallet page');
+    console.log('Advanced button clicked - opening wallet page in new tab');
     // Open wallet page in new tab (like history does)
-    if (window.hodosBrowser?.navigation?.navigate) {
-      window.hodosBrowser.navigation.navigate('/wallet');
+    if (window.cefMessage) {
+      window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet');
     }
   };
 
