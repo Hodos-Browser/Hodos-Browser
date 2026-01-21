@@ -10,17 +10,8 @@
 #include <iostream>
 #include <fstream>
 
-#ifdef _WIN32
-#include "../../include/core/WebSocketServerHandler.h"
-#endif
-
 #include "../../include/core/TabManager.h"
-
-// Forward declaration of Logger class from main shell
-class Logger {
-public:
-    static void Log(const std::string& message, int level = 1, int process = 2);
-};
+#include "../../include/core/Logger.h"
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_APP(msg) Logger::Log(msg, 0, 2)

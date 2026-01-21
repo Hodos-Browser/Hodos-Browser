@@ -28,6 +28,7 @@
 #include "include/core/WalletService.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
+#include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
 #include <algorithm>  // For std::max
@@ -50,119 +51,6 @@ HWND g_wallet_overlay_hwnd = nullptr;
 HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
-
-// Log levels
-enum class LogLevel {
-    DEBUG = 0,
-    INFO = 1,
-    WARNING = 2,
-    ERROR_LEVEL = 3
-};
-
-// Process types for identification
-enum class ProcessType {
-    MAIN = 0,
-    RENDER = 1,
-    BROWSER = 2
-};
-
-// Centralized Logger class
-class Logger {
-private:
-    static std::ofstream logFile;
-    static bool initialized;
-    static ProcessType currentProcess;
-    static std::string logFilePath;
-
-    static std::string GetTimestamp() {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
-
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
-        ss << "." << std::setfill('0') << std::setw(3) << ms.count();
-        return ss.str();
-    }
-
-    static std::string GetProcessName(ProcessType process) {
-        switch (process) {
-            case ProcessType::MAIN: return "MAIN";
-            case ProcessType::RENDER: return "RENDER";
-            case ProcessType::BROWSER: return "BROWSER";
-            default: return "UNKNOWN";
-        }
-    }
-
-    static std::string GetLogLevelName(LogLevel level) {
-        switch (level) {
-            case LogLevel::DEBUG: return "DEBUG";
-            case LogLevel::INFO: return "INFO";
-            case LogLevel::WARNING: return "WARN";
-            case LogLevel::ERROR_LEVEL: return "ERROR";
-            default: return "UNKNOWN";
-        }
-    }
-
-public:
-    static void Initialize(ProcessType process, const std::string& filePath = "debug_output.log") {
-        if (initialized) return;
-
-        currentProcess = process;
-        logFilePath = filePath;
-
-        // Open log file
-        logFile.open(logFilePath, std::ios::app);
-        if (logFile.is_open()) {
-            initialized = true;
-            Log("Logger initialized for " + GetProcessName(process), 1);
-        } else {
-            // Fallback to stdout if file can't be opened
-            std::cout << "WARNING: Could not open log file: " << filePath << std::endl;
-        }
-    }
-
-    static void Log(const std::string& message, int level = 1, int process = 0) {
-        LogLevel logLevel = static_cast<LogLevel>(level);
-        ProcessType processType = static_cast<ProcessType>(process);
-
-        if (!initialized) {
-            // Fallback logging if not initialized
-            std::cout << "[" << GetTimestamp() << "] [" << GetProcessName(processType) << "] [" << GetLogLevelName(logLevel) << "] " << message << std::endl;
-            return;
-        }
-
-        std::string logEntry = "[" + GetTimestamp() + "] [" + GetProcessName(processType) + "] [" + GetLogLevelName(logLevel) + "] " + message;
-
-        // Write to file
-        if (logFile.is_open()) {
-            logFile << logEntry << std::endl;
-            logFile.flush();
-        }
-
-        // Also write to stdout (for debugging)
-        std::cout << logEntry << std::endl;
-    }
-
-    static void Shutdown() {
-        if (initialized && logFile.is_open()) {
-            Log("Logger shutting down", 1);
-            logFile.close();
-            initialized = false;
-        }
-    }
-
-    static bool IsInitialized() {
-        return initialized;
-    }
-};
-
-// Static member definitions
-std::ofstream Logger::logFile;
-bool Logger::initialized = false;
-ProcessType Logger::currentProcess = ProcessType::MAIN;
-std::string Logger::logFilePath = "";
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)

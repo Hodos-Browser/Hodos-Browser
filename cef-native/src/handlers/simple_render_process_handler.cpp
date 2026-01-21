@@ -19,11 +19,7 @@
 #include <sstream>
 #include <iomanip>
 
-// Forward declaration of Logger class from main shell
-class Logger {
-public:
-    static void Log(const std::string& message, int level = 1, int process = 1);
-};
+#include "../../include/core/Logger.h"
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_RENDER(msg) Logger::Log(msg, 0, 1)

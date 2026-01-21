@@ -42,11 +42,7 @@
 #include <sstream>
 #include <nlohmann/json.hpp>
 
-// Forward declaration of Logger class from main shell
-class Logger {
-public:
-    static void Log(const std::string& message, int level = 1, int process = 2);
-};
+#include "../../include/core/Logger.h"
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_BROWSER(msg) Logger::Log(msg, 0, 2)
@@ -1426,37 +1422,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "toggle_wallet_panel") {
-        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
-        std::cout << "💰 Toggle wallet panel message received!" << std::endl;
-
-#ifdef __APPLE__
-        extern NSView* g_wallet_panel_view;
-        extern bool g_wallet_panel_visible;
-
-        std::cout << "💰 g_wallet_panel_view pointer: " << g_wallet_panel_view << std::endl;
-        std::cout << "💰 Current visibility: " << g_wallet_panel_visible << std::endl;
-
-        if (g_wallet_panel_view) {
-            NSView* panel = (__bridge NSView*)g_wallet_panel_view;
-            std::cout << "💰 NSView casted successfully" << std::endl;
-
-            // Toggle visibility
-            g_wallet_panel_visible = !g_wallet_panel_visible;
-            std::cout << "💰 New visibility: " << g_wallet_panel_visible << std::endl;
-
-            [panel setHidden:!g_wallet_panel_visible];
-            std::cout << "💰 setHidden called: " << (!g_wallet_panel_visible ? "YES" : "NO") << std::endl;
-            LOG_DEBUG_BROWSER("💰 Wallet panel " + std::string(g_wallet_panel_visible ? "shown" : "hidden"));
-        } else {
-            std::cout << "❌ g_wallet_panel_view is NULL!" << std::endl;
-        }
-#else
-        std::cout << "⚠️ Not on macOS, toggle not implemented for Windows yet" << std::endl;
-#endif
-        return true;
-    }
-
     if (message_name == "overlay_show_backup") {
         LOG_DEBUG_BROWSER("💾 overlay_show_backup message received from role: " + role_);
         LOG_DEBUG_BROWSER("💾 Creating backup overlay with separate process");
@@ -1756,16 +1721,22 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 #endif  // _WIN32 - end of overlay messages
 
-    // ========== WALLET PANEL TOGGLE (macOS only for now) ==========
+    // ========== WALLET PANEL TOGGLE (Cross-platform: uses separate overlay window) ==========
     if (message_name == "toggle_wallet_panel") {
         LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
+        LOG_DEBUG_BROWSER("💰 Creating wallet overlay with separate process");
 
-#ifdef __APPLE__
-        // Call Objective-C++ function in cef_browser_shell_mac.mm
-        extern void ToggleWalletPanel();
-        ToggleWalletPanel();
+#ifdef _WIN32
+        // Windows: Create overlay window (separate process for security)
+        extern HINSTANCE g_hInstance;
+        CreateWalletOverlayWithSeparateProcess(g_hInstance);
+        LOG_DEBUG_BROWSER("✅ Wallet overlay created on Windows");
+#elif defined(__APPLE__)
+        // macOS: Create overlay window (separate process for security, consistent with Windows)
+        CreateWalletOverlayWithSeparateProcess();
+        LOG_DEBUG_BROWSER("✅ Wallet overlay created on macOS");
 #else
-        LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on Windows yet");
+        LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on this platform");
 #endif
         return true;
     }

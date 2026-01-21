@@ -32,56 +32,7 @@ std::string g_pendingModalDomain = "";
 #include <ctime>
 #include <chrono>
 #include <iomanip>
-
-// Logger class for proper debug logging
-class Logger {
-private:
-    static std::string GetTimestamp() {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
-
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
-        ss << "." << std::setfill('0') << std::setw(3) << ms.count();
-        return ss.str();
-    }
-
-    static std::string GetProcessName(int process) {
-        switch (process) {
-            case 0: return "MAIN";
-            case 1: return "RENDER";
-            case 2: return "BROWSER";
-            default: return "UNKNOWN";
-        }
-    }
-
-    static std::string GetLogLevelName(int level) {
-        switch (level) {
-            case 0: return "DEBUG";
-            case 1: return "INFO";
-            case 2: return "WARN";
-            case 3: return "ERROR";
-            default: return "UNKNOWN";
-        }
-    }
-
-public:
-    static void Log(const std::string& message, int level = 1, int process = 2) {
-        std::string logEntry = "[" + GetTimestamp() + "] [" + GetProcessName(process) + "] [" + GetLogLevelName(level) + "] " + message;
-
-        // Write to file
-        std::ofstream logFile("debug_output.log", std::ios::app);
-        if (logFile.is_open()) {
-            logFile << logEntry << std::endl;
-            logFile.close();
-        }
-
-        // Also output to console
-        std::cout << logEntry << std::endl;
-    }
-};
+#include "../../include/core/Logger.h"
 
 // Logging macros for HTTP interceptor
 #define LOG_DEBUG_HTTP(msg) Logger::Log(msg, 0, 2)

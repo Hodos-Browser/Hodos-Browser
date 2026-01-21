@@ -1,13 +1,8 @@
 #include "../../include/core/HistoryManager.h"
+#include "../../include/core/Logger.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
-
-// Forward declaration of Logger
-class Logger {
-public:
-    static void Log(const std::string& message, int level = 1, int process = 0);
-};
 
 #define LOG_DEBUG_HISTORY(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO_HISTORY(msg) Logger::Log(msg, 1, 0)
