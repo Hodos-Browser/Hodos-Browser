@@ -1,0 +1,306 @@
+# Initial Setup/Recovery Interface Implementation Plan
+
+## Overview
+
+**Interface Type**: Modal or Full Shell Window
+**Purpose**: Handle wallet creation and recovery for first-time users and users recovering wallets
+
+**Status**: 📋 Planning Phase
+**Last Updated**: 2026-01-27
+
+---
+
+## Interface Description
+
+This interface allows users to:
+- Create a new wallet (generate mnemonic, first address)
+- Recover an existing wallet from mnemonic
+- Recover an existing wallet from backup file
+- Complete initial wallet setup (backup confirmation, security notices)
+
+**Display Context**:
+- Modal (recommended for overlay-style presentation)
+- Full shell window (alternative for dedicated setup flow)
+
+---
+
+## Requirements
+
+### Functional Requirements
+- [ ] Detect when no wallet exists
+- [ ] Present clear create/recover choice
+- [ ] Generate secure mnemonic for new wallets
+- [ ] Display mnemonic with backup instructions
+- [ ] Validate mnemonic format for recovery
+- [ ] Handle file import for backup recovery
+- [ ] Confirm user has backed up mnemonic
+- [ ] Integrate with existing wallet creation/recovery endpoints
+
+### Non-Functional Requirements
+- [ ] Secure display of sensitive data (mnemonic)
+- [ ] Clear error messaging
+- [ ] Progress indicators for recovery operations
+- [ ] Accessible to screen readers
+- [ ] Responsive design
+
+---
+
+## Frontend Implementation
+
+### Component Structure
+
+**Location**: `frontend/src/components/WalletSetupModal.tsx` (or similar)
+
+**Type**: React Functional Component
+
+**Props**:
+```typescript
+interface WalletSetupModalProps {
+  open: boolean;
+  onClose: () => void;
+  onComplete: () => void; // Called when wallet is created/recovered
+  mode?: 'modal' | 'fullscreen'; // Display mode
+}
+```
+
+**State Management**:
+- Current step in the setup flow
+- User input (mnemonic, file selection)
+- Loading states
+- Error states
+- Confirmation states
+
+**UI Flow Steps**:
+1. Initial choice: Create New Wallet / Recover Wallet
+2. Create flow: Generate mnemonic → Display mnemonic → Backup confirmation → Complete
+3. Recover flow: Choose method → Input mnemonic/file → Recovery process → Complete
+
+### Integration Points
+
+- **Wallet Button**: Triggers this interface when no wallet exists
+- **Startup Flow**: May trigger on first launch (if implemented)
+- **Bridge Methods**: Uses `window.hodosBrowser.wallet.*` methods
+
+---
+
+## CEF-Native Implementation
+
+### Window Management
+
+**If Modal**:
+- Use existing overlay window system
+- Route: `/wallet-setup` (or similar)
+- Overlay HWND: `g_wallet_setup_overlay_hwnd` (to be added)
+
+**If Full Shell Window**:
+- Consider if needed or if modal is sufficient
+- May require separate window class registration
+
+### Message Handling
+
+**New Messages** (if needed):
+- `overlay_show_wallet_setup` - Open setup interface
+- Additional messages for file selection, validation, etc.
+
+### Process Isolation
+
+- Follow existing overlay pattern (separate render process)
+
+---
+
+## Rust Wallet Backend
+
+### Existing Endpoints (Review/Verify)
+
+- `GET /wallet/status` - Check if wallet exists
+- `POST /wallet/create` - Create new wallet
+- `POST /wallet/recover` - Recover from mnemonic
+- `POST /wallet/restore` - Restore from backup file
+
+### Required Changes
+
+- [ ] Verify endpoints return appropriate responses
+- [ ] Ensure auto-create is disabled (see Startup Flow docs)
+- [ ] Add validation for mnemonic format
+- [ ] Add progress reporting for recovery operations
+
+---
+
+## Database Considerations
+
+### Current Schema
+
+- Wallet table stores wallet data
+- Address table stores addresses
+- No specific "setup state" tracking
+
+### Potential Additions
+
+- [ ] Wallet setup completion status
+- [ ] First-run flags
+- [ ] Setup timestamps
+- [ ] Recovery metadata
+
+**Decision Needed**: Do we need to track setup state in database, or is wallet existence sufficient?
+
+---
+
+## Triggers
+
+### Primary Triggers
+
+1. **Wallet Button Click** (when no wallet exists)
+   - Location: `frontend/src/pages/MainBrowserView.tsx`
+   - Current: Opens wallet overlay directly
+   - Change: Check wallet status first, show setup if needed
+
+2. **Startup Flow** (potential)
+   - If implemented per Startup Flow docs
+   - Check wallet on startup, trigger setup if needed
+
+### Secondary Triggers
+
+- Manual trigger from settings (if needed)
+- Recovery from error states
+
+---
+
+## User Interaction Flow
+
+### Create New Wallet Flow
+
+```
+1. User clicks Wallet button
+   ↓
+2. System detects no wallet exists
+   ↓
+3. Setup interface opens (Create/Recover choice)
+   ↓
+4. User selects "Create New Wallet"
+   ↓
+5. System generates mnemonic
+   ↓
+6. Mnemonic displayed with backup instructions
+   ↓
+7. User confirms backup (checkbox/button)
+   ↓
+8. "Continue" button enabled
+   ↓
+9. User clicks Continue
+   ↓
+10. Wallet created, setup complete
+    ↓
+11. Wallet overlay opens automatically
+```
+
+### Recover Wallet Flow (Mnemonic)
+
+```
+1. User clicks Wallet button
+   ↓
+2. System detects no wallet exists
+   ↓
+3. Setup interface opens (Create/Recover choice)
+   ↓
+4. User selects "Recover Wallet"
+   ↓
+5. User chooses "From Mnemonic"
+   ↓
+6. User pastes/types mnemonic
+   ↓
+7. System validates format
+   ↓
+8. User clicks "Recover"
+   ↓
+9. Recovery process runs (with progress)
+   ↓
+10. Wallet recovered, setup complete
+    ↓
+11. Wallet overlay opens automatically
+```
+
+### Recover Wallet Flow (File)
+
+```
+[Similar to mnemonic flow, but with file selection step]
+```
+
+---
+
+## Design Considerations
+
+**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+
+Key considerations:
+- [ ] Security of mnemonic display
+- [ ] Clear instructions for users
+- [ ] Error handling and messaging
+- [ ] Loading states during recovery
+- [ ] Accessibility requirements
+
+---
+
+## Testing Requirements
+
+### Unit Tests
+- Component rendering
+- State transitions
+- Form validation
+- Error handling
+
+### Integration Tests
+- Wallet creation flow
+- Recovery flows
+- Error scenarios
+- Bridge communication
+
+### User Acceptance Tests
+- First-time user experience
+- Recovery scenarios
+- Error recovery
+- Accessibility
+
+---
+
+## Dependencies
+
+### External Dependencies
+- Existing wallet creation/recovery endpoints
+- Bridge methods for wallet operations
+- Overlay window system
+
+### Internal Dependencies
+- Wallet status checking
+- Mnemonic validation
+- File import capabilities
+
+---
+
+## Related Documentation
+
+- [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) - Startup wallet detection
+- [UI/UX Enhancement Guide](./UI_UX_ENHANCEMENT_GUIDE.md) - Frontend architecture
+- [Design Principles](./DESIGN_PRINCIPLES.md) - Design guidelines
+- [Wallet Initialization Flow](./UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow) - Detailed flow
+
+---
+
+## Open Questions
+
+1. Modal vs Full Shell Window - which is preferred?
+2. Should we track setup completion in database?
+3. What validation is needed for mnemonic format?
+4. How to handle partial recovery scenarios?
+5. Should recovery progress be cancellable?
+
+---
+
+## Implementation Notes
+
+- This interface overlaps with existing Wallet Initialization Flow documentation
+- Review existing commented-out wallet setup code in `App.tsx`
+- Consider reusing patterns from HTTP Interceptor Flow for modals
+
+---
+
+**End of Document**

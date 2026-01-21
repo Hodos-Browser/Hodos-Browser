@@ -5,7 +5,7 @@
 This document provides comprehensive documentation for AI assistants specializing in frontend UI/UX development to understand the Hodos Browser frontend architecture, ensuring new UI components integrate seamlessly with the existing codebase without breaking functionality.
 
 **Document Version:** 1.0
-**Last Updated:** 2025-01-27
+**Last Updated:** 2026-01-27
 **Target Audience:** Frontend UI/UX AI Assistants
 
 ---
@@ -1043,6 +1043,444 @@ const MyComponent: React.FC = () => {
 
 ---
 
+## Wallet Initialization Flow
+
+### Overview
+
+**⚠️ IMPLEMENTATION STATUS**: This section describes the **PLANNED** wallet initialization flow. Most of this functionality has NOT been implemented yet.
+
+**Current State**:
+- ✅ Frontend wallet check on startup is commented out (as intended)
+- ❌ Wallet button does NOT check wallet existence (opens overlay directly)
+- ❌ WalletSetupModal component does NOT exist yet
+- ❌ Wallet button click handler does NOT check wallet status
+- ✅ Rust wallet server auto-creates wallet if none exists (needs to be changed)
+
+**Planned Implementation**: The wallet initialization flow will handle checking if a wallet exists, creating new wallets, and recovering existing wallets. This flow will be **user-initiated** (via Wallet button click) and **non-blocking** (browser startup continues regardless of wallet status).
+
+**Related Documentation**: For detailed information about the browser startup sequence and wallet file checks, see [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md).
+
+### Architecture Principles (Planned)
+
+1. **Non-blocking startup**: Browser launches without wallet; wallet is optional
+2. **File-based check**: Startup checks for wallet database file existence (fast, no server required)
+3. **On-demand server**: Wallet server starts only when wallet exists at startup OR when user chooses to create/recover
+4. **User-driven creation**: Wallet creation/recovery only happens when user explicitly chooses via modal
+
+---
+
+### Flow 1: Browser Startup
+
+**⚠️ NOT YET IMPLEMENTED** - This flow needs to be implemented in C++ startup code.
+
+**Location**: C++ backend (browser process startup)
+**Detailed Documentation**: See [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md#startup-sequence)
+
+**Planned Steps** (to be implemented):
+1. Check if wallet database file exists: `%APPDATA%/HodosBrowser/wallet/wallet.db`
+2. If file exists:
+   - Validate database (check if it's not corrupted)
+   - If valid → Start wallet server (Rust Actix-web on port 3301)
+   - If invalid → Log error, continue without wallet server
+3. If file does not exist:
+   - Continue browser startup (no wallet server)
+   - Browser is fully functional without wallet
+
+**Result**:
+- Wallet server may or may not be running
+- Browser is always ready to use
+- Wallet status stored for later checks
+
+**Frontend Impact**: None (this happens in C++ before React loads)
+
+---
+
+### Flow 2: Wallet Button Click
+
+**⚠️ NOT YET IMPLEMENTED** - The wallet button currently opens the wallet overlay directly without checking if a wallet exists.
+
+**Location**: `frontend/src/pages/MainBrowserView.tsx`
+**Trigger**: User clicks Wallet button in toolbar
+
+**Current Implementation** (lines 229-246):
+```typescript
+<IconButton
+  onClick={() => {
+    window.cefMessage?.send('overlay_show_wallet', []);
+    window.hodosBrowser.overlay.toggleInput(true);
+  }}
+>
+  <AccountBalanceWalletIcon />
+</IconButton>
+```
+
+**Planned Implementation** (to be implemented):
+```typescript
+<IconButton
+  onClick={async () => {
+    try {
+      // Ensure wallet server is running (start if needed)
+      await ensureWalletServerRunning();
+
+      // Check wallet status
+      const status = await window.hodosBrowser.wallet.getStatus();
+
+      if (status.exists) {
+        // Wallet exists - open wallet overlay
+        window.cefMessage?.send('overlay_show_wallet', []);
+        window.hodosBrowser.overlay.toggleInput(true);
+      } else {
+        // Wallet doesn't exist - show setup modal
+        setWalletSetupModalOpen(true);
+      }
+    } catch (error) {
+      console.error('Failed to check wallet status:', error);
+      // Optionally show error message to user
+    }
+  }}
+>
+```
+
+**Frontend Components Involved**:
+- `MainBrowserView.tsx`: Wallet button click handler
+- `WalletSetupModal.tsx`: New modal component (to be created)
+
+---
+
+### Flow 3: Wallet Setup Modal (No Wallet Exists)
+
+**⚠️ NOT YET IMPLEMENTED** - This component needs to be created.
+
+**Location**: `frontend/src/components/WalletSetupModal.tsx` (⚠️ TO BE CREATED)
+**Trigger**: Wallet button clicked AND `wallet.getStatus()` returns `exists: false`
+
+**Modal States**:
+1. **Initial Choice**: "Create New Wallet" or "Recover Wallet"
+2. **Create Flow**: Show mnemonic → Responsibility notice → Continue button
+3. **Recover Flow**: Choose "From Mnemonic" or "From File" → Input → Recover
+
+**Component Structure**:
+```typescript
+type WalletSetupStep =
+  | 'choice'           // Initial: Create or Recover?
+  | 'create-mnemonic'  // Create: Show mnemonic + notice
+  | 'recover-choice'   // Recover: Mnemonic or File?
+  | 'recover-mnemonic' // Recover: Input mnemonic
+  | 'recover-file';    // Recover: File picker
+
+const WalletSetupModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  onComplete: () => void; // Called when wallet is created/recovered
+}> = ({ open, onClose, onComplete }) => {
+  const [step, setStep] = useState<WalletSetupStep>('choice');
+  const [mnemonic, setMnemonic] = useState<string>('');
+  const [confirmedBackup, setConfirmedBackup] = useState(false);
+  // ... other state
+}
+```
+
+---
+
+### Flow 4: Create New Wallet
+
+**Location**: `frontend/src/components/WalletSetupModal.tsx`
+**Trigger**: User clicks "Create New Wallet" in modal
+
+**Frontend Steps**:
+1. User selects "Create New Wallet"
+2. Call `window.hodosBrowser.wallet.create()` → sends `create_wallet` message
+3. Receive response with `mnemonic`, `address`, `version`
+4. Update modal to step `'create-mnemonic'`
+5. Display mnemonic (with copy button)
+6. Show responsibility notice (about securing mnemonic)
+7. Show checkbox: "I have securely backed up my mnemonic"
+8. "Continue" button disabled until checkbox checked AND user acknowledges
+9. On "Continue" click:
+   - Close modal
+   - Call `onComplete()` callback
+   - Wallet overlay can now be opened (wallet exists)
+
+**Bridge Method**: `frontend/src/bridge/initWindowBridge.ts`
+```typescript
+window.hodosBrowser.wallet.create = () => {
+  return new Promise((resolve, reject) => {
+    window.onCreateWalletResponse = (data: any) => {
+      resolve(data);
+      delete window.onCreateWalletResponse;
+      delete window.onCreateWalletError;
+    };
+    window.onCreateWalletError = (error: string) => {
+      reject(new Error(error));
+      delete window.onCreateWalletResponse;
+      delete window.onCreateWalletError;
+    };
+    window.cefMessage?.send('create_wallet', []);
+  });
+};
+```
+
+**C++ Handler**: `cef-native/src/handlers/simple_handler.cpp` (line 878)
+- Receives `"create_wallet"` message
+- Calls `WalletService::createWallet()`
+- Returns response via `create_wallet_response` message
+
+**Rust Endpoint**: `POST /wallet/create` (via `WalletService`)
+- Creates wallet in database
+- Generates mnemonic
+- Creates first address
+- Returns: `{ success: true, mnemonic: "...", address: "...", version: "..." }`
+
+---
+
+### Flow 5: Recover from Mnemonic
+
+**Location**: `frontend/src/components/WalletSetupModal.tsx`
+**Trigger**: User selects "Recover Wallet" → "From Mnemonic"
+
+**Frontend Steps**:
+1. User selects "Recover Wallet"
+2. Modal updates to step `'recover-choice'`
+3. User clicks "From Mnemonic"
+4. Modal updates to step `'recover-mnemonic'`
+5. Show textarea for mnemonic input (12-24 words)
+6. User pastes/types mnemonic
+7. Validate mnemonic format (basic check)
+8. User clicks "Recover" button
+9. Call `window.hodosBrowser.wallet.recoverFromMnemonic(mnemonic)`
+10. Show loading state
+11. On success:
+    - Close modal
+    - Call `onComplete()` callback
+    - Wallet now exists (can open wallet overlay)
+
+**New Bridge Method** (⚠️ TO BE ADDED):
+```typescript
+// frontend/src/bridge/initWindowBridge.ts
+window.hodosBrowser.wallet.recoverFromMnemonic = (mnemonic: string) => {
+  return new Promise((resolve, reject) => {
+    window.onRecoverWalletResponse = (data: any) => {
+      resolve(data);
+      delete window.onRecoverWalletResponse;
+      delete window.onRecoverWalletError;
+    };
+    window.onRecoverWalletError = (error: string) => {
+      reject(new Error(error));
+      delete window.onRecoverWalletResponse;
+      delete window.onRecoverWalletError;
+    };
+    window.cefMessage?.send('wallet_recover', [JSON.stringify({ mnemonic, confirm: true })]);
+  });
+};
+```
+
+**C++ Handler** (⚠️ TO BE ADDED): `cef-native/src/handlers/simple_handler.cpp`
+- Receives `"wallet_recover"` message with JSON body
+- Calls `WalletService::recoverWallet(mnemonic)`
+- Returns response via `wallet_recover_response` message
+
+**Rust Endpoint**: `POST /wallet/recover` (already exists in `rust-wallet/src/handlers.rs`)
+- Requires `{ mnemonic: "...", confirm: true }`
+- Recovers wallet from mnemonic
+- Scans blockchain for addresses/UTXOs
+- Returns: `{ success: true, addresses_found: N, utxos_found: N, total_balance: N }`
+
+---
+
+### Flow 6: Recover from File
+
+**Location**: `frontend/src/components/WalletSetupModal.tsx`
+**Trigger**: User selects "Recover Wallet" → "From File"
+
+**Frontend Steps**:
+1. User selects "Recover Wallet"
+2. Modal updates to step `'recover-choice'`
+3. User clicks "From File"
+4. Modal updates to step `'recover-file'`
+5. Show file input (or trigger native file picker)
+6. User selects backup file (`wallet.db` or backup file)
+7. Read file path (or upload file data to backend)
+8. User clicks "Restore" button
+9. Call `window.hodosBrowser.wallet.restoreFromFile(filePath)`
+10. Show loading state
+11. On success:
+    - Close modal
+    - Call `onComplete()` callback
+    - Wallet now exists (can open wallet overlay)
+
+**New Bridge Method** (⚠️ TO BE ADDED):
+```typescript
+// frontend/src/bridge/initWindowBridge.ts
+window.hodosBrowser.wallet.restoreFromFile = (filePath: string) => {
+  return new Promise((resolve, reject) => {
+    window.onRestoreWalletResponse = (data: any) => {
+      resolve(data);
+      delete window.onRestoreWalletResponse;
+      delete window.onRestoreWalletError;
+    };
+    window.onRestoreWalletError = (error: string) => {
+      reject(new Error(error));
+      delete window.onRestoreWalletResponse;
+      delete window.onRestoreWalletError;
+    };
+    window.cefMessage?.send('wallet_restore', [JSON.stringify({ backup_path: filePath, confirm: true })]);
+  });
+};
+```
+
+**C++ Handler** (⚠️ TO BE ADDED): `cef-native/src/handlers/simple_handler.cpp`
+- Receives `"wallet_restore"` message with JSON body
+- Calls `WalletService::restoreWallet(backupPath)`
+- Returns response via `wallet_restore_response` message
+
+**Rust Endpoint**: `POST /wallet/restore` (already exists in `rust-wallet/src/handlers.rs`)
+- Requires `{ backup_path: "...", confirm: true }`
+- Restores database from backup file
+- Returns: `{ success: true, message: "..." }`
+
+---
+
+### Modal Component Structure
+
+**⚠️ TO BE CREATED**
+
+**New File**: `frontend/src/components/WalletSetupModal.tsx` (⚠️ TO BE CREATED)
+
+**Props**:
+```typescript
+interface WalletSetupModalProps {
+  open: boolean;
+  onClose: () => void;
+  onComplete: () => void; // Called when wallet created/recovered successfully
+}
+```
+
+**State Management**:
+```typescript
+const [step, setStep] = useState<WalletSetupStep>('choice');
+const [mnemonic, setMnemonic] = useState<string>('');
+const [inputMnemonic, setInputMnemonic] = useState<string>('');
+const [selectedFile, setSelectedFile] = useState<File | null>(null);
+const [confirmedBackup, setConfirmedBackup] = useState(false);
+const [loading, setLoading] = useState(false);
+const [error, setError] = useState<string | null>(null);
+```
+
+**Modal Steps Rendering**:
+- `'choice'`: Two buttons (Create / Recover)
+- `'create-mnemonic'`: Mnemonic display + notice + checkbox + Continue button
+- `'recover-choice'`: Two buttons (From Mnemonic / From File)
+- `'recover-mnemonic'`: Textarea + Recover button
+- `'recover-file'`: File input + Restore button
+
+**Integration with MainBrowserView**:
+```typescript
+// frontend/src/pages/MainBrowserView.tsx
+const [walletSetupModalOpen, setWalletSetupModalOpen] = useState(false);
+
+// In wallet button click handler:
+if (!status.exists) {
+  setWalletSetupModalOpen(true);
+}
+
+// Render modal:
+<WalletSetupModal
+  open={walletSetupModalOpen}
+  onClose={() => setWalletSetupModalOpen(false)}
+  onComplete={() => {
+    setWalletSetupModalOpen(false);
+    // Now open wallet overlay
+    window.cefMessage?.send('overlay_show_wallet', []);
+  }}
+/>
+```
+
+---
+
+### State Flow Diagram
+
+```
+Browser Startup
+    ↓
+Check wallet.db exists?
+    ├─ YES → Validate DB → Start wallet server
+    └─ NO  → Continue without wallet server
+    ↓
+Browser Ready (wallet server may or may not be running)
+
+User Clicks Wallet Button
+    ↓
+Check wallet.getStatus()
+    ├─ exists: true → Open Wallet Overlay
+    └─ exists: false → Show WalletSetupModal
+        ↓
+        Modal Step: 'choice'
+        ├─ "Create New" → Modal Step: 'create-mnemonic'
+        │   ├─ Call wallet.create()
+        │   ├─ Show mnemonic + notice
+        │   ├─ User checks "I backed up"
+        │   └─ Click "Continue" → onComplete() → Open Wallet Overlay
+        │
+        └─ "Recover" → Modal Step: 'recover-choice'
+            ├─ "From Mnemonic" → Modal Step: 'recover-mnemonic'
+            │   ├─ User inputs mnemonic
+            │   ├─ Call wallet.recoverFromMnemonic()
+            │   └─ Success → onComplete() → Open Wallet Overlay
+            │
+            └─ "From File" → Modal Step: 'recover-file'
+                ├─ User selects file
+                ├─ Call wallet.restoreFromFile()
+                └─ Success → onComplete() → Open Wallet Overlay
+```
+
+---
+
+### API Methods Required
+
+**Existing**:
+- `window.hodosBrowser.wallet.getStatus()` → Returns `{ exists: boolean }`
+- `window.hodosBrowser.wallet.create()` → Creates wallet, returns mnemonic
+
+**To Be Added**:
+- `window.hodosBrowser.wallet.recoverFromMnemonic(mnemonic: string)` → Recovers from mnemonic
+- `window.hodosBrowser.wallet.restoreFromFile(filePath: string)` → Restores from backup file
+
+**Backend Messages** (C++):
+- `'wallet_status_check'` (existing)
+- `'create_wallet'` (existing)
+- `'wallet_recover'` (to be added)
+- `'wallet_restore'` (to be added)
+
+---
+
+### Important Notes
+
+1. **Server Startup**: ⚠️ Wallet server startup on browser launch is NOT YET IMPLEMENTED. Currently, the wallet server must be started manually or runs separately. Planned: Wallet server can be started on-demand when user chooses to create/recover (even if it wasn't running at browser startup)
+
+2. **Auto-Creation**: ⚠️ CURRENTLY, Rust wallet auto-creates wallet on server startup (lines 106-120 in `rust-wallet/src/main.rs`). This needs to be disabled/conditional so that:
+   - Server can start without creating wallet
+   - Wallet only created when `/wallet/create` endpoint is explicitly called
+
+3. **Error Handling**: Modal should handle:
+   - Invalid mnemonic format
+   - Invalid backup file
+   - Network/server errors
+   - Wallet recovery failures
+
+4. **State Persistence**: After successful create/recover:
+   - Wallet server is running
+   - Wallet exists in database
+   - `wallet.getStatus()` will return `exists: true`
+   - User can immediately use wallet features
+
+5. **Modal UX**:
+   - Show clear loading states during async operations
+   - Display helpful error messages
+   - Allow user to go back to previous steps
+   - Prevent closing modal during critical operations (mnemonic backup)
+
+---
+
 ## Next Steps for UI/UX Enhancement
 
 ### Questions to Answer
@@ -1081,6 +1519,14 @@ const MyComponent: React.FC = () => {
 
 ---
 
+## Related Documentation
+
+- **[Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md)**: Complete browser startup sequence and wallet file checks
+- **[HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md)**: HTTP request interception and domain whitelisting
+- **[UX Design Considerations](./UX_DESIGN_CONSIDERATIONS.md)**: User experience design principles and patterns
+
+---
+
 ## Summary
 
 This guide provides a comprehensive overview of the Hodos Browser frontend architecture. Key takeaways:
@@ -1091,6 +1537,7 @@ This guide provides a comprehensive overview of the Hodos Browser frontend archi
 4. **Type safety**: Full TypeScript coverage with strict types
 5. **Material-UI**: Primary component library with `sx` prop styling
 6. **Critical integration points**: Must preserve window APIs, callbacks, routes, and CSS constraints
+7. **Non-blocking startup**: Browser launches without wallet; wallet is optional and user-initiated
 
 When implementing UI/UX enhancements:
 - ✅ Follow existing patterns

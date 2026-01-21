@@ -2,7 +2,9 @@
 
 ## Abstract
 
-A decentralized, confederated payment addressing system that enables human-readable identifiers (`alice@paymail`) without domain dependencies. The system uses IPv6-native overlay networks, BSV blockchain for registration, and established BRC standards for interoperability. **Confederation enables vendor-neutrality** - multiple independent operators run overlay service nodes, ensuring no single vendor controls the system. Payments authenticate operations through micropayments, eliminating API keys and vendor lock-in. **The system works with both IPv4 and IPv6 wallets** - IPv4-only wallets use overlay service nodes as intermediaries, while IPv6-capable wallets can connect directly when both parties have IPv6 connectivity.
+A decentralized, confederated payment addressing system that enables human-readable identifiers (`alice@paymail`) **without domain dependencies**. The system uses BitcoinSV blockchain for registration and overlay networks for resolution, eliminating the need for DNS and domain registration. **Confederation enables vendor-neutrality** - multiple independent operators run overlay service nodes, ensuring no single vendor controls the system. Payments authenticate operations through micropayments, eliminating API keys and vendor lock-in.
+
+**Core Innovation**: Protocol identifiers (`@paymail`) replace domain names, and blockchain-based overlay resolution replaces DNS lookup. This removes centralization points (registrars, ICANN, DNS) while maintaining human-readable addresses.
 
 ---
 
@@ -12,10 +14,10 @@ A decentralized, confederated payment addressing system that enables human-reada
 - **No domains required** - Protocol identifiers replace DNS
 - **No API keys** - Micropayment-based authentication
 - **No vendor lock-in** - Any wallet can implement the protocol
-- **True peer-to-peer** - Direct IPv6 connections when available
+- **Blockchain-based** - BitcoinSV provides permanent, censorship-resistant registry
 - **Standards-based** - Built on established BRC protocols
 
-**Example**: `alice@paymail` - The `@paymail` suffix signals overlay resolution, not DNS lookup.
+**Example**: `alice@paymail` - The `@paymail` suffix signals overlay resolution, not DNS lookup. No domain registration needed.
 
 ---
 
@@ -23,47 +25,43 @@ A decentralized, confederated payment addressing system that enables human-reada
 
 The system consists of three layers:
 
-1. **Wallet Layer** - Recognizes paymail addresses and queries overlay services (works with IPv4 or IPv6)
+1. **Wallet Layer** - Recognizes paymail addresses and queries overlay services
 2. **Overlay Network** - BRC-22 Topic Managers validate transactions, BRC-24 Lookup Services index aliases
 3. **Blockchain** - Permanent, censorship-resistant registry of paymail registrations
 
-Wallets query BRC-24 Lookup Services to resolve aliases to public keys and IPv6 addresses. IPv4-only wallets use overlay service nodes as intermediaries, while direct peer-to-peer connections occur when both parties have IPv6 connectivity. BRC-33 message relay handles offline delivery.
+Wallets query BRC-24 Lookup Services to resolve aliases to public keys. The overlay network uses blockchain as the source of truth, eliminating DNS dependencies. BRC-33 message relay handles offline delivery.
 
 ---
 
-## IPv6 Connectivity Model
+## How BitcoinSV Removes Domain Dependency
 
-### Why IPv6 Addresses
+### Traditional Paymail (Domain-Based)
 
-The system uses IPv6 addresses as destination identifiers rather than domain names. This aligns with Satoshi's IP-to-IP transaction vision while maintaining practical compatibility. Benefits include:
-- **Abundant addresses** - Every device can have a unique global address
-- **No NAT traversal** - Direct peer-to-peer connections when both parties have IPv6 (note: some ISPs use Carrier-Grade NAT even with IPv6; true P2P depends on ISP configuration)
-- **Free on cloud** - No additional cost for IPv6 addresses
-- **True P2P potential** - Direct connections eliminate intermediaries when available
+**Traditional approach**: `alice@example.com`
+- Requires domain registration (`example.com`)
+- Uses DNS to resolve domain to server IP address
+- Centralized: DNS controlled by ICANN/registrars
+- Censorship risk: Domains can be seized
 
-### IPv4/IPv6 Compatibility
+### Vendor-Neutral Paymail (Blockchain-Based)
 
-**Important**: IPv4 and IPv6 are separate protocols and cannot directly communicate. However, wallets do not require IPv6 connectivity to use the system, and **no NAT is needed** for wallet-to-overlay-node communication.
+**New approach**: `alice@paymail`
+- **No domain registration** - `@paymail` is a protocol identifier, not a domain
+- **No DNS lookup** - Overlay network resolves aliases using blockchain data
+- **Decentralized** - Blockchain provides permanent, censorship-resistant registry
+- **No centralization** - No ICANN, no registrars, no DNS dependency
 
-**How it works**:
-- **IPv4-only wallets**: Send HTTP requests to overlay service nodes using IPv4 addresses
-- **Overlay service nodes**: Have dual-stack connectivity (both IPv4 and IPv6), allowing them to:
-  - Receive IPv4 requests from wallets (no NAT needed - standard HTTP)
-  - Make IPv6 requests to recipient IPv6 addresses on behalf of wallets
-  - Handle all IPv6 communication as intermediaries
-- **Direct IP-to-IP**: Only occurs when both parties have IPv6 and are online
+### The Key Difference
 
-**Communication Flow**:
-1. IPv4-only wallet → IPv4 request → Overlay node (dual-stack) → IPv6 request → Recipient IPv6 address
-2. Response flows back: Recipient → Overlay node → Wallet (all via standard HTTP, no NAT)
+| Aspect | Traditional Paymail | Vendor-Neutral Paymail |
+|--------|--------------------|--------------------|
+| Address format | `alice@domain.com` | `alice@paymail` |
+| Resolution | DNS lookup | Overlay network lookup |
+| Registry | Domain registrar | BitcoinSV blockchain |
+| Dependency | DNS, ICANN, registrars | Blockchain only |
+| Censorship | Domain seizure possible | Very difficult |
 
-**Practical implications**:
-- **Sending wallet (IPv4-only)**: Sends standard HTTP requests to overlay nodes via IPv4, receives responses via IPv4. No NAT required.
-- **Receiving wallet (IPv4-only)**: Receives payments via BRC-33 relay, which overlay nodes handle
-- **Overlay nodes**: Must have dual-stack (IPv4 + IPv6) to serve both IPv4 wallets and enable IPv6 P2P
-- **True IP-to-IP**: Only occurs when both parties have IPv6 connectivity and are online
-
-**No NAT required**: Wallets communicate with overlay nodes using standard HTTP over IPv4 or IPv6. The overlay nodes handle protocol translation transparently. This design optimizes for IPv6 while maintaining full functionality for IPv4-only wallets.
+**Why this matters**: By using blockchain as the registry instead of DNS, we eliminate all centralization points. The `@paymail` suffix is just a signal to wallets: "resolve via overlay, not DNS."
 
 ---
 
@@ -77,7 +75,7 @@ Users register paymail aliases by creating on-chain transactions using PushDrop 
 - Action: `"register"`
 - Alias: The desired identifier (e.g., `"alice"`)
 - Public key: 33-byte compressed secp256k1 key (derived via BRC-42/43)
-- Optional IPv6 address: For direct P2P connectivity
+- Optional server address: For direct connectivity
 - Optional relay preferences: Fallback nodes for offline delivery
 
 PushDrop allows structured data to be embedded in spendable outputs without affecting spending rules. Unlike OP_RETURN (which creates unspendable outputs), PushDrop tokens can be transferred, traded, or revoked by spending them - giving users full control over their registration via their private key.
@@ -107,7 +105,7 @@ Topic Managers reject invalid or duplicate registrations. Once a registration is
 
 ### Lookup Service Indexing
 
-BRC-24 Lookup Services index admitted transactions by alias for fast resolution. Services synchronize with peer nodes using BRC-88 overlay synchronization protocols. The lookup service maintains a queryable index of all valid paymail registrations.
+BRC-24 Lookup Services index admitted transactions by alias for fast resolution. Services synchronize with peer nodes using BRC-88 overlay synchronization protocols. The lookup service maintains a queryable index of all valid paymail registrations, using blockchain as the authoritative source.
 
 ---
 
@@ -126,36 +124,36 @@ Wallets recognize standardized suffixes that signal overlay resolution:
 
 1. Wallet parses address into alias and suffix
 2. Wallet queries BRC-24 Lookup Service via overlay service nodes
-3. Lookup service returns public key and optional IPv6 address
-4. Wallet connects directly via IPv6 (if both parties have IPv6) or uses BRC-33 relay
+3. Lookup service returns public key and optional server address
+4. Wallet uses public key to create payment or connects via BRC-33 relay if recipient is offline
 
-### Overlay Service Nodes
+### Overlay Service Node Discovery
 
-Wallets require initial overlay service nodes (Topic Managers and Lookup Services) to begin querying. These are standard BRC-22/BRC-24 overlay nodes.
+Wallets need to discover overlay service nodes (Topic Managers and Lookup Services) to begin querying. These are standard BRC-22/BRC-24 overlay nodes.
 
 **Node Discovery Approaches**:
 
-**Hardcoded List**: Simple fallback list of overlay service nodes embedded in wallet software. Requires wallet updates to add nodes.
+**Hardcoded List**: Simple fallback list of overlay service nodes embedded in wallet software. Each node entry includes its server address (IP address or domain name). Requires wallet updates to add nodes.
 
-**On-Chain Registry**: Overlay service nodes advertised in well-known blockchain transactions via BRC-23 (CHIP). Fully decentralized and self-updating.
+**On-Chain Registry (BRC-23 CHIP)**: Overlay service nodes advertise themselves in blockchain transactions using BRC-23 (Confederacy Host Interconnect Protocol). Nodes create CHIP tokens that contain their service addresses, allowing wallets to discover available Topic Managers and Lookup Services dynamically. This is fully decentralized and self-updating.
 
-**Hybrid**: Hardcoded fallback with periodic on-chain updates. Provides resilience with graceful degradation.
+**Hybrid**: Hardcoded fallback with periodic on-chain updates. Wallets start with hardcoded nodes, then query blockchain for updated CHIP advertisements. Provides resilience with graceful degradation.
 
-**Note on Trust**: Overlay service nodes are standard overlay infrastructure. The low entry cost (~$50/month for VPS) does not provide significant costly signaling. Trust derives from operational transparency, on-chain node advertisements, and the ability for users to choose among multiple service providers. The decentralized nature of the overlay network reduces reliance on any single node operator.
+**How CHIP Works**: Nodes create on-chain transactions containing their service information (IP addresses, ports, capabilities). Wallets scan the blockchain for CHIP tokens to discover available overlay nodes. This eliminates the need for centralized node directories while maintaining discoverability.
+
+**Note on Trust**: Overlay service nodes are standard overlay infrastructure. The low entry cost (~$50/month for VPS) does not provide significant costly signaling. Trust derives from operational transparency, on-chain node advertisements via CHIP, and the ability for users to choose among multiple service providers. The decentralized nature of the overlay network reduces reliance on any single node operator.
 
 ---
 
 ## Payment Delivery
 
-### Direct Peer-to-Peer
+### Payment Flow
 
-When both parties have IPv6 connectivity and are online, wallets can connect directly without intermediaries. This enables true IP-to-IP transactions as envisioned by Satoshi. The payment flow follows standard paymail protocols (BRC-28) but uses direct IPv6 connections instead of HTTP servers.
-
-**Note**: Direct IP-to-IP requires both parties to have IPv6 connectivity. Wallets without IPv6 use overlay service nodes as intermediaries, which still provides the benefit of IPv6 address-based routing without requiring IPv6 from the wallet itself.
+Wallets follow standard paymail protocols (BRC-28) to request payment destinations and deliver transactions. The payment flow works through overlay service nodes, which handle routing and delivery.
 
 ### BRC-33 Message Relay
 
-When recipients are offline or lack IPv6 connectivity, senders use BRC-33 PeerServ message relay. The relay stores transactions until recipients poll for messages. This provides store-and-forward capability without custom relay protocols.
+When recipients are offline, senders use BRC-33 PeerServ message relay. The relay stores transactions until recipients poll for messages. This provides store-and-forward capability without custom relay protocols.
 
 ### Transaction Format
 
@@ -198,7 +196,6 @@ BRC-23 (CHIP) enables node discovery through on-chain advertisements. Nodes adve
 | Lookup | 1 | Requesting wallet |
 | Payment destination | 5 | Sender wallet |
 | Relay message | 10 | Sender wallet |
-| Direct P2P | 0 | Free |
 
 ### Payment Validation
 
@@ -224,7 +221,7 @@ Topic Manager validation enforces first-come-first-served registration. Registra
 
 ### Spam Prevention
 
-Micropayments required for every operation. Rate limiting per IPv6 address. Higher fees for suspicious patterns. Double-spend protection through immediate transaction broadcasting and TXID tracking.
+Micropayments required for every operation. Rate limiting per IP address. Higher fees for suspicious patterns. Double-spend protection through immediate transaction broadcasting and TXID tracking.
 
 ---
 
@@ -267,17 +264,17 @@ Micropayments required for every operation. Rate limiting per IPv6 address. High
 
 ---
 
-## Comparison: Traditional vs IPv6-Native Paymail
+## Comparison: Traditional vs Vendor-Neutral Paymail
 
-| Aspect | Traditional Paymail | IPv6-Native Paymail |
+| Aspect | Traditional Paymail | Vendor-Neutral Paymail |
 |--------|--------------------|--------------------|
 | Identity format | `alice@domain.com` | `alice@paymail` |
 | Resolution | DNS lookup | Overlay lookup |
-| Dependency | Registrars, ICANN | Blockchain only |
+| Registry | Domain registrar | BitcoinSV blockchain |
+| Dependency | DNS, ICANN, registrars | Blockchain only |
 | Censorship | Domain seizure possible | Very difficult |
 | Cost (operator) | $119-179/year | $60/year |
 | Cost (user) | Vendor-dependent | ~$0.01/year |
-| Direct P2P | No (always via server) | Yes (when both online) |
 | Offline support | Always online server | BRC-33 relay fallback |
 | BSV-native | No | Yes |
 
@@ -289,9 +286,9 @@ Micropayments required for every operation. Rate limiting per IPv6 address. High
 
 DNS requires domain registration, creating centralization points and censorship risks. Overlay networks use blockchain as the source of truth, eliminating registrar dependencies. Protocol identifiers (`@paymail`) signal resolution method without requiring domain ownership.
 
-### Why IPv6 Addresses
+### Why Blockchain Registry
 
-The system uses IPv6 addresses as destination identifiers to enable direct peer-to-peer connections when both parties have IPv6 connectivity. This aligns with Satoshi's IP-to-IP transaction vision. Wallets themselves do not require IPv6 - they can send to IPv6 addresses via overlay service nodes. Direct IP-to-IP connections occur only when both parties have IPv6 and are online, providing optimal performance while maintaining full functionality for IPv4-only wallets through relay services.
+BitcoinSV blockchain provides a permanent, censorship-resistant registry. Once a registration is mined, it cannot be altered or removed by any central authority. The blockchain's ordering resolves race conditions and provides cryptographic proof of ownership.
 
 ### Why Micropayments
 
@@ -300,58 +297,6 @@ BSV's low transaction fees make micropayment-funded services viable. Payment-as-
 ### Why BRC Standards
 
 Leveraging existing BRC standards ensures interoperability and reduces implementation complexity. Standards provide proven patterns for overlay networks, message relay, and key management. Vendor-neutral standards prevent lock-in.
-
----
-
-## Open Questions for Peer Review
-
-The following topics would benefit from community input:
-
-### Alias Expiration
-
-**Current proposal**: Registrations last forever. Abandoned aliases remain claimed indefinitely.
-
-**Question**: Should registrations expire if not renewed? This prevents alias hoarding but adds complexity. Alternatively, the registration fee could be set high enough to discourage mass squatting while keeping the system simple.
-
-*Seeking opinions on expiration policy.*
-
-### Trademark and Impersonation Disputes
-
-**Current proposal**: First-come-first-served with no dispute mechanism.
-
-**Question**: How should trademark conflicts be handled? This is a legal question as much as a technical one. Options include:
-- Pure first-come-first-served (simple, but invites squatting)
-- Dispute resolution process (complex, who decides?)
-- Higher fees for "premium" short aliases (economic deterrent)
-- Accept that this is a social/legal problem, not a technical one
-
-*Seeking opinions on dispute handling - or whether it should be explicitly out of scope.*
-
-### Suffix Standardization
-
-**Current proposal**: Wallets recognize `@paymail`, `@bitcoin`, and `@bsv` as protocol identifiers.
-
-**Question**: Should there be a single canonical suffix, or multiple? If multiple, are they aliases for the same namespace (so `alice@paymail` = `alice@bitcoin`) or separate namespaces?
-
-The suffix must signal to wallets: "This is not a DNS domain - resolve via overlay network." Standardization ensures interoperability.
-
-*Seeking opinions on preferred suffix(es) and whether they should be aliased or distinct.*
-
-### Multiple Registrations Per User
-
-**Current proposal**: Users can register multiple aliases. Each is an independent on-chain token.
-
-**Implication**: Early adopters may claim common names speculatively. This mirrors domain name speculation - some will profit, some will lose money on names that never gain value.
-
-*Note: The authors lost money on MoneyButton paymails that became worthless when the service shut down. This illustrates the risk of identity systems dependent on single vendors - and why vendor-neutral, on-chain registration matters.*
-
-### Revocation Mechanism
-
-**Current proposal**: Users revoke registrations by spending the PushDrop token. Spending the token removes it from the UTXO set, effectively "deleting" the registration.
-
-**Question**: Should spent aliases become available for re-registration, or remain permanently claimed? Allowing re-registration could enable "alias recycling" but might cause confusion if someone else claims a previously-used identity.
-
-*Seeking opinions on alias lifecycle after revocation.*
 
 ---
 
@@ -378,11 +323,9 @@ The suffix must signal to wallets: "This is not a DNS domain - resolve via overl
 
 ### General References
 - [SPV Wallet (BSV Association)](https://github.com/bitcoin-sv/spv-wallet)
-- [IPv6 and Bitcoin - CoinGeek](https://coingeek.com/ipv6-and-bitcoin-were-made-for-each-other-while-btc-misses-out/)
-- [Satoshi's P2P Vision - BSV Blockchain](https://bsvblockchain.org/realising-finally-satoshi-peer-to-peer-vision-for-bitcoin/)
-- [BSV Overlay Networks](https://docs.bsvblockchain.org/network-topology/overlay-networks)
+- [BSV Overlay Networks](https://docs.bsvblockchain.org/network-topology/overlay-services)
 
 ---
 
 **Document Status**: Architecture Proposal for Peer Review
-**Last Updated**: January 2025
+**Last Updated**: January 2026

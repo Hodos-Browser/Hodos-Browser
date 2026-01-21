@@ -5,7 +5,7 @@
 This document outlines how the HTTP interceptor system works, including domain whitelisting checks, BRC-100 authentication flows, and user approval modals. This serves as a reference implementation for adding similar interceptor-based flows that require database checks and frontend user notifications/prompts.
 
 **Document Version:** 1.0
-**Last Updated:** 2025-01-27
+**Last Updated:** 2026-01-27
 **Target Audience:** Developers implementing new HTTP interceptor-based flows
 
 ---
@@ -437,6 +437,17 @@ if (!domainVerifier.isDomainWhitelisted(requestDomain_)) {
 
 ## Wallet Existence Check (Commented Out - Reference)
 
+**⚠️ IMPLEMENTATION STATUS**:
+
+**Current State**:
+- ✅ This wallet check code is **commented out** (as intended)
+- ❌ The new wallet check on Wallet button click is **NOT YET IMPLEMENTED**
+- ❌ WalletSetupModal component does **NOT YET EXIST**
+
+**Planned Implementation**: The wallet initialization will move wallet checks to user-initiated actions (Wallet button click) rather than automatic startup checks.
+
+**Note**: For the planned wallet initialization flow, see [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) and [Wallet Initialization Flow](./UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow).
+
 This code was previously used to check wallet status on startup and prompt users to create/backup their wallet. It's currently **commented out** but serves as a reference for similar startup checks.
 
 ### Location
@@ -532,6 +543,14 @@ This code demonstrates a **startup check pattern**:
 - **Startup checks**: Wallet existence, database initialization, first-run setup
 - **Proactive prompts**: Backup reminders, security warnings, update notifications
 - **Frontend-initiated**: Not triggered by HTTP requests, but by app lifecycle
+
+**⚠️ IMPLEMENTATION STATUS**:
+
+**Current State**:
+- ❌ Wallet checks on Wallet button click are **NOT YET IMPLEMENTED**
+- ✅ Frontend startup check is commented out (as intended)
+
+**Planned Implementation**: The wallet initialization flow will NOT use this startup pattern. Instead, wallet checks will happen when the user clicks the Wallet button. See [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) for the planned implementation.
 
 ### Differences from HTTP Interceptor Flow
 

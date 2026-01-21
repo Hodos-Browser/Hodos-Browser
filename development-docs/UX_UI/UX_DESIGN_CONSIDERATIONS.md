@@ -2,6 +2,8 @@
 
 This document outlines user experience design considerations for HodosBrowser wallet interactions. These designs prioritize user understanding, security, and informed consent.
 
+**Related Documentation**: For foundational design principles, philosophy, and interaction rules, see [Design Principles & Philosophy](./DESIGN_PRINCIPLES.md).
+
 ---
 
 ## Table of Contents
@@ -40,6 +42,16 @@ Wallet creation is the user's first interaction with the system. It must be:
 - User must confirm they've backed up before proceeding
 - Clear warnings about mnemonic loss = fund loss
 
+### Design Principles Applied
+
+**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+
+- **Human-Readable**: Display mnemonic clearly, use simple language
+- **Immediate Feedback**: Show clear success/error states after wallet creation
+- **No Ambiguity**: Clear messaging about what happens next
+- **Progressive Disclosure**: Advanced details (BIP-39 path, etc.) available but hidden
+- **Non-Intrusive**: Don't interrupt browsing unless critical
+
 ---
 
 ## 2. Wallet Recovery
@@ -63,6 +75,15 @@ Recovery flows must balance security with usability. Users in recovery mode are 
 - Rate limiting on recovery attempts
 - Clear indication of what data is being restored
 - Warning if recovering into an existing wallet (overwrite risk)
+
+### Design Principles Applied
+
+**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+
+- **Human-Readable**: Simple recovery language, avoid technical terms
+- **Immediate Feedback**: Show progress during recovery ("Scanning addresses...", "Found X addresses...")
+- **Error Handling**: Every error must explain what happened and what user can do next
+- **Fast Escape Hatches**: Clear cancel/back options throughout recovery flow
 
 ---
 
@@ -132,10 +153,15 @@ When applications request access to the user's master identity key (privileged a
 
 ### Design Principles
 
+**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+
 1. **Default to Privacy**: Non-privileged (app-scoped) identity should be the default
 2. **Clear Trade-offs**: User must understand what they're giving up and gaining
 3. **Reversibility**: Make it clear this is a per-request decision, not permanent
 4. **Remember Choice**: Option to "Always allow for this app" with easy revocation
+5. **Security Without Friction**: Rare, meaningful prompts; never silently approve sensitive actions
+6. **Trust and Transparency**: Always show what site is requesting, what it wants, what it can do
+7. **Non-Annoying Permission Model**: Escalate only for certificates/identifiers (PII) and payments
 
 ### Implementation Status
 
@@ -175,10 +201,16 @@ When applications request access to the user's master identity key (privileged a
 
 **Design Considerations**:
 
+**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+
 - Notifications must be non-dismissible for high-risk operations
 - Clear visual hierarchy: routine operations vs. dangerous ones
 - Audio/haptic feedback for critical alerts
 - Notification history for audit purposes
+- **Security Without Friction**: Rare, meaningful prompts; interrupt only for sensitive actions
+- **No Ambiguity**: Clear messaging about what action is requested and what will happen
+- **Immediate Feedback**: Show notification state clearly (pending, approved, denied)
+- **Consistency**: Same notification format across all notification types
 
 ---
 
