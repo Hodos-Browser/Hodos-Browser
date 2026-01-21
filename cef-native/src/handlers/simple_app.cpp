@@ -576,7 +576,7 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance) {
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         wallet_handler,
-        "http://127.0.0.1:5137/wallet",
+        "http://127.0.0.1:5137/wallet-panel",
         settings,
         nullptr,
         CefRequestContext::GetGlobalContext()

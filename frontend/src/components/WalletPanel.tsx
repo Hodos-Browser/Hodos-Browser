@@ -1,211 +1,303 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Button, IconButton } from '@mui/material';
+import { useState } from 'react';
+import { Button } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
-import SendIcon from '@mui/icons-material/Send';
-import CallReceivedIcon from '@mui/icons-material/CallReceived';
-import RefreshIcon from '@mui/icons-material/Refresh';
-import { useWallet } from '../hooks/useWallet';
+import CloseIcon from '@mui/icons-material/Close';
+import { TransactionForm } from './TransactionForm';
+import { useBalance } from '../hooks/useBalance';
+import { useAddress } from '../hooks/useAddress';
+import type { TransactionResponse } from '../types/transaction';
+import './TransactionComponents.css';
+import './WalletPanel.css';
 
-export default function WalletPanel() {
-  const [balance, setBalance] = useState<number>(0);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const wallet = useWallet();
+interface WalletPanelProps {
+  onClose?: () => void;
+}
 
-  // Fetch balance function that can be called manually or automatically
-  const fetchBalance = useCallback(async () => {
-    try {
-      const balanceData = await wallet.getBalance();
-      if (balanceData && typeof balanceData.balance === 'number') {
-        setBalance(balanceData.balance);
-      }
-      setLoading(false);
-      setRefreshing(false);
-    } catch (error) {
-      console.error('Failed to fetch balance:', error);
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [wallet]);
+export default function WalletPanel({ onClose }: WalletPanelProps) {
+  const { balance, usdValue, isLoading: balanceLoading, refreshBalance } = useBalance();
+  const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
-  // Fetch balance on component mount and refresh every 30 seconds
-  useEffect(() => {
-    // Fetch immediately
-    fetchBalance();
+  const [showSendForm, setShowSendForm] = useState(false);
+  const [transactionResult, setTransactionResult] = useState<TransactionResponse | null>(null);
+  const [showReceiveAddress, setShowReceiveAddress] = useState(false);
+  const [addressCopiedMessage, setAddressCopiedMessage] = useState<string | null>(null);
 
-    // Set up auto-refresh every 30 seconds
-    const intervalId = setInterval(fetchBalance, 30000);
+  // State for button click animations
+  const [clickedButtons, setClickedButtons] = useState<Set<string>>(new Set());
+  const [copyAgainClicked, setCopyAgainClicked] = useState(false);
+  const [copyLinkClicked, setCopyLinkClicked] = useState(false);
 
-    // Cleanup interval on unmount
-    return () => clearInterval(intervalId);
-  }, [fetchBalance]);
+  const handleSendClick = () => {
+    // Clear all other display states first
+    setShowReceiveAddress(false);
+    setAddressCopiedMessage(null);
+    setTransactionResult(null);
 
-  // Manual refresh handler
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    await fetchBalance();
+    // Toggle send form
+    setShowSendForm(!showSendForm);
   };
 
-  const handleSend = async () => {
+  const handleReceiveClick = async () => {
+    console.log('Receive button clicked');
+
+    // Immediately show visual feedback - keep clicked state until operation completes
+    setClickedButtons(prev => new Set(prev).add('receive'));
+
+    // Clear all other display states first
+    setShowSendForm(false);
+    setTransactionResult(null);
+
     try {
-      const recipient = window.prompt('Enter recipient BSV address:');
-      if (!recipient) return;
+      // Generate address from identity
+      const addressData = await generateAndCopy();
+      console.log('Address generated and copied:', addressData);
 
-      const amountStr = window.prompt('Enter amount in satoshis:');
-      if (!amountStr) return;
+      setShowReceiveAddress(true);
+      setAddressCopiedMessage(`Address copied to clipboard: ${addressData.substring(0, 10)}...`);
 
-      const amount = parseInt(amountStr, 10);
-      if (isNaN(amount) || amount <= 0) {
-        console.error('Invalid amount. Must be a positive number.');
-        window.alert('Invalid amount. Must be a positive number.');
-        return;
-      }
-
-      // Basic validation for BSV address (starts with 1 or 3, length 26-35)
-      if (!recipient.match(/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/)) {
-        console.error('Invalid BSV address format.');
-        window.alert('Invalid BSV address format.');
-        return;
-      }
-
-      const result = await wallet.sendTransaction(recipient, amount);
-      console.log('Transaction sent successfully:', result);
-      window.alert('Transaction sent successfully!');
-
-      // Refresh balance after sending
-      const balanceData = await wallet.getBalance();
-      if (balanceData && typeof balanceData.balance === 'number') {
-        setBalance(balanceData.balance);
-      }
+      // Clear the message after 3 seconds
+      setTimeout(() => {
+        setAddressCopiedMessage(null);
+      }, 3000);
     } catch (error) {
-      console.error('Failed to send transaction:', error);
-      window.alert(`Failed to send transaction: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Failed to generate address:', error);
+      setAddressCopiedMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      // Remove clicked state after operation completes (with small delay for visual feedback)
+      setTimeout(() => {
+        setClickedButtons(prev => {
+          const newSet = new Set(prev);
+          newSet.delete('receive');
+          return newSet;
+        });
+      }, 200);
     }
   };
 
-  const handleReceive = async () => {
+  const handleSendSubmit = (result: TransactionResponse) => {
+    // Clear all other states first
+    setShowReceiveAddress(false);
+    setAddressCopiedMessage(null);
+    setTransactionResult(null);
+
+    // Set the transaction result and close the form
+    setTransactionResult(result);
+    setShowSendForm(false);
+
+    // Only refresh balance if transaction was successful
+    if (result.success !== false && result.status !== 'failed') {
+      refreshBalance();
+    }
+  };
+
+  const handleCopyAgain = async () => {
     try {
-      const addressData = await wallet.getCurrentAddress();
-      console.log('Receive address data:', addressData);
-
-      // Parse the nested response structure: { success: true, address: { address: "...", ... } }
-      let address: string | undefined;
-      if (addressData && (addressData as any).success && (addressData as any).address) {
-        address = (addressData as any).address.address;
-      }
-
-      if (address) {
-        console.log('Displaying receive address:', address);
-        window.alert(`Receive address:\n${address}`);
-      } else {
-        // Fallback: generate new address if none exists
-        console.log('No current address, generating new one...');
-        const newAddressData = await wallet.generateAddress();
-        console.log('New address data:', newAddressData);
-
-        // Handle same nested structure for generated address
-        let newAddress: string | undefined;
-        if (newAddressData && (newAddressData as any).success && (newAddressData as any).address) {
-          newAddress = (newAddressData as any).address.address;
-        } else if (newAddressData && (newAddressData as any).address) {
-          newAddress = (newAddressData as any).address;
-        }
-
-        if (newAddress) {
-          console.log('Displaying generated address:', newAddress);
-          window.alert(`Receive address:\n${newAddress}`);
-        }
-      }
+      await navigator.clipboard.writeText(currentAddress || '');
+      setCopyAgainClicked(true);
+      setTimeout(() => setCopyAgainClicked(false), 2000);
     } catch (error) {
-      console.error('Failed to get receive address:', error);
-      window.alert(`Failed to get receive address: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Failed to copy address:', error);
+    }
+  };
+
+  const handleCopyLink = async () => {
+    if (transactionResult?.whatsOnChainUrl) {
+      try {
+        await navigator.clipboard.writeText(transactionResult.whatsOnChainUrl);
+        setCopyLinkClicked(true);
+        setTimeout(() => setCopyLinkClicked(false), 2000);
+      } catch (error) {
+        console.error('Failed to copy link:', error);
+      }
     }
   };
 
   const handleAdvanced = () => {
     console.log('Advanced button clicked - opening wallet page in new tab');
-    // Open wallet page in new tab (like history does)
+    // Open wallet page in new tab
     if (window.cefMessage) {
       window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet');
     }
   };
 
   return (
-    <div style={{
-      width: '240px',
-      height: '200px',
-      display: 'flex',
-      flexDirection: 'column',
-      padding: '16px',
-      backgroundColor: '#ffffff',
-      border: '1px solid #e0e0e0',
-      borderRadius: '8px',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-      boxSizing: 'border-box',
-      gap: '8px'
-    }}>
-      {/* Balance at top with refresh button */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '8px',
-        marginBottom: '4px'
-      }}>
-        <div style={{
-          fontSize: '14px',
-          fontWeight: 600,
-          color: '#333'
-        }}>
-          Balance: {loading ? '...' : `${balance.toLocaleString()} sats`}
-        </div>
-        <IconButton
-          size="small"
-          onClick={handleRefresh}
-          disabled={refreshing}
-          sx={{ padding: '2px' }}
-          title="Refresh balance"
+    <div className="wallet-panel-light" onClick={(e) => e.stopPropagation()}>
+      {/* Close Button */}
+      {onClose && (
+        <button
+          className="wallet-panel-close-button"
+          onClick={onClose}
+          title="Close wallet panel"
         >
-          <RefreshIcon sx={{ fontSize: '16px' }} />
-        </IconButton>
+          <CloseIcon sx={{ fontSize: 18 }} />
+        </button>
+      )}
+
+      {/* Balance Display */}
+      <div className="balance-display-light">
+        <div className="balance-header-light">
+          <span className="balance-title">Balance</span>
+          <button
+            className="refresh-button-light"
+            onClick={refreshBalance}
+            disabled={balanceLoading}
+            title="Refresh balance"
+          >
+            {balanceLoading ? '...' : 'Refresh'}
+          </button>
+        </div>
+        <div className="balance-content-light">
+          <div className="balance-primary-light">
+            <span className="balance-amount-light">
+              {balanceLoading ? '...' : (balance / 100000000).toFixed(8)}
+            </span>
+            <span className="balance-currency-light">BSV</span>
+          </div>
+          <div className="balance-secondary-light">
+            <span className="balance-usd-light">
+              ${balanceLoading ? '...' : usdValue.toFixed(2)} USD
+            </span>
+          </div>
+        </div>
       </div>
 
-      {/* Send button */}
-      <Button
-        variant="contained"
-        color="primary"
-        startIcon={<SendIcon />}
-        onClick={handleSend}
-        fullWidth
-        size="small"
-        sx={{ fontSize: '12px' }}
-      >
-        Send
-      </Button>
+      {/* Action Buttons */}
+      <div className="wallet-actions-light">
+        <button
+          className={`wallet-button-light receive-button-light ${clickedButtons.has('receive') || isGenerating ? 'clicked' : ''}`}
+          onClick={handleReceiveClick}
+          disabled={isGenerating}
+        >
+          {isGenerating ? 'Generating...' : 'Receive'}
+        </button>
+        <button
+          className={`wallet-button-light send-button-light ${showSendForm ? 'active' : ''}`}
+          onClick={handleSendClick}
+        >
+          {showSendForm ? 'Close' : 'Send'}
+        </button>
+      </div>
 
-      {/* Receive button */}
-      <Button
-        variant="contained"
-        color="secondary"
-        startIcon={<CallReceivedIcon />}
-        onClick={handleReceive}
-        fullWidth
-        size="small"
-        sx={{ fontSize: '12px' }}
-      >
-        Receive
-      </Button>
+      {/* Dynamic Content Area */}
+      <div className="dynamic-content-area-light">
+        {showSendForm && (
+          <div className="send-form-container-light">
+            <TransactionForm
+              onTransactionCreated={handleSendSubmit}
+              balance={balance}
+            />
+          </div>
+        )}
 
-      {/* Advanced button */}
+        {showReceiveAddress && (
+          <div className="receive-address-container-light">
+            <h3>Receive Bitcoin SV</h3>
+            <p>Address copied to clipboard!</p>
+            <div className="address-display-light">
+              <code>{currentAddress || 'Generating...'}</code>
+            </div>
+            <div className="address-buttons-light">
+              <button
+                className={`copy-button-light ${copyAgainClicked ? 'clicked' : ''}`}
+                onClick={handleCopyAgain}
+              >
+                {copyAgainClicked ? 'Copied!' : 'Copy Again'}
+              </button>
+              <button
+                className="close-button-light"
+                onClick={() => setShowReceiveAddress(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Success/Error Modal */}
+        {transactionResult && (
+          <div className={transactionResult.success === false || transactionResult.status === 'failed' ? 'error-message-light' : 'success-message-light'}>
+            {transactionResult.success === false || transactionResult.status === 'failed' ? (
+              <>
+                <h3>Transaction Failed</h3>
+                <div className="transaction-details-light">
+                  <p><strong>Error:</strong> {transactionResult.error || transactionResult.message || 'Transaction broadcast failed'}</p>
+                  {transactionResult.txid && (
+                    <p><strong>TxID:</strong> {transactionResult.txid}</p>
+                  )}
+                </div>
+                <button onClick={() => setTransactionResult(null)} className="close-button-light">
+                  Close
+                </button>
+              </>
+            ) : (
+              <>
+                <h3>Transaction Sent!</h3>
+                <div className="transaction-details-light">
+                  {transactionResult.txid && (
+                    <p><strong>TxID:</strong> <span className="txid-display">{transactionResult.txid.substring(0, 16)}...</span></p>
+                  )}
+                  {transactionResult.message && (
+                    <p><strong>Status:</strong> {transactionResult.message}</p>
+                  )}
+                </div>
+                {transactionResult.whatsOnChainUrl && (
+                  <div className="whatsonchain-container-light">
+                    <a
+                      href={transactionResult.whatsOnChainUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="whatsonchain-link-light"
+                    >
+                      View on WhatsOnChain
+                    </a>
+                    <button
+                      onClick={handleCopyLink}
+                      className={`copy-link-button-light ${copyLinkClicked ? 'clicked' : ''}`}
+                    >
+                      {copyLinkClicked ? 'Copied!' : 'Copy Link'}
+                    </button>
+                  </div>
+                )}
+                <button onClick={() => setTransactionResult(null)} className="close-button-light">
+                  Close
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {!showSendForm && !showReceiveAddress && !transactionResult && (
+          <div className="content-placeholder-light">
+            {addressCopiedMessage ? (
+              <div className="address-copied-message-light">
+                {addressCopiedMessage}
+              </div>
+            ) : (
+              <span className="placeholder-text">Click Send or Receive to get started</span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Advanced Button */}
       <Button
         variant="outlined"
         startIcon={<SettingsIcon />}
         onClick={handleAdvanced}
         fullWidth
         size="small"
-        sx={{ fontSize: '12px' }}
+        sx={{
+          fontSize: '12px',
+          marginTop: '8px',
+          borderColor: '#2d5016',
+          color: '#2d5016',
+          '&:hover': {
+            borderColor: '#3a641e',
+            backgroundColor: 'rgba(45, 80, 22, 0.04)',
+          }
+        }}
       >
-        Advanced
+        Advanced Wallet
       </Button>
     </div>
   );

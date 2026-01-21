@@ -19,10 +19,11 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 }) => {
   const { sendTransaction } = useTransaction();
   // Private key is handled by the Go daemon using the identity file
+  // Note: feeRate is hardcoded to '5' (medium) for simplicity in the light wallet
   const [formData, setFormData] = useState<TransactionData>({
     recipient: '',
     amount: '',
-    feeRate: '5',
+    feeRate: '5', // Default medium fee rate - not user-configurable in light wallet
     memo: ''
   });
   const [errors, setErrors] = useState<Partial<TransactionData>>({});
@@ -136,11 +137,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       }
     }
 
-    // Validate fee rate
-    const feeRate = parseInt(formData.feeRate);
-    if (isNaN(feeRate) || feeRate < 1 || feeRate > 1000) {
-      newErrors.feeRate = 'Fee rate must be between 1 and 1000 satoshis per byte';
-    }
+    // Fee rate is hardcoded to 5 sat/byte - no validation needed
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -355,49 +352,6 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             </div>
           )}
           {errors.amount && <span className="field-error">{errors.amount}</span>}
-        </div>
-
-        <div className="form-group">
-          <label htmlFor="feeRate">Fee Rate (sat/byte)</label>
-          <div className="fee-rate-container">
-            <input
-              id="feeRate"
-              type="number"
-              min="1"
-              max="1000"
-              value={formData.feeRate}
-              onChange={(e) => handleInputChange('feeRate', e.target.value)}
-              className={errors.feeRate ? 'error' : ''}
-              disabled={isSubmitting || isLoading}
-            />
-            <div className="fee-presets">
-              <button
-                type="button"
-                onClick={() => handleInputChange('feeRate', '1')}
-                disabled={isSubmitting || isLoading}
-                className={formData.feeRate === '1' ? 'active' : ''}
-              >
-                Low
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInputChange('feeRate', '5')}
-                disabled={isSubmitting || isLoading}
-                className={formData.feeRate === '5' ? 'active' : ''}
-              >
-                Medium
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInputChange('feeRate', '10')}
-                disabled={isSubmitting || isLoading}
-                className={formData.feeRate === '10' ? 'active' : ''}
-              >
-                High
-              </button>
-            </div>
-          </div>
-          {errors.feeRate && <span className="field-error">{errors.feeRate}</span>}
         </div>
 
         <div className="form-group">

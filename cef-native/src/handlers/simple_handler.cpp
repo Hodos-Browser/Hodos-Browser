@@ -1363,9 +1363,10 @@ bool SimpleHandler::OnProcessMessageReceived(
             target_browser = GetSettingsBrowser();
             LOG_DEBUG_BROWSER("✅ Found settings overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "wallet") {
-            target_hwnd = FindWindow(L"CEFWalletOverlayWindow", L"Wallet Overlay");
+            extern HWND g_wallet_overlay_hwnd;
+            target_hwnd = g_wallet_overlay_hwnd;
             target_browser = GetWalletBrowser();
-            LOG_DEBUG_BROWSER("✅ Found wallet overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
+            LOG_DEBUG_BROWSER("✅ Found wallet overlay window (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "backup") {
             target_hwnd = FindWindow(L"CEFBackupOverlayWindow", L"Backup Overlay");
             target_browser = GetBackupBrowser();
@@ -1394,6 +1395,21 @@ bool SimpleHandler::OnProcessMessageReceived(
             // Then destroy the window
             LOG_DEBUG_BROWSER("🔄 Destroying " + role_ + " overlay window");
             SendMessage(target_hwnd, WM_CLOSE, 0, 0);
+
+            // Clear the global HWND
+            if (role_ == "wallet") {
+                extern HWND g_wallet_overlay_hwnd;
+                g_wallet_overlay_hwnd = nullptr;
+            } else if (role_ == "settings") {
+                extern HWND g_settings_overlay_hwnd;
+                g_settings_overlay_hwnd = nullptr;
+            } else if (role_ == "backup") {
+                extern HWND g_backup_overlay_hwnd;
+                g_backup_overlay_hwnd = nullptr;
+            } else if (role_ == "brc100auth") {
+                extern HWND g_brc100_auth_overlay_hwnd;
+                g_brc100_auth_overlay_hwnd = nullptr;
+            }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
         }

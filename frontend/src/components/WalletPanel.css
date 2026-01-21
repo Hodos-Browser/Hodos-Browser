@@ -806,3 +806,434 @@
     padding: 20px;
   }
 }
+
+/* ========================================
+   LIGHT WALLET PANEL STYLES
+   Compact popup version with auto-sizing
+   ======================================== */
+
+.wallet-panel-light {
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  padding: 16px;
+  width: auto;
+  min-width: 300px;
+  max-width: 420px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  position: relative;
+  cursor: default;
+}
+
+/* Close Button */
+.wallet-panel-close-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: #f0f0f0;
+  color: #666;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.wallet-panel-close-button:hover {
+  background: #e0e0e0;
+  color: #333;
+}
+
+.wallet-panel-close-button:active {
+  transform: scale(0.95);
+  background: #d0d0d0;
+}
+
+/* Balance Display - Light */
+.balance-display-light {
+  background: linear-gradient(135deg, var(--wallet-dark-green) 0%, var(--wallet-dark-green-hover) 100%);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 12px;
+  color: var(--wallet-text-light);
+}
+
+.balance-header-light {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.balance-title {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.refresh-button-light {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--wallet-text-light);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.refresh-button-light:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.refresh-button-light:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.balance-content-light {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.balance-primary-light {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.balance-amount-light {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--wallet-gold-accent);
+}
+
+.balance-currency-light {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--wallet-gold-accent);
+  opacity: 0.9;
+}
+
+.balance-secondary-light {
+  margin-top: 2px;
+}
+
+.balance-usd-light {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--wallet-gold-accent);
+  opacity: 0.85;
+}
+
+/* Action Buttons - Light */
+.wallet-actions-light {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.wallet-button-light {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.receive-button-light {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+  border: 2px solid var(--wallet-gold-accent);
+}
+
+.receive-button-light:hover:not(:disabled) {
+  background: var(--wallet-dark-green-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px var(--wallet-shadow);
+}
+
+.receive-button-light:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.receive-button-light.clicked {
+  background: var(--wallet-gold-accent);
+  color: var(--wallet-text-dark);
+  transform: scale(0.98);
+}
+
+.send-button-light {
+  background: var(--wallet-subdued-gold);
+  color: var(--wallet-text-dark);
+  border: 2px solid var(--wallet-dark-green);
+}
+
+.send-button-light:hover {
+  background: var(--wallet-gold-accent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px var(--wallet-shadow);
+}
+
+.send-button-light.active {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+  border-color: var(--wallet-gold-accent);
+}
+
+/* Dynamic Content Area - Light */
+.dynamic-content-area-light {
+  min-height: 60px;
+  margin-bottom: 8px;
+}
+
+.send-form-container-light {
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.send-form-container-light .transaction-form {
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+}
+
+.send-form-container-light .form-header {
+  padding-bottom: 10px;
+  margin-bottom: 14px;
+}
+
+.send-form-container-light .form-header h3 {
+  font-size: 16px;
+}
+
+.send-form-container-light .form-group {
+  margin-bottom: 14px;
+}
+
+.send-form-container-light .form-group label {
+  font-size: 12px;
+}
+
+.send-form-container-light .form-group input {
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.send-form-container-light .submit-button {
+  padding: 12px 20px;
+  font-size: 14px;
+}
+
+/* Receive Address Container - Light */
+.receive-address-container-light {
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 14px;
+  text-align: center;
+}
+
+.receive-address-container-light h3 {
+  margin: 0 0 8px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--wallet-text-dark);
+}
+
+.receive-address-container-light p {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  color: var(--wallet-dark-green);
+  font-weight: 500;
+}
+
+.address-display-light {
+  background: #ffffff;
+  border: 1px solid var(--wallet-border-light);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+
+.address-display-light code {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: var(--wallet-dark-green);
+  line-height: 1.4;
+}
+
+.address-buttons-light {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.copy-button-light,
+.close-button-light {
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.copy-button-light {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+  border: 1px solid var(--wallet-gold-accent);
+}
+
+.copy-button-light:hover {
+  background: var(--wallet-dark-green-hover);
+}
+
+.copy-button-light.clicked {
+  background: var(--wallet-gold-accent);
+  color: var(--wallet-text-dark);
+}
+
+.close-button-light {
+  background: #f0f0f0;
+  color: var(--wallet-text-dark);
+  border: 1px solid #d0d0d0;
+}
+
+.close-button-light:hover {
+  background: #e0e0e0;
+}
+
+/* Success/Error Messages - Light */
+.success-message-light {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--wallet-gold-accent);
+}
+
+.success-message-light h3 {
+  margin: 0 0 10px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.error-message-light {
+  background: #dc2626;
+  color: #ffffff;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid #991b1b;
+}
+
+.error-message-light h3 {
+  margin: 0 0 10px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.transaction-details-light {
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.transaction-details-light p {
+  margin: 6px 0;
+  word-break: break-word;
+}
+
+.txid-display {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+}
+
+.whatsonchain-container-light {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.whatsonchain-link-light {
+  color: var(--wallet-gold-accent);
+  text-decoration: underline;
+  font-size: 12px;
+}
+
+.whatsonchain-link-light:hover {
+  color: var(--wallet-text-light);
+}
+
+.copy-link-button-light {
+  padding: 4px 10px;
+  background: var(--wallet-gold-accent);
+  color: var(--wallet-text-dark);
+  border: 1px solid var(--wallet-text-light);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.copy-link-button-light:hover {
+  background: var(--wallet-text-light);
+}
+
+.copy-link-button-light.clicked {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+}
+
+/* Content Placeholder - Light */
+.content-placeholder-light {
+  padding: 16px;
+  text-align: center;
+}
+
+.placeholder-text {
+  color: #888;
+  font-size: 13px;
+}
+
+.address-copied-message-light {
+  background: var(--wallet-dark-green);
+  color: var(--wallet-text-light);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  animation: fadeInLight 0.3s ease-in;
+}
+
+@keyframes fadeInLight {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
