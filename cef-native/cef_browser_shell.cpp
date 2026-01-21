@@ -351,6 +351,27 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
 
+        case WM_ACTIVATEAPP: {
+            // wParam is TRUE if app is being activated, FALSE if deactivated
+            if (!wParam) {
+                // App is losing focus - close wallet overlay if it's open
+                LOG_DEBUG("📱 App losing focus - closing wallet overlay if open");
+                if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                    LOG_INFO("💰 Closing wallet overlay due to app focus loss");
+                    // Hide immediately for instant visual feedback
+                    ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
+                    // Then close the browser and destroy window
+                    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+                    if (wallet_browser) {
+                        wallet_browser->GetHost()->CloseBrowser(false);
+                    }
+                    DestroyWindow(g_wallet_overlay_hwnd);
+                    g_wallet_overlay_hwnd = nullptr;
+                }
+            }
+            break;
+        }
+
         case WM_CLOSE:
             LOG_INFO("🛑 Main shell window received WM_CLOSE - starting graceful shutdown...");
             ShutdownApplication();

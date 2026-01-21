@@ -149,13 +149,13 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         <div className="balance-content-light">
           <div className="balance-primary-light">
             <span className="balance-amount-light">
-              {balanceLoading ? '...' : (balance / 100000000).toFixed(8)}
+              ${balanceLoading ? '...' : usdValue.toFixed(2)}
             </span>
-            <span className="balance-currency-light">BSV</span>
+            <span className="balance-currency-light">USD</span>
           </div>
           <div className="balance-secondary-light">
             <span className="balance-usd-light">
-              ${balanceLoading ? '...' : usdValue.toFixed(2)} USD
+              {balanceLoading ? '...' : (balance / 100000000).toFixed(8)} BSV
             </span>
           </div>
         </div>

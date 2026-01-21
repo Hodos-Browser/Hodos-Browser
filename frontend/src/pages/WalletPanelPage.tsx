@@ -33,18 +33,22 @@ export default function WalletPanelPage() {
     <div
       onClick={handleBackgroundClick}
       style={{
-        width: '100%',
-        height: '100%',
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
         margin: 0,
         padding: 0,
         overflow: 'hidden',
         display: 'flex',
         justifyContent: 'flex-end',    // Align panel to right
         alignItems: 'flex-start',      // Keep at top
-        paddingTop: '60px',            // Space from top (below toolbar)
-        paddingRight: '16px',          // Space from right edge
+        paddingTop: '12vh',            // Space from top (responsive to screen height)
+        paddingRight: '6vw',           // Space from right edge (responsive to screen width)
         boxSizing: 'border-box',
         cursor: 'pointer',             // Indicate clickable background
+        backgroundColor: 'rgba(0, 0, 0, 0.01)',  // Nearly invisible backdrop to catch clicks
       }}
     >
       <WalletPanel onClose={handleClose} />

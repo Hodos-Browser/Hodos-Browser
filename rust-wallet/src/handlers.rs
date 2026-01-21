@@ -5156,7 +5156,11 @@ async fn broadcast_transaction(beef_or_raw_hex: &str) -> Result<String, String> 
         beef_or_raw_hex.to_string()
     };
 
-    let client = reqwest::Client::new();
+    // Use a client with reasonable timeout to avoid hanging
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut success_count = 0;
     let mut last_error = String::new();
 
@@ -5279,12 +5283,24 @@ async fn broadcast_to_gorillapool(client: &reqwest::Client, raw_tx_hex: &str) ->
                                         Ok("GorillaPool accepted (no TXID in response)".to_string())
                                     }
                                 } else {
-                                    // Transaction was rejected
+                                    // Transaction was rejected - check if it's actually already in mempool
                                     let error_desc = payload["resultDescription"].as_str()
                                         .unwrap_or("Unknown error");
-                                    let error_msg = format!("GorillaPool rejected: {} - {}", return_result, error_desc);
-                                    log::warn!("   ⚠️ {}", error_msg);
-                                    Err(error_msg)
+                                    let error_lower = error_desc.to_lowercase();
+
+                                    // Check if the "rejection" is actually because tx is already known
+                                    if error_lower.contains("already in")
+                                        || error_lower.contains("already known")
+                                        || error_lower.contains("duplicate")
+                                        || error_lower.contains("txn-already-in-mempool")
+                                        || error_lower.contains("txn-already-known") {
+                                        log::info!("   ℹ️  GorillaPool: Transaction already in mempool (treating as success)");
+                                        Ok(format!("Transaction already in mempool: {}", error_desc))
+                                    } else {
+                                        let error_msg = format!("GorillaPool rejected: {} - {}", return_result, error_desc);
+                                        log::warn!("   ⚠️ {}", error_msg);
+                                        Err(error_msg)
+                                    }
                                 }
                             } else {
                                 // No returnResult field - assume failure
@@ -5347,7 +5363,18 @@ async fn broadcast_to_whatsonchain(client: &reqwest::Client, raw_tx_hex: &str) -
     if status.is_success() {
         Ok(text)
     } else {
-        Err(format!("{} - {}", status, text))
+        // Check if the error is actually a success case (transaction already exists)
+        let error_lower = text.to_lowercase();
+        if error_lower.contains("already in")
+            || error_lower.contains("already known")
+            || error_lower.contains("duplicate")
+            || error_lower.contains("txn-already-in-mempool")
+            || error_lower.contains("txn-already-known") {
+            log::info!("   ℹ️  WhatsOnChain: Transaction already in mempool (treating as success)");
+            Ok(format!("Transaction already in mempool: {}", text))
+        } else {
+            Err(format!("{} - {}", status, text))
+        }
     }
 }
 

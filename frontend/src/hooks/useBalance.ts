@@ -39,10 +39,10 @@ export const useBalance = () => {
   }, []);
 
   const fetchUsdPrice = useCallback(async (): Promise<number> => {
+    // Try CryptoCompare first (primary)
     try {
       console.log('🔍 Fetching BSV price from CryptoCompare API...');
 
-      // Use only CryptoCompare API - no fallbacks
       const response = await fetch('https://min-api.cryptocompare.com/data/price?fsym=BSV&tsyms=USD', {
         method: 'GET',
         headers: {
@@ -64,18 +64,46 @@ export const useBalance = () => {
         throw new Error('Invalid price data received from CryptoCompare API');
       }
 
-      // Store price separately - USD value will be calculated when balance is available
       setBsvPrice(price);
-      console.log(`💰 BSV Price: $${price}`);
+      console.log(`💰 BSV Price (CryptoCompare): $${price}`);
       return price;
 
-    } catch (err) {
-      console.error('❌ Failed to fetch BSV price:', err);
-      console.error('🔍 This indicates a problem with the CryptoCompare API - investigate network connectivity and API status');
-      setBsvPrice(0);
-      throw new Error(`Price fetch failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } catch (primaryErr) {
+      console.warn('⚠️ CryptoCompare failed, trying CoinGecko backup...', primaryErr);
+
+      // Fallback to CoinGecko
+      try {
+        const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin-sv&vs_currencies=usd', {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json'
+          },
+          mode: 'cors'
+        });
+
+        if (!response.ok) {
+          throw new Error(`CoinGecko API failed with status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log('🔍 CoinGecko response:', data);
+
+        const price = parseFloat(data['bitcoin-sv']?.usd);
+        if (!price || price <= 0) {
+          throw new Error('Invalid price data received from CoinGecko API');
+        }
+
+        setBsvPrice(price);
+        console.log(`💰 BSV Price (CoinGecko backup): $${price}`);
+        return price;
+
+      } catch (backupErr) {
+        console.error('❌ Both price APIs failed:', backupErr);
+        setBsvPrice(0);
+        throw new Error(`Price fetch failed: All APIs unavailable`);
+      }
     }
-  }, []); // Remove balance dependency - now independent
+  }, []);
 
   const refreshBalance = useCallback(async () => {
     setIsLoading(true);
