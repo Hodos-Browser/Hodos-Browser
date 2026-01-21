@@ -149,6 +149,41 @@ export const useWallet = () => {
     }
   }, []);
 
+  const getBalance = useCallback(async () => {
+    try {
+      if (!window.hodosBrowser?.wallet) {
+        throw new Error('Bitcoin Browser API not available');
+      }
+
+      const balanceData = await window.hodosBrowser.wallet.getBalance();
+      console.log('💰 Balance retrieved:', balanceData);
+      return balanceData;
+    } catch (error) {
+      console.error('❌ Failed to get balance:', error);
+      throw error;
+    }
+  }, []);
+
+  const sendTransaction = useCallback(async (recipient: string, amount: number) => {
+    try {
+      if (!window.hodosBrowser?.wallet) {
+        throw new Error('Bitcoin Browser API not available');
+      }
+
+      const txData = {
+        recipient,
+        amount
+      };
+
+      const result = await window.hodosBrowser.wallet.sendTransaction(txData);
+      console.log('✅ Transaction sent:', result);
+      return result;
+    } catch (error) {
+      console.error('❌ Failed to send transaction:', error);
+      throw error;
+    }
+  }, []);
+
   return {
     ...walletState,
     checkWalletStatus,
@@ -157,6 +192,8 @@ export const useWallet = () => {
     getWalletInfo,
     generateAddress,
     getCurrentAddress,
-    markBackedUp
+    markBackedUp,
+    getBalance,
+    sendTransaction
   };
 };

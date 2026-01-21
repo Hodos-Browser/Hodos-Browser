@@ -2,10 +2,13 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
-#include <windows.h>
-#include <winhttp.h>
 #include <thread>
 #include <atomic>
+
+#ifdef _WIN32
+    #include <windows.h>
+    #include <winhttp.h>
+#endif
 
 class WalletService {
 public:
@@ -54,26 +57,28 @@ public:
 private:
     std::string baseUrl_;
     std::string daemonPath_;
-    HINTERNET hSession_;
-    HINTERNET hConnect_;
     bool connected_;
-
-    // Process management
-    PROCESS_INFORMATION daemonProcess_;
     std::atomic<bool> daemonRunning_;
     std::thread monitorThread_;
+
+#ifdef _WIN32
+    // Windows-specific HTTP and process management
+    HINTERNET hSession_;
+    HINTERNET hConnect_;
+    PROCESS_INFORMATION daemonProcess_;
+
+    // Windows-specific helper methods
+    std::string readResponse(HINTERNET hRequest);
+    static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType);
+#endif
 
     // HTTP helper methods
     nlohmann::json makeHttpRequest(const std::string& method, const std::string& endpoint, const std::string& body = "");
     bool initializeConnection();
     void cleanupConnection();
-    std::string readResponse(HINTERNET hRequest);
 
     // Daemon management helpers
     bool createDaemonProcess();
     void monitorDaemon();
     void cleanupDaemonProcess();
-
-    // Console control handler
-    static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType);
 };

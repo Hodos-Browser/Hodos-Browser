@@ -1,5 +1,7 @@
 # HodosBrowser - Project Context for Claude
 
+# Guidelines
+Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps
 ## Overview
 
 A Web3 browser built on CEF (Chromium Embedded Framework) with a native Rust wallet backend. Implements BRC-100 protocol suite for Bitcoin SV authentication and micropayments. This is production software handling real money; security and correctness take priority over development speed.

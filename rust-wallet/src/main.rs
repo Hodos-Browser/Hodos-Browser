@@ -292,6 +292,8 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/status", web::get().to(handlers::wallet_status))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
+            .route("/wallet/addresses", web::get().to(handlers::get_all_addresses))
+            .route("/wallet/address/current", web::get().to(handlers::get_current_address))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))

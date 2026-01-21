@@ -23,6 +23,9 @@ declare global {
         markBackedUp: () => Promise<{ success: boolean }>;
         getBackupModalState: () => Promise<{ shown: boolean }>;
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean }>;
+        getBalance: () => Promise<{ balance: number }>;
+        sendTransaction: (data: { recipient: string; amount: number }) => Promise<TransactionResponse>;
+        getTransactionHistory: () => Promise<any[]>;
       };
       address: {
         generate: () => Promise<AddressData>;

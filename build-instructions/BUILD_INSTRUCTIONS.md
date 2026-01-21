@@ -203,29 +203,42 @@ npm run build
 
 #### Configure CMake
 
-**Important**: The CMakeLists.txt currently has some hardcoded paths that need to be addressed. The vcpkg toolchain path and installation prefix must be specified via command-line arguments.
+**Note**: The CMakeLists.txt now uses portable configuration - no hardcoded paths! You have two options:
 
-**Working Configuration Command:**
+**Option 1: Using Environment Variable (Recommended)**
 
-```bash
+```powershell
+# Set VCPKG_ROOT environment variable (one-time setup)
+# Replace with your actual vcpkg installation path
+$env:VCPKG_ROOT = "C:/Users/<YourUsername>/Dev/vcpkg"
+
+# Configure CMake (vcpkg will be found automatically)
 cd cef-native
-
-# Configure CMake with all required parameters
-# Replace the paths with your actual vcpkg installation location
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
-  -DCMAKE_TOOLCHAIN_FILE=C:/Users/archb/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake ^
-  -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_INSTALL_PREFIX=C:/Users/archb/Dev/vcpkg/installed/x64-windows-static ^
-  -DOPENSSL_USE_STATIC_LIBS=TRUE
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 ```
 
-**Path Customization:**
-- Replace `C:/Users/archb/Dev/vcpkg` with your actual vcpkg installation path (recommended: `C:/Users/<YourUsername>/Dev/vcpkg`)
-- The `CMAKE_INSTALL_PREFIX` should point to your vcpkg installed packages directory (`<vcpkg_root>/installed/x64-windows-static`)
-- Adjust the path based on your vcpkg installation location
-- Ensure you use `x64-windows-static` triplet to match the packages you installed
+**To make VCPKG_ROOT permanent (recommended):**
+```powershell
+# Add to your PowerShell profile or set in Windows Environment Variables
+[System.Environment]::SetEnvironmentVariable('VCPKG_ROOT', 'C:/Users/<YourUsername>/Dev/vcpkg', 'User')
+```
 
-**Note**: The vcpkg toolchain file automatically locates packages (OpenSSL, nlohmann/json) from the vcpkg installation. However, the CMakeLists.txt may need updates to properly use vcpkg's package discovery instead of hardcoded paths.
+**Option 2: Command-Line Parameter**
+
+```powershell
+cd cef-native
+
+# Configure CMake with explicit toolchain path
+# Replace with your actual vcpkg installation location
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_TOOLCHAIN_FILE=C:/Users/<YourUsername>/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+**Benefits of New Configuration:**
+- ✅ Works on any developer's machine (no hardcoded paths)
+- ✅ Automatic package discovery (OpenSSL, nlohmann-json, sqlite3)
+- ✅ Cleaner CMake output with helpful messages
+- ✅ Foundation for cross-platform support (Windows + macOS)
 
 #### Build Native Shell
 
@@ -265,14 +278,14 @@ cargo run --release
 
 ### CEF Integration Issues
 - [x] **CEF Version**: Current working version: `cef_binary_136.1.6+g1ac1b14+chromium-136.0.7103.114_windows64`
-- [ ] **Hardcoded Paths**: CMakeLists.txt has hardcoded vcpkg paths that need to be made configurable
-- [ ] **vcpkg Toolchain**: Users must specify their vcpkg toolchain path via command-line
-- [ ] **OpenSSL Paths**: CMakeLists.txt has hardcoded OpenSSL include paths that should use vcpkg's package discovery
+- [x] **Hardcoded Paths**: ✅ FIXED! CMakeLists.txt now uses environment variables and auto-detection
+- [x] **vcpkg Toolchain**: ✅ FIXED! Automatically detected via VCPKG_ROOT environment variable
+- [x] **OpenSSL Paths**: ✅ FIXED! Uses vcpkg's automatic package discovery
 - [x] **Wrapper Build**: Wrapper builds correctly but must be built by each developer
 
 ### Build System Issues
-- [ ] **vcpkg Path Configuration**: Make vcpkg paths configurable or auto-detectable
-- [ ] **Cross-Platform**: Test build process on different platforms
+- [x] **vcpkg Path Configuration**: ✅ FIXED! Uses VCPKG_ROOT environment variable or command-line parameter
+- [ ] **Cross-Platform**: Test build process on different platforms (macOS support in progress)
 - [ ] **CI/CD**: Set up automated build pipeline
 - [ ] **Dependencies**: Automate dependency installation
 - [ ] **Version Management**: Implement proper versioning for all components

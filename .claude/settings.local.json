@@ -7,7 +7,14 @@
       "Bash(wc:*)",
       "Bash(find:*)",
       "Bash(sqlite3:*)",
-      "Bash(./kill-browser.sh)"
+      "Bash(./kill-browser.sh)",
+      "Bash(npx tsc:*)",
+      "Bash(brew install:*)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "bsv-filesystem-context",
+    "bsv-mcp"
+  ]
 }

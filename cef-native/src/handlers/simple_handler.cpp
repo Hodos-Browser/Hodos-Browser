@@ -1,8 +1,31 @@
 // cef_native/src/simple_handler.cpp
 #include "../../include/handlers/simple_handler.h"
 #include "../../include/handlers/simple_app.h"
+
+// Platform-specific includes
+#ifdef _WIN32
+    #include "../../include/core/WalletService.h"
+    #include "../../include/core/HttpRequestInterceptor.h"
+    #include <windows.h>
+#endif
+
+#ifdef __APPLE__
+    #include "../../include/core/WalletService.h"
+#endif
+
+// Cross-platform includes (available on both platforms)
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
+
+#ifdef __APPLE__
+    // Forward declarations (no Cocoa.h in .cpp files)
+    #ifdef __OBJC__
+        #import <Cocoa/Cocoa.h>
+    #else
+        struct NSView;
+    #endif
+#endif
+
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
 #include "include/cef_v8.h"
@@ -14,9 +37,6 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
-#include "../../include/core/WalletService.h"
-#include "../../include/core/HttpRequestInterceptor.h"
-#include <windows.h>
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -36,9 +56,15 @@ public:
 #include "../../include/core/PendingAuthRequest.h"
 #define LOG_ERROR_BROWSER(msg) Logger::Log(msg, 3, 2)
 
-extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
-extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
-extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
+// Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
+#ifdef _WIN32
+    extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
+    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
+    extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
+#else
+    // macOS global views
+    extern NSView* g_webview_view;
+#endif
 
 // Global backup modal state management
 static bool g_backupModalShown = false;
@@ -86,6 +112,7 @@ CefRefPtr<CefLoadHandler> SimpleHandler::GetLoadHandler() {
 
 CefRefPtr<CefBrowser> SimpleHandler::webview_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::header_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::wallet_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
@@ -101,6 +128,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetHeaderBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetWebviewBrowser() {
     return webview_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetWalletPanelBrowser() {
+    return wallet_panel_browser_;
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsBrowser() {
@@ -133,6 +164,7 @@ void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
 }
 
 // Static method to notify frontend of tab list changes (called from TabManager)
+// Available on both platforms now
 void SimpleHandler::NotifyTabListChanged() {
     CEF_REQUIRE_UI_THREAD();
 
@@ -173,7 +205,7 @@ void SimpleHandler::NotifyTabListChanged() {
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
     CEF_REQUIRE_UI_THREAD();
 
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabTitle(tab_id, title.ToString());
@@ -194,7 +226,7 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabURL(tab_id, url.ToString());
@@ -211,7 +243,7 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         // Use the first favicon URL (usually the most appropriate)
@@ -257,7 +289,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                                          bool canGoForward) {
     CEF_REQUIRE_UI_THREAD();
 
-    // Check if this is a tab browser and update TabManager
+    // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabLoadingState(tab_id, isLoading, canGoBack, canGoForward);
@@ -265,7 +297,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
 
-    // Track history when page finishes loading (for main tabs only)
+    // Track history when page finishes loading (for tabs - both platforms)
     if (!isLoading && tab_id != -1) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
         if (frame && frame->IsValid()) {
@@ -309,6 +341,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         LOG_DEBUG_BROWSER("📡 Backup URL: " + browser->GetMainFrame()->GetURL().ToString());
     }
 
+    // API injection logic (cross-platform)
     if (!isLoading) {
         if (role_ == "overlay") {
             // Log that we're about to inject the API
@@ -344,10 +377,14 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             // Send pending auth request data to the overlay after React app loads
             // Add a small delay to ensure React is fully mounted
+#ifdef _WIN32
             CefPostDelayedTask(TID_UI, base::BindOnce([]() {
                 extern void sendAuthRequestDataToOverlay();
                 sendAuthRequestDataToOverlay();
             }), 500);
+#else
+            // TODO: Implement BRC-100 auth on macOS
+#endif
         } else if (ExtractTabIdFromRole(role_) != -1) {
             // Inject the hodosBrowser API into tab browsers
             LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
@@ -388,7 +425,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
     LOG_DEBUG_BROWSER("✅ OnAfterCreated for role: " + role_);
 
-    // Check if this is a tab browser - register with TabManager first
+    // Check if this is a tab browser - register with TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         // This is a tab browser - register with TabManager
@@ -397,7 +434,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                          ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
         // Delayed WasResized() + Invalidate() to fix first-render black screen
-        // CEF needs time for HWND to be fully initialized before rendering
+        // CEF needs time for view to be fully initialized before rendering
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -405,7 +442,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
                 LOG(INFO) << "Tab browser delayed resize/invalidate completed";
             }
-        }, browser_ref), 150);  // 150ms delay for window initialization
+        }, browser_ref), 150);  // 150ms delay for view initialization
 
         return;  // Tab browsers don't need the overlay/header/webview handling below
     }
@@ -423,9 +460,47 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("🧭 header browser initialized.");
         LOG_DEBUG_BROWSER("🧭 header browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+#ifdef __APPLE__
+        // macOS: Aggressively trigger paint for windowless rendering
+        LOG_DEBUG_BROWSER("🎨 Forcing header browser paint on macOS");
+        CefRefPtr<CefBrowser> browser_ref = browser;
+
+        // Immediate resize and invalidate
+        if (browser->GetHost()) {
+            browser->GetHost()->WasResized();
+            browser->GetHost()->Invalidate(PET_VIEW);
+            LOG_DEBUG_BROWSER("🎨 Called WasResized() and Invalidate() for header");
+        }
+
+        // Delayed paint trigger (ensure view is ready)
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+                LOG_DEBUG_BROWSER("🎨 Delayed WasResized() and Invalidate() for header");
+            }
+        }, browser_ref), 100);
+#else
+        // Windows code stays as-is
         // Trigger initial resize to ensure content renders on startup
         browser->GetHost()->WasResized();
         LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for header browser");
+
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+#endif
+    } else if (role_ == "wallet_panel") {
+        wallet_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("💰 Wallet panel browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Trigger initial resize
+        browser->GetHost()->WasResized();
+        LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for wallet panel browser");
     } else if (role_ == "overlay") {
         overlay_browser_ = browser;
         LOG_DEBUG_BROWSER("🪟 Overlay browser initialized.");
@@ -517,7 +592,7 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     std::cout << "  → Not a popup, checking if tab browser..." << std::endl;
 
-    // Check if this is a tab browser
+    // Check if this is a tab browser (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     std::cout << "  → Extracted tab ID: " << tab_id << std::endl;
 
@@ -550,6 +625,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "webview" && browser == webview_browser_) {
         std::cout << "  → Webview browser cleanup" << std::endl;
         webview_browser_ = nullptr;
+    } else if (role_ == "wallet_panel" && browser == wallet_panel_browser_) {
+        std::cout << "  → Wallet panel browser cleanup" << std::endl;
+        wallet_panel_browser_ = nullptr;
     } else if (role_ == "header" && browser == header_browser_) {
         std::cout << "  → Header browser cleanup" << std::endl;
         header_browser_ = nullptr;
@@ -617,6 +695,7 @@ bool SimpleHandler::OnBeforePopup(
     );
 
     if (should_create_tab) {
+#ifdef _WIN32
         // Create new tab for ANY browser (tab browser, webview, etc.)
         LOG_DEBUG_BROWSER("📑 Converting popup to new tab: " + url + " (disposition: " + disposition_str + ", role: " + role_ + ")");
 
@@ -634,6 +713,11 @@ bool SimpleHandler::OnBeforePopup(
 
         // Return true to cancel the popup window creation (we handled it with a new tab)
         return true;
+#else
+        // TODO(macOS): Implement tab creation for popup handling
+        LOG_DEBUG_BROWSER("📑 Popup to tab conversion not implemented on macOS: " + url);
+        return false;  // Allow default behavior for now
+#endif
     }
 
     // For other dispositions (CURRENT_TAB, SAVE_TO_DISK, etc.), allow default behavior
@@ -656,12 +740,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
     // ========== TAB MANAGEMENT MESSAGES ==========
+    // Tab management available on both platforms now
 
     if (message_name == "tab_create") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
 
-        // Get main window dimensions for tab size
+#ifdef _WIN32
+        // Windows: Get main window dimensions for tab size
         extern HWND g_hwnd;
         RECT rect;
         GetClientRect(g_hwnd, &rect);
@@ -673,6 +759,19 @@ bool SimpleHandler::OnProcessMessageReceived(
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+#else
+        // macOS: Get webview dimensions through helper function
+        // g_webview_view is already void*, no bridge cast needed
+        ViewDimensions dims = GetViewDimensions(g_webview_view);
+
+        int tab_id = TabManager::GetInstance().CreateTab(
+            url,
+            g_webview_view,  // Already void*, no cast needed
+            0, 0,
+            dims.width,
+            dims.height
+        );
+#endif
 
         LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id));
 
@@ -748,6 +847,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     // ========== NAVIGATION MESSAGES ==========
+    // Navigation now uses TabManager on both platforms
 
     if (message_name == "navigate") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -822,6 +922,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== WALLET SERVICE MESSAGES (Cross-platform) ==========
     if (message_name == "wallet_status_check") {
         LOG_DEBUG_BROWSER("🔍 Wallet status check requested");
 
@@ -1252,6 +1353,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+#ifdef _WIN32
+    // ========== OVERLAY MESSAGES (Windows only) ==========
     if (message_name == "overlay_close") {
         LOG_DEBUG_BROWSER("🧠 [SimpleHandler] overlay_close message received");
 
@@ -1312,41 +1415,84 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "overlay_show_wallet") {
         LOG_DEBUG_BROWSER("💰 overlay_show_wallet message received from role: " + role_);
-
         LOG_DEBUG_BROWSER("💰 Creating wallet overlay with separate process");
-        // Create new process for wallet overlay
+
+#ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateWalletOverlayWithSeparateProcess(g_hInstance);
+#elif defined(__APPLE__)
+        CreateWalletOverlayWithSeparateProcess();
+#endif
+        return true;
+    }
+
+    if (message_name == "toggle_wallet_panel") {
+        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
+        std::cout << "💰 Toggle wallet panel message received!" << std::endl;
+
+#ifdef __APPLE__
+        extern NSView* g_wallet_panel_view;
+        extern bool g_wallet_panel_visible;
+
+        std::cout << "💰 g_wallet_panel_view pointer: " << g_wallet_panel_view << std::endl;
+        std::cout << "💰 Current visibility: " << g_wallet_panel_visible << std::endl;
+
+        if (g_wallet_panel_view) {
+            NSView* panel = (__bridge NSView*)g_wallet_panel_view;
+            std::cout << "💰 NSView casted successfully" << std::endl;
+
+            // Toggle visibility
+            g_wallet_panel_visible = !g_wallet_panel_visible;
+            std::cout << "💰 New visibility: " << g_wallet_panel_visible << std::endl;
+
+            [panel setHidden:!g_wallet_panel_visible];
+            std::cout << "💰 setHidden called: " << (!g_wallet_panel_visible ? "YES" : "NO") << std::endl;
+            LOG_DEBUG_BROWSER("💰 Wallet panel " + std::string(g_wallet_panel_visible ? "shown" : "hidden"));
+        } else {
+            std::cout << "❌ g_wallet_panel_view is NULL!" << std::endl;
+        }
+#else
+        std::cout << "⚠️ Not on macOS, toggle not implemented for Windows yet" << std::endl;
+#endif
         return true;
     }
 
     if (message_name == "overlay_show_backup") {
         LOG_DEBUG_BROWSER("💾 overlay_show_backup message received from role: " + role_);
-
         LOG_DEBUG_BROWSER("💾 Creating backup overlay with separate process");
-        // Create new process for backup overlay
+
+#ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateBackupOverlayWithSeparateProcess(g_hInstance);
+#elif defined(__APPLE__)
+        CreateBackupOverlayWithSeparateProcess();
+#endif
         return true;
     }
 
     if (message_name == "overlay_show_settings") {
         LOG_DEBUG_BROWSER("🪟 overlay_show_settings message received from role: " + role_);
-
         LOG_DEBUG_BROWSER("🪟 Creating settings overlay with separate process");
-        // Create new process for settings overlay
+
+#ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateSettingsOverlayWithSeparateProcess(g_hInstance);
+#elif defined(__APPLE__)
+        CreateSettingsOverlayWithSeparateProcess();
+#endif
         return true;
     }
 
     if (message_name == "overlay_show_settings_menu") {
         LOG_DEBUG_BROWSER("📋 overlay_show_settings_menu message received from role: " + role_);
 
-        // Create/toggle settings menu dropdown
+#ifdef _WIN32
         extern HINSTANCE g_hInstance;
         extern void CreateSettingsMenuOverlay(HINSTANCE);
         CreateSettingsMenuOverlay(g_hInstance);
+#elif defined(__APPLE__)
+        CreateSettingsMenuOverlay();
+#endif
         return true;
     }
 
@@ -1369,15 +1515,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_DEBUG_BROWSER("🔐 Creating BRC-100 auth overlay with separate process");
-        // Create new process for BRC-100 auth overlay
+
+#ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateBRC100AuthOverlayWithSeparateProcess(g_hInstance);
+#elif defined(__APPLE__)
+        CreateBRC100AuthOverlayWithSeparateProcess();
+#endif
         return true;
     }
 
     if (message_name == "overlay_hide") {
         LOG_DEBUG_BROWSER("🪟 overlay_hide message received from role: " + role_);
 
+#ifdef _WIN32
         // Close the BRC-100 auth overlay window
         HWND auth_hwnd = FindWindow(L"CEFBRC100AuthOverlayWindow", L"BRC-100 Auth Overlay");
         LOG_DEBUG_BROWSER("🪟 FindWindow result: " + std::to_string((uintptr_t)auth_hwnd));
@@ -1387,6 +1538,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay window not found");
         }
+#else
+        // TODO(macOS): Implement BRC-100 auth overlay hiding for macOS
+        LOG_DEBUG_BROWSER("⚠️ overlay_hide not implemented on macOS");
+#endif
         return true;
     }
 
@@ -1446,8 +1601,13 @@ bool SimpleHandler::OnProcessMessageReceived(
                                         LOG_DEBUG_BROWSER("🔐 Sending auth response back to original request: " + responseData_);
 
                                         // Call the handleAuthResponse function in HttpRequestInterceptor
+#ifdef _WIN32
                                         extern void handleAuthResponse(const std::string& responseData);
                                         handleAuthResponse(responseData_);
+#else
+                                        // TODO: macOS HTTP auth response handling
+                                        LOG_WARNING_BROWSER("Warning: handleAuthResponse not implemented on macOS");
+#endif
                                     }
                                 } else {
                                     LOG_DEBUG_BROWSER("🔐 Failed to generate authentication response (status: " + std::to_string(status) + ")");
@@ -1538,12 +1698,17 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (false && message_name == "overlay_hide_NEVER_CALLED_67890" && role_ == "settings") {
         LOG_DEBUG_BROWSER("🪟 overlay_hide message received for settings overlay");
 
+#ifdef _WIN32
         // Close the settings overlay window
         HWND settings_hwnd = FindWindow(L"CEFSettingsOverlayWindow", L"Settings Overlay");
         if (settings_hwnd) {
             LOG_DEBUG_BROWSER("🪟 Closing settings overlay window");
             DestroyWindow(settings_hwnd);
         }
+#else
+        // TODO(macOS): Implement settings overlay hiding for macOS
+        LOG_DEBUG_BROWSER("⚠️ overlay_hide_settings not implemented on macOS");
+#endif
         return true;
     }
 
@@ -1554,6 +1719,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         bool enable = args->GetBool(0);
         LOG_DEBUG_BROWSER("🪟 Setting overlay input: " + std::string(enable ? "enabled" : "disabled") + " for role: " + role_);
 
+#ifdef _WIN32
         // Handle input for the appropriate overlay based on role
         HWND target_hwnd = nullptr;
         if (role_ == "settings") {
@@ -1582,9 +1748,29 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("❌ No target HWND found for overlay_input");
         }
+#else
+        // TODO(macOS): Implement overlay input handling for macOS
+        LOG_DEBUG_BROWSER("⚠️ overlay_input not implemented on macOS");
+#endif
+        return true;
+    }
+#endif  // _WIN32 - end of overlay messages
+
+    // ========== WALLET PANEL TOGGLE (macOS only for now) ==========
+    if (message_name == "toggle_wallet_panel") {
+        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
+
+#ifdef __APPLE__
+        // Call Objective-C++ function in cef_browser_shell_mac.mm
+        extern void ToggleWalletPanel();
+        ToggleWalletPanel();
+#else
+        LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on Windows yet");
+#endif
         return true;
     }
 
+#ifdef _WIN32
     if (message_name == "address_generate") {
         LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -1618,8 +1804,43 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         return true;
     }
+#else
+    if (message_name == "address_generate") {
+        LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-    // Transaction Message Handlers
+        try {
+            // Call WalletService to generate address
+            WalletService walletService;
+            nlohmann::json addressData = walletService.generateAddress();
+
+            LOG_DEBUG_BROWSER("✅ Address generated successfully: " + addressData.dump());
+
+            // Send result back to the requesting browser
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_response");
+            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
+            responseArgs->SetString(0, addressData.dump());
+
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+            LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
+            LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+
+        } catch (const std::exception& e) {
+            LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
+
+            // Send error response
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
+            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
+            responseArgs->SetString(0, e.what());
+
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        }
+
+        return true;
+    }
+#endif
+
+    // Transaction Message Handlers (Cross-platform)
 
     if (message_name == "create_transaction") {
         LOG_DEBUG_BROWSER("💰 Create transaction requested from browser ID: " + std::to_string(browser->GetIdentifier()));
@@ -1975,6 +2196,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         return true;
     }
+    // All wallet handlers now cross-platform (WalletService has platform implementations)
 
     return false;
 }
@@ -2012,7 +2234,12 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
         url.find("messagebox.babbage.systems") != std::string::npos ||
         url.find("/.well-known/auth") != std::string::npos) {
         LOG_DEBUG_BROWSER("🌐 Intercepting wallet request from browser role: " + role_);
+#ifdef _WIN32
         return new HttpRequestInterceptor();
+#else
+        // TODO: macOS HTTP request interception
+        return nullptr;  // No interception on macOS yet
+#endif
     }
 
     // For other requests, use default handling
@@ -2036,13 +2263,61 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
 
-    // For overlay windows, we want normal input processing, not shortcuts
-    if (role_ == "wallet" || role_ == "settings") {
-        *is_keyboard_shortcut = false;
-        return false; // Let the event be processed normally
+    // Handle DevTools keyboard shortcuts for all windows
+    if (event.type == KEYEVENT_RAWKEYDOWN) {
+        // F12 - universal DevTools shortcut (cross-platform)
+        // Key code 123 is F12 on both Windows and macOS
+        if (event.windows_key_code == 123) {
+            ShowOrFocusDevTools(browser);
+            return true; // Consume the event
+        }
+
+        // Check for 'I' key shortcuts
+        if (event.windows_key_code == 'I') {
+#ifdef __APPLE__
+            // macOS: Cmd+Option+I
+            if ((event.modifiers & EVENTFLAG_COMMAND_DOWN) && (event.modifiers & EVENTFLAG_ALT_DOWN)) {
+                ShowOrFocusDevTools(browser);
+                return true; // Consume the event
+            }
+#endif
+#ifdef _WIN32
+            // Windows: Ctrl+Shift+I
+            if ((event.modifiers & EVENTFLAG_CONTROL_DOWN) && (event.modifiers & EVENTFLAG_SHIFT_DOWN)) {
+                ShowOrFocusDevTools(browser);
+                return true; // Consume the event
+            }
+#endif
+        }
     }
 
     return false; // Let other handlers process the event
+}
+
+void SimpleHandler::ShowOrFocusDevTools(CefRefPtr<CefBrowser> browser) {
+    if (!browser || !browser->GetHost()) {
+        LOG_DEBUG_BROWSER("⚠️ Cannot show DevTools - invalid browser");
+        return;
+    }
+
+    // Check if DevTools already open
+    if (!browser->GetHost()->HasDevTools()) {
+        CefWindowInfo windowInfo;
+        CefBrowserSettings settings;
+
+#ifdef _WIN32
+        // Windows: Use SetAsPopup for detached DevTools window (prevents blank window issues)
+        windowInfo.SetAsPopup(NULL, "DevTools");
+#endif
+        // macOS: Default CefWindowInfo creates a popup window automatically
+
+        // Use nullptr for client - CEF will create default handler for DevTools
+        // This prevents lifecycle issues when DevTools window closes
+        browser->GetHost()->ShowDevTools(windowInfo, nullptr, settings, CefPoint());
+        LOG_DEBUG_BROWSER("🔧 DevTools opened via keyboard shortcut");
+    } else {
+        LOG_DEBUG_BROWSER("🔧 DevTools already open - focusing existing window");
+    }
 }
 
 void SimpleHandler::SetRenderHandler(CefRefPtr<CefRenderHandler> handler) {
@@ -2057,15 +2332,13 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
                                         CefRefPtr<CefContextMenuParams> params,
                                         CefRefPtr<CefMenuModel> model) {
-    // Enable DevTools for overlay windows in development
-    if (role_ == "settings" || role_ == "wallet" || role_ == "backup" || role_ == "brc100auth") {
-        // Add Inspect Element option - use custom menu ID
-        const int MENU_ID_DEV_TOOLS_INSPECT = MENU_ID_USER_FIRST + 1;
-        model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
-        model->AddSeparator();
+    // Enable DevTools for all windows
+    // Add Inspect Element option - use custom menu ID
+    const int MENU_ID_DEV_TOOLS_INSPECT = MENU_ID_USER_FIRST + 1;
+    model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
+    model->AddSeparator();
 
-        LOG_DEBUG_BROWSER("🔧 Context menu enabled for " + role_ + " overlay - DevTools available");
-    }
+    LOG_DEBUG_BROWSER("🔧 Context menu enabled - DevTools available");
 }
 
 bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
@@ -2076,11 +2349,11 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
     // Log all context menu commands for debugging
     LOG_DEBUG_BROWSER("🔘 Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
 
-    // Handle DevTools for overlay windows
-    if ((role_ == "settings" || role_ == "wallet" || role_ == "backup" || role_ == "brc100auth") && command_id == (MENU_ID_USER_FIRST + 1)) {
-        // Open DevTools
-        browser->GetHost()->ShowDevTools(CefWindowInfo(), nullptr, CefBrowserSettings(), CefPoint());
-        LOG_DEBUG_BROWSER("🔧 DevTools opened for " + role_ + " overlay");
+    // Handle DevTools for all windows
+    if (command_id == (MENU_ID_USER_FIRST + 1)) {
+        // Open DevTools using helper
+        ShowOrFocusDevTools(browser);
+        LOG_DEBUG_BROWSER("🔧 DevTools opened via context menu");
         return true;
     }
 
@@ -2093,6 +2366,7 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
         if (!link_url.empty()) {
             LOG_DEBUG_BROWSER("📑 Intercepting 'Open in new tab' command, creating tab for: " + link_url);
 
+#ifdef _WIN32
             // Get main window dimensions
             extern HWND g_hwnd;
             RECT rect;
@@ -2107,6 +2381,11 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
 
             // Return true to prevent default behavior (opening in separate window)
             return true;
+#else
+            // TODO(macOS): Implement "Open in new tab" handling for macOS
+            LOG_DEBUG_BROWSER("⚠️ 'Open in new tab' not implemented on macOS");
+            return false;
+#endif
         } else {
             LOG_DEBUG_BROWSER("⚠️ Command 50100 called but no link URL available");
         }

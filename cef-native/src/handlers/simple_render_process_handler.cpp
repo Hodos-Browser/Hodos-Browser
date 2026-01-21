@@ -1,10 +1,17 @@
 // cef_native/src/simple_render_process_handler.cpp
 #include "../../include/handlers/simple_render_process_handler.h"
-#include "../../include/core/IdentityHandler.h"
+
+// Platform-specific V8 handlers (Windows-only currently)
+#ifdef _WIN32
+    #include "../../include/core/IdentityHandler.h"
+    #include "BRC100Handler.h"
+#endif
+
+// Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
-#include "../../include/core/AddressHandler.h"
 #include "../../include/core/HistoryManager.h"
-#include "BRC100Handler.h"
+#include "../../include/core/AddressHandler.h"
+
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
 #include <iostream>
@@ -194,7 +201,7 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
-// Handler for history operations
+// Handler for history operations (cross-platform)
 class HistoryV8Handler : public CefV8Handler {
 public:
     HistoryV8Handler() {}
@@ -383,10 +390,12 @@ private:
 
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 SimpleRenderProcessHandler constructor called!");
+
+#ifdef _WIN32
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
 
-    // Initialize HistoryManager for render process
+    // Initialize HistoryManager for render process (Windows-only)
     std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
     std::string user_data_path = appdata_path + "\\HodosBrowser\\Default";
 
@@ -396,6 +405,9 @@ SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     } else {
         LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
     }
+#else
+    LOG_DEBUG_RENDER("🔧 HistoryManager not available on macOS - stubbed");
+#endif
 }
 
 void SimpleRenderProcessHandler::OnContextCreated(
@@ -407,8 +419,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     LOG_DEBUG_RENDER("🔧 OnContextCreated called for browser ID: " + std::to_string(browser->GetIdentifier()));
     LOG_DEBUG_RENDER("🔧 Frame URL: " + frame->GetURL().ToString());
+#ifdef _WIN32
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
+#endif
     LOG_DEBUG_RENDER("🔧 RENDER PROCESS HANDLER IS WORKING!");
     LOG_DEBUG_RENDER("🔧 THIS IS THE RENDER PROCESS HANDLER!");
 
@@ -429,7 +443,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
     global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-    // Create the identity object inside hodosBrowser
+#ifdef _WIN32
+    // Create the identity object inside hodosBrowser (Windows-only)
     CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -443,8 +458,15 @@ void SimpleRenderProcessHandler::OnContextCreated(
     identityObject->SetValue("markBackedUp",
         CefV8Value::CreateFunction("markBackedUp", identityHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // macOS: Provide stub identity API to prevent JavaScript errors
+    CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🔧 Identity API stubbed on macOS (empty object)");
+#endif
 
-    // Create the navigation object inside hodosBrowser
+#ifdef _WIN32
+    // Create the navigation object inside hodosBrowser (Windows-only)
     CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -454,6 +476,31 @@ void SimpleRenderProcessHandler::OnContextCreated(
     navigationObject->SetValue("navigate",
         CefV8Value::CreateFunction("navigate", navigationHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // macOS: Navigation handler is cross-platform, inject it
+    std::cout << "🔧 macOS: Injecting navigation API..." << std::endl;
+    LOG_DEBUG_RENDER("🔧 macOS: Injecting navigation API...");
+
+    CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
+    if (!navigationObject) {
+        std::cout << "❌ Failed to create navigationObject!" << std::endl;
+        LOG_ERROR_RENDER("❌ Failed to create navigationObject!");
+    } else {
+        std::cout << "✅ navigationObject created" << std::endl;
+    }
+
+    bool setResult = hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    std::cout << "🔧 SetValue('navigation') result: " << setResult << std::endl;
+
+    CefRefPtr<NavigationHandler> navHandler = new NavigationHandler();
+    CefRefPtr<CefV8Value> navFunction = CefV8Value::CreateFunction("navigate", navHandler);
+
+    bool setFuncResult = navigationObject->SetValue("navigate", navFunction, V8_PROPERTY_ATTRIBUTE_NONE);
+    std::cout << "🔧 SetValue('navigate' function) result: " << setFuncResult << std::endl;
+
+    LOG_DEBUG_RENDER("✅ Navigation API injection completed on macOS");
+    std::cout << "✅ Navigation API injection completed on macOS" << std::endl;
+#endif
 
     // overlayPanel object removed - now using process-per-overlay architecture
 
@@ -475,7 +522,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
         LOG_DEBUG_RENDER("🎯 isMainBrowser: " + std::string(isMainBrowser ? "true" : "false"));
     }
 
-    // Create the address object
+#ifdef _WIN32
+    // Create the address object (Windows)
     CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -484,8 +532,29 @@ void SimpleRenderProcessHandler::OnContextCreated(
     addressObject->SetValue("generate",
         CefV8Value::CreateFunction("generate", addressHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+#else
+    // macOS: AddressHandler is cross-platform now
+    CefRefPtr<CefV8Value> addressObject = CefV8Value::CreateObject(nullptr, nullptr);
+    hodosBrowser->SetValue("address", addressObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-    // Create the history object
+    CefRefPtr<AddressHandler> addressHandler = new AddressHandler();
+
+    addressObject->SetValue("generate",
+        CefV8Value::CreateFunction("generate", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    addressObject->SetValue("getAll",
+        CefV8Value::CreateFunction("getAll", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    addressObject->SetValue("getCurrent",
+        CefV8Value::CreateFunction("getCurrent", addressHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+
+    LOG_DEBUG_RENDER("✅ Address API enabled on macOS");
+#endif
+
+    // Create the history object (cross-platform)
     LOG_DEBUG_RENDER("📚 Creating history object for V8 context");
     CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
@@ -522,8 +591,13 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> sendFunction = CefV8Value::CreateFunction("send", new CefMessageSendHandler());
     cefMessageObject->SetValue("send", sendFunction, V8_PROPERTY_ATTRIBUTE_NONE);
 
-    // Register BRC-100 API
+#ifdef _WIN32
+    // Register BRC-100 API (Windows-only)
     BRC100Handler::RegisterBRC100API(context);
+#else
+    // TODO: macOS implementation - BRC-100 API stubbed for now
+    LOG_DEBUG_RENDER("🔧 BRC-100 API not available on macOS - stubbed");
+#endif
 
     // For overlay browsers, signal that all systems are ready
     if (isOverlayBrowser) {
@@ -576,14 +650,17 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             // Send message to React component
             std::string js = R"(
+                console.log('🔔 Dispatching tab_list_response event');
                 window.dispatchEvent(new MessageEvent('message', {
                     data: {
                         type: 'tab_list_response',
                         data: ')" + escaped_json + R"('
                     }
                 }));
+                console.log('✅ tab_list_response event dispatched');
             )";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_DEBUG_RENDER("✅ tab_list_response JavaScript executed");
             return true;
         }
 

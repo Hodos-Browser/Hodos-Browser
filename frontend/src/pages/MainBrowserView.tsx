@@ -229,8 +229,8 @@ const MainBrowserView: React.FC = () => {
                 {/* Wallet Button */}
                 <IconButton
                     onClick={() => {
-                        window.cefMessage?.send('overlay_show_wallet', []);
-                        window.hodosBrowser.overlay.toggleInput(true);
+                        console.log('💰 Wallet panel toggle clicked');
+                        window.cefMessage?.send('toggle_wallet_panel', []);
                     }}
                     size="small"
                     sx={{
