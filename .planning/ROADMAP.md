@@ -17,7 +17,7 @@ None
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation & Investigation** - Understand current address bar and history database architecture
-- [ ] **Phase 2: Core Input Component** - Build base omnibox React component with Material-UI
+- [x] **Phase 2: Core Input Component** - Build base omnibox React component with Material-UI
 - [ ] **Phase 3: History Autocomplete** - Integrate SQLite history database with search and ranking
 - [ ] **Phase 4: Google Search Integration** - Set up Google API and implement search vs URL detection
 - [ ] **Phase 5: Keyboard Navigation** - Implement Chrome-like keyboard shortcuts and navigation
@@ -44,10 +44,11 @@ Plans:
   - React component architecture to replace (MainBrowserView InputBase)
   - Material-UI components to reuse (Paper styling)
   - State management patterns to extend (address + suggestions[])
-**Plans**: TBD
+**Status**: Complete
+**Completed**: 2026-01-25
 
 Plans:
-- TBD (determined during phase planning)
+- [x] 02-01: Core Input Component (3 min) - Chrome-like omnibox with Material-UI dropdown and instant feedback
 
 ### Phase 3: History Autocomplete
 **Goal**: Query SQLite history database from frontend, implement ranking algorithm (frequency + recency), and display history suggestions in dropdown
@@ -109,7 +110,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Investigation | 1/1 | Complete | 2026-01-25 |
-| 2. Core Input Component | 0/TBD | Not started | - |
+| 2. Core Input Component | 1/1 | Complete | 2026-01-25 |
 | 3. History Autocomplete | 0/TBD | Not started | - |
 | 4. Google Search Integration | 0/TBD | Not started | - |
 | 5. Keyboard Navigation | 0/TBD | Not started | - |
