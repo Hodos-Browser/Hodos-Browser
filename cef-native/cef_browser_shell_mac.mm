@@ -89,6 +89,7 @@ NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
+NSWindow* g_omnibox_overlay_window = nullptr;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -112,6 +113,7 @@ void CreateWalletOverlayWithSeparateProcess();
 void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateSettingsMenuOverlay();
+void CreateOmniboxOverlay();
 void ShutdownApplication();
 
 // ============================================================================
@@ -372,6 +374,108 @@ ViewDimensions GetViewDimensions(void* nsview) {
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
         wallet->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+@end
+
+// Omnibox Overlay View
+@interface OmniboxOverlayView : NSView
+@property (nonatomic, strong) CALayer* renderLayer;
+@end
+
+@implementation OmniboxOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (omnibox) {
+        omnibox->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        omnibox->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+        LOG_DEBUG("🖱️ Omnibox overlay: Left-click forwarded to CEF");
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (omnibox) {
+        omnibox->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    int modifiers = 0;
+    NSEventModifierFlags flags = [event modifierFlags];
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (omnibox) {
+        omnibox->GetHost()->SendKeyEvent(key_event);
+        LOG_DEBUG("⌨️ Omnibox overlay: Key down forwarded to CEF");
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    int modifiers = 0;
+    NSEventModifierFlags flags = [event modifierFlags];
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (omnibox) {
+        omnibox->GetHost()->SendKeyEvent(key_event);
     }
 }
 
@@ -663,6 +767,19 @@ ViewDimensions GetViewDimensions(void* nsview) {
         if (auth) auth->GetHost()->WasResized();
         LOG_DEBUG("🔄 BRC-100 auth overlay resized and notified");
     }
+
+    if (g_omnibox_overlay_window && [g_omnibox_overlay_window isVisible]) {
+        // Omnibox overlay is only 300px tall, positioned at top
+        int overlayHeight = 300;
+        NSRect omniboxFrame = NSMakeRect(mainFrame.origin.x,
+                                          mainFrame.origin.y + mainFrame.size.height - overlayHeight,
+                                          mainFrame.size.width,
+                                          overlayHeight);
+        [g_omnibox_overlay_window setFrame:omniboxFrame display:YES];
+        CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+        if (omnibox) omnibox->GetHost()->WasResized();
+        LOG_DEBUG("🔄 Omnibox overlay resized and notified");
+    }
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
@@ -702,6 +819,12 @@ ViewDimensions GetViewDimensions(void* nsview) {
         g_wallet_overlay_window = nullptr;
     }
 
+    // Close omnibox overlay
+    if (g_omnibox_overlay_window && [g_omnibox_overlay_window isVisible]) {
+        LOG_INFO("🔍 Closing omnibox overlay due to app focus loss");
+        [g_omnibox_overlay_window orderOut:nil];
+    }
+
     // Note: Settings and other overlays can remain open when app loses focus
     // Only wallet overlay auto-closes for security (matches Windows behavior)
 }
@@ -736,6 +859,13 @@ extern "C" void CloseOverlayWindow(void* window, void* parent) {
     [overlayWindow close];
 
     LOG_INFO("✅ Overlay window closed successfully");
+}
+
+extern "C" void HideOmniboxOverlay() {
+    if (g_omnibox_overlay_window) {
+        [g_omnibox_overlay_window orderOut:nil];
+        LOG_INFO("✅ Omnibox overlay hidden");
+    }
 }
 
 // ============================================================================
@@ -1102,6 +1232,88 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
     LOG_INFO("✅ BRC-100 auth overlay created successfully");
 }
 
+void CreateOmniboxOverlay() {
+    LOG_INFO("🔍 Creating omnibox overlay (macOS)");
+
+    // Check if overlay already exists
+    if (g_omnibox_overlay_window) {
+        LOG_WARNING("🔍 Omnibox overlay already exists, showing it");
+        [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    // Get main window position and size
+    NSRect mainFrame = [g_main_window frame];
+    int width = (int)mainFrame.size.width;
+    int overlayHeight = 300;  // 300px height for dropdown
+
+    // Position at top of main window
+    NSRect overlayFrame = NSMakeRect(mainFrame.origin.x,
+                                      mainFrame.origin.y + mainFrame.size.height - overlayHeight,
+                                      width,
+                                      overlayHeight);
+
+    g_omnibox_overlay_window = [[NSWindow alloc]
+        initWithContentRect:overlayFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_omnibox_overlay_window) {
+        LOG_ERROR("❌ Failed to create omnibox overlay window");
+        return;
+    }
+
+    [g_omnibox_overlay_window setOpaque:NO];
+    [g_omnibox_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_omnibox_overlay_window setLevel:NSFloatingWindowLevel];  // Use floating for top-most behavior
+    [g_omnibox_overlay_window setIgnoresMouseEvents:NO];
+    [g_omnibox_overlay_window setReleasedWhenClosed:NO];
+    [g_omnibox_overlay_window setHasShadow:NO];
+    [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_omnibox_overlay_window ordered:NSWindowAbove];
+
+    OmniboxOverlayView* contentView = [[OmniboxOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, width, overlayHeight)];
+    [g_omnibox_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("omnibox_overlay"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   width,
+                                   overlayHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        "http://127.0.0.1:5137/omnibox-overlay",
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("❌ Failed to create omnibox overlay CEF browser");
+        return;
+    }
+
+    [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
+    LOG_INFO("✅ Omnibox overlay created successfully");
+}
+
 void CreateSettingsMenuOverlay() {
     LOG_INFO("🎨 Creating settings menu overlay (macOS)");
 
@@ -1225,6 +1437,12 @@ void ShutdownApplication() {
         settings_menu_browser->GetHost()->CloseBrowser(false);
     }
 
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (omnibox_browser) {
+        LOG_INFO("🔄 Closing omnibox overlay browser...");
+        omnibox_browser->GetHost()->CloseBrowser(false);
+    }
+
     // Step 2: Close overlay windows
     LOG_INFO("🔄 Closing overlay windows...");
 
@@ -1256,6 +1474,12 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing settings menu overlay window...");
         [g_settings_menu_overlay_window close];
         g_settings_menu_overlay_window = nullptr;
+    }
+
+    if (g_omnibox_overlay_window) {
+        LOG_INFO("🔄 Closing omnibox overlay window...");
+        [g_omnibox_overlay_window close];
+        g_omnibox_overlay_window = nullptr;
     }
 
     // Step 3: Close main window

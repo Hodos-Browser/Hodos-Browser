@@ -646,17 +646,14 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             // Send message to React component
             std::string js = R"(
-                console.log('🔔 Dispatching tab_list_response event');
                 window.dispatchEvent(new MessageEvent('message', {
                     data: {
                         type: 'tab_list_response',
                         data: ')" + escaped_json + R"('
                     }
                 }));
-                console.log('✅ tab_list_response event dispatched');
             )";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-            LOG_DEBUG_RENDER("✅ tab_list_response JavaScript executed");
             return true;
         }
 

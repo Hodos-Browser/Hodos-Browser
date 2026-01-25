@@ -20,7 +20,7 @@ Progress: ████░░░░░░ 40%
 
 **Velocity:**
 - Total plans completed: 3
-- Average duration: 5 min
+- Average duration: 7 min
 - Total execution time: 0.3 hours
 
 **By Phase:**
@@ -29,11 +29,11 @@ Progress: ████░░░░░░ 40%
 |-------|-------|-------|----------|
 | 1 | 1 | 7 min | 7 min |
 | 2 | 1 | 3 min | 3 min |
-| 2.1 | 1 | 6 min | 6 min |
+| 2.1 | 1 | 12 min | 12 min |
 
 **Recent Trend:**
-- Last 5 plans: 7 min, 3 min, 6 min
-- Trend: Consistent (averaging 5-6 min per plan)
+- Last 5 plans: 7 min, 3 min, 12 min
+- Trend: Variable (Phase 2.1 longer due to macOS support addition)
 
 ## Accumulated Context
 
@@ -52,7 +52,7 @@ Recent decisions affecting current work:
 | 2 | Uncontrolled component with initialValue prop | Simpler implementation for Phase 2, will add proper state sync in Phase 3 |
 | 2 | Material-UI Fade animation for dropdown | Smoother, more Chrome-like feel; simpler than Collapse |
 | 2 | Temporarily disabled tab sync and Ctrl+L focus | Deferred to Phases 3 and 5 per plan scope |
-| 2.1 | Windows-only overlay implementation | Followed existing pattern with #ifdef _WIN32; macOS support can be added later |
+| 2.1 | Cross-platform overlay implementation | Windows and macOS support following wallet overlay pattern with NSWindow on macOS |
 | 2.1 | 300px overlay height (not full window) | Just enough for dropdown, not full window height like other overlays |
 | 2.1 | Unified pill container wraps input + dropdown | Single rounded Box for Chrome-like appearance |
 | 2.1 | Auto-show dropdown on mount | Chrome behavior when clicking address bar |

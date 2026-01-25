@@ -57,11 +57,14 @@
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
+    extern void CreateOmniboxOverlay(HINSTANCE hInstance);
 #else
     // macOS global views
     extern NSView* g_webview_view;
     // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
+    extern "C" void HideOmniboxOverlay();
+    extern void CreateOmniboxOverlay();
 #endif
 
 // Global backup modal state management
@@ -117,6 +120,7 @@ CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::omnibox_overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
 }
@@ -148,6 +152,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
     return settings_menu_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxOverlayBrowser() {
+    return omnibox_overlay_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -565,6 +573,19 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "omnibox_overlay") {
+        omnibox_overlay_browser_ = browser;
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized.");
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser ID: " + std::to_string(browser->GetIdentifier()));
+
+        // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -617,6 +638,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
         std::cout << "  → BRC100 auth browser cleanup" << std::endl;
         brc100_auth_browser_ = nullptr;
+    } else if (role_ == "omnibox_overlay" && browser == omnibox_overlay_browser_) {
+        std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
+        omnibox_overlay_browser_ = nullptr;
     } else if (role_ == "overlay" && browser == overlay_browser_) {
         std::cout << "  → Overlay browser cleanup" << std::endl;
         overlay_browser_ = nullptr;
@@ -1411,6 +1435,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             } else if (role_ == "brc100auth") {
                 extern HWND g_brc100_auth_overlay_hwnd;
                 g_brc100_auth_overlay_hwnd = nullptr;
+            } else if (role_ == "omnibox_overlay") {
+                extern HWND g_omnibox_overlay_hwnd;
+                g_omnibox_overlay_hwnd = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -1422,6 +1449,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern NSWindow* g_wallet_overlay_window;
         extern NSWindow* g_backup_overlay_window;
         extern NSWindow* g_brc100_auth_overlay_window;
+        extern NSWindow* g_omnibox_overlay_window;
 
         NSWindow* target_window = nullptr;
         CefRefPtr<CefBrowser> target_browser = nullptr;
@@ -1438,6 +1466,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "brc100auth") {
             target_window = g_brc100_auth_overlay_window;
             target_browser = GetBRC100AuthBrowser();
+        } else if (role_ == "omnibox_overlay") {
+            target_window = g_omnibox_overlay_window;
+            target_browser = GetOmniboxOverlayBrowser();
         }
 
         if (target_window) {
@@ -1452,6 +1483,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
                 else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
+                else if (role_ == "omnibox_overlay") omnibox_overlay_browser_ = nullptr;
             }
 
             // Remove from parent window and close
@@ -1467,6 +1499,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_backup_overlay_window = nullptr;
             } else if (role_ == "brc100auth") {
                 g_brc100_auth_overlay_window = nullptr;
+            } else if (role_ == "omnibox_overlay") {
+                g_omnibox_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -1824,6 +1858,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateOmniboxOverlay(g_hInstance);
+#elif defined(__APPLE__)
+        CreateOmniboxOverlay();
 #endif
         return true;
     }
@@ -1849,6 +1885,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
             ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
         }
+#elif defined(__APPLE__)
+        HideOmniboxOverlay();
 #endif
 
         return true;
@@ -1862,6 +1900,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
             ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
         }
+#elif defined(__APPLE__)
+        HideOmniboxOverlay();
 #endif
 
         return true;
