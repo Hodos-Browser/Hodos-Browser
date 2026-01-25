@@ -2420,6 +2420,13 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             }
         }
     }
+
+    // CRITICAL: For omnibox_overlay on macOS, let events pass through to webpage
+    // The events were forwarded from header, now they need to reach React
+    if (role_ == "omnibox_overlay") {
+        LOG_DEBUG_BROWSER("⌨️ Omnibox overlay allowing event to propagate to webpage");
+        return false; // Don't consume - let webpage handle it
+    }
 #endif
 
     // Handle DevTools keyboard shortcuts for all windows
