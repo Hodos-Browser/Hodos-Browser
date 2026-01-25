@@ -114,12 +114,14 @@ export default function OmniboxOverlayRoot() {
       {/* Position address bar exactly where it is in the header */}
       {/* TabBar: 40px, Toolbar: 54px (9px padding top), nav buttons: ~140px */}
       <div
+        onClick={(e) => e.stopPropagation()} // Prevent background click handler
         style={{
           position: 'absolute',
           top: 49, // 40px TabBar + 9px toolbar padding
           left: 148, // 8px toolbar padding + 140px nav buttons
           right: 128, // Space for wallet/history/settings buttons (3 buttons + padding)
           cursor: 'text',
+          pointerEvents: 'auto', // Ensure this receives pointer events
         }}
       >
         <Omnibox
