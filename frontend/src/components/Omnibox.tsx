@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  Box,
   Paper,
   InputBase,
   List,
@@ -14,6 +13,7 @@ interface OmniboxProps {
 }
 
 const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
+  console.log('🎯 Omnibox component loaded');
   const [inputValue, setInputValue] = useState<string>(initialValue);
   const [showDropdown, setShowDropdown] = useState<boolean>(false);
 
@@ -29,8 +29,14 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
     suggestion.toLowerCase().includes(inputValue.toLowerCase())
   );
 
+  // Auto-show dropdown on mount (Chrome behavior when clicking address bar)
+  useEffect(() => {
+    setShowDropdown(true);
+  }, []);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    console.log('🎯 Input changed:', value, 'Will show dropdown:', value.length > 0);
     setInputValue(value);
     setShowDropdown(value.length > 0);
   };
@@ -62,7 +68,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   };
 
   return (
-    <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
+    <>
       <Paper
         sx={{
           display: 'flex',
@@ -91,6 +97,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
           onBlur={handleInputBlur}
           onKeyDown={handleKeyDown}
           placeholder="Search or enter address"
+          autoFocus
           fullWidth
           sx={{
             fontSize: 14,
@@ -138,7 +145,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
           </List>
         </Paper>
       </Fade>
-    </Box>
+    </>
   );
 };
 
