@@ -13,7 +13,9 @@ import { brc100 } from './bridge/brc100';
 // Removed identity types - now using unified wallet system
 
 const App = () => {
-  console.log("🔍 App component rendering, pathname:", window.location.pathname);
+  console.log("🔍🔍🔍 APP COMPONENT RENDERING 🔍🔍🔍");
+  console.log("🔍 Current pathname:", window.location.pathname);
+  console.log("🔍 Full URL:", window.location.href);
 
   // BRC-100 auth modal state
   const [authModalOpen, setAuthModalOpen] = React.useState(false);

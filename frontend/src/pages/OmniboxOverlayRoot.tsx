@@ -1,9 +1,13 @@
 import React, { useEffect } from 'react';
 import Omnibox from '../components/Omnibox';
 
+console.log('🔍🔍🔍 OmniboxOverlayRoot.tsx FILE LOADED 🔍🔍🔍');
+
 export default function OmniboxOverlayRoot() {
+  console.log('🔍🔍🔍 OmniboxOverlayRoot COMPONENT RENDERING 🔍🔍🔍');
+
   useEffect(() => {
-    console.log('🔍 Omnibox overlay mounted');
+    console.log('🔍🔍🔍 Omnibox overlay MOUNTED (useEffect ran) 🔍🔍🔍');
   }, []);
 
   const focusInput = () => {

@@ -14,7 +14,7 @@ interface OmniboxProps {
 }
 
 const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
-  console.log('🎯 Omnibox component loaded');
+  console.log('🎯🎯🎯 OMNIBOX COMPONENT RENDERING 🎯🎯🎯');
   const [inputValue, setInputValue] = useState<string>(initialValue);
   const [showDropdown, setShowDropdown] = useState<boolean>(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
