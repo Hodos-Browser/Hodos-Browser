@@ -47,9 +47,10 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   };
 
   const handleInputBlur = () => {
-    setTimeout(() => {
-      setShowDropdown(false);
-    }, 200);
+    // Don't auto-hide dropdown on blur - overlay handles closing
+    // setTimeout(() => {
+    //   setShowDropdown(false);
+    // }, 200);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

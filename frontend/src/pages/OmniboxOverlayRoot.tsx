@@ -1,8 +1,10 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Box } from '@mui/material';
 import Omnibox from '../components/Omnibox';
 
 const OmniboxOverlayRoot: React.FC = () => {
+  const omniboxRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     console.log('🔍 Omnibox overlay mounted');
   }, []);
@@ -16,7 +18,7 @@ const OmniboxOverlayRoot: React.FC = () => {
     }
   };
 
-  const handleEscape = () => {
+  const handleClose = () => {
     console.log('🔍 Closing omnibox overlay');
 
     // Send close message via IPC
@@ -29,12 +31,32 @@ const OmniboxOverlayRoot: React.FC = () => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        handleEscape();
+        handleClose();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Close overlay when clicking outside the omnibox
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (omniboxRef.current && !omniboxRef.current.contains(e.target as Node)) {
+        console.log('🔍 Click outside omnibox detected, closing overlay');
+        handleClose();
+      }
+    };
+
+    // Add listener with a small delay to avoid closing immediately on mount
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleClickOutside);
+    }, 100);
+
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
   }, []);
 
   return (
@@ -49,6 +71,7 @@ const OmniboxOverlayRoot: React.FC = () => {
       {/* Position address bar exactly where it is in the header */}
       {/* TabBar: 40px, Toolbar: 54px (9px padding top), nav buttons: ~140px */}
       <Box
+        ref={omniboxRef}
         sx={{
           position: 'absolute',
           top: 49, // 40px TabBar + 9px toolbar padding
