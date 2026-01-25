@@ -211,28 +211,37 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-    CefKeyEvent key_event;
-    key_event.type = KEYEVENT_RAWKEYDOWN;
-    key_event.native_key_code = [event keyCode];
+    CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
+    if (!settings) return;
 
     NSString* chars = [event characters];
-    if (chars.length > 0) {
-        key_event.character = [chars characterAtIndex:0];
-    }
+    NSEventModifierFlags flags = [event modifierFlags];
 
     int modifiers = 0;
-    NSEventModifierFlags flags = [event modifierFlags];
     if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
     if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
     if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
     if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
-    key_event.modifiers = modifiers;
 
-    CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
-    if (settings) {
-        settings->GetHost()->SendKeyEvent(key_event);
-        LOG_DEBUG("⌨️ Settings overlay: Key down forwarded to CEF");
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
     }
+    key_event.modifiers = modifiers;
+    settings->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        settings->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("⌨️ Settings overlay: Key events forwarded to CEF");
 }
 
 - (void)keyUp:(NSEvent *)event {
@@ -329,28 +338,37 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-    CefKeyEvent key_event;
-    key_event.type = KEYEVENT_RAWKEYDOWN;
-    key_event.native_key_code = [event keyCode];
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (!wallet) return;
 
     NSString* chars = [event characters];
-    if (chars.length > 0) {
-        key_event.character = [chars characterAtIndex:0];
-    }
+    NSEventModifierFlags flags = [event modifierFlags];
 
     int modifiers = 0;
-    NSEventModifierFlags flags = [event modifierFlags];
     if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
     if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
     if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
     if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
-    key_event.modifiers = modifiers;
 
-    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-    if (wallet) {
-        wallet->GetHost()->SendKeyEvent(key_event);
-        LOG_DEBUG("⌨️ Wallet overlay: Key down forwarded to CEF");
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
     }
+    key_event.modifiers = modifiers;
+    wallet->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        wallet->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("⌨️ Wallet overlay: Key events forwarded to CEF");
 }
 
 - (void)keyUp:(NSEvent *)event {
@@ -557,6 +575,64 @@ ViewDimensions GetViewDimensions(void* nsview) {
     }
 }
 
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
+    if (!backup) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    backup->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        backup->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("⌨️ Backup overlay: Key events forwarded to CEF");
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
+    if (!backup) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    backup->GetHost()->SendKeyEvent(key_event);
+}
+
 @end
 
 // BRC-100 Auth Overlay View
@@ -624,6 +700,64 @@ ViewDimensions GetViewDimensions(void* nsview) {
     if (auth) {
         auth->GetHost()->SendMouseMoveEvent(mouse_event, false);
     }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> auth = SimpleHandler::GetBRC100AuthBrowser();
+    if (!auth) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    auth->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        auth->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("⌨️ BRC-100 auth overlay: Key events forwarded to CEF");
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> auth = SimpleHandler::GetBRC100AuthBrowser();
+    if (!auth) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    auth->GetHost()->SendKeyEvent(key_event);
 }
 
 @end
