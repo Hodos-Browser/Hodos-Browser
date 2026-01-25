@@ -2,6 +2,9 @@
 
 **Analysis Date:** 2026-01-24
 
+**Feature-Specific Documentation:**
+- For detailed address bar and history database architecture, see `../phases/1-foundation-investigation/INVESTIGATION.md` (React components, HistoryManager C++ API, SQLite schema, IPC protocol, data flow diagrams)
+
 ## Pattern Overview
 
 **Overall:** Three-Layer Distributed Architecture with Process Isolation

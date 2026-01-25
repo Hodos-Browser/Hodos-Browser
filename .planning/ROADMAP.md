@@ -40,6 +40,10 @@ Plans:
 **Goal**: Build the foundational omnibox React component with input handling, basic dropdown UI, and Material-UI styling
 **Depends on**: Phase 1
 **Research**: Unlikely (React + Material-UI component using established patterns)
+**Context**: See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for:
+  - React component architecture to replace (MainBrowserView InputBase)
+  - Material-UI components to reuse (Paper styling)
+  - State management patterns to extend (address + suggestions[])
 **Plans**: TBD
 
 Plans:
@@ -50,6 +54,11 @@ Plans:
 **Depends on**: Phase 2
 **Research**: Likely (database integration and ranking)
 **Research topics**: Querying SQLite history from React frontend (via C++ layer), autocomplete ranking algorithms (FrecencyScore = frequency × recency_weight), efficient SQL queries for prefix matching
+**Context**: See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for:
+  - HistoryManager C++ API (GetHistory, SearchHistory methods to extend)
+  - SQLite schema (urls/visits tables with indexes)
+  - IPC protocol patterns (window.cefMessage.send)
+  - SQL query examples for autocomplete (frecency ranking)
 **Plans**: TBD
 
 Plans:
@@ -60,6 +69,9 @@ Plans:
 **Depends on**: Phase 3
 **Research**: Likely (external API and setup)
 **Research topics**: Google Custom Search API vs Autocomplete API (which to use), Google API project setup and credential management, URL detection heuristics (protocol, TLD, whitespace patterns)
+**Context**: See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for:
+  - Existing navigation flow (handleNavigate to window.cefMessage.send)
+  - IPC protocol to extend for search vs URL routing
 **Plans**: TBD
 
 Plans:
@@ -69,6 +81,9 @@ Plans:
 **Goal**: Implement arrow key navigation through suggestions, Tab to autocomplete, Enter to navigate/search with Chrome-like behavior
 **Depends on**: Phase 4
 **Research**: Unlikely (standard React keyboard event handling)
+**Context**: See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for:
+  - Existing handleKeyDown patterns (Ctrl+L for address bar focus)
+  - Event handler architecture to extend (ArrowUp/ArrowDown/Tab)
 **Plans**: TBD
 
 Plans:
@@ -78,6 +93,9 @@ Plans:
 **Goal**: Verify Windows compatibility, optimize performance (query speed, dropdown rendering), and refine UI/UX
 **Depends on**: Phase 5
 **Research**: Unlikely (testing and refinement of existing functionality)
+**Context**: See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for:
+  - Complete data flow diagram (React → IPC → C++ → SQLite)
+  - Performance considerations (database queries, IPC latency)
 **Plans**: TBD
 
 Plans:

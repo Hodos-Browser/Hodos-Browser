@@ -47,16 +47,26 @@ Fast, seamless switching between URL navigation and web search without the user 
 
 ## Context
 
+**Implementation Architecture:**
+See `.planning/phases/1-foundation-investigation/INVESTIGATION.md` for comprehensive documentation:
+- Complete React component architecture (MainBrowserView address bar)
+- HistoryManager C++ API reference and SQLite schema
+- End-to-end data flow diagrams (React → IPC → C++ → SQLite)
+- Replace vs Reuse decision matrix for all components
+- IPC protocol documentation
+- SQL query examples for autocomplete
+
 **Existing Address Bar:**
-- There is currently a basic address bar in the browser
-- The omnibox will replace this existing component
-- Need to understand current implementation to ensure clean migration
+- Basic address bar in MainBrowserView.tsx (lines 183-227)
+- Simple InputBase component with no autocomplete functionality
+- The omnibox will replace this with full dropdown UI
 
 **Browser History Database:**
 - History is stored in SQLite database (C++ layer manages it)
 - Location: `%APPDATA%/HodosBrowser/Default/` (Windows) or `~/Library/Application Support/HodosBrowser/Default/` (macOS)
 - Managed by HistoryManager in C++: `cef-native/src/core/HistoryManager.cpp`
-- Contains visited URLs, page titles, timestamps, visit frequency data
+- Schema: urls table (url, title, visit_count, typed_count, last_visit_time) + visits table
+- Perfect for autocomplete (no schema changes needed)
 
 **Architecture Considerations:**
 - Frontend (React) handles UI and user interactions
@@ -80,11 +90,16 @@ Fast, seamless switching between URL navigation and web search without the user 
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Replace existing address bar (not add alongside) | Cleaner UX, avoids confusion about which input to use | — Pending |
+| Replace existing address bar (not add alongside) | Cleaner UX, avoids confusion about which input to use | ✓ Confirmed (Phase 1) |
 | Use Google for search (not DuckDuckGo/Bing) | User explicitly requested Google | — Pending |
 | Mix history URLs + Google suggestions in dropdown | Requested by user; provides best of local + remote suggestions | — Pending |
 | MacOS-first implementation | User's development platform; can test immediately | — Pending |
 | Chrome-like keyboard shortcuts | Leverage familiar UX patterns users already know | — Pending |
+| REPLACE: MainBrowserView InputBase component | Simple text input has no autocomplete dropdown UI, suggestion rendering, or keyboard navigation | ✓ Decided (Phase 1) |
+| KEEP: HistoryManager C++ class and SQLite schema | Database schema perfect for autocomplete with url, title, visit_count, typed_count, last_visit_time fields | ✓ Decided (Phase 1) |
+| EXTEND: State management for suggestions[], selectedIndex, showDropdown | Need autocomplete state in addition to address string | ✓ Decided (Phase 1) |
+| EXTEND: IPC protocol with autocomplete_query/response messages | New messages for autocomplete suggestions | ✓ Decided (Phase 1) |
+| EXTEND: HistoryManager with GetAutocompleteSuggestions() method | Single new method for optimized autocomplete queries | ✓ Decided (Phase 1) |
 
 ---
-*Last updated: 2026-01-24 after initialization*
+*Last updated: 2026-01-25 after Phase 1 completion*
