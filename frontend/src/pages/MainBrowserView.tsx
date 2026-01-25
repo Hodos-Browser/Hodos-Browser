@@ -3,6 +3,8 @@ import {
   Box,
   Toolbar,
   IconButton,
+  Paper,
+  InputBase,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -15,7 +17,6 @@ import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { TabBar } from '../components/TabBar';
-import Omnibox from '../components/Omnibox';
 
 
 const MainBrowserView: React.FC = () => {
@@ -149,11 +150,50 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Address Bar - Omnibox component with dropdown */}
-                <Omnibox
-                    onNavigate={handleNavigate}
-                    initialValue={address}
-                />
+                {/* Address Bar Placeholder - clicking shows omnibox overlay */}
+                <Paper
+                    onClick={() => {
+                        console.log('🔍 Address bar clicked, showing omnibox overlay');
+                        window.cefMessage?.send('show_omnibox_overlay', []);
+                    }}
+                    sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        flex: 1,
+                        minWidth: 0,
+                        height: 36,
+                        borderRadius: 20,
+                        px: 2,
+                        bgcolor: '#f1f3f4',
+                        boxShadow: 'none',
+                        border: '1px solid transparent',
+                        cursor: 'pointer',
+                        '&:hover': {
+                            bgcolor: '#ffffff',
+                            border: '1px solid rgba(0, 0, 0, 0.1)',
+                        },
+                    }}
+                >
+                    <InputBase
+                        value={address}
+                        placeholder="Search or enter address"
+                        readOnly
+                        fullWidth
+                        sx={{
+                            fontSize: 14,
+                            color: 'rgba(0, 0, 0, 0.87)',
+                            cursor: 'pointer',
+                            '& input': {
+                                padding: 0,
+                                cursor: 'pointer',
+                                '&::placeholder': {
+                                    color: 'rgba(0, 0, 0, 0.4)',
+                                    opacity: 1,
+                                },
+                            },
+                        }}
+                    />
+                </Paper>
 
                 {/* Wallet Button */}
                 <IconButton
