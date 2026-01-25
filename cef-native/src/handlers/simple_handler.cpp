@@ -391,6 +391,12 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 #else
             // TODO: Implement BRC-100 auth on macOS
 #endif
+        } else if (role_ == "omnibox_overlay") {
+            // Inject the hodosBrowser API into omnibox overlay browser
+            LOG_DEBUG_BROWSER("🔧 OMNIBOX OVERLAY BROWSER LOADED - Injecting hodosBrowser API");
+
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
         } else if (ExtractTabIdFromRole(role_) != -1) {
             // Inject the hodosBrowser API into tab browsers
             LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
