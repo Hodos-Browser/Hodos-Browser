@@ -16,7 +16,7 @@ None
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation & Investigation** - Understand current address bar and history database architecture
+- [x] **Phase 1: Foundation & Investigation** - Understand current address bar and history database architecture
 - [ ] **Phase 2: Core Input Component** - Build base omnibox React component with Material-UI
 - [ ] **Phase 3: History Autocomplete** - Integrate SQLite history database with search and ranking
 - [ ] **Phase 4: Google Search Integration** - Set up Google API and implement search vs URL detection
@@ -30,10 +30,11 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Nothing (first phase)
 **Research**: Likely (need to understand existing implementation)
 **Research topics**: Current address bar code location and structure, SQLite history database schema (fields, indexes, query patterns), CEF browser data storage patterns in C++ layer (HistoryManager.cpp)
-**Plans**: TBD
+**Status**: Complete
+**Completed**: 2026-01-25
 
 Plans:
-- TBD (determined during phase planning)
+- [x] 01-01: Foundation Investigation (7 min) - Mapped address bar and history architecture with replace-vs-reuse decisions
 
 ### Phase 2: Core Input Component
 **Goal**: Build the foundational omnibox React component with input handling, basic dropdown UI, and Material-UI styling
@@ -89,7 +90,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Investigation | 0/TBD | Not started | - |
+| 1. Foundation & Investigation | 1/1 | Complete | 2026-01-25 |
 | 2. Core Input Component | 0/TBD | Not started | - |
 | 3. History Autocomplete | 0/TBD | Not started | - |
 | 4. Google Search Integration | 0/TBD | Not started | - |
