@@ -1403,7 +1403,18 @@ void CreateOmniboxOverlay() {
     // Check if overlay already exists
     if (g_omnibox_overlay_window) {
         LOG_WARNING("🔍 Omnibox overlay already exists, showing it");
+
+        // CRITICAL: Resign main window as key so overlay can become key
+        [g_main_window resignKeyWindow];
+
         [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
+
+        // Force it to become key
+        [g_omnibox_overlay_window becomeKeyWindow];
+
+        NSLog(@"🔍 Overlay is key window: %d", [g_omnibox_overlay_window isKeyWindow]);
+        NSLog(@"🔍 Main window is key: %d", [g_main_window isKeyWindow]);
+
         // Make the content view first responder to receive keyboard events
         BOOL didBecome = [[g_omnibox_overlay_window contentView] becomeFirstResponder];
         NSLog(@"🔍 Content view becomeFirstResponder result: %d", didBecome);
@@ -1487,20 +1498,22 @@ void CreateOmniboxOverlay() {
         return;
     }
 
-    // CRITICAL: Make window key FIRST before setting first responder
+    // CRITICAL: Resign main window as key so overlay can become key
+    [g_main_window resignKeyWindow];
+
     [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
 
-    // Wait a tick for window to become key, then set first responder
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        BOOL canBecomeKey = [g_omnibox_overlay_window canBecomeKeyWindow];
-        BOOL isKey = [g_omnibox_overlay_window isKeyWindow];
-        NSLog(@"🔍 Window canBecomeKey: %d, isKey: %d", canBecomeKey, isKey);
+    // Force it to become key
+    [g_omnibox_overlay_window becomeKeyWindow];
 
-        BOOL didMake = [g_omnibox_overlay_window makeFirstResponder:contentView];
-        NSLog(@"🔍 makeFirstResponder result: %d", didMake);
-        NSLog(@"🔍 First responder: %@", [g_omnibox_overlay_window firstResponder]);
-        NSLog(@"🔍 Content view acceptsFirstResponder: %d", [contentView acceptsFirstResponder]);
-    });
+    NSLog(@"🔍 Initial overlay is key window: %d", [g_omnibox_overlay_window isKeyWindow]);
+    NSLog(@"🔍 Main window is key: %d", [g_main_window isKeyWindow]);
+
+    // Make the content view first responder so it receives keyboard events
+    BOOL didMake = [g_omnibox_overlay_window makeFirstResponder:contentView];
+    NSLog(@"🔍 Initial makeFirstResponder result: %d", didMake);
+    NSLog(@"🔍 First responder is now: %@", [g_omnibox_overlay_window firstResponder]);
+    NSLog(@"🔍 Content view: %@", contentView);
 
     LOG_INFO("✅ Omnibox overlay created successfully");
 }
