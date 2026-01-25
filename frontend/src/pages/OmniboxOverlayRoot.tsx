@@ -9,8 +9,12 @@ export default function OmniboxOverlayRoot() {
   const focusInput = () => {
     const input = document.querySelector('input');
     if (input) {
-      input.focus();
-      console.log('🔍 Input focused');
+      // Blur then focus to ensure focus event fires
+      input.blur();
+      setTimeout(() => {
+        input.focus();
+        console.log('🔍 Input focused');
+      }, 10);
     }
   };
 
@@ -43,19 +47,40 @@ export default function OmniboxOverlayRoot() {
     }
   };
 
-  // Focus input when window gains focus (overlay becomes visible)
+  // Use visibility API to detect when overlay becomes visible
   useEffect(() => {
-    const handleWindowFocus = () => {
-      console.log('🔍 Window focused, focusing input');
-      setTimeout(() => focusInput(), 50);
+    const checkVisibility = () => {
+      if (!document.hidden) {
+        console.log('🔍 Document visible, focusing input');
+        setTimeout(() => focusInput(), 50);
+      }
     };
 
-    window.addEventListener('focus', handleWindowFocus);
-
-    // Also focus on mount
+    // Focus on mount
     setTimeout(() => focusInput(), 150);
 
-    return () => window.removeEventListener('focus', handleWindowFocus);
+    // Listen for visibility changes
+    document.addEventListener('visibilitychange', checkVisibility);
+
+    // Also listen for window focus
+    window.addEventListener('focus', checkVisibility);
+
+    // Poll for visibility (backup for CEF context where events might not fire)
+    const pollInterval = setInterval(() => {
+      if (!document.hidden) {
+        const input = document.querySelector('input');
+        if (input && document.activeElement !== input) {
+          console.log('🔍 Polling detected unfocused input, focusing');
+          focusInput();
+        }
+      }
+    }, 200); // More aggressive polling
+
+    return () => {
+      document.removeEventListener('visibilitychange', checkVisibility);
+      window.removeEventListener('focus', checkVisibility);
+      clearInterval(pollInterval);
+    };
   }, []);
 
   // Listen for Escape key
