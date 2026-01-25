@@ -1,14 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { Box } from '@mui/material';
 import Omnibox from '../components/Omnibox';
 
 const OmniboxOverlayRoot: React.FC = () => {
-  const containerRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     console.log('🔍 Omnibox overlay mounted');
-
-    // Focus will be handled by Omnibox component's onFocus
   }, []);
 
   const handleNavigate = (url: string) => {
@@ -29,7 +25,7 @@ const OmniboxOverlayRoot: React.FC = () => {
     }
   };
 
-  // Listen for Escape key at container level
+  // Listen for Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -43,27 +39,21 @@ const OmniboxOverlayRoot: React.FC = () => {
 
   return (
     <Box
-      ref={containerRef}
       sx={{
         width: '100%',
         height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        pt: 2,
-        px: 2,
         bgcolor: 'transparent',
+        position: 'relative',
       }}
     >
-      {/* Unified pill container wrapping the entire omnibox */}
+      {/* Position address bar exactly where it is in the header */}
+      {/* TabBar: 40px, Toolbar: 54px (9px padding top), nav buttons: ~140px */}
       <Box
         sx={{
-          width: '100%',
-          maxWidth: '800px',
-          borderRadius: 20,
-          bgcolor: '#ffffff',
-          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
-          overflow: 'visible',
+          position: 'absolute',
+          top: 49, // 40px TabBar + 9px toolbar padding
+          left: 148, // 8px toolbar padding + 140px nav buttons
+          right: 128, // Space for wallet/history/settings buttons (3 buttons + padding)
         }}
       >
         <Omnibox

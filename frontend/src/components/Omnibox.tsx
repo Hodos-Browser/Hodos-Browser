@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
+  Box,
   Paper,
   InputBase,
   List,
@@ -68,7 +69,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   };
 
   return (
-    <>
+    <Box sx={{ position: 'relative', width: '100%' }}>
       <Paper
         sx={{
           display: 'flex',
@@ -145,7 +146,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
           </List>
         </Paper>
       </Fade>
-    </>
+    </Box>
   );
 };
 
