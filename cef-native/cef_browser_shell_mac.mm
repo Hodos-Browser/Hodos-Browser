@@ -292,6 +292,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 - (BOOL)canBecomeKeyView { return YES; }
 
 - (void)mouseDown:(NSEvent *)event {
+    NSLog(@"🔍 WalletOverlayView mouseDown called!");
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
@@ -301,9 +302,15 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
+        // CRITICAL: Set focus when user clicks
+        wallet->GetHost()->SetFocus(true);
+        NSLog(@"🔍 CEF focus enabled on click");
+
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
         LOG_DEBUG("🖱️ Wallet overlay: Left-click forwarded to CEF");
+    } else {
+        NSLog(@"❌ Wallet browser not available!");
     }
 }
 
@@ -338,10 +345,16 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    NSLog(@"🔍🔍🔍 WalletOverlayView keyDown called! keyCode: %d", (int)[event keyCode]);
+
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-    if (!wallet) return;
+    if (!wallet) {
+        NSLog(@"❌ WalletOverlayView: Browser not available!");
+        return;
+    }
 
     NSString* chars = [event characters];
+    NSLog(@"🔍 Key characters: '%@'", chars);
     NSEventModifierFlags flags = [event modifierFlags];
 
     int modifiers = 0;
@@ -359,6 +372,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
     }
     key_event.modifiers = modifiers;
     wallet->GetHost()->SendKeyEvent(key_event);
+    NSLog(@"🔍 Sent RAWKEYDOWN to CEF");
 
     // Send CHAR event for character input (critical for typing)
     if (chars.length > 0) {
@@ -366,6 +380,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
         key_event.character = [chars characterAtIndex:0];
         key_event.unmodified_character = [chars characterAtIndex:0];
         wallet->GetHost()->SendKeyEvent(key_event);
+        NSLog(@"🔍 Sent CHAR to CEF: %c", (char)key_event.character);
     }
 
     LOG_DEBUG("⌨️ Wallet overlay: Key events forwarded to CEF");
@@ -397,7 +412,17 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
 @end
 
-// Omnibox Overlay Window - custom window that can become key
+// Custom overlay windows that can become key (required for keyboard input)
+// Borderless NSWindows refuse to become key by default - must override canBecomeKeyWindow
+
+@interface WalletOverlayWindow : NSWindow
+@end
+
+@implementation WalletOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
 @interface OmniboxOverlayWindow : NSWindow
 @end
 
@@ -975,7 +1000,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
         if (wallet_browser) {
             wallet_browser->GetHost()->CloseBrowser(false);
         }
-        [g_main_window removeChildWindow:g_wallet_overlay_window];
+        // No removeChildWindow needed - wallet overlay is not a child window
         [g_wallet_overlay_window close];
         g_wallet_overlay_window = nullptr;
     }
@@ -1198,7 +1223,7 @@ void CreateWalletOverlayWithSeparateProcess() {
         g_wallet_overlay_window = nullptr;
     }
 
-    g_wallet_overlay_window = [[NSWindow alloc]
+    g_wallet_overlay_window = [[WalletOverlayWindow alloc]
         initWithContentRect:mainFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
@@ -1211,13 +1236,15 @@ void CreateWalletOverlayWithSeparateProcess() {
 
     [g_wallet_overlay_window setOpaque:NO];
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_wallet_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel to keep it within app
+    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];  // Must be floating to stay above main window (not a child)
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
     [g_wallet_overlay_window setHasShadow:NO];
 
-    // Make this a child window of the main window so it stays within the app
-    [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
+    // CRITICAL: Do NOT make this a child window - child windows cannot become key windows
+    // and therefore cannot receive keyboard events (input fields won't work)
+    // Window position sync is handled in MainWindowDelegate::windowDidMove/windowDidResize
+    // [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
 
     WalletOverlayView* contentView = [[WalletOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
@@ -1227,7 +1254,7 @@ void CreateWalletOverlayWithSeparateProcess() {
     window_info.SetAsWindowless((__bridge void*)contentView);
 
     CefBrowserSettings settings;
-    settings.windowless_frame_rate = 30;
+    settings.windowless_frame_rate = 60;  // Increased from 30 to 60fps for smoother text input
     settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     settings.javascript = STATE_ENABLED;
     settings.javascript_access_clipboard = STATE_ENABLED;
@@ -1254,7 +1281,17 @@ void CreateWalletOverlayWithSeparateProcess() {
         return;
     }
 
+    // CRITICAL: Resign main window first so overlay can become key
+    [g_main_window resignKeyWindow];
+
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
+
+    // Make content view first responder for keyboard events
+    [g_wallet_overlay_window makeFirstResponder:contentView];
+
+    NSLog(@"🔍 Wallet overlay is key window: %d", [g_wallet_overlay_window isKeyWindow]);
+    NSLog(@"🔍 First responder: %@", [g_wallet_overlay_window firstResponder]);
+
     LOG_INFO("✅ Wallet overlay created successfully");
 }
 

@@ -223,12 +223,25 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    // Create CGImage from CEF's BGRA buffer
+    // CRITICAL: Copy buffer immediately - CEF may reuse it causing ghosting
+    size_t bufferSize = width * height * 4;
+    void* bufferCopy = malloc(bufferSize);
+    if (!bufferCopy) {
+        std::cout << "❌ Failed to allocate buffer copy" << std::endl;
+        return;
+    }
+    memcpy(bufferCopy, buffer, bufferSize);
+
+    // Create CGImage from copied buffer with deallocation callback
     CGDataProviderRef provider = CGDataProviderCreateWithData(
-        nullptr, buffer, width * height * 4, nullptr);
+        nullptr, bufferCopy, bufferSize,
+        [](void* info, const void* data, size_t size) {
+            free(const_cast<void*>(data));  // Free buffer when image is released
+        });
 
     if (!provider) {
         std::cout << "❌ Failed to create CGDataProvider" << std::endl;
+        free(bufferCopy);
         return;
     }
 
@@ -244,22 +257,25 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         false,                                      // Should interpolate
         kCGRenderingIntentDefault);                 // Rendering intent
 
+    CGColorSpaceRelease(colorSpace);
+    CGDataProviderRelease(provider);
+
     if (!image) {
         std::cout << "❌ Failed to create CGImage" << std::endl;
-        CGDataProviderRelease(provider);
-        CGColorSpaceRelease(colorSpace);
         return;
     }
 
     // Update layer on main thread (CALayer is not thread-safe)
     dispatch_async(dispatch_get_main_queue(), ^{
-        layer.contents = (__bridge id)image;
-        CGImageRelease(image);
-        std::cout << "✅ CALayer contents updated (macOS)" << std::endl;
-    });
+        // CRITICAL: Disable implicit animations - prevents fade-in ghosting effect
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
 
-    CGColorSpaceRelease(colorSpace);
-    CGDataProviderRelease(provider);
+        layer.contents = (__bridge id)image;
+
+        [CATransaction commit];
+        CGImageRelease(image);
+    });
 
 #endif
 }

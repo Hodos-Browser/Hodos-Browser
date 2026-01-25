@@ -523,6 +523,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized.");
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+        // CRITICAL: Set focus so keyboard input works in React input fields
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Settings browser focus enabled");
+
         // Delayed resize/invalidate to fix first-render issue
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
@@ -536,6 +540,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         wallet_browser_ = browser;
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized.");
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // CRITICAL: Set focus so keyboard input works in React input fields
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Wallet browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render issue
         CefRefPtr<CefBrowser> browser_ref = browser;
@@ -551,6 +559,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("💾 Backup browser initialized.");
         LOG_DEBUG_BROWSER("💾 Backup browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+        // CRITICAL: Set focus so keyboard input works in React input fields
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Backup browser focus enabled");
+
         // Delayed resize/invalidate to fix first-render issue
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
@@ -565,6 +577,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+
+        // CRITICAL: Set focus so keyboard input works in React input fields
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ BRC-100 Auth browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render issue
     } else if (role_ == "settings_menu") {
@@ -584,6 +600,10 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         omnibox_overlay_browser_ = browser;
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized.");
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser ID: " + std::to_string(browser->GetIdentifier()));
+
+        // CRITICAL: Set focus so keyboard input works in React input fields
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Omnibox overlay browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render issue
         CefRefPtr<CefBrowser> browser_ref = browser;
