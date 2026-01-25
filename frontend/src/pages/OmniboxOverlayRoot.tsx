@@ -13,7 +13,9 @@ export default function OmniboxOverlayRoot() {
       input.blur();
       setTimeout(() => {
         input.focus();
-        console.log('🔍 Input focused');
+        console.log('🔍 Input focused via querySelector');
+        console.log('🔍 Active element:', document.activeElement);
+        console.log('🔍 Input is active:', document.activeElement === input);
       }, 10);
     }
   };

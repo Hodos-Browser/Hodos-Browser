@@ -17,6 +17,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   console.log('🎯 Omnibox component loaded');
   const [inputValue, setInputValue] = useState<string>(initialValue);
   const [showDropdown, setShowDropdown] = useState<boolean>(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
 
   const mockSuggestions: string[] = [
     'https://google.com',
@@ -33,6 +34,33 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   // Auto-show dropdown on mount (Chrome behavior when clicking address bar)
   useEffect(() => {
     setShowDropdown(true);
+
+    // Focus input with ref
+    if (inputRef.current) {
+      const input = inputRef.current;
+      input.focus();
+      console.log('🎯 Input focused via ref on mount');
+      console.log('🎯 Input element:', input);
+      console.log('🎯 Document active element:', document.activeElement);
+      console.log('🎯 Input IS active element:', document.activeElement === input);
+
+      // Add keydown listener to debug if events reach the input
+      const debugKeydown = (e: KeyboardEvent) => {
+        console.log('🎯 INPUT KEYDOWN EVENT:', e.key, 'keyCode:', e.keyCode, 'char:', e.key);
+      };
+
+      const debugInput = (e: Event) => {
+        console.log('🎯 INPUT EVENT FIRED:', (e.target as HTMLInputElement).value);
+      };
+
+      input.addEventListener('keydown', debugKeydown);
+      input.addEventListener('input', debugInput);
+
+      return () => {
+        input.removeEventListener('keydown', debugKeydown);
+        input.removeEventListener('input', debugInput);
+      };
+    }
   }, []);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -43,7 +71,9 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   };
 
   const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
-    console.log('🎯 Input focused, showing dropdown and clearing input');
+    console.log('🎯 Input focused event fired, showing dropdown and clearing input');
+    console.log('🎯 Active element:', document.activeElement);
+    console.log('🎯 Input element:', e.target);
     setInputValue(''); // Clear input on focus so it's fresh each time
     setShowDropdown(true); // Always show dropdown when focused
     // Don't select text since we just cleared it
@@ -96,6 +126,7 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
         }}
       >
         <InputBase
+          inputRef={inputRef}
           value={inputValue}
           onChange={handleInputChange}
           onFocus={handleInputFocus}
