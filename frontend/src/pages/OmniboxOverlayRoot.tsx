@@ -114,7 +114,7 @@ export default function OmniboxOverlayRoot() {
         padding: 0,
         overflow: 'hidden',
         cursor: 'default',
-        backgroundColor: 'rgba(0, 0, 0, 0.01)', // Nearly invisible backdrop to catch clicks
+        backgroundColor: 'rgba(255, 0, 0, 0.3)', // VERY VISIBLE red backdrop for debugging
       }}
     >
       {/* Position address bar exactly where it is in the header */}

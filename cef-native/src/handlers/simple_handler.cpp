@@ -2402,7 +2402,7 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                                   CefEventHandle os_event,
                                   bool* is_keyboard_shortcut) {
     // Log keyboard events for debugging
-    LOG_DEBUG_BROWSER("⌨️ OnPreKeyEvent - type: " + std::to_string(event.type) +
+    LOG_DEBUG_BROWSER("⌨️ OnPreKeyEvent [" + role_ + "] - type: " + std::to_string(event.type) +
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
 
