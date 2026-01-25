@@ -1,10 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Toolbar,
   IconButton,
-  InputBase,
-  Paper,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -17,13 +15,12 @@ import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { TabBar } from '../components/TabBar';
+import Omnibox from '../components/Omnibox';
 
 
 const MainBrowserView: React.FC = () => {
-    // Address bar state
-    const [address, setAddress] = useState('https://metanetapps.com/');
-    const [isEditingAddress, setIsEditingAddress] = useState(false);
-    const addressBarRef = useRef<HTMLInputElement>(null);
+    // Address bar state - TODO Phase 3: Remove when Omnibox manages state
+    const [address] = useState('https://metanetapps.com/');
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -41,59 +38,32 @@ const MainBrowserView: React.FC = () => {
         closeActiveTab,
     } = useTabManager();
 
+    // TODO Phase 3: Re-enable tab sync when Omnibox integrates with tab state
     // Sync address bar with active tab's URL
-    React.useEffect(() => {
-        // Only update if user is not currently editing the address bar
-        if (!isEditingAddress) {
-            const activeTab = tabs.find(t => t.id === activeTabId);
-            if (activeTab && activeTab.url) {
-                setAddress(activeTab.url);
-            }
-        }
-    }, [activeTabId, tabs, isEditingAddress]);
+    // React.useEffect(() => {
+    //     // Only update if user is not currently editing the address bar
+    //     if (!isEditingAddress) {
+    //         const activeTab = tabs.find(t => t.id === activeTabId);
+    //         if (activeTab && activeTab.url) {
+    //             setAddress(activeTab.url);
+    //         }
+    //     }
+    // }, [activeTabId, tabs, isEditingAddress]);
 
     // Keyboard shortcuts
+    // TODO Phase 5: Restore Ctrl+L focus when Omnibox exposes focus method
     useKeyboardShortcuts({
         onNewTab: createTab,
         onCloseTab: closeActiveTab,
         onNextTab: nextTab,
         onPrevTab: prevTab,
         onSwitchToTab: switchToTabByIndex,
-        onFocusAddressBar: () => addressBarRef.current?.focus(),
+        onFocusAddressBar: () => {}, // Temporarily disabled until Omnibox exposes focus method
         onReload: reload,
     });
 
-    const handleNavigate = () => {
-        navigate(address);
-        setIsEditingAddress(false);
-    };
-
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter') {
-            handleNavigate();
-        } else if (e.key === 'Escape') {
-            setIsEditingAddress(false);
-            // Reset to active tab's URL
-            const activeTab = tabs.find(t => t.id === activeTabId);
-            if (activeTab) {
-                setAddress(activeTab.url);
-            }
-        }
-    };
-
-    const handleAddressFocus = () => {
-        setIsEditingAddress(true);
-        // Select all text for easy editing
-        setTimeout(() => addressBarRef.current?.select(), 0);
-    };
-
-    const handleAddressBlur = () => {
-        setIsEditingAddress(false);
-        // Reset to active tab's URL if user didn't navigate
-        const activeTab = tabs.find(t => t.id === activeTabId);
-        if (activeTab && activeTab.url !== address) {
-            setAddress(activeTab.url);
-        }
+    const handleNavigate = (url: string) => {
+        navigate(url);
     };
 
     return (
@@ -179,52 +149,11 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Address Bar - grows to fill available space */}
-                <Paper
-                    sx={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        flex: 1,
-                        minWidth: 0, // Allow shrinking below content size
-                        height: 36,
-                        borderRadius: 20,
-                        px: 2,
-                        bgcolor: '#f1f3f4',
-                        boxShadow: 'none',
-                        border: '1px solid transparent',
-                        '&:hover': {
-                            bgcolor: '#ffffff',
-                            border: '1px solid rgba(0, 0, 0, 0.1)',
-                        },
-                        '&:focus-within': {
-                            bgcolor: '#ffffff',
-                            border: '1px solid #1a73e8',
-                            boxShadow: '0 0 0 2px rgba(26, 115, 232, 0.1)',
-                        },
-                    }}
-                >
-                    <InputBase
-                        inputRef={addressBarRef}
-                        value={address}
-                        onChange={(e) => setAddress(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        onFocus={handleAddressFocus}
-                        onBlur={handleAddressBlur}
-                        placeholder="Search or enter address"
-                        fullWidth
-                        sx={{
-                            fontSize: 14,
-                            color: 'rgba(0, 0, 0, 0.87)',
-                            '& input': {
-                                padding: 0,
-                                '&::placeholder': {
-                                    color: 'rgba(0, 0, 0, 0.4)',
-                                    opacity: 1,
-                                },
-                            }
-                        }}
-                    />
-                </Paper>
+                {/* Address Bar - Omnibox component with dropdown */}
+                <Omnibox
+                    onNavigate={handleNavigate}
+                    initialValue={address}
+                />
 
                 {/* Wallet Button */}
                 <IconButton

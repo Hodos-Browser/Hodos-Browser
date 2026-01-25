@@ -16,7 +16,6 @@ interface OmniboxProps {
 const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   const [inputValue, setInputValue] = useState<string>(initialValue);
   const [showDropdown, setShowDropdown] = useState<boolean>(false);
-  const [selectedIndex, setSelectedIndex] = useState<number>(-1);
 
   const mockSuggestions: string[] = [
     'https://google.com',
