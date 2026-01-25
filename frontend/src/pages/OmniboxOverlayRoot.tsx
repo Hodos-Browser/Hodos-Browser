@@ -1,10 +1,7 @@
-import React, { useEffect, useRef } from 'react';
-import { Box } from '@mui/material';
+import React, { useEffect } from 'react';
 import Omnibox from '../components/Omnibox';
 
-const OmniboxOverlayRoot: React.FC = () => {
-  const omniboxRef = useRef<HTMLDivElement>(null);
-
+export default function OmniboxOverlayRoot() {
   useEffect(() => {
     console.log('🔍 Omnibox overlay mounted');
   }, []);
@@ -27,6 +24,17 @@ const OmniboxOverlayRoot: React.FC = () => {
     }
   };
 
+  const handleBackgroundClick = (e: React.MouseEvent) => {
+    console.log('🔍 Background clicked, target:', e.target, 'currentTarget:', e.currentTarget);
+    // Only close if clicking the background, not the omnibox itself
+    if (e.target === e.currentTarget) {
+      console.log('🔍 Click was on background, calling handleClose()');
+      handleClose();
+    } else {
+      console.log('🔍 Click was on omnibox content, ignoring');
+    }
+  };
+
   // Listen for Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -39,53 +47,38 @@ const OmniboxOverlayRoot: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Close overlay when clicking outside the omnibox
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (omniboxRef.current && !omniboxRef.current.contains(e.target as Node)) {
-        console.log('🔍 Click outside omnibox detected, closing overlay');
-        handleClose();
-      }
-    };
-
-    // Add listener with a small delay to avoid closing immediately on mount
-    const timer = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
-    }, 100);
-
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, []);
-
   return (
-    <Box
-      sx={{
-        width: '100%',
-        height: '100%',
-        bgcolor: 'transparent',
-        position: 'relative',
+    <div
+      onClick={handleBackgroundClick}
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
+        margin: 0,
+        padding: 0,
+        overflow: 'hidden',
+        cursor: 'default',
+        backgroundColor: 'rgba(0, 0, 0, 0.01)', // Nearly invisible backdrop to catch clicks
       }}
     >
       {/* Position address bar exactly where it is in the header */}
       {/* TabBar: 40px, Toolbar: 54px (9px padding top), nav buttons: ~140px */}
-      <Box
-        ref={omniboxRef}
-        sx={{
+      <div
+        style={{
           position: 'absolute',
           top: 49, // 40px TabBar + 9px toolbar padding
           left: 148, // 8px toolbar padding + 140px nav buttons
           right: 128, // Space for wallet/history/settings buttons (3 buttons + padding)
+          cursor: 'text',
         }}
       >
         <Omnibox
           onNavigate={handleNavigate}
           initialValue=""
         />
-      </Box>
-    </Box>
+      </div>
+    </div>
   );
-};
-
-export default OmniboxOverlayRoot;
+}
