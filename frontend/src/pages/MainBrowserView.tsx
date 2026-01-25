@@ -3,8 +3,6 @@ import {
   Box,
   Toolbar,
   IconButton,
-  Paper,
-  InputBase,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -20,8 +18,8 @@ import { TabBar } from '../components/TabBar';
 
 
 const MainBrowserView: React.FC = () => {
-    // Address bar state - TODO Phase 3: Remove when Omnibox manages state
-    const [address] = useState('https://metanetapps.com/');
+    // Address bar state
+    const [address, setAddress] = useState('https://metanetapps.com/');
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -150,50 +148,32 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Address Bar Placeholder - clicking shows omnibox overlay */}
-                <Paper
-                    onClick={() => {
-                        console.log('🔍 Address bar clicked, showing omnibox overlay');
-                        window.cefMessage?.send('show_omnibox_overlay', []);
+                {/* Simple Address Bar Input */}
+                <input
+                    type="text"
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                            handleNavigate(address);
+                        }
                     }}
-                    sx={{
-                        display: 'flex',
-                        alignItems: 'center',
+                    onFocus={(e) => e.target.select()}
+                    placeholder="Search or enter address"
+                    style={{
                         flex: 1,
                         minWidth: 0,
                         height: 36,
                         borderRadius: 20,
-                        px: 2,
-                        bgcolor: '#f1f3f4',
-                        boxShadow: 'none',
+                        paddingLeft: 16,
+                        paddingRight: 16,
+                        backgroundColor: '#f1f3f4',
                         border: '1px solid transparent',
-                        cursor: 'pointer',
-                        '&:hover': {
-                            bgcolor: '#ffffff',
-                            border: '1px solid rgba(0, 0, 0, 0.1)',
-                        },
+                        fontSize: 14,
+                        color: 'rgba(0, 0, 0, 0.87)',
+                        outline: 'none',
                     }}
-                >
-                    <InputBase
-                        value={address}
-                        placeholder="Search or enter address"
-                        readOnly
-                        fullWidth
-                        sx={{
-                            fontSize: 14,
-                            color: 'rgba(0, 0, 0, 0.87)',
-                            cursor: 'pointer',
-                            '& input': {
-                                padding: 0,
-                                cursor: 'pointer',
-                                '&::placeholder': {
-                                    color: 'rgba(0, 0, 0, 0.4)',
-                                    opacity: 1,
-                                },
-                            },
-                        }}
-                    />
-                </Paper>
+                />
 
                 {/* Wallet Button */}
                 <IconButton
