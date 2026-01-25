@@ -449,10 +449,17 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    NSLog(@"🔍 OmniboxOverlayView keyDown called! keyCode: %d", (int)[event keyCode]);
+
     CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
-    if (!omnibox) return;
+    if (!omnibox) {
+        NSLog(@"❌ OmniboxOverlayView: Browser not available!");
+        return;
+    }
 
     NSString* chars = [event characters];
+    NSLog(@"🔍 Key characters: '%@'", chars);
+
     NSEventModifierFlags flags = [event modifierFlags];
 
     int modifiers = 0;
@@ -470,6 +477,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
     }
     key_event.modifiers = modifiers;
     omnibox->GetHost()->SendKeyEvent(key_event);
+    NSLog(@"🔍 Sent RAWKEYDOWN to CEF");
 
     // Send CHAR event for character input (critical for typing)
     if (chars.length > 0) {
@@ -477,6 +485,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
         key_event.character = [chars characterAtIndex:0];
         key_event.unmodified_character = [chars characterAtIndex:0];
         omnibox->GetHost()->SendKeyEvent(key_event);
+        NSLog(@"🔍 Sent CHAR to CEF: %c", (char)key_event.character);
     }
 
     LOG_DEBUG("⌨️ Omnibox overlay: Key events forwarded to CEF");
@@ -1383,7 +1392,9 @@ void CreateOmniboxOverlay() {
         LOG_WARNING("🔍 Omnibox overlay already exists, showing it");
         [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
         // Make the content view first responder to receive keyboard events
-        [[g_omnibox_overlay_window contentView] becomeFirstResponder];
+        BOOL didBecome = [[g_omnibox_overlay_window contentView] becomeFirstResponder];
+        NSLog(@"🔍 Content view becomeFirstResponder result: %d", didBecome);
+        NSLog(@"🔍 First responder is now: %@", [g_omnibox_overlay_window firstResponder]);
         return;
     }
 
@@ -1461,7 +1472,10 @@ void CreateOmniboxOverlay() {
     [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
 
     // Make the content view first responder so it receives keyboard events
-    [contentView becomeFirstResponder];
+    BOOL didMake = [g_omnibox_overlay_window makeFirstResponder:contentView];
+    NSLog(@"🔍 Initial makeFirstResponder result: %d", didMake);
+    NSLog(@"🔍 Initial first responder: %@", [g_omnibox_overlay_window firstResponder]);
+    NSLog(@"🔍 Content view: %@", contentView);
 
     LOG_INFO("✅ Omnibox overlay created successfully");
 }
