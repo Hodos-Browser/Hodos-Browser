@@ -1818,6 +1818,55 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OMNIBOX OVERLAY ==========
+    if (message_name == "show_omnibox_overlay") {
+        LOG_DEBUG_BROWSER("🔍 Show omnibox overlay requested");
+#ifdef _WIN32
+        extern HINSTANCE g_hInstance;
+        CreateOmniboxOverlay(g_hInstance);
+#endif
+        return true;
+    }
+
+    if (message_name == "omnibox_navigate") {
+        LOG_DEBUG_BROWSER("🔍 Omnibox navigation requested");
+
+        // Get URL from args
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0);
+
+        LOG_DEBUG_BROWSER("🔍 Navigating to: " + url);
+
+        // Navigate active tab
+        Tab* activeTab = TabManager::GetInstance().GetActiveTab();
+        if (activeTab && activeTab->browser) {
+            activeTab->browser->GetMainFrame()->LoadURL(url);
+        }
+
+        // Close omnibox overlay
+#ifdef _WIN32
+        extern HWND g_omnibox_overlay_hwnd;
+        if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
+            ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
+        }
+#endif
+
+        return true;
+    }
+
+    if (message_name == "omnibox_close") {
+        LOG_DEBUG_BROWSER("🔍 Close omnibox overlay requested");
+
+#ifdef _WIN32
+        extern HWND g_omnibox_overlay_hwnd;
+        if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
+            ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
+        }
+#endif
+
+        return true;
+    }
+
 #ifdef _WIN32
     if (message_name == "address_generate") {
         LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
