@@ -44,5 +44,8 @@ archived-docs/
 
 # Debugging and one-off test scripts (not part of the test suite)
 rust-wallet/test-scripts/
-
-rust-wallet/HodosBrowser/
+# Bitcoin Wallet Databases (NEVER commit - contains private keys!)                                                           
+rust-wallet/HodosBrowser/                                                                                                    
+**/wallet/wallet.db                                                                                                          
+**/wallet/wallet.db-shm                                                                                                      
+**/wallet/wallet.db-wal 
