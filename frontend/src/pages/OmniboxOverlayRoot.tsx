@@ -114,26 +114,65 @@ export default function OmniboxOverlayRoot() {
         padding: 0,
         overflow: 'hidden',
         cursor: 'default',
-        backgroundColor: 'rgba(255, 0, 0, 0.3)', // VERY VISIBLE red backdrop for debugging
+        backgroundColor: 'rgba(0, 0, 0, 0.01)', // Nearly invisible backdrop for click detection
+        pointerEvents: 'auto',
       }}
     >
-      {/* Position address bar exactly where it is in the header */}
-      {/* TabBar: 40px, Toolbar: 54px (9px padding top), nav buttons: ~140px */}
-      <div
-        onClick={(e) => e.stopPropagation()} // Prevent background click handler
-        style={{
-          position: 'absolute',
-          top: 49, // 40px TabBar + 9px toolbar padding
-          left: 148, // 8px toolbar padding + 140px nav buttons
-          right: 128, // Space for wallet/history/settings buttons (3 buttons + padding)
-          cursor: 'text',
-          pointerEvents: 'auto', // Ensure this receives pointer events
-        }}
-      >
-        <Omnibox
-          onNavigate={handleNavigate}
-          initialValue=""
-        />
+      {/* Replicate exact header layout to position omnibox correctly */}
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        pointerEvents: 'none', // Clicks pass through invisible parts
+      }}>
+        {/* Invisible TabBar spacer - matches TabBar height */}
+        <div style={{ height: 40 }} />
+
+        {/* Replicate Toolbar layout exactly from MainBrowserView.tsx */}
+        <div style={{
+          display: 'flex',
+          height: 54,
+          paddingLeft: 8,  // px: 1 in MUI = 8px
+          paddingRight: 8,
+          gap: 6,  // gap: 0.75 in MUI = 6px
+          alignItems: 'center',
+        }}>
+          {/* Invisible spacers matching navigation buttons (flexShrink: 0, small size) */}
+          {/* Back button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+
+          {/* Forward button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+
+          {/* Refresh button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+
+          {/* ACTUAL OMNIBOX - only this element is interactive */}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              pointerEvents: 'auto',
+            }}
+          >
+            <Omnibox
+              onNavigate={handleNavigate}
+              initialValue=""
+            />
+          </div>
+
+          {/* Invisible spacers matching right-side buttons */}
+          {/* Wallet button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+
+          {/* History button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+
+          {/* Settings button spacer */}
+          <div style={{ width: 34, height: 34, flexShrink: 0 }} />
+        </div>
       </div>
     </div>
   );
