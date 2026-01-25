@@ -60,6 +60,8 @@
 #else
     // macOS global views
     extern NSView* g_webview_view;
+    // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
+    extern "C" void CloseOverlayWindow(void* window, void* parent);
 #endif
 
 // Global backup modal state management
@@ -1349,12 +1351,12 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-#ifdef _WIN32
-    // ========== OVERLAY MESSAGES (Windows only) ==========
+    // ========== OVERLAY CLOSE (Cross-platform) ==========
     if (message_name == "overlay_close") {
-        LOG_DEBUG_BROWSER("🧠 [SimpleHandler] overlay_close message received");
+        LOG_DEBUG_BROWSER("🧠 [SimpleHandler] overlay_close message received for role: " + role_);
 
-        // Find and destroy overlay windows based on role
+#ifdef _WIN32
+        // Windows implementation
         HWND target_hwnd = nullptr;
         CefRefPtr<CefBrowser> target_browser = nullptr;
 
@@ -1413,10 +1415,69 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
         }
+#elif defined(__APPLE__)
+        // macOS implementation
+        extern NSWindow* g_main_window;
+        extern NSWindow* g_settings_overlay_window;
+        extern NSWindow* g_wallet_overlay_window;
+        extern NSWindow* g_backup_overlay_window;
+        extern NSWindow* g_brc100_auth_overlay_window;
+
+        NSWindow* target_window = nullptr;
+        CefRefPtr<CefBrowser> target_browser = nullptr;
+
+        if (role_ == "settings") {
+            target_window = g_settings_overlay_window;
+            target_browser = GetSettingsBrowser();
+        } else if (role_ == "wallet") {
+            target_window = g_wallet_overlay_window;
+            target_browser = GetWalletBrowser();
+        } else if (role_ == "backup") {
+            target_window = g_backup_overlay_window;
+            target_browser = GetBackupBrowser();
+        } else if (role_ == "brc100auth") {
+            target_window = g_brc100_auth_overlay_window;
+            target_browser = GetBRC100AuthBrowser();
+        }
+
+        if (target_window) {
+            LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window");
+
+            // Close the browser first
+            if (target_browser) {
+                LOG_DEBUG_BROWSER("🔄 Closing " + role_ + " browser");
+                target_browser->GetHost()->CloseBrowser(false);
+                // Clear the appropriate browser reference
+                if (role_ == "settings") settings_browser_ = nullptr;
+                else if (role_ == "wallet") wallet_browser_ = nullptr;
+                else if (role_ == "backup") backup_browser_ = nullptr;
+                else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
+            }
+
+            // Remove from parent window and close
+            LOG_DEBUG_BROWSER("🔄 Destroying " + role_ + " overlay window");
+            CloseOverlayWindow(target_window, g_main_window);
+
+            // Clear the global NSWindow pointer
+            if (role_ == "wallet") {
+                g_wallet_overlay_window = nullptr;
+            } else if (role_ == "settings") {
+                g_settings_overlay_window = nullptr;
+            } else if (role_ == "backup") {
+                g_backup_overlay_window = nullptr;
+            } else if (role_ == "brc100auth") {
+                g_brc100_auth_overlay_window = nullptr;
+            }
+        } else {
+            LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
+        }
+#endif
 
         return true;
     }
 
+#ifdef _WIN32
+    // ========== OVERLAY MESSAGES (Windows-specific) ==========
     if (false && message_name == "overlay_hide_NEVER_CALLED_12345") {
         LOG_DEBUG_BROWSER("🪟 Hiding overlay HWND");
         LOG_DEBUG_BROWSER("🪟 Before hide - EXSTYLE: 0x" + std::to_string(GetWindowLong(nullptr, GWL_EXSTYLE)));

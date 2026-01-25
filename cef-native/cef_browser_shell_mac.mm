@@ -81,7 +81,6 @@ void ShutdownApplication();
 
 NSWindow* g_main_window = nullptr;
 NSView* g_header_view = nullptr;
-NSView* g_wallet_panel_view = nullptr;  // NEW: Wallet panel between header and webview
 NSView* g_webview_view = nullptr;
 
 // Overlay windows (created on-demand)
@@ -90,9 +89,6 @@ NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
-
-// Wallet panel state
-bool g_wallet_panel_visible = true;  // Default visible
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -624,24 +620,11 @@ ViewDimensions GetViewDimensions(void* nsview) {
     NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width, webviewHeight);
     [g_webview_view setFrame:webviewRect];
 
-    // Resize wallet panel view (top-right corner box)
-    int walletPanelX = contentRect.size.width - walletPanelWidth;  // 20px from right
-    int walletPanelY = contentRect.size.height - headerHeight - walletPanelHeight;  // 10px below header
-    NSRect walletPanelRect = NSMakeRect(walletPanelX, walletPanelY,
-                                        walletPanelWidth, walletPanelHeight);
-    [g_wallet_panel_view setFrame:walletPanelRect];
-
     // Notify CEF browsers of resize
     CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
     if (header) {
         header->GetHost()->WasResized();
         LOG_DEBUG("🔄 Header browser notified of resize");
-    }
-
-    CefRefPtr<CefBrowser> wallet_panel = SimpleHandler::GetWalletPanelBrowser();
-    if (wallet_panel) {
-        wallet_panel->GetHost()->WasResized();
-        LOG_DEBUG("🔄 Wallet panel browser notified of resize");
     }
 
     CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
@@ -703,25 +686,56 @@ ViewDimensions GetViewDimensions(void* nsview) {
     LOG_INFO("❌ Main window will close");
 }
 
+- (void)windowDidResignKey:(NSNotification *)notification {
+    // App is losing focus - close all overlays (matches Windows WM_ACTIVATEAPP behavior)
+    LOG_DEBUG("📱 Main window resigned key - closing overlays if open");
+
+    // Close wallet overlay
+    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
+        LOG_INFO("💰 Closing wallet overlay due to app focus loss");
+        CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+        if (wallet_browser) {
+            wallet_browser->GetHost()->CloseBrowser(false);
+        }
+        [g_main_window removeChildWindow:g_wallet_overlay_window];
+        [g_wallet_overlay_window close];
+        g_wallet_overlay_window = nullptr;
+    }
+
+    // Note: Settings and other overlays can remain open when app loses focus
+    // Only wallet overlay auto-closes for security (matches Windows behavior)
+}
+
 @end
 
 // ============================================================================
-// Wallet Panel Toggle (C++ callable)
+// Wallet Panel Toggle - REMOVED (now uses overlay approach like Windows)
+// ============================================================================
+// Note: Wallet panel now uses CreateWalletOverlayWithSeparateProcess()
+// instead of embedded view to maintain parity with Windows implementation
+
+// ============================================================================
+// Helper function for closing overlay windows from C++ code
 // ============================================================================
 
-void ToggleWalletPanel() {
-    if (!g_wallet_panel_view) {
-        LOG_WARNING("ToggleWalletPanel called but g_wallet_panel_view is null");
+extern "C" void CloseOverlayWindow(void* window, void* parent) {
+    if (!window) {
+        LOG_WARNING("CloseOverlayWindow: window is null");
         return;
     }
 
-    NSView* panel = (__bridge NSView*)g_wallet_panel_view;
+    NSWindow* overlayWindow = (__bridge NSWindow*)window;
+    NSWindow* parentWindow = (__bridge NSWindow*)parent;
 
-    // Toggle visibility
-    g_wallet_panel_visible = !g_wallet_panel_visible;
+    // Remove from parent (if parent exists)
+    if (parentWindow) {
+        [parentWindow removeChildWindow:overlayWindow];
+    }
 
-    [panel setHidden:!g_wallet_panel_visible];
-    LOG_INFO("💰 Wallet panel toggled: " + std::string(g_wallet_panel_visible ? "visible" : "hidden"));
+    // Close the window
+    [overlayWindow close];
+
+    LOG_INFO("✅ Overlay window closed successfully");
 }
 
 // ============================================================================
@@ -752,14 +766,11 @@ void CreateMainWindow() {
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 
-    // Calculate heights and panel dimensions
+    // Calculate heights
     int headerHeight = 99;         // Header with tabs/address bar
-    int walletPanelWidth = 200;    // Compact vertical panel
-    int walletPanelHeight = 140;   // Enough for balance + 3 buttons
     int webviewHeight = screenRect.size.height - headerHeight;  // Full height below header
 
     LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px");
-    LOG_INFO("📐 Wallet panel height: " + std::to_string(walletPanelHeight) + "px (overlay mode)");
     LOG_INFO("📐 Webview height: " + std::to_string(webviewHeight) + "px (full)");
 
     // Create header view (at very top)
@@ -789,21 +800,8 @@ void CreateMainWindow() {
     [[g_main_window contentView] addSubview:g_webview_view];
     LOG_INFO("✅ Webview created (full height)");
 
-    // Create wallet panel view (top-right corner box)
-    int walletPanelX = screenRect.size.width - walletPanelWidth - 20;  // 20px from right edge
-    int walletPanelY = screenRect.size.height - headerHeight - walletPanelHeight - 10;  // 10px below header
-    NSRect walletPanelRect = NSMakeRect(walletPanelX, walletPanelY,
-                                        walletPanelWidth, walletPanelHeight);
-    g_wallet_panel_view = [[NSView alloc] initWithFrame:walletPanelRect];
-
-    if (!g_wallet_panel_view) {
-        LOG_ERROR("❌ Failed to create wallet panel view");
-        return;
-    }
-
-    [g_wallet_panel_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
-    [[g_main_window contentView] addSubview:g_wallet_panel_view];  // Added AFTER webview = on top
-    LOG_INFO("✅ Wallet panel view created at Y=" + std::to_string(walletPanelY) + " (overlay mode)");
+    // Note: Wallet panel now uses overlay window approach (CreateWalletOverlayWithSeparateProcess)
+    // instead of embedded view to maintain parity with Windows implementation
 
     // Show window
     [g_main_window makeKeyAndOrderFront:nil];
@@ -844,10 +842,13 @@ void CreateSettingsOverlayWithSeparateProcess() {
 
     [g_settings_overlay_window setOpaque:NO];
     [g_settings_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_settings_overlay_window setLevel:NSFloatingWindowLevel];
+    [g_settings_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel
     [g_settings_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_overlay_window setReleasedWhenClosed:NO];
     [g_settings_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_settings_overlay_window ordered:NSWindowAbove];
 
     // Create custom view for event handling and rendering
     SettingsOverlayView* contentView = [[SettingsOverlayView alloc]
@@ -915,10 +916,13 @@ void CreateWalletOverlayWithSeparateProcess() {
 
     [g_wallet_overlay_window setOpaque:NO];
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];
+    [g_wallet_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel to keep it within app
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
     [g_wallet_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window so it stays within the app
+    [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
 
     WalletOverlayView* contentView = [[WalletOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
@@ -983,10 +987,13 @@ void CreateBackupOverlayWithSeparateProcess() {
 
     [g_backup_overlay_window setOpaque:NO];
     [g_backup_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_backup_overlay_window setLevel:NSFloatingWindowLevel];
+    [g_backup_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel
     [g_backup_overlay_window setIgnoresMouseEvents:NO];
     [g_backup_overlay_window setReleasedWhenClosed:NO];
     [g_backup_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_backup_overlay_window ordered:NSWindowAbove];
 
     BackupOverlayView* contentView = [[BackupOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
@@ -1050,10 +1057,13 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
 
     [g_brc100_auth_overlay_window setOpaque:NO];
     [g_brc100_auth_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_brc100_auth_overlay_window setLevel:NSFloatingWindowLevel];
+    [g_brc100_auth_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel
     [g_brc100_auth_overlay_window setIgnoresMouseEvents:NO];
     [g_brc100_auth_overlay_window setReleasedWhenClosed:NO];
     [g_brc100_auth_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_brc100_auth_overlay_window ordered:NSWindowAbove];
 
     BRC100AuthOverlayView* contentView = [[BRC100AuthOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
@@ -1463,36 +1473,8 @@ int main(int argc, char* argv[]) {
 
         LOG_INFO("✅ Webview browser creation result: " + std::string(webview_created ? "SUCCESS" : "FAILED"));
 
-        // ===================================================================
-        // Create Wallet Panel Browser (dedicated wallet info panel)
-        // ===================================================================
-
-        NSView* walletPanelView = (__bridge NSView*)g_wallet_panel_view;
-        NSRect walletPanelBounds = [walletPanelView bounds];
-
-        LOG_INFO("🔧 Creating wallet panel browser with SetAsChild");
-        LOG_INFO("📐 Wallet panel bounds: " + std::to_string((int)walletPanelBounds.size.width) +
-                 "x" + std::to_string((int)walletPanelBounds.size.height));
-
-        CefWindowInfo wallet_panel_window_info;
-        CefRect walletPanelCefRect(0, 0, (int)walletPanelBounds.size.width, (int)walletPanelBounds.size.height);
-        wallet_panel_window_info.SetAsChild((__bridge void*)walletPanelView, walletPanelCefRect);
-
-        CefRefPtr<SimpleHandler> wallet_panel_handler = new SimpleHandler("wallet_panel");
-
-        CefBrowserSettings wallet_panel_settings;
-        wallet_panel_settings.background_color = CefColorSetARGB(255, 245, 245, 245);  // Light gray
-
-        bool wallet_panel_created = CefBrowserHost::CreateBrowser(
-            wallet_panel_window_info,
-            wallet_panel_handler,
-            "http://127.0.0.1:5137/wallet-panel",  // Load wallet panel React component
-            wallet_panel_settings,
-            nullptr,
-            CefRequestContext::GetGlobalContext()
-        );
-
-        LOG_INFO("✅ Wallet panel browser creation result: " + std::string(wallet_panel_created ? "SUCCESS" : "FAILED"));
+        // Note: Wallet panel browser removed - now uses overlay window approach
+        // (CreateWalletOverlayWithSeparateProcess) to match Windows implementation
 
         // Debug: Check webview hierarchy after browsers created
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{

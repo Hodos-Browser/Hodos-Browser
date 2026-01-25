@@ -44,8 +44,8 @@ export default function WalletPanelPage() {
         display: 'flex',
         justifyContent: 'flex-end',    // Align panel to right
         alignItems: 'flex-start',      // Keep at top
-        paddingTop: '12vh',            // Space from top (responsive to screen height)
-        paddingRight: '6vw',           // Space from right edge (responsive to screen width)
+        paddingTop: '9vh',            // Space from top (responsive to screen height)
+        paddingRight: '0vw',           // Space from right edge (responsive to screen width)
         boxSizing: 'border-box',
         cursor: 'pointer',             // Indicate clickable background
         backgroundColor: 'rgba(0, 0, 0, 0.01)',  // Nearly invisible backdrop to catch clicks

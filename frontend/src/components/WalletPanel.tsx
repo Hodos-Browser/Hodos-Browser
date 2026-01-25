@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
-import CloseIcon from '@mui/icons-material/Close';
 import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
@@ -122,17 +121,6 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
 
   return (
     <div className="wallet-panel-light" onClick={(e) => e.stopPropagation()}>
-      {/* Close Button */}
-      {onClose && (
-        <button
-          className="wallet-panel-close-button"
-          onClick={onClose}
-          title="Close wallet panel"
-        >
-          <CloseIcon sx={{ fontSize: 18 }} />
-        </button>
-      )}
-
       {/* Balance Display */}
       <div className="balance-display-light">
         <div className="balance-header-light">
