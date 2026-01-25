@@ -6,6 +6,14 @@ export default function OmniboxOverlayRoot() {
     console.log('🔍 Omnibox overlay mounted');
   }, []);
 
+  const focusInput = () => {
+    const input = document.querySelector('input');
+    if (input) {
+      input.focus();
+      console.log('🔍 Input focused');
+    }
+  };
+
   const handleNavigate = (url: string) => {
     console.log('🔍 Navigating to:', url);
 
@@ -34,6 +42,21 @@ export default function OmniboxOverlayRoot() {
       console.log('🔍 Click was on omnibox content, ignoring');
     }
   };
+
+  // Focus input when window gains focus (overlay becomes visible)
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      console.log('🔍 Window focused, focusing input');
+      setTimeout(() => focusInput(), 50);
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+
+    // Also focus on mount
+    setTimeout(() => focusInput(), 150);
+
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, []);
 
   // Listen for Escape key
   useEffect(() => {

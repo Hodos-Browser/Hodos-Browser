@@ -43,7 +43,10 @@ const Omnibox: React.FC<OmniboxProps> = ({ onNavigate, initialValue = '' }) => {
   };
 
   const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
-    e.target.select();
+    console.log('🎯 Input focused, showing dropdown and clearing input');
+    setInputValue(''); // Clear input on focus so it's fresh each time
+    setShowDropdown(true); // Always show dropdown when focused
+    // Don't select text since we just cleared it
   };
 
   const handleInputBlur = () => {
