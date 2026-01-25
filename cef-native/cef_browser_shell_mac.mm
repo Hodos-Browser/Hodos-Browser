@@ -431,28 +431,37 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-    CefKeyEvent key_event;
-    key_event.type = KEYEVENT_RAWKEYDOWN;
-    key_event.native_key_code = [event keyCode];
+    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
+    if (!omnibox) return;
 
     NSString* chars = [event characters];
-    if (chars.length > 0) {
-        key_event.character = [chars characterAtIndex:0];
-    }
+    NSEventModifierFlags flags = [event modifierFlags];
 
     int modifiers = 0;
-    NSEventModifierFlags flags = [event modifierFlags];
     if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
     if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
     if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
     if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
-    key_event.modifiers = modifiers;
 
-    CefRefPtr<CefBrowser> omnibox = SimpleHandler::GetOmniboxOverlayBrowser();
-    if (omnibox) {
-        omnibox->GetHost()->SendKeyEvent(key_event);
-        LOG_DEBUG("⌨️ Omnibox overlay: Key down forwarded to CEF");
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
     }
+    key_event.modifiers = modifiers;
+    omnibox->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        omnibox->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("⌨️ Omnibox overlay: Key events forwarded to CEF");
 }
 
 - (void)keyUp:(NSEvent *)event {
@@ -1239,6 +1248,8 @@ void CreateOmniboxOverlay() {
     if (g_omnibox_overlay_window) {
         LOG_WARNING("🔍 Omnibox overlay already exists, showing it");
         [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
+        // Make the content view first responder to receive keyboard events
+        [[g_omnibox_overlay_window contentView] becomeFirstResponder];
         return;
     }
 
@@ -1279,6 +1290,9 @@ void CreateOmniboxOverlay() {
         initWithFrame:NSMakeRect(0, 0, width, overlayHeight)];
     [g_omnibox_overlay_window setContentView:contentView];
 
+    // Enable keyboard event handling
+    [g_omnibox_overlay_window makeFirstResponder:contentView];
+
     CefWindowInfo window_info;
     window_info.SetAsWindowless((__bridge void*)contentView);
 
@@ -1311,6 +1325,10 @@ void CreateOmniboxOverlay() {
     }
 
     [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
+
+    // Make the content view first responder so it receives keyboard events
+    [contentView becomeFirstResponder];
+
     LOG_INFO("✅ Omnibox overlay created successfully");
 }
 
