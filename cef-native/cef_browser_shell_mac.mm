@@ -397,6 +397,15 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
 @end
 
+// Omnibox Overlay Window - custom window that can become key
+@interface OmniboxOverlayWindow : NSWindow
+@end
+
+@implementation OmniboxOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
 // Omnibox Overlay View
 @interface OmniboxOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
@@ -1409,7 +1418,7 @@ void CreateOmniboxOverlay() {
                                       width,
                                       overlayHeight);
 
-    g_omnibox_overlay_window = [[NSWindow alloc]
+    g_omnibox_overlay_window = [[OmniboxOverlayWindow alloc]
         initWithContentRect:overlayFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
@@ -1428,8 +1437,13 @@ void CreateOmniboxOverlay() {
     [g_omnibox_overlay_window setHasShadow:NO];
     [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
 
-    // Make this a child window of the main window
-    [g_main_window addChildWindow:g_omnibox_overlay_window ordered:NSWindowAbove];
+    // Critical: Allow window to become key to receive keyboard events
+    [g_omnibox_overlay_window setStyleMask:NSWindowStyleMaskBorderless];
+    [g_omnibox_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary];
+
+    // DON'T make it a child window - child windows can't become key and receive keyboard events
+    // Instead, position it as a separate floating window
+    // [g_main_window addChildWindow:g_omnibox_overlay_window ordered:NSWindowAbove];
 
     OmniboxOverlayView* contentView = [[OmniboxOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, width, overlayHeight)];
@@ -1469,13 +1483,20 @@ void CreateOmniboxOverlay() {
         return;
     }
 
+    // CRITICAL: Make window key FIRST before setting first responder
     [g_omnibox_overlay_window makeKeyAndOrderFront:nil];
 
-    // Make the content view first responder so it receives keyboard events
-    BOOL didMake = [g_omnibox_overlay_window makeFirstResponder:contentView];
-    NSLog(@"🔍 Initial makeFirstResponder result: %d", didMake);
-    NSLog(@"🔍 Initial first responder: %@", [g_omnibox_overlay_window firstResponder]);
-    NSLog(@"🔍 Content view: %@", contentView);
+    // Wait a tick for window to become key, then set first responder
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        BOOL canBecomeKey = [g_omnibox_overlay_window canBecomeKeyWindow];
+        BOOL isKey = [g_omnibox_overlay_window isKeyWindow];
+        NSLog(@"🔍 Window canBecomeKey: %d, isKey: %d", canBecomeKey, isKey);
+
+        BOOL didMake = [g_omnibox_overlay_window makeFirstResponder:contentView];
+        NSLog(@"🔍 makeFirstResponder result: %d", didMake);
+        NSLog(@"🔍 First responder: %@", [g_omnibox_overlay_window firstResponder]);
+        NSLog(@"🔍 Content view acceptsFirstResponder: %d", [contentView acceptsFirstResponder]);
+    });
 
     LOG_INFO("✅ Omnibox overlay created successfully");
 }
