@@ -1029,6 +1029,10 @@ extern "C" void HideOmniboxOverlay() {
     }
 }
 
+extern "C" bool IsOmniboxOverlayVisible() {
+    return g_omnibox_overlay_window && [g_omnibox_overlay_window isVisible];
+}
+
 // ============================================================================
 // Main Window Creation
 // ============================================================================

@@ -64,6 +64,7 @@
     // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
     extern "C" void HideOmniboxOverlay();
+    extern "C" bool IsOmniboxOverlayVisible();
     extern void CreateOmniboxOverlay();
 #endif
 
@@ -2405,6 +2406,21 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
     LOG_DEBUG_BROWSER("⌨️ OnPreKeyEvent [" + role_ + "] - type: " + std::to_string(event.type) +
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
+
+#ifdef __APPLE__
+    // CRITICAL: On macOS, if omnibox overlay is visible, forward keyboard events to it
+    // because main window stays key and header browser receives events
+    if (role_ == "header") {
+        if (IsOmniboxOverlayVisible()) {
+            CefRefPtr<CefBrowser> omnibox = GetOmniboxOverlayBrowser();
+            if (omnibox) {
+                LOG_DEBUG_BROWSER("⌨️ Forwarding key event from header to omnibox overlay");
+                omnibox->GetHost()->SendKeyEvent(event);
+                return true; // Consume event so header doesn't process it
+            }
+        }
+    }
+#endif
 
     // Handle DevTools keyboard shortcuts for all windows
     if (event.type == KEYEVENT_RAWKEYDOWN) {
