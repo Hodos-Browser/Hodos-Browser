@@ -20,6 +20,7 @@ import { TabBar } from '../components/TabBar';
 const MainBrowserView: React.FC = () => {
     // Address bar state
     const [address, setAddress] = useState('https://metanetapps.com/');
+    const [isEditingAddress, setIsEditingAddress] = useState(false);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -37,17 +38,16 @@ const MainBrowserView: React.FC = () => {
         closeActiveTab,
     } = useTabManager();
 
-    // TODO Phase 3: Re-enable tab sync when Omnibox integrates with tab state
     // Sync address bar with active tab's URL
-    // React.useEffect(() => {
-    //     // Only update if user is not currently editing the address bar
-    //     if (!isEditingAddress) {
-    //         const activeTab = tabs.find(t => t.id === activeTabId);
-    //         if (activeTab && activeTab.url) {
-    //             setAddress(activeTab.url);
-    //         }
-    //     }
-    // }, [activeTabId, tabs, isEditingAddress]);
+    React.useEffect(() => {
+        // Only update if user is not currently editing the address bar
+        if (!isEditingAddress) {
+            const activeTab = tabs.find(t => t.id === activeTabId);
+            if (activeTab && activeTab.url) {
+                setAddress(activeTab.url);
+            }
+        }
+    }, [activeTabId, tabs, isEditingAddress]);
 
     // Keyboard shortcuts
     // TODO Phase 5: Restore Ctrl+L focus when Omnibox exposes focus method
@@ -152,13 +152,24 @@ const MainBrowserView: React.FC = () => {
                 <input
                     type="text"
                     value={address}
-                    onChange={(e) => setAddress(e.target.value)}
+                    onChange={(e) => {
+                        setAddress(e.target.value);
+                        setIsEditingAddress(true);
+                    }}
                     onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                             handleNavigate(address);
+                            setIsEditingAddress(false);
+                            e.currentTarget.blur();
                         }
                     }}
-                    onFocus={(e) => e.target.select()}
+                    onFocus={(e) => {
+                        e.target.select();
+                        setIsEditingAddress(true);
+                    }}
+                    onBlur={() => {
+                        setIsEditingAddress(false);
+                    }}
                     placeholder="Search or enter address"
                     style={{
                         flex: 1,
