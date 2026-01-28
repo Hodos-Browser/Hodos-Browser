@@ -924,8 +924,33 @@ void CreateOmniboxOverlay(HINSTANCE hInstance) {
     g_omnibox_overlay_hwnd = omnibox_hwnd;
     LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)));
 
-    // TODO: Create CEF browser in Plan 02
-    LOG_INFO_APP("🔍 Omnibox browser creation deferred to Plan 02");
+    // Create CEF browser subprocess for omnibox overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(omnibox_hwnd, "OmniboxOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(255, 255, 255, 255);  // white background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> omnibox_handler(new SimpleHandler("omnibox"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(omnibox_hwnd, overlayWidth, overlayHeight);
+    omnibox_handler->SetRenderHandler(render_handler);
+
+    // Minimal isolation: use global context (shared cache/cookies as per CONTEXT.md decision)
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, omnibox_handler,
+        "http://127.0.0.1:5137/omnibox",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("✅ Omnibox overlay browser created with subprocess");
+    } else {
+        LOG_ERROR_APP("❌ Failed to create omnibox overlay browser");
+    }
 }
 
 void ShowOmniboxOverlay() {

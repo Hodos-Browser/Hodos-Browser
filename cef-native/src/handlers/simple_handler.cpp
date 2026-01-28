@@ -117,6 +117,8 @@ CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::omnibox_browser_ = nullptr;
+
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
 }
@@ -148,6 +150,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
     return settings_menu_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxBrowser() {
+    return omnibox_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -581,6 +587,23 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "omnibox") {
+        omnibox_browser_ = browser;
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized.");
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // CRITICAL: Set focus so address bar input continues working
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Omnibox browser focus enabled");
+
+        // Delayed resize/invalidate to fix first-render black screen issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -645,6 +668,12 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "header" && browser == header_browser_) {
         std::cout << "  → Header browser cleanup" << std::endl;
         header_browser_ = nullptr;
+    } else if (role_ == "settings_menu" && browser == settings_menu_browser_) {
+        std::cout << "  → Settings menu browser cleanup" << std::endl;
+        settings_menu_browser_ = nullptr;
+    } else if (role_ == "omnibox" && browser == omnibox_browser_) {
+        std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
+        omnibox_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -867,6 +896,12 @@ bool SimpleHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string path = args->GetString(0);
 
+        // Dismiss omnibox overlay on navigation
+#ifdef _WIN32
+        extern void HideOmniboxOverlay();
+        HideOmniboxOverlay();
+#endif
+
         // Normalize protocol
         if (!(path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0)) {
             path = "http://" + path;
@@ -925,6 +960,58 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // Duplicate address_generate handler removed - keeping the one at line 489
 
+    // ========== OMNIBOX OVERLAY MESSAGES ==========
+
+    if (message_name == "omnibox_create_or_show") {
+#ifdef _WIN32
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance);
+        extern HINSTANCE g_hInstance;
+        CreateOmniboxOverlay(g_hInstance);
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay create_or_show triggered");
+#else
+        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "omnibox_show") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+#ifdef _WIN32
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance);
+        extern void ShowOmniboxOverlay();
+        extern HWND g_omnibox_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        // Create if doesn't exist, otherwise show
+        if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
+            CreateOmniboxOverlay(g_hInstance);
+        } else {
+            ShowOmniboxOverlay();
+        }
+
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay shown with query: " + query);
+        // TODO Phase 2: Send query to overlay browser for suggestion rendering
+#else
+        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "omnibox_hide") {
+#ifdef _WIN32
+        extern void HideOmniboxOverlay();
+        HideOmniboxOverlay();
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#endif
+        return true;
+    }
+
+    // Navigate message: dismiss overlay on navigation (already handled above, just ensure dismiss)
+    // NOTE: The navigate handler already exists above (line ~895), we need to add dismiss logic there
 
     if (message_name == "force_repaint") {
         LOG_DEBUG_BROWSER("🔄 Force repaint requested for " + role_ + " browser");
