@@ -1024,6 +1024,27 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "omnibox_update_query") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetString(0);
+
+        LOG_DEBUG_BROWSER("🔍 Omnibox query update received: " + query);
+
+        // Forward to omnibox overlay browser's renderer process
+        CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+        if (omnibox_browser && omnibox_browser->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> forward_msg = CefProcessMessage::Create("omnibox_query_update");
+            CefRefPtr<CefListValue> forward_args = forward_msg->GetArgumentList();
+            forward_args->SetString(0, query);
+            omnibox_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, forward_msg);
+            LOG_DEBUG_BROWSER("🔍 Query forwarded to omnibox overlay: " + query);
+        } else {
+            LOG_DEBUG_BROWSER("⚠️ Omnibox browser not available for query forward");
+        }
+
+        return true;
+    }
+
     // Navigate message: dismiss overlay on navigation (already handled above, just ensure dismiss)
     // NOTE: The navigate handler already exists above (line ~895), we need to add dismiss logic there
 

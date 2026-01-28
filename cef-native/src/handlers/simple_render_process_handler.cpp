@@ -1328,6 +1328,24 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OMNIBOX QUERY UPDATE ==========
+    if (message_name == "omnibox_query_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Omnibox query update received in renderer: " + query);
+
+        // Escape query for JavaScript string
+        std::string escapedQuery = escapeJsonForJs(query);
+
+        // Dispatch CustomEvent to JavaScript
+        std::string js = "window.dispatchEvent(new CustomEvent('omniboxQueryUpdate', { detail: { query: '" + escapedQuery + "' } }));";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 omniboxQueryUpdate event dispatched");
+        return true;
+    }
+
     // ========== GOOGLE SUGGEST RESPONSE ==========
     if (message_name == "google_suggest_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
