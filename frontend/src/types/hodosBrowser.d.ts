@@ -43,6 +43,12 @@ declare global {
         open: (panelName: string) => void;
         toggleInput: (enable: boolean) => void;
       };
+      omnibox: {
+        show: (query: string) => void;
+        hide: () => void;
+        createOrShow: () => void;
+        getSuggestions: (query: string) => Promise<any[]>;
+      };
     };
     cefMessage?: {
       send: (channel: string, args: any[]) => void;
