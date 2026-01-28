@@ -992,14 +992,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
 
 #ifdef _WIN32
-        extern void CreateOmniboxOverlay(HINSTANCE hInstance);
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
         extern void ShowOmniboxOverlay();
         extern HWND g_omnibox_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         // Create if doesn't exist, otherwise show
         if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
-            CreateOmniboxOverlay(g_hInstance);
+            CreateOmniboxOverlay(g_hInstance, true);
         } else {
             ShowOmniboxOverlay();
         }

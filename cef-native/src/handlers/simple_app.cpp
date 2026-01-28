@@ -870,7 +870,7 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     }
 }
 
-void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true) {
+void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     LOG_INFO_APP("🔍 Creating omnibox overlay with keep-alive pattern (showImmediately=" +
                  std::string(showImmediately ? "true" : "false") + ")");
 

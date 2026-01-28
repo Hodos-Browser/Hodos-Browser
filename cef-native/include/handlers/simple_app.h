@@ -38,7 +38,7 @@
     void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
-    void CreateOmniboxOverlay(HINSTANCE hInstance);
+    void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true);
     void ShowOmniboxOverlay();
     void HideOmniboxOverlay();
 
