@@ -962,11 +962,24 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== OMNIBOX OVERLAY MESSAGES ==========
 
+    if (message_name == "omnibox_create") {
+#ifdef _WIN32
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern HINSTANCE g_hInstance;
+        // Create overlay but don't show it (showImmediately = false)
+        CreateOmniboxOverlay(g_hInstance, false);
+        LOG_DEBUG_BROWSER("🔍 Omnibox overlay created (hidden) for preemptive loading");
+#else
+        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#endif
+        return true;
+    }
+
     if (message_name == "omnibox_create_or_show") {
 #ifdef _WIN32
-        extern void CreateOmniboxOverlay(HINSTANCE hInstance);
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
         extern HINSTANCE g_hInstance;
-        CreateOmniboxOverlay(g_hInstance);
+        CreateOmniboxOverlay(g_hInstance, true);
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay create_or_show triggered");
 #else
         LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");

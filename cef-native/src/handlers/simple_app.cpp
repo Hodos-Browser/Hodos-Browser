@@ -870,13 +870,16 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     }
 }
 
-void CreateOmniboxOverlay(HINSTANCE hInstance) {
-    LOG_INFO_APP("🔍 Creating omnibox overlay with keep-alive pattern");
+void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true) {
+    LOG_INFO_APP("🔍 Creating omnibox overlay with keep-alive pattern (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ")");
 
-    // Keep-alive check: if HWND already exists, just show it
+    // Keep-alive check: if HWND already exists, conditionally show it
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
-        LOG_INFO_APP("🔍 Omnibox overlay already exists, showing it");
-        ShowOmniboxOverlay();
+        LOG_INFO_APP("🔍 Omnibox overlay already exists");
+        if (showImmediately) {
+            ShowOmniboxOverlay();
+        }
         return;
     }
 
@@ -915,14 +918,21 @@ void CreateOmniboxOverlay(HINSTANCE hInstance) {
         return;
     }
 
-    // Force position with SWP_NOACTIVATE and SWP_SHOWWINDOW
+    // Force position with SWP_NOACTIVATE (conditionally show)
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
     SetWindowPos(omnibox_hwnd, HWND_TOPMOST,
         overlayX, overlayY, overlayWidth, overlayHeight,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        flags);
 
     // Store HWND globally
     g_omnibox_overlay_hwnd = omnibox_hwnd;
-    LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)));
+    LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
 
     // Create CEF browser subprocess for omnibox overlay
     CefWindowInfo window_info;

@@ -179,8 +179,9 @@ const MainBrowserView: React.FC = () => {
                     onFocus={(e) => {
                         e.target.select();
                         setIsEditingAddress(true);
-                        // Preemptive creation: create overlay subprocess on focus (before typing)
-                        window.cefMessage?.send('omnibox_create_or_show', []);
+                        // Preemptive creation: create overlay subprocess on focus but don't show
+                        // Only shows when user types (see onChange handler)
+                        window.cefMessage?.send('omnibox_create', []);
                     }}
                     onBlur={() => {
                         setIsEditingAddress(false);
