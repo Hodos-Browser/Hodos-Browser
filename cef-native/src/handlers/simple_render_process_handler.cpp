@@ -1350,6 +1350,24 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OMNIBOX AUTOCOMPLETE UPDATE ==========
+    if (message_name == "omnibox_autocomplete_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestion = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Omnibox autocomplete update received in renderer: " + suggestion);
+
+        // Escape suggestion for JavaScript string
+        std::string escapedSuggestion = escapeJsonForJs(suggestion);
+
+        // Dispatch via window.postMessage (MainBrowserView listens for this)
+        std::string js = "window.postMessage({ type: 'omnibox_autocomplete', suggestion: '" + escapedSuggestion + "' }, '*');";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 omnibox_autocomplete message posted to window");
+        return true;
+    }
+
     // ========== GOOGLE SUGGEST RESPONSE ==========
     if (message_name == "google_suggest_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();

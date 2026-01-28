@@ -1045,6 +1045,27 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "omnibox_autocomplete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestion = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+        LOG_DEBUG_BROWSER("🔍 Omnibox autocomplete received: " + suggestion);
+
+        // Forward to header browser's renderer process
+        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+        if (header_browser && header_browser->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> forward_msg = CefProcessMessage::Create("omnibox_autocomplete_update");
+            CefRefPtr<CefListValue> forward_args = forward_msg->GetArgumentList();
+            forward_args->SetString(0, suggestion);
+            header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, forward_msg);
+            LOG_DEBUG_BROWSER("🔍 Autocomplete forwarded to header browser: " + suggestion);
+        } else {
+            LOG_DEBUG_BROWSER("⚠️ Header browser not available for autocomplete forward");
+        }
+
+        return true;
+    }
+
     // Navigate message: dismiss overlay on navigation (already handled above, just ensure dismiss)
     // NOTE: The navigate handler already exists above (line ~895), we need to add dismiss logic there
 
