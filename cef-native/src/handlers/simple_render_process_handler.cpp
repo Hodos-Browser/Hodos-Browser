@@ -197,6 +197,36 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
+// Handler for omnibox overlay.close() - sends omnibox_hide message
+class OmniboxCloseHandler : public CefV8Handler {
+public:
+    OmniboxCloseHandler() {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        LOG_DEBUG_RENDER("🔍 omnibox overlay.close() called");
+
+        // Send omnibox_hide message
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        if (context && context->GetFrame()) {
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("omnibox_hide");
+            context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
+            LOG_DEBUG_RENDER("✅ omnibox overlay.close() sent omnibox_hide message");
+        }
+
+        return true;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(OmniboxCloseHandler);
+};
+
 // Handler for history operations (cross-platform)
 class HistoryV8Handler : public CefV8Handler {
 public:
@@ -426,11 +456,15 @@ void SimpleRenderProcessHandler::OnContextCreated(
     std::string url = frame->GetURL().ToString();
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
     bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
+    bool isOmniboxOverlay = (url.find("/omnibox") != std::string::npos);
 
     if (isOverlayBrowser) {
         LOG_DEBUG_RENDER("🎯 OVERLAY BROWSER V8 CONTEXT CREATED!");
         LOG_DEBUG_RENDER("🎯 URL: " + url);
         LOG_DEBUG_RENDER("🎯 Setting up hodosBrowser for overlay browser");
+        if (isOmniboxOverlay) {
+            LOG_DEBUG_RENDER("🔍 Detected omnibox overlay - will inject overlay.close()");
+        }
     }
 
     CefRefPtr<CefV8Value> global = context->GetGlobal();
@@ -507,10 +541,18 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefRefPtr<CefV8Value> overlayObject = CefV8Value::CreateObject(nullptr, nullptr);
         hodosBrowser->SetValue("overlay", overlayObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-        // Add close method for overlay browsers - uses cefMessage internally
-        overlayObject->SetValue("close",
-            CefV8Value::CreateFunction("close", new OverlayCloseHandler()),
-            V8_PROPERTY_ATTRIBUTE_NONE);
+        // Add close method for overlay browsers
+        // Omnibox overlay sends "omnibox_hide", other overlays send "overlay_close"
+        if (isOmniboxOverlay) {
+            overlayObject->SetValue("close",
+                CefV8Value::CreateFunction("close", new OmniboxCloseHandler()),
+                V8_PROPERTY_ATTRIBUTE_NONE);
+            LOG_DEBUG_RENDER("🔍 Omnibox overlay.close() injected (sends omnibox_hide)");
+        } else {
+            overlayObject->SetValue("close",
+                CefV8Value::CreateFunction("close", new OverlayCloseHandler()),
+                V8_PROPERTY_ATTRIBUTE_NONE);
+        }
 
         LOG_DEBUG_RENDER("🎯 Overlay object created with close method");
     } else {

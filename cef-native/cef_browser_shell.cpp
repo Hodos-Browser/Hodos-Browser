@@ -225,6 +225,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 LOG_DEBUG("🔄 Moved BRC-100 auth overlay to match main window");
             }
 
+            // Dismiss omnibox overlay on window move (as per CONTEXT.md decision)
+            if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd)) {
+                extern void HideOmniboxOverlay();
+                HideOmniboxOverlay();
+                LOG_DEBUG("🔍 Dismissed omnibox overlay on window move");
+            }
+
             // IMPORTANT: Call DefWindowProc to ensure Windows updates internal state
             break;  // Let DefWindowProc handle WM_MOVE
         }
@@ -356,6 +363,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 LOG_DEBUG("🔄 Resized BRC-100 auth overlay to match main window");
             }
 
+            // Dismiss omnibox overlay on window resize (as per CONTEXT.md decision)
+            if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd)) {
+                extern void HideOmniboxOverlay();
+                HideOmniboxOverlay();
+                LOG_DEBUG("🔍 Dismissed omnibox overlay on window resize");
+            }
+
             return 0;
         }
 
@@ -375,6 +389,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     }
                     DestroyWindow(g_wallet_overlay_hwnd);
                     g_wallet_overlay_hwnd = nullptr;
+                }
+
+                // Dismiss omnibox overlay on focus loss (as per CONTEXT.md decision)
+                if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd)) {
+                    extern void HideOmniboxOverlay();
+                    HideOmniboxOverlay();
+                    LOG_DEBUG("🔍 Dismissed omnibox overlay on focus loss");
                 }
             }
             break;
@@ -903,6 +924,16 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // CRITICAL: Return MA_NOACTIVATE to prevent focus theft from address bar
             return MA_NOACTIVATE;
 
+        case WM_ACTIVATE: {
+            // Dismiss on click-outside (when overlay loses activation)
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                LOG_DEBUG("🔍 Omnibox overlay received WM_ACTIVATE WA_INACTIVE - dismissing");
+                extern void HideOmniboxOverlay();
+                HideOmniboxOverlay();
+            }
+            return 0;
+        }
+
         case WM_LBUTTONDOWN: {
             LOG_DEBUG("🖱️ Omnibox Overlay received WM_LBUTTONDOWN");
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -911,14 +942,13 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             mouse_event.y = pt.y;
             mouse_event.modifiers = 0;
 
-            // TODO: Forward clicks to omnibox browser when created in Plan 02
-            // CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
-            // if (omnibox_browser) {
-            //     omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
-            //     omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-            //     LOG_DEBUG("🧠 Left-click sent to omnibox overlay browser");
-            // }
-            LOG_DEBUG("⚠️ Omnibox browser not implemented yet (Plan 02)");
+            // Forward clicks to omnibox browser
+            CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+            if (omnibox_browser) {
+                omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+                LOG_DEBUG("🧠 Left-click sent to omnibox overlay browser");
+            }
             return 0;
         }
 
@@ -932,10 +962,6 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             LOG_DEBUG("❌ Omnibox Overlay received WM_DESTROY - cleaning up");
             // No cleanup - window persists
             return 0;
-
-        case WM_ACTIVATE:
-            LOG_DEBUG("⚡ Omnibox HWND activated with state: " + std::to_string(LOWORD(wParam)));
-            break;
 
         case WM_WINDOWPOSCHANGING:
             // Allow normal z-order changes for better window management
