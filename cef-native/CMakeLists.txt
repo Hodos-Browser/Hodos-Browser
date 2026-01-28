@@ -113,6 +113,7 @@ set(SOURCES
     src/core/AddressHandler.cpp
     src/core/Logger.cpp
     src/core/HistoryManager.cpp
+    src/core/GoogleSuggestService.cpp
 )
 
 # Platform-specific handler files
