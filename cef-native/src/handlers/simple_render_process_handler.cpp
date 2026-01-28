@@ -458,7 +458,7 @@ private:
 // Handler for window.hodosBrowser.googleSuggest API
 class GoogleSuggestV8Handler : public CefV8Handler {
 public:
-    GoogleSuggestV8Handler() {}
+    GoogleSuggestV8Handler() : nextRequestId_(1) {}
 
     bool Execute(const CefString& name,
                  CefRefPtr<CefV8Value> object,
@@ -476,21 +476,24 @@ public:
             }
 
             std::string query = arguments[0]->GetStringValue();
-            LOG_DEBUG_RENDER("🔍 googleSuggest.fetch() called with query: " + query);
+            int requestId = nextRequestId_++;
 
-            // Send IPC message to browser process
+            LOG_DEBUG_RENDER("🔍 googleSuggest.fetch() called with query: " + query + " (requestId: " + std::to_string(requestId) + ")");
+
+            // Send IPC message to browser process with requestId
             CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("google_suggest_request");
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             args->SetString(0, query);
+            args->SetInt(1, requestId);
 
             CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
             CefRefPtr<CefBrowser> browser = context->GetBrowser();
             browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, message);
 
-            LOG_DEBUG_RENDER("🔍 google_suggest_request sent to browser process");
+            LOG_DEBUG_RENDER("🔍 google_suggest_request sent to browser process with requestId: " + std::to_string(requestId));
 
-            // Return undefined (response will come via event)
-            retval = CefV8Value::CreateUndefined();
+            // Return the request ID so JavaScript can match responses
+            retval = CefV8Value::CreateInt(requestId);
             return true;
         }
 
@@ -498,6 +501,7 @@ public:
     }
 
 private:
+    int nextRequestId_;
     IMPLEMENT_REFCOUNTING(GoogleSuggestV8Handler);
 };
 
@@ -1350,17 +1354,18 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     if (message_name == "google_suggest_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string suggestionsJson = args->GetString(0);
+        int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson);
+        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson + " (requestId: " + std::to_string(requestId) + ")");
 
         // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
         std::string escapedJson = escapeJsonForJs(suggestionsJson);
 
-        // Dispatch custom event with suggestions
-        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: JSON.parse('" + escapedJson + "') }));";
+        // Dispatch custom event with suggestions and requestId
+        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: { suggestions: JSON.parse('" + escapedJson + "'), requestId: " + std::to_string(requestId) + " } }));";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window");
+        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
 
         return true;
     }

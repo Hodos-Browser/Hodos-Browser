@@ -2388,8 +2388,9 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "google_suggest_request") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+        int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
 
-        LOG_DEBUG_BROWSER("🔍 Google Suggest request for query: " + query);
+        LOG_DEBUG_BROWSER("🔍 Google Suggest request for query: " + query + " (requestId: " + std::to_string(requestId) + ")");
 
         // Fetch suggestions (returns empty vector on failure)
         std::vector<std::string> suggestions = GoogleSuggestService::GetInstance().fetchSuggestions(query);
@@ -2402,13 +2403,14 @@ bool SimpleHandler::OnProcessMessageReceived(
             response.push_back(suggestion);
         }
 
-        // Send response back to render process
+        // Send response back to render process with requestId
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("google_suggest_response");
         CefRefPtr<CefListValue> responseArgs = responseMsg->GetArgumentList();
         responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(1, requestId);
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
-        LOG_DEBUG_BROWSER("📤 Google Suggest response sent: " + response.dump());
+        LOG_DEBUG_BROWSER("📤 Google Suggest response sent: " + response.dump() + " (requestId: " + std::to_string(requestId) + ")");
 
         return true;
     }
