@@ -31,12 +31,16 @@
     extern HWND g_backup_overlay_hwnd;
     extern HWND g_brc100_auth_overlay_hwnd;
     extern HWND g_settings_menu_overlay_hwnd;
+    extern HWND g_omnibox_overlay_hwnd;
     extern HINSTANCE g_hInstance;
 
     // Windows overlay creation functions
     void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
+    void CreateOmniboxOverlay(HINSTANCE hInstance);
+    void ShowOmniboxOverlay();
+    void HideOmniboxOverlay();
 
 #elif defined(__APPLE__)
     // macOS: NSWindow* and NSView* (forward declared as void*)
