@@ -406,6 +406,46 @@ public:
 
             return true;
         }
+        else if (name == "searchWithFrecency") {
+            // arguments[0] = { query: string, limit?: number }
+            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
+                exception = "searchWithFrecency() requires a parameters object with query";
+                return true;
+            }
+
+            CefRefPtr<CefV8Value> params = arguments[0];
+
+            std::string query = "";
+            int limit = 6;
+
+            if (params->HasValue("query") && params->GetValue("query")->IsString()) {
+                query = params->GetValue("query")->GetStringValue().ToString();
+            }
+
+            if (params->HasValue("limit") && params->GetValue("limit")->IsInt()) {
+                limit = params->GetValue("limit")->GetIntValue();
+            }
+
+            LOG_INFO_RENDER("🔍 history.searchWithFrecency() called with query: " + query);
+
+            auto results = manager.SearchHistoryWithFrecency(query, limit);
+
+            // Convert to V8 array with score
+            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
+            for (size_t i = 0; i < results.size(); i++) {
+                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
+                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].entry.url), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].entry.title), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].entry.visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("lastVisitTime", CefV8Value::CreateDouble(static_cast<double>(results[i].entry.last_visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("frecencyScore", CefV8Value::CreateDouble(results[i].frecency_score), V8_PROPERTY_ATTRIBUTE_NONE);
+
+                retval->SetValue(static_cast<int>(i), entry_obj);
+            }
+
+            LOG_INFO_RENDER("✅ searchWithFrecency returned " + std::to_string(results.size()) + " entries");
+            return true;
+        }
 
         return false;
     }
@@ -606,6 +646,9 @@ void SimpleRenderProcessHandler::OnContextCreated(
     historyObject->SetValue("search",
         CefV8Value::CreateFunction("search", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("searchWithFrecency",
+        CefV8Value::CreateFunction("searchWithFrecency", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
     historyObject->SetValue("delete",
         CefV8Value::CreateFunction("delete", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
@@ -619,7 +662,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("test", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 
-    LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
+    LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(7) + " functions");
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);
