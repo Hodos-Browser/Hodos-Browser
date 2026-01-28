@@ -91,8 +91,9 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
     const autocompleteSuggestion = getAutocompleteSuggestion(historySuggestions, query);
     setAutocomplete(autocompleteSuggestion);
 
-    // Fetch Google suggestions only if history < 3
-    if (historyResults.length < 3 && query.length >= 2) {
+    // Always fetch Google suggestions for queries >= 2 chars
+    // (We'll limit display to 6 total in the ranking logic)
+    if (query.length >= 2) {
       try {
         if (window.hodosBrowser?.googleSuggest?.fetch) {
           const requestId = window.hodosBrowser.googleSuggest.fetch(query);
@@ -113,18 +114,8 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
   // Debounce the search for Google API (200ms), but history is immediate
   const debouncedGoogleFetch = useDebounce((query: string) => {
     if (query.length >= 2 && currentQueryRef.current === query) {
-      // Re-check if we need Google results
-      const currentHistory = suggestions.filter(s => s.type === 'history');
-      if (currentHistory.length < 3) {
-        try {
-          if (window.hodosBrowser?.googleSuggest?.fetch) {
-            const requestId = window.hodosBrowser.googleSuggest.fetch(query);
-            pendingGoogleRequestRef.current = requestId;
-          }
-        } catch (error) {
-          console.warn('Google suggest request failed:', error);
-        }
-      }
+      // Fetch Google suggestions (already handled in performSearch above)
+      // This debounced version is redundant but kept for future use
     }
   }, 200);
 

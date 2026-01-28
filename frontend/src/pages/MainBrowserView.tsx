@@ -15,6 +15,7 @@ import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { TabBar } from '../components/TabBar';
+import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
 
 const MainBrowserView: React.FC = () => {
@@ -83,8 +84,17 @@ const MainBrowserView: React.FC = () => {
         onReload: reload,
     });
 
-    const handleNavigate = (url: string) => {
-        navigate(url);
+    const handleNavigate = (input: string) => {
+        // Detect if input is a URL or search query
+        if (isUrl(input)) {
+            // It's a URL - normalize and navigate
+            const url = normalizeUrl(input);
+            navigate(url);
+        } else {
+            // It's a search query - search Google
+            const searchUrl = toGoogleSearchUrl(input);
+            navigate(searchUrl);
+        }
     };
 
     return (
