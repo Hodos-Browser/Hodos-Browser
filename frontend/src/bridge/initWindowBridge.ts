@@ -411,3 +411,30 @@ if (!window.hodosBrowser.wallet) {
 
 
 // overlayPanel methods removed - now using process-per-overlay architecture
+
+// Omnibox API for address bar overlay control
+if (!(window.hodosBrowser as any).omnibox) {
+  (window.hodosBrowser as any).omnibox = {
+    // Show overlay with current query
+    show: (query: string) => {
+      window.cefMessage?.send('omnibox_show', [query]);
+    },
+
+    // Hide overlay
+    hide: () => {
+      window.cefMessage?.send('omnibox_hide', []);
+    },
+
+    // Create or show overlay (preemptive)
+    createOrShow: () => {
+      window.cefMessage?.send('omnibox_create_or_show', []);
+    },
+
+    // Placeholder for future suggestion provider (Phase 2)
+    // Will be implemented when suggestion pipeline is added
+    getSuggestions: async (_query: string): Promise<any[]> => {
+      // TODO: Phase 2 - query history and Google suggestions
+      return [];
+    },
+  };
+}

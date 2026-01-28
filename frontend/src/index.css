@@ -91,3 +91,36 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+/* CEF browser-level cursor fix for omnibox overlay */
+body[data-overlay="omnibox"] * {
+  cursor: default !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+}
+
+body[data-overlay="omnibox"] button,
+body[data-overlay="omnibox"] [role="button"],
+body[data-overlay="omnibox"] a,
+body[data-overlay="omnibox"] .MuiListItemButton-root {
+  cursor: pointer !important;
+}
+
+/* Prevent CEF from maintaining focus states */
+body[data-overlay="omnibox"] *:focus,
+body[data-overlay="omnibox"] *:focus-visible,
+body[data-overlay="omnibox"] *:active {
+  outline: none !important;
+  background-color: transparent !important;
+}
+
+/* Only show hover background on actual hover */
+body[data-overlay="omnibox"] .MuiListItemButton-root:hover {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+body[data-overlay="omnibox"] .MuiListItemButton-root:not(:hover) {
+  background-color: transparent !important;
+}

@@ -1,6 +1,6 @@
 import type { AddressData } from './address';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
-import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams } from './history';
+import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
 
 declare global {
   interface Window {
@@ -8,6 +8,7 @@ declare global {
       history: {
         get: (params?: HistoryGetParams) => HistoryEntry[];
         search: (params: HistorySearchParams) => HistoryEntry[];
+        searchWithFrecency: (params: { query: string; limit?: number }) => HistoryEntryWithFrecency[];
         delete: (url: string) => boolean;
         clearAll: () => boolean;
         clearRange: (params: ClearRangeParams) => boolean;
@@ -42,6 +43,15 @@ declare global {
       overlayPanel: {
         open: (panelName: string) => void;
         toggleInput: (enable: boolean) => void;
+      };
+      omnibox: {
+        show: (query: string) => void;
+        hide: () => void;
+        createOrShow: () => void;
+        getSuggestions: (query: string) => Promise<any[]>;
+      };
+      googleSuggest: {
+        fetch: (query: string) => number;
       };
     };
     cefMessage?: {
