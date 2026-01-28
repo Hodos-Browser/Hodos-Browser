@@ -31,6 +31,14 @@ const OmniboxOverlayRoot: React.FC = () => {
     };
   }, [search]);
 
+  // Reset focus when query changes (clears any persistent MUI focus states)
+  useEffect(() => {
+    // Force blur any focused elements when query changes
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }, [query]);
+
   // Send autocomplete suggestion back to address bar
   useEffect(() => {
     if (autocomplete && window.cefMessage) {
@@ -68,7 +76,7 @@ const OmniboxOverlayRoot: React.FC = () => {
         <List dense sx={{ py: 0.5 }}>
           {suggestions.map((suggestion, index) => (
             <SuggestionItem
-              key={`${suggestion.type}-${suggestion.url}-${index}`}
+              key={`${query}-${suggestion.type}-${suggestion.url}-${index}`}
               suggestion={suggestion}
               query={query}
               isFirst={index === 0}
@@ -117,16 +125,27 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
     <ListItem disablePadding>
       <ListItemButton
         onClick={handleClick}
+        disableRipple
         sx={{
           py: 0.75,
           px: 1.5,
+          cursor: 'pointer !important',
+          userSelect: 'none',
           '&:hover': {
             backgroundColor: 'action.hover',
-            cursor: 'pointer',
+          },
+          '&:focus': {
+            backgroundColor: 'transparent',
+          },
+          '&:active': {
+            backgroundColor: 'action.hover',
+          },
+          '&.Mui-focusVisible': {
+            backgroundColor: 'transparent',
           },
         }}
       >
-        <ListItemIcon sx={{ minWidth: 36 }}>
+        <ListItemIcon sx={{ minWidth: 36, cursor: 'pointer' }}>
           {suggestion.type === 'history' ? (
             <HistoryIcon fontSize="small" color="action" />
           ) : (
@@ -136,15 +155,17 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
         <ListItemText
           primary={highlightedTitle}
           secondary={secondaryText}
+          sx={{ cursor: 'pointer' }}
           primaryTypographyProps={{
             variant: 'body2',
             noWrap: true,
-            sx: { fontWeight: isFirst ? 500 : 400 }
+            sx: { fontWeight: isFirst ? 500 : 400, cursor: 'pointer' }
           }}
           secondaryTypographyProps={{
             variant: 'caption',
             noWrap: true,
-            color: 'text.disabled'
+            color: 'text.disabled',
+            sx: { cursor: 'pointer' }
           }}
         />
       </ListItemButton>
