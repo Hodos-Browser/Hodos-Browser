@@ -21,6 +21,7 @@ const MainBrowserView: React.FC = () => {
     // Address bar state
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
+    const [autocompleteText, setAutocompleteText] = useState<string>('');
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -48,6 +49,28 @@ const MainBrowserView: React.FC = () => {
             }
         }
     }, [activeTabId, tabs, isEditingAddress]);
+
+    // Listen for autocomplete suggestions from omnibox overlay
+    React.useEffect(() => {
+        const handleAutocomplete = (event: MessageEvent) => {
+            if (event.data?.type === 'omnibox_autocomplete') {
+                const suggestion = event.data.suggestion;
+                if (suggestion && address && isEditingAddress) {
+                    // Only show autocomplete if suggestion starts with current input
+                    if (suggestion.toLowerCase().startsWith(address.toLowerCase())) {
+                        setAutocompleteText(suggestion.slice(address.length));
+                    } else {
+                        setAutocompleteText('');
+                    }
+                } else {
+                    setAutocompleteText('');
+                }
+            }
+        };
+
+        window.addEventListener('message', handleAutocomplete);
+        return () => window.removeEventListener('message', handleAutocomplete);
+    }, [address, isEditingAddress]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -152,12 +175,15 @@ const MainBrowserView: React.FC = () => {
                     type="text"
                     value={address}
                     onChange={(e) => {
-                        setAddress(e.target.value);
+                        const newValue = e.target.value;
+                        setAddress(newValue);
                         setIsEditingAddress(true);
+                        setAutocompleteText(''); // Clear autocomplete on input change
 
-                        // Show overlay on first character, hide on empty
-                        if (e.target.value.length > 0) {
-                            window.cefMessage?.send('omnibox_show', [e.target.value]);
+                        // Send query to omnibox overlay for suggestions
+                        if (newValue.length > 0) {
+                            window.cefMessage?.send('omnibox_update_query', [newValue]);
+                            window.cefMessage?.send('omnibox_show', [newValue]);
                         } else {
                             window.cefMessage?.send('omnibox_hide', []);
                         }
@@ -166,6 +192,7 @@ const MainBrowserView: React.FC = () => {
                         if (e.key === 'Enter') {
                             handleNavigate(address);
                             setIsEditingAddress(false);
+                            setAutocompleteText('');
                             e.currentTarget.blur();
                             // Navigation dismisses overlay
                             window.cefMessage?.send('omnibox_hide', []);
@@ -173,7 +200,13 @@ const MainBrowserView: React.FC = () => {
                             // Escape dismisses overlay, keeps current input
                             window.cefMessage?.send('omnibox_hide', []);
                             setIsEditingAddress(false);
+                            setAutocompleteText('');
                             e.currentTarget.blur();
+                        } else if (e.key === 'Tab' && autocompleteText) {
+                            // Tab accepts the autocomplete suggestion
+                            e.preventDefault();
+                            setAddress(address + autocompleteText);
+                            setAutocompleteText('');
                         }
                     }}
                     onFocus={(e) => {
@@ -185,6 +218,7 @@ const MainBrowserView: React.FC = () => {
                     }}
                     onBlur={() => {
                         setIsEditingAddress(false);
+                        setAutocompleteText('');
                     }}
                     placeholder="Search or enter address"
                     style={{
