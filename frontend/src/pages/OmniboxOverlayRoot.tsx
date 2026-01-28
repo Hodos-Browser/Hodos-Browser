@@ -15,6 +15,14 @@ const OmniboxOverlayRoot: React.FC = () => {
   const [query, setQuery] = useState('');
   const { suggestions, loading, autocomplete, search } = useOmniboxSuggestions();
 
+  // Set body data attribute for CEF-level cursor fix
+  useEffect(() => {
+    document.body.setAttribute('data-overlay', 'omnibox');
+    return () => {
+      document.body.removeAttribute('data-overlay');
+    };
+  }, []);
+
   // Listen for query updates from address bar
   useEffect(() => {
     const handleQueryUpdate = (event: Event) => {
