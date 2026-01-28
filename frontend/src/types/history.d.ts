@@ -6,6 +6,14 @@ export interface HistoryEntry {
   transition: number;
 }
 
+export interface HistoryEntryWithFrecency {
+  url: string;
+  title: string;
+  visitCount: number;
+  lastVisitTime: number;
+  frecencyScore: number;
+}
+
 export interface HistorySearchParams {
   search?: string;
   startTime?: number;  // Chromium timestamp

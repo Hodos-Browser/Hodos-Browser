@@ -1,4 +1,4 @@
-import type { HistoryEntry, Suggestion } from '../types/omnibox';
+import type { HistoryEntryWithFrecency, Suggestion } from '../types/omnibox';
 
 /**
  * Extract domain from URL for deduplication
@@ -19,7 +19,7 @@ function extractDomain(url: string): string {
  * Results are capped at 6.
  */
 export function rankAndMergeSuggestions(
-  historyResults: HistoryEntry[],
+  historyResults: HistoryEntryWithFrecency[],
   googleResults: string[],
   _query: string
 ): Suggestion[] {

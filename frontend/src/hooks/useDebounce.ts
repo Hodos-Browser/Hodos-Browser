@@ -4,7 +4,7 @@ import { useRef, useEffect, useMemo } from 'react';
  * Debounces a callback function to delay execution until after a specified delay.
  * Uses useRef to avoid stale closures with React state.
  */
-export function useDebounce<T extends (...args: unknown[]) => unknown>(
+export function useDebounce<T extends (...args: any[]) => any>(
   callback: T,
   delay: number
 ): (...args: Parameters<T>) => void {
