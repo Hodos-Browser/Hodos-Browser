@@ -23,6 +23,11 @@ struct HistorySearchParams {
     int offset;
 };
 
+struct HistoryEntryWithScore {
+    HistoryEntry entry;
+    double frecency_score;
+};
+
 class HistoryManager {
 public:
     static HistoryManager& GetInstance();
@@ -36,6 +41,7 @@ public:
     // Query our History database
     std::vector<HistoryEntry> GetHistory(int limit, int offset);
     std::vector<HistoryEntry> SearchHistory(const HistorySearchParams& params);
+    std::vector<HistoryEntryWithScore> SearchHistoryWithFrecency(const std::string& query, int limit = 6);
     HistoryEntry GetHistoryEntryByUrl(const std::string& url);
 
     // Test function to debug schema
@@ -63,6 +69,9 @@ private:
 
     bool OpenDatabase();
     void CloseDatabase();
+
+    // Helper functions
+    static std::string extractDomain(const std::string& url);
 
     // Prevent copying
     HistoryManager(const HistoryManager&) = delete;
