@@ -454,6 +454,53 @@ private:
     IMPLEMENT_REFCOUNTING(HistoryV8Handler);
 };
 
+// ========== GOOGLE SUGGEST V8 HANDLER ==========
+// Handler for window.hodosBrowser.googleSuggest API
+class GoogleSuggestV8Handler : public CefV8Handler {
+public:
+    GoogleSuggestV8Handler() {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        if (name == "fetch") {
+            // Expect one argument: query string
+            if (arguments.size() < 1 || !arguments[0]->IsString()) {
+                exception = "fetch() requires one string argument (query)";
+                return true;
+            }
+
+            std::string query = arguments[0]->GetStringValue();
+            LOG_DEBUG_RENDER("🔍 googleSuggest.fetch() called with query: " + query);
+
+            // Send IPC message to browser process
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("google_suggest_request");
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            args->SetString(0, query);
+
+            CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+            CefRefPtr<CefBrowser> browser = context->GetBrowser();
+            browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, message);
+
+            LOG_DEBUG_RENDER("🔍 google_suggest_request sent to browser process");
+
+            // Return undefined (response will come via event)
+            retval = CefV8Value::CreateUndefined();
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(GoogleSuggestV8Handler);
+};
+
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 SimpleRenderProcessHandler constructor called!");
 
@@ -671,6 +718,19 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // Create the send function for cefMessage
     CefRefPtr<CefV8Value> sendFunction = CefV8Value::CreateFunction("send", new CefMessageSendHandler());
     cefMessageObject->SetValue("send", sendFunction, V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // Inject Google Suggest API for omnibox overlay only
+    if (isOmniboxOverlay) {
+        CefRefPtr<CefV8Value> googleSuggestObject = CefV8Value::CreateObject(nullptr, nullptr);
+        hodosBrowser->SetValue("googleSuggest", googleSuggestObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+
+        CefRefPtr<GoogleSuggestV8Handler> googleSuggestHandler = new GoogleSuggestV8Handler();
+        googleSuggestObject->SetValue("fetch",
+            CefV8Value::CreateFunction("fetch", googleSuggestHandler),
+            V8_PROPERTY_ATTRIBUTE_NONE);
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest API injected for omnibox overlay");
+    }
 
 #ifdef _WIN32
     // Register BRC-100 API (Windows-only)
@@ -1264,6 +1324,25 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         // Execute JavaScript callback
         std::string js = "if (window.onSetBackupModalStateResponse) { window.onSetBackupModalStateResponse(" + responseJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
+    // ========== GOOGLE SUGGEST RESPONSE ==========
+    if (message_name == "google_suggest_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestionsJson = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson);
+
+        // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
+        std::string escapedJson = escapeJsonForJs(suggestionsJson);
+
+        // Dispatch custom event with suggestions
+        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: JSON.parse('" + escapedJson + "') }));";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window");
 
         return true;
     }
