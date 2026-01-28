@@ -51,6 +51,7 @@ HWND g_wallet_overlay_hwnd = nullptr;
 HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
+HWND g_omnibox_overlay_hwnd = nullptr;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -145,6 +146,12 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Destroying BRC-100 auth overlay window...");
         DestroyWindow(g_brc100_auth_overlay_hwnd);
         g_brc100_auth_overlay_hwnd = nullptr;
+    }
+
+    if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
+        LOG_INFO("🔄 Destroying omnibox overlay window...");
+        DestroyWindow(g_omnibox_overlay_hwnd);
+        g_omnibox_overlay_hwnd = nullptr;
     }
 
 
@@ -888,6 +895,55 @@ LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Omnibox Overlay Window Procedure
+LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            LOG_DEBUG("👆 Omnibox Overlay HWND received WM_MOUSEACTIVATE");
+            // CRITICAL: Return MA_NOACTIVATE to prevent focus theft from address bar
+            return MA_NOACTIVATE;
+
+        case WM_LBUTTONDOWN: {
+            LOG_DEBUG("🖱️ Omnibox Overlay received WM_LBUTTONDOWN");
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            // TODO: Forward clicks to omnibox browser when created in Plan 02
+            // CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+            // if (omnibox_browser) {
+            //     omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+            //     omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            //     LOG_DEBUG("🧠 Left-click sent to omnibox overlay browser");
+            // }
+            LOG_DEBUG("⚠️ Omnibox browser not implemented yet (Plan 02)");
+            return 0;
+        }
+
+        case WM_CLOSE:
+            LOG_DEBUG("❌ Omnibox Overlay received WM_CLOSE - hiding window");
+            // Keep-alive: hide instead of destroy
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            LOG_DEBUG("❌ Omnibox Overlay received WM_DESTROY - cleaning up");
+            // No cleanup - window persists
+            return 0;
+
+        case WM_ACTIVATE:
+            LOG_DEBUG("⚡ Omnibox HWND activated with state: " + std::to_string(LOWORD(wParam)));
+            break;
+
+        case WM_WINDOWPOSCHANGING:
+            // Allow normal z-order changes for better window management
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
     CefMainArgs main_args(hInstance);
@@ -1004,6 +1060,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&settingsMenuOverlayClass)) {
         LOG_DEBUG("❌ Failed to register settings menu overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Omnibox overlay window class
+    WNDCLASS omniboxOverlayClass = {};
+    omniboxOverlayClass.lpfnWndProc = OmniboxOverlayWndProc;
+    omniboxOverlayClass.hInstance = hInstance;
+    omniboxOverlayClass.lpszClassName = L"CEFOmniboxOverlayWindow";
+
+    if (!RegisterClass(&omniboxOverlayClass)) {
+        LOG_DEBUG("❌ Failed to register omnibox overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
