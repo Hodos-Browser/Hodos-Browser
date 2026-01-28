@@ -896,9 +896,9 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     // Address bar left offset: 8px padding + (3 buttons * 34px) + (3 gaps * 6px) = 128px
     // Address bar right offset: similar for 3 right buttons = ~128px from right edge
     int overlayX = mainRect.left + 160;
-    int overlayY = headerRect.top + 120;  // Flush below toolbar
+    int overlayY = headerRect.top + 104;  // Flush below toolbar
     int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 400;  // Max height, will be dynamically adjusted by content later
+    int overlayHeight = 290;  // Max height, will be dynamically adjusted by content later
 
     LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(overlayWidth) + "x" +
@@ -941,7 +941,7 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
 
     CefBrowserSettings settings;
     settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(255, 255, 255, 255);  // white background
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent background
     settings.javascript = STATE_ENABLED;
 
     CefRefPtr<SimpleHandler> omnibox_handler(new SimpleHandler("omnibox"));
@@ -991,9 +991,9 @@ void ShowOmniboxOverlay() {
     GetWindowRect(g_header_hwnd, &headerRect);
 
     int overlayX = mainRect.left + 160;
-    int overlayY = headerRect.top + 120;
+    int overlayY = headerRect.top + 104;
     int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 400;
+    int overlayHeight = 290;
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
