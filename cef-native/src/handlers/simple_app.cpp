@@ -898,7 +898,7 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     int overlayX = mainRect.left + 160;
     int overlayY = headerRect.top + 104;  // Flush below toolbar
     int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 290;  // Max height, will be dynamically adjusted by content later
+    int overlayHeight = 350;  // Max height, will be dynamically adjusted by content later
 
     LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(overlayWidth) + "x" +
@@ -993,7 +993,7 @@ void ShowOmniboxOverlay() {
     int overlayX = mainRect.left + 160;
     int overlayY = headerRect.top + 104;
     int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 290;
+    int overlayHeight = 350;
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
