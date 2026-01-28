@@ -1004,13 +1004,18 @@ void ShowOmniboxOverlay() {
     LONG exStyle = GetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
-    // TODO: Call WasResized, Invalidate, SetFocus on omnibox browser when created in Plan 02
-    // CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
-    // if (omnibox_browser) {
-    //     omnibox_browser->GetHost()->WasResized();
-    //     omnibox_browser->GetHost()->Invalidate(PET_VIEW);
-    //     omnibox_browser->GetHost()->SetFocus(true);
-    // }
+    // Clear any persistent focus states by executing blur on active element
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+    if (omnibox_browser && omnibox_browser->GetMainFrame()) {
+        omnibox_browser->GetHost()->WasResized();
+        omnibox_browser->GetHost()->Invalidate(PET_VIEW);
+
+        // Execute JavaScript to blur any focused elements
+        std::string blurJs = "if (document.activeElement) { document.activeElement.blur(); }";
+        omnibox_browser->GetMainFrame()->ExecuteJavaScript(blurJs, "about:blank", 0);
+
+        LOG_INFO_APP("🔍 Cleared focus states in omnibox browser");
+    }
 
     LOG_INFO_APP("✅ Omnibox overlay shown");
 }
@@ -1030,6 +1035,13 @@ void HideOmniboxOverlay() {
         UnhookWindowsHookEx(g_omnibox_mouse_hook);
         g_omnibox_mouse_hook = nullptr;
         LOG_INFO_APP("✅ Omnibox mouse hook removed");
+    }
+
+    // Clear focus from omnibox browser before hiding
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+    if (omnibox_browser) {
+        omnibox_browser->GetHost()->SetFocus(false);
+        LOG_INFO_APP("✅ Cleared focus from omnibox browser");
     }
 
     // Hide window (keep-alive - don't destroy)

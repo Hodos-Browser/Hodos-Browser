@@ -959,6 +959,27 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // CRITICAL: Return MA_NOACTIVATE to prevent focus theft from address bar
             return MA_NOACTIVATE;
 
+        case WM_SETCURSOR: {
+            // Force hand cursor for omnibox overlay (all content is clickable)
+            SetCursor(LoadCursor(nullptr, IDC_HAND));
+            return TRUE;
+        }
+
+        case WM_MOUSEMOVE: {
+            // Forward mouse moves to CEF for hover states
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+            if (omnibox_browser) {
+                omnibox_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
         case WM_LBUTTONDOWN: {
             LOG_DEBUG("🖱️ Omnibox Overlay received WM_LBUTTONDOWN");
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
