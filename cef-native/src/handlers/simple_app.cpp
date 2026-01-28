@@ -972,6 +972,18 @@ void ShowOmniboxOverlay() {
 
     LOG_INFO_APP("🔍 Showing omnibox overlay");
 
+    // Install global mouse hook for click-outside detection
+    extern HHOOK g_omnibox_mouse_hook;
+    extern LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_omnibox_mouse_hook) {
+        g_omnibox_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, OmniboxMouseHookProc, nullptr, 0);
+        if (g_omnibox_mouse_hook) {
+            LOG_INFO_APP("✅ Omnibox mouse hook installed for click-outside detection");
+        } else {
+            LOG_WARNING_APP("⚠️ Failed to install omnibox mouse hook. Error: " + std::to_string(GetLastError()));
+        }
+    }
+
     // Recalculate position in case address bar moved
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
@@ -1011,6 +1023,14 @@ void HideOmniboxOverlay() {
     }
 
     LOG_INFO_APP("🔍 Hiding omnibox overlay");
+
+    // Remove global mouse hook
+    extern HHOOK g_omnibox_mouse_hook;
+    if (g_omnibox_mouse_hook) {
+        UnhookWindowsHookEx(g_omnibox_mouse_hook);
+        g_omnibox_mouse_hook = nullptr;
+        LOG_INFO_APP("✅ Omnibox mouse hook removed");
+    }
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);

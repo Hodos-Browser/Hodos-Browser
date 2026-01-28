@@ -53,6 +53,9 @@ HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
 
+// Global mouse hook for omnibox click-outside detection
+HHOOK g_omnibox_mouse_hook = nullptr;
+
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO(msg) Logger::Log(msg, 1, 0)
@@ -150,6 +153,12 @@ void ShutdownApplication() {
 
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
         LOG_INFO("🔄 Destroying omnibox overlay window...");
+        // Remove mouse hook if still installed
+        if (g_omnibox_mouse_hook) {
+            UnhookWindowsHookEx(g_omnibox_mouse_hook);
+            g_omnibox_mouse_hook = nullptr;
+            LOG_INFO("🔄 Omnibox mouse hook removed during shutdown");
+        }
         DestroyWindow(g_omnibox_overlay_hwnd);
         g_omnibox_overlay_hwnd = nullptr;
     }
@@ -916,6 +925,32 @@ LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Low-level mouse hook for omnibox click-outside detection
+LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        // Check for mouse down events (left or right button)
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            // Only process if omnibox overlay is visible
+            if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+
+                // Get overlay window rect
+                RECT overlayRect;
+                GetWindowRect(g_omnibox_overlay_hwnd, &overlayRect);
+
+                // Check if click is outside overlay bounds
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside omnibox overlay bounds - dismissing");
+                    extern void HideOmniboxOverlay();
+                    HideOmniboxOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_omnibox_mouse_hook, nCode, wParam, lParam);
+}
+
 // Omnibox Overlay Window Procedure
 LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -923,16 +958,6 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             LOG_DEBUG("👆 Omnibox Overlay HWND received WM_MOUSEACTIVATE");
             // CRITICAL: Return MA_NOACTIVATE to prevent focus theft from address bar
             return MA_NOACTIVATE;
-
-        case WM_ACTIVATE: {
-            // Dismiss on click-outside (when overlay loses activation)
-            if (LOWORD(wParam) == WA_INACTIVE) {
-                LOG_DEBUG("🔍 Omnibox overlay received WM_ACTIVATE WA_INACTIVE - dismissing");
-                extern void HideOmniboxOverlay();
-                HideOmniboxOverlay();
-            }
-            return 0;
-        }
 
         case WM_LBUTTONDOWN: {
             LOG_DEBUG("🖱️ Omnibox Overlay received WM_LBUTTONDOWN");
