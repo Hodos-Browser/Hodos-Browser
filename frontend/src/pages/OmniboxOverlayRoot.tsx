@@ -8,21 +8,9 @@ import { Box, Typography, Paper } from '@mui/material';
  * Phase 2: Will be replaced with suggestion list rendering.
  */
 const OmniboxOverlayRoot: React.FC = () => {
-    const [ready, setReady] = React.useState(false);
-
     React.useEffect(() => {
-        // Wait for 'allSystemsReady' event from V8 injection
-        const handleReady = () => setReady(true);
-        window.addEventListener('allSystemsReady', handleReady);
-
-        return () => {
-            window.removeEventListener('allSystemsReady', handleReady);
-        };
+        console.log("🔍 OmniboxOverlayRoot mounted");
     }, []);
-
-    if (!ready) {
-        return null; // Don't render until CEF context is ready
-    }
 
     return (
         <Box

@@ -895,9 +895,9 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     // Tab bar height: 40px, Toolbar height: 54px (total 94px)
     // Address bar left offset: 8px padding + (3 buttons * 34px) + (3 gaps * 6px) = 128px
     // Address bar right offset: similar for 3 right buttons = ~128px from right edge
-    int overlayX = mainRect.left + 128;
-    int overlayY = headerRect.top + 40 + 54;  // Flush below toolbar
-    int overlayWidth = (headerRect.right - headerRect.left) - 128 - 128;
+    int overlayX = mainRect.left + 160;
+    int overlayY = headerRect.top + 120;  // Flush below toolbar
+    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
     int overlayHeight = 400;  // Max height, will be dynamically adjusted by content later
 
     LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -990,9 +990,9 @@ void ShowOmniboxOverlay() {
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
-    int overlayX = mainRect.left + 128;
-    int overlayY = headerRect.top + 40 + 54;
-    int overlayWidth = (headerRect.right - headerRect.left) - 128 - 128;
+    int overlayX = mainRect.left + 160;
+    int overlayY = headerRect.top + 120;
+    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
     int overlayHeight = 400;
 
     // Force position and show with SWP_NOACTIVATE

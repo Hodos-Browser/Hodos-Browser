@@ -9,7 +9,20 @@
       "Bash(sqlite3:*)",
       "Bash(./kill-browser.sh)",
       "Bash(npx tsc:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs: initialize project\n\nAddress box enhancement with autocomplete suggestions combining browser history and Google search\n\nCo-Authored-By: Claude Sonnet 4.5 \\(1M context\\) <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(if ! grep -q \"^\\\\.planning/$\" .gitignore)",
+      "Bash(then echo \".planning/\")",
+      "Bash(else echo \".planning/ already in .gitignore\")",
+      "Bash(fi)",
+      "Bash(git commit:*)",
+      "WebSearch",
+      "WebFetch(domain:www.fullstackoptimization.com)",
+      "WebFetch(domain:www.chromium.org)",
+      "WebFetch(domain:firefox-source-docs.mozilla.org)",
+      "WebFetch(domain:support.mozilla.org)",
+      "Bash(git check-ignore:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
