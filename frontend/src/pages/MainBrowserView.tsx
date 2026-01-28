@@ -180,71 +180,91 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Simple Address Bar Input */}
-                <input
-                    type="text"
-                    value={address}
-                    onChange={(e) => {
-                        const newValue = e.target.value;
-                        setAddress(newValue);
-                        setIsEditingAddress(true);
-                        setAutocompleteText(''); // Clear autocomplete on input change
+                {/* Address Bar with Inline Autocomplete */}
+                <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                    <input
+                        type="text"
+                        value={address}
+                        onChange={(e) => {
+                            const newValue = e.target.value;
+                            setAddress(newValue);
+                            setIsEditingAddress(true);
+                            setAutocompleteText(''); // Clear autocomplete on input change
 
-                        // Send query to omnibox overlay for suggestions
-                        if (newValue.length > 0) {
-                            window.cefMessage?.send('omnibox_update_query', [newValue]);
-                            window.cefMessage?.send('omnibox_show', [newValue]);
-                        } else {
-                            window.cefMessage?.send('omnibox_hide', []);
-                        }
-                    }}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                            handleNavigate(address);
+                            // Send query to omnibox overlay for suggestions
+                            if (newValue.length > 0) {
+                                window.cefMessage?.send('omnibox_update_query', [newValue]);
+                                window.cefMessage?.send('omnibox_show', [newValue]);
+                            } else {
+                                window.cefMessage?.send('omnibox_hide', []);
+                            }
+                        }}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                handleNavigate(address);
+                                setIsEditingAddress(false);
+                                setAutocompleteText('');
+                                e.currentTarget.blur();
+                                // Navigation dismisses overlay
+                                window.cefMessage?.send('omnibox_hide', []);
+                            } else if (e.key === 'Escape') {
+                                // Escape dismisses overlay, keeps current input
+                                window.cefMessage?.send('omnibox_hide', []);
+                                setIsEditingAddress(false);
+                                setAutocompleteText('');
+                                e.currentTarget.blur();
+                            } else if (e.key === 'Tab' && autocompleteText) {
+                                // Tab accepts the autocomplete suggestion
+                                e.preventDefault();
+                                setAddress(address + autocompleteText);
+                                setAutocompleteText('');
+                            }
+                        }}
+                        onFocus={(e) => {
+                            e.target.select();
+                            setIsEditingAddress(true);
+                            // Preemptive creation: create overlay subprocess on focus but don't show
+                            // Only shows when user types (see onChange handler)
+                            window.cefMessage?.send('omnibox_create', []);
+                        }}
+                        onBlur={() => {
                             setIsEditingAddress(false);
                             setAutocompleteText('');
-                            e.currentTarget.blur();
-                            // Navigation dismisses overlay
-                            window.cefMessage?.send('omnibox_hide', []);
-                        } else if (e.key === 'Escape') {
-                            // Escape dismisses overlay, keeps current input
-                            window.cefMessage?.send('omnibox_hide', []);
-                            setIsEditingAddress(false);
-                            setAutocompleteText('');
-                            e.currentTarget.blur();
-                        } else if (e.key === 'Tab' && autocompleteText) {
-                            // Tab accepts the autocomplete suggestion
-                            e.preventDefault();
-                            setAddress(address + autocompleteText);
-                            setAutocompleteText('');
-                        }
-                    }}
-                    onFocus={(e) => {
-                        e.target.select();
-                        setIsEditingAddress(true);
-                        // Preemptive creation: create overlay subprocess on focus but don't show
-                        // Only shows when user types (see onChange handler)
-                        window.cefMessage?.send('omnibox_create', []);
-                    }}
-                    onBlur={() => {
-                        setIsEditingAddress(false);
-                        setAutocompleteText('');
-                    }}
-                    placeholder="Search or enter address"
-                    style={{
-                        flex: 1,
-                        minWidth: 0,
-                        height: 36,
-                        borderRadius: 20,
-                        paddingLeft: 16,
-                        paddingRight: 16,
-                        backgroundColor: '#f1f3f4',
-                        border: '1px solid transparent',
-                        fontSize: 14,
-                        color: 'rgba(0, 0, 0, 0.87)',
-                        outline: 'none',
-                    }}
-                />
+                        }}
+                        placeholder="Search or enter address"
+                        style={{
+                            width: '100%',
+                            height: 36,
+                            borderRadius: 20,
+                            paddingLeft: 16,
+                            paddingRight: 16,
+                            backgroundColor: '#f1f3f4',
+                            border: '1px solid transparent',
+                            fontSize: 14,
+                            color: 'rgba(0, 0, 0, 0.87)',
+                            outline: 'none',
+                        }}
+                    />
+                    {/* Inline autocomplete text overlay */}
+                    {autocompleteText && isEditingAddress && (
+                        <span
+                            style={{
+                                position: 'absolute',
+                                left: 16,
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                fontSize: 14,
+                                color: 'rgba(0, 0, 0, 0.4)',
+                                pointerEvents: 'none',
+                                userSelect: 'none',
+                                whiteSpace: 'pre',
+                            }}
+                        >
+                            <span style={{ visibility: 'hidden' }}>{address}</span>
+                            {autocompleteText}
+                        </span>
+                    )}
+                </Box>
 
                 {/* Wallet Button */}
                 <IconButton
