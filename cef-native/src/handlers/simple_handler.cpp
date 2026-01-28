@@ -16,6 +16,7 @@
 // Cross-platform includes (available on both platforms)
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
+#include "../../include/core/GoogleSuggestService.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -2361,6 +2362,35 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
     // All wallet handlers now cross-platform (WalletService has platform implementations)
+
+    // ========== GOOGLE SUGGEST SERVICE ==========
+    if (message_name == "google_suggest_request") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+        LOG_DEBUG_BROWSER("🔍 Google Suggest request for query: " + query);
+
+        // Fetch suggestions (returns empty vector on failure)
+        std::vector<std::string> suggestions = GoogleSuggestService::GetInstance().fetchSuggestions(query);
+
+        LOG_DEBUG_BROWSER("🔍 Got " + std::to_string(suggestions.size()) + " suggestions from Google");
+
+        // Build JSON array response
+        nlohmann::json response = nlohmann::json::array();
+        for (const std::string& suggestion : suggestions) {
+            response.push_back(suggestion);
+        }
+
+        // Send response back to render process
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("google_suggest_response");
+        CefRefPtr<CefListValue> responseArgs = responseMsg->GetArgumentList();
+        responseArgs->SetString(0, response.dump());
+
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        LOG_DEBUG_BROWSER("📤 Google Suggest response sent: " + response.dump());
+
+        return true;
+    }
 
     return false;
 }
