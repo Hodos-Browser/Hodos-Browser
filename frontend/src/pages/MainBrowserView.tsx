@@ -50,14 +50,13 @@ const MainBrowserView: React.FC = () => {
     }, [activeTabId, tabs, isEditingAddress]);
 
     // Keyboard shortcuts
-    // TODO Phase 5: Restore Ctrl+L focus when Omnibox exposes focus method
     useKeyboardShortcuts({
         onNewTab: createTab,
         onCloseTab: closeActiveTab,
         onNextTab: nextTab,
         onPrevTab: prevTab,
         onSwitchToTab: switchToTabByIndex,
-        onFocusAddressBar: () => {}, // Temporarily disabled until Omnibox exposes focus method
+        onFocusAddressBar: () => {}, // TODO: Implement address bar focus functionality
         onReload: reload,
     });
 

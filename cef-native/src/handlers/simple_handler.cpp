@@ -57,15 +57,11 @@
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
-    extern void CreateOmniboxOverlay(HINSTANCE hInstance);
 #else
     // macOS global views
     extern NSView* g_webview_view;
     // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
-    extern "C" void HideOmniboxOverlay();
-    extern "C" bool IsOmniboxOverlayVisible();
-    extern void CreateOmniboxOverlay();
 #endif
 
 // Global backup modal state management
@@ -121,7 +117,6 @@ CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
-CefRefPtr<CefBrowser> SimpleHandler::omnibox_overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
 }
@@ -153,10 +148,6 @@ CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
     return settings_menu_browser_;
-}
-
-CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxOverlayBrowser() {
-    return omnibox_overlay_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -392,12 +383,6 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 #else
             // TODO: Implement BRC-100 auth on macOS
 #endif
-        } else if (role_ == "omnibox_overlay") {
-            // Inject the hodosBrowser API into omnibox overlay browser
-            LOG_DEBUG_BROWSER("🔧 OMNIBOX OVERLAY BROWSER LOADED - Injecting hodosBrowser API");
-
-            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
-            InjectHodosBrowserAPI(browser);
         } else if (ExtractTabIdFromRole(role_) != -1) {
             // Inject the hodosBrowser API into tab browsers
             LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
@@ -596,23 +581,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
-    } else if (role_ == "omnibox_overlay") {
-        omnibox_overlay_browser_ = browser;
-        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized.");
-        LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser ID: " + std::to_string(browser->GetIdentifier()));
-
-        // CRITICAL: Set focus so keyboard input works in React input fields
-        browser->GetHost()->SetFocus(true);
-        LOG_DEBUG_BROWSER("⌨️ Omnibox overlay browser focus enabled");
-
-        // Delayed resize/invalidate to fix first-render issue
-        CefRefPtr<CefBrowser> browser_ref = browser;
-        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
-            if (b && b->GetHost()) {
-                b->GetHost()->WasResized();
-                b->GetHost()->Invalidate(PET_VIEW);
-            }
-        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -665,9 +633,6 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
         std::cout << "  → BRC100 auth browser cleanup" << std::endl;
         brc100_auth_browser_ = nullptr;
-    } else if (role_ == "omnibox_overlay" && browser == omnibox_overlay_browser_) {
-        std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
-        omnibox_overlay_browser_ = nullptr;
     } else if (role_ == "overlay" && browser == overlay_browser_) {
         std::cout << "  → Overlay browser cleanup" << std::endl;
         overlay_browser_ = nullptr;
@@ -1462,9 +1427,6 @@ bool SimpleHandler::OnProcessMessageReceived(
             } else if (role_ == "brc100auth") {
                 extern HWND g_brc100_auth_overlay_hwnd;
                 g_brc100_auth_overlay_hwnd = nullptr;
-            } else if (role_ == "omnibox_overlay") {
-                extern HWND g_omnibox_overlay_hwnd;
-                g_omnibox_overlay_hwnd = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -1476,7 +1438,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern NSWindow* g_wallet_overlay_window;
         extern NSWindow* g_backup_overlay_window;
         extern NSWindow* g_brc100_auth_overlay_window;
-        extern NSWindow* g_omnibox_overlay_window;
 
         NSWindow* target_window = nullptr;
         CefRefPtr<CefBrowser> target_browser = nullptr;
@@ -1493,9 +1454,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "brc100auth") {
             target_window = g_brc100_auth_overlay_window;
             target_browser = GetBRC100AuthBrowser();
-        } else if (role_ == "omnibox_overlay") {
-            target_window = g_omnibox_overlay_window;
-            target_browser = GetOmniboxOverlayBrowser();
         }
 
         if (target_window) {
@@ -1510,7 +1468,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
                 else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
-                else if (role_ == "omnibox_overlay") omnibox_overlay_browser_ = nullptr;
             }
 
             // Remove from parent window and close
@@ -1526,8 +1483,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_backup_overlay_window = nullptr;
             } else if (role_ == "brc100auth") {
                 g_brc100_auth_overlay_window = nullptr;
-            } else if (role_ == "omnibox_overlay") {
-                g_omnibox_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -1876,61 +1831,6 @@ bool SimpleHandler::OnProcessMessageReceived(
 #else
         LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on this platform");
 #endif
-        return true;
-    }
-
-    // ========== OMNIBOX OVERLAY ==========
-    if (message_name == "show_omnibox_overlay") {
-        LOG_DEBUG_BROWSER("🔍 Show omnibox overlay requested");
-#ifdef _WIN32
-        extern HINSTANCE g_hInstance;
-        CreateOmniboxOverlay(g_hInstance);
-#elif defined(__APPLE__)
-        CreateOmniboxOverlay();
-#endif
-        return true;
-    }
-
-    if (message_name == "omnibox_navigate") {
-        LOG_DEBUG_BROWSER("🔍 Omnibox navigation requested");
-
-        // Get URL from args
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string url = args->GetString(0);
-
-        LOG_DEBUG_BROWSER("🔍 Navigating to: " + url);
-
-        // Navigate active tab
-        Tab* activeTab = TabManager::GetInstance().GetActiveTab();
-        if (activeTab && activeTab->browser) {
-            activeTab->browser->GetMainFrame()->LoadURL(url);
-        }
-
-        // Close omnibox overlay
-#ifdef _WIN32
-        extern HWND g_omnibox_overlay_hwnd;
-        if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
-            ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
-        }
-#elif defined(__APPLE__)
-        HideOmniboxOverlay();
-#endif
-
-        return true;
-    }
-
-    if (message_name == "omnibox_close") {
-        LOG_DEBUG_BROWSER("🔍 Close omnibox overlay requested");
-
-#ifdef _WIN32
-        extern HWND g_omnibox_overlay_hwnd;
-        if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
-            ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
-        }
-#elif defined(__APPLE__)
-        HideOmniboxOverlay();
-#endif
-
         return true;
     }
 
@@ -2426,28 +2326,6 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
     LOG_DEBUG_BROWSER("⌨️ OnPreKeyEvent [" + role_ + "] - type: " + std::to_string(event.type) +
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
-
-#ifdef __APPLE__
-    // CRITICAL: On macOS, if omnibox overlay is visible, forward keyboard events to it
-    // because main window stays key and header browser receives events
-    if (role_ == "header") {
-        if (IsOmniboxOverlayVisible()) {
-            CefRefPtr<CefBrowser> omnibox = GetOmniboxOverlayBrowser();
-            if (omnibox) {
-                LOG_DEBUG_BROWSER("⌨️ Forwarding key event from header to omnibox overlay");
-                omnibox->GetHost()->SendKeyEvent(event);
-                return true; // Consume event so header doesn't process it
-            }
-        }
-    }
-
-    // CRITICAL: For omnibox_overlay on macOS, let events pass through to webpage
-    // The events were forwarded from header, now they need to reach React
-    if (role_ == "omnibox_overlay") {
-        LOG_DEBUG_BROWSER("⌨️ Omnibox overlay allowing event to propagate to webpage");
-        return false; // Don't consume - let webpage handle it
-    }
-#endif
 
     // Handle DevTools keyboard shortcuts for all windows
     if (event.type == KEYEVENT_RAWKEYDOWN) {

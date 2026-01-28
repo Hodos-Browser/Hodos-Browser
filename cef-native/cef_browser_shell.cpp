@@ -51,7 +51,6 @@ HWND g_wallet_overlay_hwnd = nullptr;
 HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
-HWND g_omnibox_overlay_hwnd = nullptr;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -148,11 +147,6 @@ void ShutdownApplication() {
         g_brc100_auth_overlay_hwnd = nullptr;
     }
 
-    if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
-        LOG_INFO("🔄 Destroying omnibox overlay window...");
-        DestroyWindow(g_omnibox_overlay_hwnd);
-        g_omnibox_overlay_hwnd = nullptr;
-    }
 
     // Step 3: Destroy main windows (child windows first)
     LOG_INFO("🔄 Destroying main windows...");
