@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Box, List, ListItem, ListItemIcon, ListItemText, Typography, CircularProgress } from '@mui/material';
+import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography, CircularProgress } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
 import { useOmniboxSuggestions } from '../hooks/useOmniboxSuggestions';
@@ -114,39 +114,40 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
     : null;
 
   return (
-    <ListItem
-      onClick={handleClick}
-      sx={{
-        cursor: 'pointer',
-        backgroundColor: isFirst ? 'action.selected' : 'transparent',
-        '&:hover': {
-          backgroundColor: 'action.hover',
-        },
-        py: 0.75,
-        px: 1.5,
-      }}
-    >
-      <ListItemIcon sx={{ minWidth: 36 }}>
-        {suggestion.type === 'history' ? (
-          <HistoryIcon fontSize="small" color="action" />
-        ) : (
-          <SearchIcon fontSize="small" color="action" />
-        )}
-      </ListItemIcon>
-      <ListItemText
-        primary={highlightedTitle}
-        secondary={secondaryText}
-        primaryTypographyProps={{
-          variant: 'body2',
-          noWrap: true,
-          sx: { fontWeight: isFirst ? 500 : 400 }
+    <ListItem disablePadding>
+      <ListItemButton
+        onClick={handleClick}
+        sx={{
+          py: 0.75,
+          px: 1.5,
+          '&:hover': {
+            backgroundColor: 'action.hover',
+            cursor: 'pointer',
+          },
         }}
-        secondaryTypographyProps={{
-          variant: 'caption',
-          noWrap: true,
-          color: 'text.disabled'
-        }}
-      />
+      >
+        <ListItemIcon sx={{ minWidth: 36 }}>
+          {suggestion.type === 'history' ? (
+            <HistoryIcon fontSize="small" color="action" />
+          ) : (
+            <SearchIcon fontSize="small" color="action" />
+          )}
+        </ListItemIcon>
+        <ListItemText
+          primary={highlightedTitle}
+          secondary={secondaryText}
+          primaryTypographyProps={{
+            variant: 'body2',
+            noWrap: true,
+            sx: { fontWeight: isFirst ? 500 : 400 }
+          }}
+          secondaryTypographyProps={{
+            variant: 'caption',
+            noWrap: true,
+            color: 'text.disabled'
+          }}
+        />
+      </ListItemButton>
     </ListItem>
   );
 };
