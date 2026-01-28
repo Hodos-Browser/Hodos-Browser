@@ -154,10 +154,24 @@ const MainBrowserView: React.FC = () => {
                     onChange={(e) => {
                         setAddress(e.target.value);
                         setIsEditingAddress(true);
+
+                        // Show overlay on first character, hide on empty
+                        if (e.target.value.length > 0) {
+                            window.cefMessage?.send('omnibox_show', [e.target.value]);
+                        } else {
+                            window.cefMessage?.send('omnibox_hide', []);
+                        }
                     }}
                     onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                             handleNavigate(address);
+                            setIsEditingAddress(false);
+                            e.currentTarget.blur();
+                            // Navigation dismisses overlay
+                            window.cefMessage?.send('omnibox_hide', []);
+                        } else if (e.key === 'Escape') {
+                            // Escape dismisses overlay, keeps current input
+                            window.cefMessage?.send('omnibox_hide', []);
                             setIsEditingAddress(false);
                             e.currentTarget.blur();
                         }
@@ -165,6 +179,8 @@ const MainBrowserView: React.FC = () => {
                     onFocus={(e) => {
                         e.target.select();
                         setIsEditingAddress(true);
+                        // Preemptive creation: create overlay subprocess on focus (before typing)
+                        window.cefMessage?.send('omnibox_create_or_show', []);
                     }}
                     onBlur={() => {
                         setIsEditingAddress(false);
