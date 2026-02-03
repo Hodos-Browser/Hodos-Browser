@@ -1,0 +1,664 @@
+# Wallet Backup & Recovery — Implementation Outline
+
+**Created**: 2026-02-03
+**Status**: Draft — design outline for review
+**Related**: `STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` (Phases 2, 5, 7)
+**Objective**: Enable full wallet recovery from mnemonic alone by combining three backup mechanisms — local file export, on-chain encrypted backup, and cloud sync scaffolding.
+
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Backup Data Model](#2-backup-data-model)
+3. [Mechanism A: Local Encrypted Backup File](#3-mechanism-a-local-encrypted-backup-file)
+4. [Mechanism B: On-Chain Encrypted Backup](#4-mechanism-b-on-chain-encrypted-backup)
+5. [Mechanism C: Cloud Sync Scaffolding](#5-mechanism-c-cloud-sync-scaffolding)
+6. [Recovery Flows](#6-recovery-flows)
+7. [Implementation Phases](#7-implementation-phases)
+8. [Relationship to Transition Plan](#8-relationship-to-transition-plan)
+9. [Open Questions](#9-open-questions)
+
+---
+
+## 1. Overview
+
+### The Problem
+
+HD wallet outputs (m/0, m/1, m/2...) are recoverable from a mnemonic alone by scanning sequential addresses. BRC-42 protocol outputs, PushDrop tokens, and certificates use non-sequential derivation — their derivation parameters cannot be guessed. Without a backup of those parameters, these outputs are lost if the database is lost.
+
+### The Solution: Three Layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1: On-Chain Encrypted Backup (automatic)         │
+│  Mnemonic-only recovery. Encrypted derivation data      │
+│  stored in a BIP32 UTXO on the blockchain.              │
+│  Always available. No user action needed.               │
+├─────────────────────────────────────────────────────────┤
+│  Layer 2: Local Encrypted Backup File (user-initiated)  │
+│  Full wallet export in BSV SDK sync-compatible JSON.     │
+│  User saves to USB, cloud drive, etc.                   │
+├─────────────────────────────────────────────────────────┤
+│  Layer 3: Cloud Sync (future, scaffolding only)         │
+│  Same JSON format as Layer 2, pushed to remote storage. │
+│  Infrastructure for multi-device sync.                  │
+│  Commented out / behind feature flag until needed.      │
+└─────────────────────────────────────────────────────────┘
+```
+
+All three layers use the **same JSON entity format** matching the BSV SDK wallet-toolbox sync protocol. Data serialized for one layer can be deserialized by any other.
+
+---
+
+## 2. Backup Data Model
+
+### Entity Format (shared across all three mechanisms)
+
+The backup payload is a JSON object containing arrays of entities matching the wallet-toolbox shapes. This ensures compatibility with the BSV SDK sync system and future cloud sync.
+
+```json
+{
+  "version": 1,
+  "chain": "main",
+  "created_at": "2026-02-03T12:00:00Z",
+  "wallet_identity_key": "02abc...def",
+
+  "users": [
+    {
+      "userId": 1,
+      "identityKey": "02abc...def",
+      "activeStorage": "local"
+    }
+  ],
+
+  "transactions": [
+    {
+      "transactionId": 42,
+      "userId": 1,
+      "txid": "abc123...",
+      "status": "completed",
+      "reference": "ref-001",
+      "isOutgoing": true,
+      "satoshis": 50000,
+      "description": "Payment to merchant",
+      "rawTx": "<hex>",
+      "inputBEEF": "<hex or null>",
+      "provenTxId": 7
+    }
+  ],
+
+  "outputs": [
+    {
+      "outputId": 100,
+      "userId": 1,
+      "transactionId": 42,
+      "basketId": 3,
+      "spendable": true,
+      "change": false,
+      "vout": 0,
+      "satoshis": 45000,
+      "txid": "abc123...",
+      "derivationPrefix": "2-authrite",
+      "derivationSuffix": "session-xyz",
+      "senderIdentityKey": "03fed...cba",
+      "customInstructions": null,
+      "outputDescription": "Auth token",
+      "lockingScript": "<hex>",
+      "providedBy": "you",
+      "purpose": "",
+      "type": "custom",
+      "spentBy": null
+    }
+  ],
+
+  "proven_txs": [
+    {
+      "provenTxId": 7,
+      "txid": "abc123...",
+      "height": 850001,
+      "index": 42,
+      "merklePath": "<hex>",
+      "rawTx": "<hex>",
+      "blockHash": "0000...fff",
+      "merkleRoot": "aaa...bbb"
+    }
+  ],
+
+  "output_baskets": [
+    {
+      "basketId": 3,
+      "userId": 1,
+      "name": "auth-tokens",
+      "numberOfDesiredUTXOs": 6,
+      "minimumDesiredUTXOValue": 10000,
+      "isDeleted": false
+    }
+  ],
+
+  "certificates": [
+    {
+      "certificateId": 1,
+      "userId": 1,
+      "type": "identity",
+      "serialNumber": "cert-001",
+      "certifier": "03aaa...",
+      "subject": "02abc...",
+      "verifier": null,
+      "revocationOutpoint": "txid.0",
+      "signature": "3045...",
+      "isDeleted": false,
+      "fields": [
+        { "fieldName": "name", "fieldValue": "<encrypted>", "masterKey": "<hex>" },
+        { "fieldName": "email", "fieldValue": "<encrypted>", "masterKey": "<hex>" }
+      ]
+    }
+  ],
+
+  "output_tags": [ ... ],
+  "tx_labels": [ ... ],
+  "settings": { ... }
+}
+```
+
+### What's Included vs Excluded
+
+| Included | Excluded |
+|---|---|
+| All transactions (with rawTx) | Mnemonic (user re-enters on recovery) |
+| All outputs (with derivation data) | Domain whitelist (browser-specific) |
+| All proven_txs (with merkle proofs) | Messages / relay_messages |
+| All certificates + fields | Balance cache (recomputed) |
+| All baskets, tags, labels | Derived key cache (recomputed) |
+| Settings | Monitor events (diagnostic only) |
+
+### Backup Size Estimates
+
+| Wallet Activity | Estimated Payload Size |
+|---|---|
+| Light use (50 transactions, 100 outputs) | ~50 KB |
+| Moderate use (500 transactions, 1000 outputs) | ~500 KB |
+| Heavy use (5000 transactions, 10000 outputs) | ~5 MB |
+| Encrypted + compressed | ~40-60% of raw JSON |
+
+---
+
+## 3. Mechanism A: Local Encrypted Backup File
+
+### User Flow
+
+```
+Export:
+  User clicks "Export Wallet Backup" in settings
+    → Wallet serializes all entities to JSON (format above)
+    → Wallet encrypts with AES-256-GCM
+    → Encryption key derived from mnemonic via HKDF-SHA256
+      (or user-provided passphrase — TBD, see Open Questions)
+    → Save as .bsv-wallet file
+    → User stores file wherever they want
+
+Import:
+  User clicks "Import Wallet Backup" in settings
+    → Select .bsv-wallet file
+    → Enter mnemonic (or passphrase)
+    → Decrypt
+    → Validate: check wallet_identity_key matches derived master pubkey
+    → Merge entities into database (insert or update, never overwrite newer data)
+    → Recompute balance cache
+```
+
+### File Format
+
+```
+.bsv-wallet file structure:
+┌──────────────────────────────────┐
+│ Magic bytes: "BSVW" (4 bytes)    │
+│ Version: uint8 (1 byte)          │
+│ Encryption: uint8 (1 byte)       │
+│   0x01 = AES-256-GCM, mnemonic  │
+│   0x02 = AES-256-GCM, passphrase│
+│ IV/Nonce: 12 bytes               │
+│ Salt: 32 bytes (for key deriv.)  │
+│ Encrypted payload: variable      │
+│ Auth tag: 16 bytes (GCM tag)     │
+└──────────────────────────────────┘
+```
+
+### Rust Implementation
+
+```
+New files:
+  src/backup/mod.rs           — Module root
+  src/backup/export.rs        — Serialize entities → encrypted file
+  src/backup/import.rs        — Decrypt file → merge entities into DB
+  src/backup/entities.rs      — Serde structs matching the JSON format
+  src/backup/encryption.rs    — AES-256-GCM encrypt/decrypt, key derivation
+
+Modified files:
+  src/handlers.rs             — Add /wallet/export and /wallet/import endpoints
+  src/main.rs                 — Register new routes
+```
+
+### Endpoints
+
+```
+POST /wallet/export
+  → Returns encrypted .bsv-wallet file as binary response
+
+POST /wallet/import
+  Body: { file: <binary>, mnemonic: "<mnemonic>" }
+  → Decrypts, validates, merges into database
+  → Returns { imported_transactions: N, imported_outputs: N, ... }
+```
+
+---
+
+## 4. Mechanism B: On-Chain Encrypted Backup
+
+### Concept
+
+Store encrypted derivation data for non-HD outputs in a special UTXO on the blockchain. The UTXO lives at a deterministic BIP32 address derived from the mnemonic, so it can be found during recovery by scanning sequential addresses.
+
+### Design
+
+**Backup address derivation**:
+```
+Backup address = m/{BACKUP_INDEX}
+where BACKUP_INDEX is a well-known constant (e.g., 2147483647 = max i32)
+This is high enough to never collide with normal HD address indices.
+```
+
+**Transaction structure**:
+```
+Input:  previous backup UTXO (or any wallet UTXO for first backup)
+Output 0: P2PKH to backup address (dust amount, e.g., 546 sat)
+            — this is the "marker" that recovery scanning finds
+Output 1: OP_RETURN
+            OP_FALSE OP_RETURN
+            <protocol_flag: "hodos-backup-v1">
+            <encrypted_payload>
+```
+
+**Encrypted payload contents** (subset of full backup — only what's needed beyond HD recovery):
+```json
+{
+  "version": 1,
+  "updated_at": "2026-02-03T12:00:00Z",
+  "non_hd_outputs": [
+    {
+      "txid": "abc123...",
+      "vout": 0,
+      "derivationPrefix": "2-authrite",
+      "derivationSuffix": "session-xyz",
+      "senderIdentityKey": "03fed...cba",
+      "basketId": 3,
+      "customInstructions": null
+    }
+  ],
+  "certificates": [
+    {
+      "type": "identity",
+      "serialNumber": "cert-001",
+      "certifier": "03aaa...",
+      "subject": "02abc...",
+      "signature": "3045...",
+      "fields": [ ... ]
+    }
+  ],
+  "baskets": [
+    { "name": "auth-tokens" }
+  ]
+}
+```
+
+**Note**: The on-chain payload is a **subset** — only non-HD derivation data, certificates, and basket definitions. HD outputs are recoverable from the mnemonic via address scanning, so they don't need to be in the on-chain backup. This keeps the payload small.
+
+**Encryption**:
+```
+key = HKDF-SHA256(master_private_key, salt="hodos-onchain-backup", info="v1")
+payload = AES-256-GCM(key, nonce=random_12_bytes, plaintext=json_bytes)
+on_chain_data = nonce || ciphertext || auth_tag
+```
+
+Only the holder of the master private key (derived from mnemonic) can decrypt.
+
+### Lifecycle
+
+```
+Trigger: a non-HD output is confirmed (proven)
+  OR: periodic timer (e.g., daily if any non-HD data changed)
+  OR: wallet shutdown (if dirty flag set)
+
+Create/Update:
+  1. Gather all non-HD output derivation data + certificates
+  2. Serialize to JSON, encrypt
+  3. If previous backup UTXO exists:
+       Spend it as input (reclaims the dust)
+     Else:
+       Use a normal wallet UTXO as input
+  4. Create new backup UTXO + OP_RETURN
+  5. Broadcast
+  6. Track the backup UTXO txid locally (for next update)
+
+Recovery:
+  1. Derive backup address from mnemonic: m/{BACKUP_INDEX}
+  2. Query blockchain for UTXOs at this address
+  3. If found: fetch the transaction, extract OP_RETURN data
+  4. Decrypt using master private key
+  5. Import non-HD derivation data into database
+  6. Now can derive keys for BRC-42 outputs, certificates, etc.
+  7. Verify each recovered output still exists on-chain
+```
+
+### Rust Implementation
+
+```
+New files:
+  src/backup/onchain.rs       — On-chain backup create/update/recover
+  src/backup/onchain_tx.rs    — Build backup transaction (input + P2PKH + OP_RETURN)
+
+Modified files:
+  src/monitor/task_onchain_backup.rs  — Background task: check dirty flag,
+                                         create/update backup when needed
+  src/main.rs                          — Register backup task with monitor
+  src/handlers.rs                      — Recovery endpoint uses onchain restore
+```
+
+### Constants
+
+```rust
+/// Well-known address index for on-chain backup UTXO
+/// Max i32 value — will never collide with normal HD indices
+const BACKUP_ADDRESS_INDEX: i32 = 2_147_483_647;
+
+/// Minimum satoshis for backup UTXO (dust limit)
+const BACKUP_DUST_AMOUNT: i64 = 546;
+
+/// Protocol flag in OP_RETURN for backup identification
+const BACKUP_PROTOCOL_FLAG: &str = "hodos-backup-v1";
+
+/// HKDF salt for on-chain backup encryption key derivation
+const BACKUP_ENCRYPTION_SALT: &[u8] = b"hodos-onchain-backup";
+```
+
+### Cost Analysis
+
+| Scenario | Backup Size | Tx Size | Fee (~1 sat/byte) |
+|---|---|---|---|
+| 10 BRC-42 outputs + 2 certs | ~2 KB | ~2.5 KB | ~2,500 sat (~$0.001) |
+| 100 BRC-42 outputs + 10 certs | ~15 KB | ~16 KB | ~16,000 sat (~$0.006) |
+| 1000 BRC-42 outputs + 50 certs | ~120 KB | ~121 KB | ~121,000 sat (~$0.05) |
+| Update frequency: weekly | | | ~$0.05-$2.50/year |
+
+---
+
+## 5. Mechanism C: Cloud Sync Scaffolding
+
+### Purpose
+
+Prepare the codebase for future cloud sync without implementing the transport layer. The data format and serialization code from Mechanism A is reused. Only the "push to server / pull from server" part is left as scaffolding.
+
+### Rust Implementation
+
+```
+New files:
+  src/sync/mod.rs             — Module root with SyncProvider trait
+  src/sync/provider.rs        — trait SyncProvider {
+                                   async fn push(data: BackupPayload) -> Result<()>;
+                                   async fn pull(identity_key: &str) -> Result<BackupPayload>;
+                                   async fn get_sync_state() -> Result<SyncState>;
+                                 }
+  src/sync/local_provider.rs  — Implements SyncProvider for local file (wraps Mechanism A)
+  src/sync/remote_provider.rs — Stub/commented-out HTTP-based provider
+                                 // TODO: implement when cloud sync server is available
+                                 // Uses same BackupPayload JSON format
+
+Modified files:
+  src/database/sync_state_repo.rs  — Already created in transition plan Phase 5
+  src/main.rs                       — SyncProvider registered but remote disabled
+```
+
+### SyncProvider Trait
+
+```rust
+/// Trait for wallet backup/sync providers.
+/// All providers use the same BackupPayload format (BSV SDK compatible).
+///
+/// Implementations:
+///   - LocalFileProvider: export/import .bsv-wallet files
+///   - OnChainProvider: on-chain encrypted backup (Mechanism B)
+///   - RemoteProvider: cloud sync (future, commented out)
+pub trait SyncProvider: Send + Sync {
+    /// Push current wallet state to backup destination
+    async fn push(&self, payload: &BackupPayload) -> Result<(), SyncError>;
+
+    /// Pull wallet state from backup destination
+    async fn pull(&self, identity_key: &str) -> Result<Option<BackupPayload>, SyncError>;
+
+    /// Check if backup is newer than local state
+    async fn needs_sync(&self, local_updated_at: i64) -> Result<bool, SyncError>;
+}
+```
+
+### Multi-Device Sync via On-Chain Backup
+
+As you noted, the on-chain backup mechanism could serve as a basic cross-device sync:
+
+```
+Device A creates BRC-42 output
+  → Device A updates on-chain backup
+  → Device B scans backup address (periodic or on-demand)
+  → Device B finds updated backup, decrypts
+  → Device B now knows about Device A's output
+```
+
+This is eventual consistency with the blockchain as the sync transport. Not real-time, but functional. The cloud sync scaffolding could be wired to use the on-chain backup as its provider instead of (or alongside) a remote server.
+
+---
+
+## 6. Recovery Flows
+
+### Flow 1: Mnemonic-Only Recovery (On-Chain Backup)
+
+```
+User has: mnemonic only (lost device, no backup file)
+
+Step 1: Derive master key from mnemonic
+Step 2: Scan HD addresses m/0, m/1, m/2... up to gap limit
+         → Recovers all simple HD UTXOs
+Step 3: Check backup address m/{BACKUP_INDEX}
+         → If UTXO found: decrypt OP_RETURN payload
+         → Recover non-HD derivation data, certificates, baskets
+Step 4: For each recovered non-HD output:
+         → Derive key using recovered derivationPrefix/Suffix
+         → Verify output exists on-chain (query by txid:vout)
+         → If exists and unspent: add to wallet as spendable
+Step 5: Recompute balance from all recovered outputs
+
+Result: Full recovery of HD outputs + non-HD outputs up to last backup
+```
+
+### Flow 2: Mnemonic + Backup File Recovery
+
+```
+User has: mnemonic + .bsv-wallet file
+
+Step 1: Derive master key from mnemonic
+Step 2: Decrypt .bsv-wallet file
+Step 3: Validate identity key matches
+Step 4: Import all entities (transactions, outputs, proofs, certs)
+Step 5: Verify on-chain state for each output
+Step 6: Also check on-chain backup (may be newer than file)
+         → Merge any newer data from on-chain backup
+Step 7: Recompute balance
+
+Result: Full recovery (file may be more complete than on-chain backup
+        since it includes full transaction history, not just derivation data)
+```
+
+### Flow 3: Normal Startup (No Recovery)
+
+```
+Wallet starts normally with existing database
+
+Step 1: Load database
+Step 2: Check on-chain backup currency
+         → If local data has non-HD outputs not yet backed up:
+           set dirty flag for background backup task
+Step 3: Resume normal operation
+```
+
+---
+
+## 7. Implementation Phases
+
+This work is separate from but dependent on the main transition plan phases.
+
+### Phase B1: Backup Entity Format + Local File Export/Import
+
+**Depends on**: Transition Plan Phase 1 (status consolidation) at minimum. Ideally also Phase 3 (users table) so userId is available.
+
+**Scope**:
+- Define `BackupPayload` serde structs matching the JSON format
+- Implement AES-256-GCM encryption/decryption with key derivation
+- Implement `/wallet/export` endpoint (serialize → encrypt → file)
+- Implement `/wallet/import` endpoint (decrypt → validate → merge)
+- File format with magic bytes, version, encryption metadata
+
+**Files**:
+```
+NEW:  src/backup/mod.rs
+NEW:  src/backup/entities.rs
+NEW:  src/backup/export.rs
+NEW:  src/backup/import.rs
+NEW:  src/backup/encryption.rs
+MOD:  src/handlers.rs (add export/import endpoints)
+MOD:  src/main.rs (register routes)
+```
+
+**Testing**:
+- Create a wallet with transactions, outputs, certificates
+- Export to .bsv-wallet file
+- Create a fresh wallet from same mnemonic
+- Import the file
+- Verify all data matches original
+
+---
+
+### Phase B2: On-Chain Encrypted Backup
+
+**Depends on**: Phase B1 (reuses encryption code), Transition Plan Phase 2 (proven_txs for proof tracking), Transition Plan Phase 4 (outputs table with derivation fields).
+
+**Scope**:
+- Implement backup transaction builder (P2PKH + OP_RETURN)
+- Implement backup payload serializer (non-HD subset)
+- Implement backup update logic (spend previous backup UTXO)
+- Implement recovery scanner (find backup at known address, decrypt)
+- Background task to update backup when dirty flag is set
+
+**Files**:
+```
+NEW:  src/backup/onchain.rs
+NEW:  src/backup/onchain_tx.rs
+NEW:  src/monitor/task_onchain_backup.rs
+MOD:  src/handlers.rs (recovery flow uses onchain restore)
+MOD:  src/main.rs (register backup monitor task)
+```
+
+**Testing**:
+- Create wallet, perform BRC-42 interactions
+- Verify backup transaction broadcast with correct structure
+- Verify backup UTXO at expected address
+- Delete database, recover from mnemonic only
+- Verify non-HD outputs recovered from on-chain backup
+- Verify certificates recovered
+- Verify backup update replaces previous (spends old UTXO)
+
+---
+
+### Phase B3: Cloud Sync Scaffolding
+
+**Depends on**: Phase B1 (same payload format), Transition Plan Phase 5 (sync_states table).
+
+**Scope**:
+- Define `SyncProvider` trait
+- Implement `LocalFileProvider` (wraps Phase B1 export/import)
+- Implement `OnChainProvider` (wraps Phase B2)
+- Stub `RemoteProvider` with commented-out HTTP implementation
+- Wire `SyncProvider` into AppState
+
+**Files**:
+```
+NEW:  src/sync/mod.rs
+NEW:  src/sync/provider.rs
+NEW:  src/sync/local_provider.rs
+NEW:  src/sync/onchain_provider.rs
+NEW:  src/sync/remote_provider.rs (commented out / stub)
+MOD:  src/main.rs (register SyncProvider)
+```
+
+**Testing**:
+- Verify LocalFileProvider produces same output as direct export
+- Verify OnChainProvider triggers backup correctly
+- Verify RemoteProvider compiles but is inactive
+
+---
+
+## 8. Relationship to Transition Plan
+
+### Dependency Map
+
+```
+Transition Plan                    Backup Plan
+───────────────                    ───────────
+Phase 1: Status Consolidation ──────► Phase B1: Local File Export
+Phase 2: Proven Transaction Model      (can start after Phase 1)
+Phase 3: Multi-User Foundation ────►
+Phase 4: Output Model Transition ──► Phase B2: On-Chain Backup
+Phase 5: Supporting Tables ────────► Phase B3: Cloud Sync Scaffolding
+Phase 6: Monitor Pattern ─────────► Phase B2: (backup task in monitor)
+Phase 7: Per-Output Key Derivation   (benefits from all backup phases)
+Phase 8: Cleanup
+```
+
+### Suggested Order
+
+```
+1. Transition Phase 1 (status consolidation)
+2. Transition Phase 2 (proven_txs)
+3. Transition Phase 3 (users)
+4. Backup Phase B1 (local file export/import)     ← can start here
+5. Transition Phase 4 (outputs model)
+6. Transition Phase 5 (supporting tables)
+7. Backup Phase B3 (sync scaffolding)
+8. Transition Phase 6 (monitor pattern)
+9. Backup Phase B2 (on-chain backup)               ← needs monitor + outputs
+10. Transition Phase 7 (per-output key derivation)
+11. Transition Phase 8 (cleanup)
+```
+
+Phase B2 (on-chain backup) is positioned after the monitor pattern (Phase 6) so it can run as a proper background task, and after the outputs model (Phase 4) so derivation fields are available.
+
+---
+
+## 9. Open Questions
+
+These will be answered during implementation:
+
+1. **Encryption key source**: Derive from mnemonic (no extra password) or require a separate passphrase? Mnemonic-derived is more convenient but means anyone with the mnemonic can decrypt the backup.
+
+2. **Backup update trigger**: Timer-based (daily), event-based (on confirmed non-HD output), or on wallet shutdown? Probably a combination.
+
+3. **Backup UTXO amount**: Dust limit (546 sat) is cheapest but might be swept by cleanup. Consider a slightly higher amount (1000 sat) for safety.
+
+4. **OP_RETURN vs PushDrop**: OP_RETURN is simpler and unspendable. PushDrop would make the data spendable but adds complexity. OP_RETURN is likely the right choice since we only need the data, not a spendable token.
+
+5. **Backup history**: Keep only the latest backup, or maintain a chain of incremental backups? Latest-only is simpler and sufficient. The old backup UTXO is spent as input to the new one, so only the latest exists as a UTXO.
+
+6. **Maximum payload size**: BSV supports very large transactions, but at what point should we split the backup across multiple OP_RETURNs? Likely not needed until thousands of BRC-42 interactions.
+
+7. **Backup verification**: Should the wallet periodically verify it can decrypt its own on-chain backup? A self-test could catch encryption issues early.
+
+---
+
+*End of backup and recovery outline. Implementation begins after transition plan Phase 1 is complete.*
