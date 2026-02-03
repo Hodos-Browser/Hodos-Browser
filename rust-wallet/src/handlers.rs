@@ -22,8 +22,9 @@ pub use certificate_handlers::{
 // Fee Calculation Utilities
 // ============================================================================
 
-/// Default fee rate in satoshis per kilobyte (1 sat/byte = 1000 sat/kb)
-/// BSV miners currently accept 0.5-1 sat/byte. Using 1 sat/byte for safety margin.
+/// Fallback fee rate in satoshis per kilobyte (1 sat/byte = 1000 sat/kb)
+/// Used when ARC policy endpoint is unreachable. Dynamic fee rate is fetched
+/// from ARC /v1/policy and cached in FeeRateCache (see fee_rate_cache.rs).
 pub const DEFAULT_SATS_PER_KB: u64 = 1000;
 
 /// Minimum fee to ensure transaction relay (dust prevention)
@@ -146,29 +147,6 @@ pub fn get_transaction_fee(tx: &crate::transaction::Transaction, sats_per_kb: u6
     }
 }
 
-// TODO: Future enhancement - Dynamic fee rate fetching from MAPI
-//
-// BSV miners expose fee quotes via Merchant API (MAPI):
-// - TAAL: https://merchantapi.taal.com/mapi/feeQuote
-// - GorillaPool: Similar endpoint
-//
-// Response format:
-// {
-//   "fees": [{
-//     "feeType": "standard",
-//     "miningFee": { "satoshis": 500, "bytes": 1000 },
-//     "relayFee": { "satoshis": 250, "bytes": 1000 }
-//   }]
-// }
-//
-// Implementation plan:
-// 1. Add FeeRateCache struct with TTL (1 hour recommended)
-// 2. Add async fn fetch_mapi_fee_quote() -> Result<u64, Error>
-// 3. Store cached rate in AppState
-// 4. Fall back to DEFAULT_SATS_PER_KB on error
-//
-// See: https://github.com/bitcoin-sv-specs/brfc-merchantapi
-
 // Health check
 pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
@@ -217,11 +195,35 @@ pub async fn get_version() -> HttpResponse {
 }
 
 // /getPublicKey - BRC-100 endpoint
-// Returns the master identity key (m) for BRC-100 authentication
-pub async fn get_public_key(state: web::Data<AppState>) -> HttpResponse {
-    log::info!("📋 /getPublicKey called - returning MASTER identity key");
+// Returns the master identity key when identityKey=true or no protocol params,
+// otherwise derives a child public key using BRC-42 key derivation.
+pub async fn get_public_key(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 /getPublicKey called");
 
-    // Get master public key from database
+    // Parse optional JSON body (empty body = return identity key)
+    let req: serde_json::Value = if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("   JSON parse error: {}", e);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Invalid JSON: {}", e)
+                }));
+            }
+        }
+    };
+
+    let identity_key = req.get("identityKey").and_then(|v| v.as_bool()).unwrap_or(false);
+    let protocol_id = req.get("protocolID");
+    let key_id = req.get("keyID").and_then(|v| v.as_str());
+    let for_self = req.get("forSelf").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Get master public key (always needed)
     let db = state.database.lock().unwrap();
     let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
         Ok(key) => key,
@@ -234,12 +236,148 @@ pub async fn get_public_key(state: web::Data<AppState>) -> HttpResponse {
     };
     drop(db);
 
-    let master_pubkey_hex = hex::encode(master_pubkey);
+    // If identityKey=true or no protocol params, return master identity key
+    if identity_key || protocol_id.is_none() || key_id.is_none() {
+        let master_pubkey_hex = hex::encode(&master_pubkey);
+        log::info!("   Returning MASTER identity key: {}", master_pubkey_hex);
+        return HttpResponse::Ok().json(serde_json::json!({
+            "publicKey": master_pubkey_hex
+        }));
+    }
 
-    log::info!("   Master public key: {}", master_pubkey_hex);
+    // Parse protocolID for BRC-42 derivation
+    let protocol_id = protocol_id.unwrap();
+    let key_id = key_id.unwrap();
+
+    let protocol_id_str = if let serde_json::Value::Array(arr) = protocol_id {
+        if arr.len() == 2 {
+            if let (Some(level), Some(name)) = (arr[0].as_u64(), arr[1].as_str()) {
+                format!("{}-{}", level, name)
+            } else {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Invalid protocolID format: expected [number, string]"
+                }));
+            }
+        } else {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "protocolID must be [securityLevel, protocolName]"
+            }));
+        }
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "protocolID must be an array"
+        }));
+    };
+
+    let invoice = format!("{}-{}", protocol_id_str, key_id);
+    log::info!("   BRC-43 invoice: {}, forSelf: {}", invoice, for_self);
+
+    // Resolve counterparty public key for BRC-42 derivation
+    // "anyone" → PrivateKey(1).toPublicKey(), "self" → our master pubkey, hex → parse
+    let counterparty_val = req.get("counterparty").cloned();
+    let counterparty_pubkey = match resolve_counterparty_pubkey(&counterparty_val, &master_pubkey) {
+        Ok(pubkey) => pubkey,
+        Err(e) => {
+            log::error!("   Failed to resolve counterparty: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid counterparty: {}", e)
+            }));
+        }
+    };
+
+    // Need master private key for BRC-42 ECDH derivation
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(key) => key,
+        Err(e) => {
+            log::error!("   Failed to get master private key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to get master private key"
+            }));
+        }
+    };
+    drop(db);
+
+    let derived_pubkey_hex = if for_self {
+        // forSelf=true: derive OUR child public key
+        // SDK equivalent: rootKey.deriveChild(counterparty, invoiceNumber).toPublicKey()
+        match derive_child_private_key(&master_privkey, &counterparty_pubkey, &invoice) {
+            Ok(child_privkey) => {
+                use secp256k1::{Secp256k1, SecretKey, PublicKey};
+                let secp = Secp256k1::new();
+                match SecretKey::from_slice(&child_privkey) {
+                    Ok(secret) => {
+                        hex::encode(PublicKey::from_secret_key(&secp, &secret).serialize())
+                    }
+                    Err(e) => {
+                        log::error!("   Invalid derived private key: {}", e);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "Key derivation produced invalid key"
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("   BRC-42 derivation failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Key derivation failed: {}", e)
+                }));
+            }
+        }
+    } else {
+        // forSelf=false: derive counterparty's child public key
+        // SDK equivalent: counterparty.deriveChild(rootKey, invoiceNumber)
+        match derive_child_public_key(&master_privkey, &counterparty_pubkey, &invoice) {
+            Ok(child_pubkey) => hex::encode(&child_pubkey),
+            Err(e) => {
+                log::error!("   BRC-42 derivation failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Key derivation failed: {}", e)
+                }));
+            }
+        }
+    };
+
+    log::info!("   ✅ Derived child public key (forSelf={}): {}", for_self, derived_pubkey_hex);
+
+    // Cache forSelf=true derivations so signAction can sign PushDrop inputs later.
+    // Persisted to database so it survives wallet restarts.
+    if for_self {
+        log::info!("   📋 Caching derived key (forSelf=true) for PushDrop signing...");
+        log::info!("      pubkey: {}", derived_pubkey_hex);
+        log::info!("      invoice: {}", invoice);
+        log::info!("      counterparty: {}", hex::encode(&counterparty_pubkey));
+
+        // In-memory cache (fast path)
+        {
+            let mut cache = state.derived_key_cache.lock().unwrap();
+            cache.insert(derived_pubkey_hex.clone(), crate::DerivedKeyInfo {
+                invoice: invoice.clone(),
+                counterparty_pubkey: counterparty_pubkey.clone(),
+            });
+            log::info!("      ✅ In-memory cache: written (total entries: {})", cache.len());
+        }
+
+        // Persistent database cache (survives restarts)
+        {
+            let db = state.database.lock().unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let counterparty_hex = hex::encode(&counterparty_pubkey);
+            match db.connection().execute(
+                "INSERT OR REPLACE INTO derived_key_cache (derived_pubkey, invoice, counterparty_pubkey, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![derived_pubkey_hex, invoice, counterparty_hex, now],
+            ) {
+                Ok(rows) => log::info!("      ✅ DB cache: written ({} row(s) affected)", rows),
+                Err(e) => log::error!("      ❌ DB cache WRITE FAILED: {} — signAction will not find this key after restart!", e),
+            }
+        }
+    }
 
     HttpResponse::Ok().json(serde_json::json!({
-        "publicKey": master_pubkey_hex
+        "publicKey": derived_pubkey_hex
     }))
 }
 
@@ -2313,17 +2451,38 @@ pub async fn create_signature(
         log::info!("   ℹ️  No session validation required (no space in keyID)");
     }
 
-    // Get counterparty public key (if not "self" or "anyone")
-    let counterparty_pubkey = match &req.counterparty {
-        serde_json::Value::String(s) if s == "self" || s == "anyone" => {
-            log::info!("   No counterparty ({})", s);
-            None
+    // Resolve counterparty public key for BRC-42 derivation
+    // BRC-42 always requires a counterparty public key:
+    //   "anyone" → PrivateKey(1).toPublicKey() (well-known generator point G)
+    //   "self" → our own master public key
+    //   hex string → parse as 33-byte compressed public key
+    let counterparty_pubkey: Vec<u8> = match &req.counterparty {
+        serde_json::Value::String(s) if s == "anyone" => {
+            log::info!("   Counterparty: anyone (PrivateKey(1).toPublicKey())");
+            use secp256k1::{Secp256k1, SecretKey, PublicKey};
+            let secp = Secp256k1::new();
+            let mut anyone_privkey = [0u8; 32];
+            anyone_privkey[31] = 1; // Private key = 1
+            let secret = SecretKey::from_slice(&anyone_privkey).unwrap();
+            PublicKey::from_secret_key(&secp, &secret).serialize().to_vec()
+        }
+        serde_json::Value::String(s) if s == "self" => {
+            log::info!("   Counterparty: self (our master public key)");
+            match hex::decode(&our_identity_key) {
+                Ok(bytes) if bytes.len() == 33 => bytes,
+                _ => {
+                    log::error!("   Failed to decode master public key for 'self' counterparty");
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Failed to resolve 'self' counterparty"
+                    }));
+                }
+            }
         }
         serde_json::Value::String(hex_pubkey) => {
             match hex::decode(hex_pubkey) {
                 Ok(bytes) if bytes.len() == 33 => {
                     log::info!("   Counterparty pubkey: {}", hex_pubkey);
-                    Some(bytes)
+                    bytes
                 }
                 Ok(bytes) => {
                     return HttpResponse::BadRequest().json(serde_json::json!({
@@ -2360,22 +2519,15 @@ pub async fn create_signature(
 
     log::info!("   ✅ MASTER private key retrieved for signature (createSignature)");
 
-    // Derive BRC-42 child private key
-    let child_privkey = if let Some(counterparty_pub) = counterparty_pubkey {
-        // BRC-42 derivation with counterparty
-        match derive_child_private_key(&private_key_bytes, &counterparty_pub, &invoice) {
-            Ok(key) => key,
-            Err(e) => {
-                log::error!("   Failed to derive BRC-42 child key: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to derive child key: {}", e)
-                }));
-            }
+    // BRC-42 child private key derivation (always derived, even for "anyone" and "self")
+    let child_privkey = match derive_child_private_key(&private_key_bytes, &counterparty_pubkey, &invoice) {
+        Ok(key) => key,
+        Err(e) => {
+            log::error!("   Failed to derive BRC-42 child key: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to derive child key: {}", e)
+            }));
         }
-    } else {
-        // Simple derivation (no counterparty)
-        log::info!("   Using wallet private key for signature (no counterparty)");
-        private_key_bytes
     };
 
     log::info!("   ✅ Child private key derived");
@@ -2460,6 +2612,7 @@ struct PendingTransaction {
     user_input_infos: Vec<UserInputInfo>, // User-provided inputs (from inputBEEF)
     brc29_info: Option<Brc29PaymentInfo>, // BRC-29 payment metadata if applicable
     input_beef: Option<crate::beef::Beef>, // Full inputBEEF for verification chain
+    reservation_placeholder: Option<String>, // pending-{timestamp} for optimistic lock rollback
 }
 
 // In-memory storage for pending transactions
@@ -2608,6 +2761,13 @@ pub struct CreateActionOutput {
 
     #[serde(rename = "outputDescription")]
     pub output_description: Option<String>, // Description of this output
+
+    // BRC-100 basket and tag support
+    #[serde(rename = "basket")]
+    pub basket: Option<String>, // Optional basket name for UTXO tracking (<300 chars)
+
+    #[serde(rename = "tags")]
+    pub tags: Option<Vec<String>>, // Optional tags for filtering (<300 chars each)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2626,6 +2786,13 @@ pub struct CreateActionOptions {
 
     #[serde(rename = "randomizeOutputs")]
     pub randomize_outputs: Option<bool>, // Default: true
+
+    /// BRC-100: TXIDs of previously-created noSend transactions to broadcast
+    /// alongside this transaction. Used for transaction chaining where the first
+    /// tx is created with noSend=true, then the second tx uses sendWith to
+    /// broadcast both together.
+    #[serde(rename = "sendWith", default)]
+    pub send_with: Option<Vec<String>>,
 }
 
 // Response structure for /createAction - full BRC-100 spec
@@ -2645,8 +2812,36 @@ pub struct CreateActionResponse {
     pub txid: Option<String>,
     #[serde(rename = "tx", skip_serializing_if = "Option::is_none")]
     pub tx: Option<Vec<u8>>, // Atomic BEEF (BRC-95) as byte array per BRC-100 spec
-    #[serde(rename = "sendResult", skip_serializing_if = "Option::is_none")]
-    pub send_result: Option<serde_json::Value>, // Result of broadcasting when noSend=false
+    #[serde(rename = "sendWithResults", skip_serializing_if = "Option::is_none")]
+    pub send_with_results: Option<Vec<SendWithResult>>, // BRC-100: broadcast results array
+    /// BRC-100: Change outpoints from noSend transactions, formatted as "txid.vout".
+    /// The SDK uses these to chain transactions by passing them back as inputs in subsequent createAction calls.
+    #[serde(rename = "noSendChange", skip_serializing_if = "Option::is_none")]
+    pub no_send_change: Option<Vec<String>>,
+    /// BRC-100: Signable transaction for two-phase flow.
+    /// Present when inputs need SDK-side signing (PushDrop tokens, etc.).
+    /// Contains AtomicBEEF bytes (for sighash computation) + reference (for signAction).
+    #[serde(rename = "signableTransaction", skip_serializing_if = "Option::is_none")]
+    pub signable_transaction: Option<SignableTransactionResponse>,
+}
+
+/// Two-phase signing response: the SDK uses `tx` to compute sighashes,
+/// then calls signAction with the `reference` and computed unlock scripts.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignableTransactionResponse {
+    /// AtomicBEEF bytes containing the unsigned transaction + parent chain.
+    /// SDK parses this to compute sighash preimages for each unsigned input.
+    pub tx: Vec<u8>,
+    /// Reference to pass to signAction along with the computed spends.
+    pub reference: String,
+}
+
+/// BRC-100 broadcast result per transaction
+/// Status values: 'unproven' (accepted, not mined), 'sending' (propagating), 'failed'
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendWithResult {
+    pub txid: String,
+    pub status: String, // "unproven" | "sending" | "failed"
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2678,9 +2873,15 @@ pub async fn create_action(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createAction called");
-    log::info!("📋 Raw request body ({} bytes): {}...",
-        body.len(),
-        String::from_utf8_lossy(&body[..std::cmp::min(500, body.len())]));
+    log::info!("📋 Raw request body ({} bytes):", body.len());
+    // Log full request in chunks of 2000 chars for complete visibility
+    let body_str = String::from_utf8_lossy(&body);
+    let body_len = body_str.len();
+    if body_len <= 4000 {
+        log::info!("📋 FULL REQUEST: {}", body_str);
+    } else {
+        log::info!("📋 REQUEST (first 4000 of {} chars): {}", body_len, &body_str[..4000]);
+    }
 
     // Parse request
     let req: CreateActionRequest = match serde_json::from_slice(&body) {
@@ -2694,9 +2895,112 @@ pub async fn create_action(
     };
 
     log::info!("   Description: {:?}", req.description);
+    log::info!("   Labels: {:?}", req.labels);
     log::info!("   Outputs: {}", req.outputs.len());
+    for (i, output) in req.outputs.iter().enumerate() {
+        log::info!("   Output[{}]: satoshis={:?}, basket={:?}, tags={:?}, description={:?}",
+            i, output.satoshis, output.basket, output.tags, output.output_description);
+        if let Some(ref script) = output.script {
+            log::info!("   Output[{}]: lockingScript ({} hex chars): {}...",
+                i, script.len(), &script[..std::cmp::min(120, script.len())]);
+        }
+        if let Some(ref addr) = output.address {
+            log::info!("   Output[{}]: address={}", i, addr);
+        }
+        if let Some(ref ci) = output.custom_instructions {
+            log::info!("   Output[{}]: customInstructions={}", i, ci);
+        }
+    }
     log::info!("   Inputs provided: {}", req.inputs.as_ref().map(|i| i.len()).unwrap_or(0));
     log::info!("   InputBEEF provided: {}", req.input_beef.is_some());
+    if let Some(ref options) = req.options {
+        log::info!("   Options: acceptDelayedBroadcast={:?}, signAndProcess={:?}, noSend={:?}, randomizeOutputs={:?}",
+            options.accept_delayed_broadcast,
+            options.sign_and_process,
+            options.no_send,
+            options.randomize_outputs);
+    }
+
+    // ============================================================
+    // SERIALIZATION LOCK: Only one createAction can run at a time.
+    // This prevents race conditions where:
+    // - Two calls select UTXOs from the same parent transaction
+    // - Second call's BEEF builder can't find first call's parent (not yet broadcast)
+    // - Concurrent signing creates conflicting transaction chains
+    // The lock is held for the entire handler (select → sign → BEEF → broadcast).
+    // ============================================================
+    let _create_action_guard = state.create_action_lock.lock().await;
+    log::info!("   🔒 createAction serialization lock acquired");
+
+    // ============================================================
+    // BRC-100 Basket/Tag Validation (Phase 2 from implementation plan)
+    // Validate and normalize all basket names and tags BEFORE processing
+    // ============================================================
+    use crate::database::basket_repo::validate_and_normalize_basket_name;
+    use crate::database::tag_repo::validate_and_normalize_tag;
+    use std::collections::HashMap;
+
+    let mut normalized_baskets: HashMap<usize, String> = HashMap::new();
+    let mut normalized_tags: HashMap<usize, Vec<String>> = HashMap::new();
+
+    for (i, output) in req.outputs.iter().enumerate() {
+        // Validate and normalize basket name if provided
+        if let Some(ref basket) = output.basket {
+            match validate_and_normalize_basket_name(basket) {
+                Ok(normalized) => {
+                    log::info!("   Output {}: basket='{}' (normalized from '{}')", i, normalized, basket);
+                    normalized_baskets.insert(i, normalized);
+                }
+                Err(e) => {
+                    log::error!("   ❌ Output {}: invalid basket name: {}", i, e);
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("Output {}: {}", i, e),
+                        "code": "ERR_INVALID_BASKET_NAME"
+                    }));
+                }
+            }
+        }
+
+        // Validate and normalize tag names if provided
+        if let Some(ref tags) = output.tags {
+            let mut output_tags = Vec::new();
+            for (j, tag) in tags.iter().enumerate() {
+                match validate_and_normalize_tag(tag) {
+                    Ok(normalized) => {
+                        // Deduplicate during normalization
+                        if !output_tags.contains(&normalized) {
+                            output_tags.push(normalized);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("   ❌ Output {} tag {}: {}", i, j, e);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Output {} tag {}: {}", i, j, e),
+                            "code": "ERR_INVALID_TAG"
+                        }));
+                    }
+                }
+            }
+            if !output_tags.is_empty() {
+                log::info!("   Output {}: tags={:?}", i, output_tags);
+                normalized_tags.insert(i, output_tags);
+            }
+        }
+
+        // Validate output description length if provided (SDK: 5-50 bytes UTF-8)
+        if let Some(ref desc) = output.output_description {
+            let byte_len = desc.len();
+            if byte_len > 0 && byte_len < 5 {
+                log::warn!("   ⚠️  Output {}: outputDescription too short ({} bytes, min 5) - accepting anyway", i, byte_len);
+            } else if byte_len > 50 {
+                log::error!("   ❌ Output {}: outputDescription too long ({} bytes, max 50)", i, byte_len);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Output {}: outputDescription exceeds 50 bytes ({} bytes)", i, byte_len),
+                    "code": "ERR_INVALID_OUTPUT_DESCRIPTION"
+                }));
+            }
+        }
+    }
 
     // Parse inputBEEF if provided (contains source transactions for user inputs)
     // inputBEEF can be either a hex string or a byte array [u8, u8, ...]
@@ -2771,6 +3075,7 @@ pub async fn create_action(
         source_tx: Option<Vec<u8>>,
         locking_script: Vec<u8>,
         unlocking_script: Option<Vec<u8>>,
+        unlocking_script_length: Option<usize>,
         sequence: u32,
     }
 
@@ -2849,6 +3154,7 @@ pub async fn create_action(
                 source_tx,
                 locking_script,
                 unlocking_script,
+                unlocking_script_length: input.unlocking_script_length,
                 sequence: input.sequence_number.unwrap_or(0xFFFFFFFF),
             });
         }
@@ -2885,6 +3191,7 @@ pub async fn create_action(
     for user_input in &user_inputs {
         let script_len = user_input.unlocking_script.as_ref()
             .map(|s| s.len())
+            .or(user_input.unlocking_script_length)
             .unwrap_or(107);  // Default to P2PKH unlocking script size
         user_input_script_lengths.push(script_len);
     }
@@ -2895,20 +3202,22 @@ pub async fn create_action(
     let estimated_wallet_inputs = if user_inputs.is_empty() { 2 } else { 1 };
     let total_estimated_inputs = user_inputs.len() + estimated_wallet_inputs;
 
-    // Calculate estimated fee (1 sat/byte = 1000 sat/kb)
+    // Get dynamic fee rate from ARC policy (cached, 1-hour TTL)
+    let fee_rate_sats_per_kb = state.fee_rate_cache.get_rate().await;
+
     let mut estimated_fee = estimate_fee_for_transaction(
         total_estimated_inputs,
         &output_script_lengths,
         true,  // Include change output
-        DEFAULT_SATS_PER_KB
+        fee_rate_sats_per_kb
     ) as i64;
 
     log::info!("   📊 Fee estimation:");
     log::info!("      Estimated inputs: {} (user: {}, wallet: ~{})",
         total_estimated_inputs, user_inputs.len(), estimated_wallet_inputs);
     log::info!("      Output count: {} + 1 change", output_script_lengths.len());
-    log::info!("      Estimated fee: {} satoshis ({} sat/byte)",
-        estimated_fee, DEFAULT_SATS_PER_KB / 1000);
+    log::info!("      Estimated fee: {} satoshis ({} sat/KB, {:.1} sat/byte)",
+        estimated_fee, fee_rate_sats_per_kb, fee_rate_sats_per_kb as f64 / 1000.0);
 
     let total_needed = total_output + estimated_fee;
     log::info!("   Total needed: {} satoshis", total_needed);
@@ -2926,6 +3235,7 @@ pub async fn create_action(
 
     // Wallet UTXOs - only fetch if we need them
     let mut selected_utxos: Vec<crate::utxo_fetcher::UTXO> = Vec::new();
+    let mut reservation_placeholder: Option<String> = None; // Tracks placeholder spent_txid for rollback
     let addresses: Vec<crate::json_storage::AddressInfo>;
 
     if need_wallet_utxos {
@@ -2995,7 +3305,7 @@ pub async fn create_action(
                 // Convert database UTXOs to fetcher format
                 db_utxos.iter()
                     .filter_map(|db_utxo| {
-                        address_id_map.get(&db_utxo.address_id)
+                        db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
                             .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
                     })
                     .collect::<Vec<_>>()
@@ -3059,8 +3369,37 @@ pub async fn create_action(
             }
             drop(db);
 
-            // Use API UTXOs (they're more up-to-date)
-            all_utxos = api_utxos;
+            // Note: We don't use api_utxos directly because they don't reflect our local is_spent status.
+            // The API UTXOs are now cached in the database - we'll re-read with is_spent filter below.
+            log::info!("   ✅ API UTXOs cached to database");
+        }
+
+        // NOTE: The outer create_action_lock already serializes concurrent createAction calls.
+        // This inner lock is retained as defense-in-depth for UTXO selection specifically,
+        // in case other endpoints also select UTXOs in the future.
+        let _utxo_lock = state.utxo_selection_lock.lock().await;
+
+        // Re-read UTXOs from database (with correct is_spent status) under the lock
+        {
+            let db = state.database.lock().unwrap();
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+
+            // Re-query to get fresh unspent UTXOs (respects is_spent flag)
+            all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
+                Ok(db_utxos) => {
+                    db_utxos.iter()
+                        .filter_map(|db_utxo| {
+                            db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
+                                .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Err(e) => {
+                    log::warn!("   Failed to re-read UTXOs from database: {}", e);
+                    Vec::new()
+                }
+            };
+            drop(db);
         }
 
         if all_utxos.is_empty() && user_inputs.is_empty() {
@@ -3086,11 +3425,68 @@ pub async fn create_action(
 
             let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
             log::info!("   Selected {} wallet UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+
+            // Mark selected UTXOs as "in use" immediately (still under the lock)
+            if !selected_utxos.is_empty() {
+                let db = state.database.lock().unwrap();
+                let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+
+                // Mark as spent with a placeholder txid (will be updated with real txid after signing)
+                // Using "pending-{timestamp}" to indicate these are reserved but not yet broadcast
+                let placeholder_txid = format!("pending-{}", chrono::Utc::now().timestamp_millis());
+                let utxos_to_reserve: Vec<(String, u32)> = selected_utxos.iter()
+                    .map(|u| (u.txid.clone(), u.vout))
+                    .collect();
+
+                match utxo_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid) {
+                    Ok(count) => {
+                        log::info!("   🔒 Reserved {} UTXOs (preventing concurrent selection)", count);
+                        reservation_placeholder = Some(placeholder_txid);
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to reserve UTXOs: {} (continuing anyway)", e);
+                    }
+                }
+                drop(db);
+            }
         }
+        // Lock is released here when _utxo_lock goes out of scope
     } else {
         // No wallet UTXOs needed - user inputs cover everything
         addresses = Vec::new();
         log::info!("   ✅ Skipping wallet UTXO fetch - user inputs cover all requirements");
+    }
+
+    // Reserve user-provided inputs in local utxos table (optimistic locking).
+    // This prevents listOutputs from returning tokens that are already committed
+    // to being spent in this transaction. Only affects UTXOs tracked locally
+    // (basket outputs); external UTXOs not in our table are silently skipped.
+    if !user_inputs.is_empty() {
+        // Ensure we have a placeholder — create one if wallet UTXOs weren't needed
+        if reservation_placeholder.is_none() {
+            reservation_placeholder = Some(format!("pending-{}", chrono::Utc::now().timestamp_millis()));
+        }
+
+        let placeholder = reservation_placeholder.as_ref().unwrap();
+        let user_outpoints: Vec<(String, u32)> = user_inputs.iter()
+            .map(|ui| (ui.txid.clone(), ui.vout))
+            .collect();
+
+        let db = state.database.lock().unwrap();
+        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+
+        match utxo_repo.mark_multiple_spent(&user_outpoints, placeholder) {
+            Ok(count) => {
+                if count > 0 {
+                    log::info!("   🔒 Reserved {} user-provided input(s) (basket outputs)", count);
+                    state.balance_cache.invalidate();
+                }
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to reserve user-provided inputs: {} (continuing anyway)", e);
+            }
+        }
+        drop(db);
     }
 
     // Calculate total input (user inputs + wallet inputs)
@@ -3105,10 +3501,11 @@ pub async fn create_action(
     // Build input script lengths for accurate size calculation
     let mut actual_input_script_lengths: Vec<usize> = Vec::new();
 
-    // User inputs - use actual unlocking script size or estimate
+    // User inputs - use actual unlocking script size, or SDK-provided length hint, or default P2PKH
     for user_input in &user_inputs {
         let script_len = user_input.unlocking_script.as_ref()
             .map(|s| s.len())
+            .or(user_input.unlocking_script_length)
             .unwrap_or(107);  // Default P2PKH unlocking script
         actual_input_script_lengths.push(script_len);
     }
@@ -3122,7 +3519,7 @@ pub async fn create_action(
     let estimated_tx_size = estimate_transaction_size(&actual_input_script_lengths, &output_script_lengths)
         + 25 + 9;  // Add P2PKH change output (25 script + 8 value + 1 varint)
 
-    estimated_fee = calculate_fee(estimated_tx_size, DEFAULT_SATS_PER_KB) as i64;
+    estimated_fee = calculate_fee(estimated_tx_size, fee_rate_sats_per_kb) as i64;
 
     log::info!("   📊 Recalculated fee with actual {} inputs:", actual_input_count);
     log::info!("      Estimated tx size: {} bytes", estimated_tx_size);
@@ -3159,6 +3556,18 @@ pub async fn create_action(
 
     // Track BRC-29 payment info if present
     let mut brc29_info: Option<Brc29PaymentInfo> = None;
+
+    // Track basket outputs for database insertion after signing (BRC-100 basket tracking)
+    struct PendingBasketOutput {
+        vout: u32,
+        satoshis: i64,
+        script_hex: String,
+        basket_name: String,
+        tags: Vec<String>,
+        custom_instructions: Option<String>,
+        output_description: Option<String>,
+    }
+    let mut pending_basket_outputs: Vec<PendingBasketOutput> = Vec::new();
 
     // Add requested outputs
     for (i, output) in req.outputs.iter().enumerate() {
@@ -3308,12 +3717,30 @@ pub async fn create_action(
         let satoshis = output.satoshis.unwrap_or(0);
         log::info!("   Output {}: {} satoshis", i, satoshis);
         log::info!("   Output {} script (hex): {}", i, hex::encode(&script_bytes));
+
+        // Collect basket output metadata for database insertion (BRC-100)
+        if let Some(basket_name) = normalized_baskets.get(&i) {
+            pending_basket_outputs.push(PendingBasketOutput {
+                vout: i as u32,
+                satoshis,
+                script_hex: hex::encode(&script_bytes),
+                basket_name: basket_name.clone(),
+                tags: normalized_tags.get(&i).cloned().unwrap_or_default(),
+                custom_instructions: output.custom_instructions.clone(),
+                output_description: output.output_description.clone(),
+            });
+            log::info!("   Output {}: tracked for basket '{}'", i, basket_name);
+        }
+
         tx.add_output(TxOutput::new(satoshis, script_bytes));
     }
 
     // Calculate change
     let change = total_input - total_output - estimated_fee;
     log::info!("   Change: {} satoshis", change);
+
+    // Track change output info for immediate UTXO insertion (balance accuracy fix)
+    let mut pending_change_utxo: Option<(i64, i32, i64, String)> = None; // (address_id, address_index, satoshis, script_hex)
 
     if change > 546 { // Dust limit
         // Get first address for change
@@ -3324,6 +3751,8 @@ pub async fn create_action(
 
         let db = state.database.lock().unwrap();
         let wallet_repo = WalletRepository::new(db.connection());
+        let address_repo = AddressRepository::new(db.connection());
+
         let wallet = match wallet_repo.get_primary_wallet() {
             Ok(Some(w)) => w,
             Ok(None) | Err(_) => {
@@ -3334,7 +3763,18 @@ pub async fn create_action(
         };
 
         let wallet_id = wallet.id.unwrap();
-        let current_index = wallet.current_index;
+
+        // Use MAX(index) from database instead of wallet.current_index
+        // This is more reliable - current_index can get out of sync
+        let current_index = match address_repo.get_max_index(wallet_id) {
+            Ok(Some(max_idx)) => max_idx + 1,  // Next index is max + 1
+            Ok(None) => 0,  // No addresses yet, start at 0
+            Err(e) => {
+                log::warn!("   Failed to get max address index: {}, falling back to wallet.current_index", e);
+                wallet.current_index
+            }
+        };
+        log::info!("   Next change address index: {} (from MAX query)", current_index);
 
         // Derive new address for change
         let master_privkey = match get_master_private_key_from_db(&db) {
@@ -3383,7 +3823,7 @@ pub async fn create_action(
         };
 
         // Save new change address to database
-        let address_repo = AddressRepository::new(db.connection());
+        // (address_repo already created above for MAX query)
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3401,18 +3841,72 @@ pub async fn create_action(
             created_at,
         };
 
-        match address_repo.create(&address_model) {
-            Ok(_) => {
+        let change_address_id = match address_repo.create(&address_model) {
+            Ok(addr_id) => {
                 // Update wallet's current_index
                 if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
                     log::warn!("   Failed to update wallet index: {}", e);
                 }
-                log::info!("   ✅ Generated new change address: {} (index {})", change_address, current_index);
+                log::info!("   ✅ Generated new change address: {} (index {}, id {})", change_address, current_index, addr_id);
+                Some(addr_id)
             }
             Err(e) => {
-                log::warn!("   Failed to save change address to database: {} (continuing anyway)", e);
+                // Address creation failed - this should be rare since we use MAX(index) query
+                // But keep fallback logic for edge cases (concurrent requests, etc.)
+                log::warn!("   Failed to create change address: {} - checking if it already exists", e);
+
+                // Try to look up the existing address
+                match address_repo.get_by_address(&change_address) {
+                    Ok(Some(existing_addr)) => {
+                        if let Some(addr_id) = existing_addr.id {
+                            log::info!("   ✅ Using existing address: {} (index {}, id {})", change_address, existing_addr.index, addr_id);
+
+                            // Fix the current_index to prevent this from happening again
+                            // Set it to one past this address's index
+                            let correct_index = existing_addr.index + 1;
+                            if correct_index > current_index {
+                                if let Err(fix_err) = wallet_repo.update_current_index(wallet_id, correct_index) {
+                                    log::warn!("   Failed to fix wallet current_index: {}", fix_err);
+                                } else {
+                                    log::info!("   🔧 Fixed wallet current_index: {} → {}", current_index, correct_index);
+                                }
+                            }
+
+                            Some(addr_id)
+                        } else {
+                            log::warn!("   Existing address has no ID, cannot track change UTXO");
+                            None
+                        }
+                    }
+                    Ok(None) => {
+                        // Address string not found, but index might exist with different address
+                        // This could happen if derivation changed - try to find highest index and fix
+                        log::warn!("   Address not found by string, index {} may have different address", current_index);
+
+                        // Try to get the address at the conflicting index
+                        match address_repo.get_by_wallet_and_index(wallet_id, current_index) {
+                            Ok(Some(addr_at_index)) => {
+                                log::warn!("   Index {} has address: {} (expected: {})",
+                                          current_index, addr_at_index.address, change_address);
+                                // Fix current_index to move past this
+                                let correct_index = current_index + 1;
+                                if let Err(fix_err) = wallet_repo.update_current_index(wallet_id, correct_index) {
+                                    log::warn!("   Failed to fix wallet current_index: {}", fix_err);
+                                } else {
+                                    log::info!("   🔧 Fixed wallet current_index: {} → {}", current_index, correct_index);
+                                }
+                            }
+                            _ => {}
+                        }
+                        None
+                    }
+                    Err(lookup_err) => {
+                        log::warn!("   Failed to look up existing address: {}", lookup_err);
+                        None
+                    }
+                }
             }
-        }
+        };
 
         drop(db);
 
@@ -3453,10 +3947,71 @@ pub async fn create_action(
             }
         };
 
-        tx.add_output(TxOutput::new(change, change_script.bytes));
+        tx.add_output(TxOutput::new(change, change_script.bytes.clone()));
         log::info!("   Added change output: {} satoshis", change);
+
+        // Store change UTXO info for later insertion (after txid is calculated)
+        if let Some(addr_id) = change_address_id {
+            pending_change_utxo = Some((addr_id, current_index, change, hex::encode(&change_script.bytes)));
+            log::info!("   📝 Pending change UTXO tracked for address_id={}", addr_id);
+        }
     } else if change > 0 {
         log::info!("   Change below dust limit ({}), adding to fee", change);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TRANSACTION FEE SUMMARY - Detailed breakdown for fee analysis
+    // ═══════════════════════════════════════════════════════════════
+    {
+        let actual_fee = if change > 546 { estimated_fee } else { total_input - total_output };
+        let change_returned = if change > 546 { change } else { 0 };
+        let num_inputs = user_inputs.len() + selected_utxos.len();
+        let num_requested_outputs = req.outputs.len();
+        let num_total_outputs = num_requested_outputs + if change > 546 { 1 } else { 0 };
+
+        log::info!("");
+        log::info!("   ╔═══════════════════════════════════════════════════════════╗");
+        log::info!("   ║              TRANSACTION FEE SUMMARY                     ║");
+        log::info!("   ╠═══════════════════════════════════════════════════════════╣");
+        log::info!("   ║  ARC Fee Rate:    {} sat/KB ({:.2} sat/byte)", fee_rate_sats_per_kb, fee_rate_sats_per_kb as f64 / 1000.0);
+        log::info!("   ║  Min Fee Floor:   {} sats", MIN_FEE_SATS);
+        log::info!("   ║  Est. Tx Size:    {} bytes", estimated_tx_size);
+        log::info!("   ║");
+        log::info!("   ║  INPUTS ({}):", num_inputs);
+        if !user_inputs.is_empty() {
+            log::info!("   ║    User inputs:   {} ({} sats)", user_inputs.len(), user_input_total);
+        }
+        if !selected_utxos.is_empty() {
+            log::info!("   ║    Wallet inputs: {} ({} sats)", selected_utxos.len(), wallet_input_total);
+            for utxo in &selected_utxos {
+                log::info!("   ║      {}:{} = {} sats", &utxo.txid[..16], utxo.vout, utxo.satoshis);
+            }
+        }
+        log::info!("   ║    Total In:      {} sats", total_input);
+        log::info!("   ║");
+        log::info!("   ║  OUTPUTS ({}):", num_total_outputs);
+        for (i, output) in req.outputs.iter().enumerate() {
+            let sats = output.satoshis.unwrap_or(0);
+            let label = if output.output_description.is_some() {
+                format!(" ({})", output.output_description.as_ref().unwrap())
+            } else {
+                String::new()
+            };
+            log::info!("   ║    Output {}:      {} sats{}", i, sats, label);
+        }
+        if change > 546 {
+            log::info!("   ║    Change:        {} sats (returned to wallet)", change_returned);
+        }
+        log::info!("   ║    Total Out:     {} sats (excl. fee)", total_output + change_returned);
+        log::info!("   ║");
+        log::info!("   ║  >>> FEE PAID TO MINERS: {} sats <<<", actual_fee);
+        if change > 0 && change <= 546 {
+            log::info!("   ║    (includes {} sats dust absorbed into fee)", change);
+        }
+        log::info!("   ║  Net cost to wallet: {} sats (outputs to others) + {} sats (fee) = {} sats",
+            total_output, actual_fee, total_output + actual_fee);
+        log::info!("   ╚═══════════════════════════════════════════════════════════╝");
+        log::info!("");
     }
 
     // Calculate txid
@@ -3491,6 +4046,7 @@ pub async fn create_action(
             user_input_infos,
             brc29_info: brc29_info.clone(),
             input_beef: parsed_input_beef.clone(),
+            reservation_placeholder: reservation_placeholder.clone(),
         });
     }
 
@@ -3501,6 +4057,108 @@ pub async fn create_action(
 
     log::info!("   ✅ Transaction created: {}", txid);
     log::info!("   Reference: {}", reference);
+
+    // Insert pending change UTXO into database (balance accuracy fix)
+    // This ensures the change output is immediately reflected in balance calculations
+    // BRC-100: Change outputs go to the "default" basket
+    if let Some((addr_id, _addr_index, satoshis, ref script_hex)) = pending_change_utxo {
+        let change_vout = req.outputs.len() as u32; // Change is always the last output
+        log::info!("   💾 Inserting pending change UTXO: txid={}, vout={}, satoshis={}", txid, change_vout, satoshis);
+
+        let db = state.database.lock().unwrap();
+        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+
+        // Get or create the "default" basket for change outputs (BRC-99)
+        let default_basket_id = match basket_repo.find_or_insert("default") {
+            Ok(id) => Some(id),
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to get 'default' basket: {}", e);
+                None
+            }
+        };
+
+        // Insert change UTXO with default basket and 'completed' status
+        // (change outputs are part of our own transaction, so they're immediately valid)
+        match utxo_repo.insert_output_with_basket(
+            Some(addr_id),
+            &txid,
+            change_vout,
+            satoshis,
+            &script_hex,
+            default_basket_id,
+            None,  // No custom instructions for change
+            "completed",  // Status - change outputs are immediately valid
+            None,  // No output description for change
+        ) {
+            Ok(_utxo_id) => {
+                log::info!("   ✅ Change UTXO inserted with 'default' basket - balance will be accurate immediately");
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to insert change UTXO: {} (balance may be temporarily inaccurate)", e);
+            }
+        }
+        drop(db);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // BRC-100 BASKET OUTPUT TRACKING
+    // Insert outputs that have a basket property into the database.
+    // These are tracked as wallet-owned UTXOs queryable via listOutputs.
+    // Uses pre-signing txid (reconciled after signing in Step 7).
+    // ═══════════════════════════════════════════════════════════════
+    if !pending_basket_outputs.is_empty() {
+        log::info!("   💾 Inserting {} basket output(s)...", pending_basket_outputs.len());
+        let db = state.database.lock().unwrap();
+        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let tag_repo = crate::database::TagRepository::new(db.connection());
+
+        for bo in &pending_basket_outputs {
+            // Resolve basket ID (find existing or create new)
+            let basket_id = match basket_repo.find_or_insert(&bo.basket_name) {
+                Ok(id) => id,
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to resolve basket '{}': {}", bo.basket_name, e);
+                    continue;
+                }
+            };
+
+            // Insert UTXO with basket (address_id = None for basket outputs)
+            match utxo_repo.insert_output_with_basket(
+                None,       // No address_id — basket outputs may not map to an HD wallet address
+                &txid,      // Pre-signing txid (will be reconciled after signing)
+                bo.vout,
+                bo.satoshis,
+                &bo.script_hex,
+                Some(basket_id),
+                bo.custom_instructions.as_deref(),
+                "completed",
+                bo.output_description.as_deref(),
+            ) {
+                Ok(utxo_id) => {
+                    log::info!("   ✅ Basket output vout={} → basket='{}' (utxo_id={})",
+                        bo.vout, bo.basket_name, utxo_id);
+
+                    // Assign tags to the output
+                    for tag in &bo.tags {
+                        match tag_repo.assign_tag_to_output(utxo_id, tag) {
+                            Ok(_) => {
+                                log::info!("      Tagged with '{}'", tag);
+                            }
+                            Err(e) => {
+                                log::warn!("      ⚠️  Failed to assign tag '{}': {}", tag, e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to insert basket output vout={}: {}", bo.vout, e);
+                }
+            }
+        }
+        drop(db);
+    }
 
     // Invalidate balance cache (outgoing transaction changes balance)
     state.balance_cache.invalidate();
@@ -3577,13 +4235,22 @@ pub async fn create_action(
     let sign_and_process = options.and_then(|o| o.sign_and_process).unwrap_or(true);
     let accept_delayed_broadcast = options.and_then(|o| o.accept_delayed_broadcast).unwrap_or(true);
     let no_send = options.and_then(|o| o.no_send).unwrap_or(false);
+    let send_with_txids: Vec<String> = options
+        .and_then(|o| o.send_with.clone())
+        .unwrap_or_default();
+    let is_send_with = !send_with_txids.is_empty();
 
-    log::info!("   Options: signAndProcess={}, acceptDelayedBroadcast={}, noSend={}",
-               sign_and_process, accept_delayed_broadcast, no_send);
+    log::info!("   Options: signAndProcess={}, acceptDelayedBroadcast={}, noSend={}, sendWith={:?}",
+               sign_and_process, accept_delayed_broadcast, no_send, send_with_txids);
 
     // Determine if we should sign and/or broadcast
+    // Per BRC-100 spec: sendWith trumps noSend (isSendWith forces broadcast of batched txids)
     let should_sign = sign_and_process;
-    let should_broadcast = !accept_delayed_broadcast && !no_send;
+    let should_broadcast = (!accept_delayed_broadcast && !no_send) || is_send_with;
+
+    // Save the pre-signing txid for post-signing reconciliation
+    // (BSV txids include unlocking scripts, so signing changes the txid)
+    let pre_signing_txid = txid.clone();
 
     let (final_txid, raw_tx) = if should_sign {
         log::info!("   🖊️  Signing transaction...");
@@ -3616,14 +4283,86 @@ pub async fn create_action(
                         // Parse as generic JSON to handle both regular and BRC-29 responses
                         match serde_json::from_slice::<serde_json::Value>(&bytes) {
                             Ok(json_resp) => {
+                                // Check if signAction reports unsigned inputs → two-phase flow
+                                if let Some(unsigned) = json_resp["unsignedInputs"].as_array() {
+                                    if !unsigned.is_empty() {
+                                        log::info!("   ℹ️  signAction reports {} unsigned input(s) — two-phase flow",
+                                            unsigned.len());
+
+                                        // Extract the AtomicBEEF bytes from signAction's response.
+                                        // The BEEF contains the partially-signed tx (wallet inputs signed,
+                                        // PushDrop inputs empty) plus all parent transactions.
+                                        // The SDK uses this to compute sighash preimages for unsigned inputs.
+                                        let beef_bytes = if let Some(raw_tx_hex) = json_resp["rawTx"].as_str() {
+                                            match hex::decode(raw_tx_hex) {
+                                                Ok(bytes) => bytes,
+                                                Err(e) => {
+                                                    log::error!("   Failed to decode BEEF hex: {}", e);
+                                                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                                                        "error": format!("Failed to decode BEEF for signableTransaction: {}", e)
+                                                    }));
+                                                }
+                                            }
+                                        } else {
+                                            log::error!("   signAction returned unsigned inputs but no rawTx");
+                                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                                "error": "signAction returned unsigned inputs but no BEEF data"
+                                            }));
+                                        };
+
+                                        log::info!("   ➡️  Returning signableTransaction ({} BEEF bytes, reference: {})",
+                                            beef_bytes.len(), reference);
+
+                                        // Return two-phase response per SDK spec:
+                                        // signableTransaction: { tx: AtomicBEEF bytes, reference: string }
+                                        return HttpResponse::Ok().json(serde_json::json!({
+                                            "signableTransaction": {
+                                                "tx": beef_bytes,
+                                                "reference": reference,
+                                            }
+                                        }));
+                                    }
+                                }
+
                                 let txid = json_resp["txid"].as_str().unwrap_or("").to_string();
                                 log::info!("   ✅ Transaction signed successfully");
                                 log::info!("   📝 Signed TXID: {}", txid);
 
                                 // Extract rawTx (Atomic BEEF hex string) and convert to bytes
-                                let tx_data = if let Some(raw_tx) = json_resp["rawTx"].as_str() {
+                                let tx_data = if let Some(raw_tx_hex) = json_resp["rawTx"].as_str() {
                                     log::info!("   📦 Extracting Atomic BEEF response");
-                                    hex::decode(raw_tx).ok()
+
+                                    // Extract the signed raw transaction from the BEEF and store it.
+                                    // This is critical for BEEF ancestry: if a subsequent createAction
+                                    // spends outputs from THIS transaction, the BEEF builder needs the
+                                    // SIGNED raw tx (not the unsigned version stored at creation time).
+                                    match crate::beef::Beef::extract_raw_tx_hex(raw_tx_hex) {
+                                        Ok(signed_raw_tx_hex) => {
+                                            log::info!("   💾 Storing signed raw tx for BEEF ancestry ({} hex chars)", signed_raw_tx_hex.len());
+
+                                            // Update transactions table with signed raw_tx
+                                            {
+                                                let db = state.database.lock().unwrap();
+                                                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                                                if let Err(e) = tx_repo.update_raw_tx(&txid, &signed_raw_tx_hex) {
+                                                    log::warn!("   ⚠️  Failed to update signed raw_tx in transactions: {}", e);
+                                                }
+
+                                                // Also store in parent_transactions cache for fast BEEF lookup
+                                                let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                                                if let Err(e) = parent_tx_repo.upsert(None, &txid, &signed_raw_tx_hex) {
+                                                    log::warn!("   ⚠️  Failed to cache signed tx in parent_transactions: {}", e);
+                                                } else {
+                                                    log::info!("   ✅ Cached signed tx {} in parent_transactions for BEEF ancestry", &txid[..16]);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!("   ⚠️  Failed to extract signed raw tx from BEEF: {}", e);
+                                        }
+                                    }
+
+                                    hex::decode(raw_tx_hex).ok()
                                 } else {
                                     log::warn!("   ⚠️  Missing rawTx in response");
                                     None
@@ -3662,28 +4401,152 @@ pub async fn create_action(
         (txid, tx_bytes)
     };
 
+    // ═══════════════════════════════════════════════════════════════
+    // POST-SIGNING TXID RECONCILIATION
+    // BSV txids include unlocking scripts, so signing changes the txid.
+    // Update all DB records from pre-signing txid to signed txid.
+    // ═══════════════════════════════════════════════════════════════
+    if final_txid != pre_signing_txid && !final_txid.is_empty() {
+        log::info!("   🔄 Txid changed after signing: {} → {}", &pre_signing_txid[..16], &final_txid[..16]);
+
+        let db = state.database.lock().unwrap();
+
+        // 1. Update transaction record txid
+        {
+            use crate::database::TransactionRepository;
+            let tx_repo = TransactionRepository::new(db.connection());
+            if let Err(e) = tx_repo.rename_txid(&pre_signing_txid, &final_txid) {
+                log::warn!("   ⚠️  Failed to update transaction txid: {}", e);
+            }
+        }
+
+        // 2. Update change UTXO txid (change is always the last output)
+        if pending_change_utxo.is_some() {
+            let change_vout = req.outputs.len() as u32;
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            if let Err(e) = utxo_repo.update_utxo_txid(&pre_signing_txid, change_vout, &final_txid) {
+                log::warn!("   ⚠️  Failed to update change UTXO txid: {}", e);
+            }
+        }
+
+        // 2b. Update basket output txids (pre-signing → signed)
+        if !pending_basket_outputs.is_empty() {
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            for bo in &pending_basket_outputs {
+                if let Err(e) = utxo_repo.update_utxo_txid(&pre_signing_txid, bo.vout, &final_txid) {
+                    log::warn!("   ⚠️  Failed to update basket output vout={} txid: {}", bo.vout, e);
+                }
+            }
+            log::info!("   ✅ Updated {} basket output txid(s)", pending_basket_outputs.len());
+        }
+
+        // 3. Update spent_txid on reserved inputs (placeholder → signed txid)
+        if let Some(ref placeholder) = reservation_placeholder {
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            if let Err(e) = utxo_repo.update_spent_txid_batch(placeholder, &final_txid) {
+                log::warn!("   ⚠️  Failed to update spent_txid on inputs: {}", e);
+            }
+        }
+
+        drop(db);
+    } else if !final_txid.is_empty() {
+        // Txid didn't change (unsigned or same) — still update spent_txid from placeholder
+        if let Some(ref placeholder) = reservation_placeholder {
+            let db = state.database.lock().unwrap();
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            if let Err(e) = utxo_repo.update_spent_txid_batch(placeholder, &final_txid) {
+                log::warn!("   ⚠️  Failed to update spent_txid on inputs: {}", e);
+            }
+            drop(db);
+        }
+    }
+
     // Track broadcast result for response
-    let mut send_result: Option<serde_json::Value> = None;
+    let mut send_with_results: Option<Vec<SendWithResult>> = None;
 
     if should_broadcast {
         if let Some(ref tx_bytes) = raw_tx {
             let beef_hex = hex::encode(tx_bytes);
             log::info!("   📡 Broadcasting transaction to network...");
 
-            match broadcast_transaction(&beef_hex).await {
-                Ok(txid) => {
-                    log::info!("   ✅ Broadcast successful: {}", txid);
-                    send_result = Some(serde_json::json!({
-                        "status": "success",
-                        "txid": txid
-                    }));
+            match broadcast_transaction(&beef_hex, Some(&state.database), Some(&final_txid)).await {
+                Ok(_broadcast_msg) => {
+                    log::info!("   ✅ Broadcast successful: {}", _broadcast_msg);
+
+                    // Update broadcast_status to 'broadcast' in database
+                    {
+                        use crate::database::TransactionRepository;
+                        let db = state.database.lock().unwrap();
+                        let tx_repo = TransactionRepository::new(db.connection());
+                        if let Err(e) = tx_repo.update_broadcast_status(&final_txid, "broadcast") {
+                            log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                        }
+                    }
+
+                    // Note: Do NOT populate send_with_results here.
+                    // sendWithResults is only for transactions listed in sendWith[],
+                    // not for the current transaction's broadcast result.
                 }
                 Err(e) => {
                     log::error!("   ❌ Broadcast failed: {}", e);
-                    send_result = Some(serde_json::json!({
-                        "status": "error",
-                        "description": e
-                    }));
+
+                    // Update broadcast_status to 'failed' in database
+                    {
+                        use crate::database::TransactionRepository;
+                        use crate::database::UtxoRepository;
+                        let db = state.database.lock().unwrap();
+                        let tx_repo = TransactionRepository::new(db.connection());
+                        if let Err(e) = tx_repo.update_broadcast_status(&final_txid, "failed") {
+                            log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                        }
+
+                        // CRITICAL: Remove ghost change UTXO since broadcast failed.
+                        // Try signed txid first, then pre-signing txid as fallback
+                        // (signAction may not have updated the UTXO txid if it failed)
+                        let utxo_repo = UtxoRepository::new(db.connection());
+                        let mut deleted_count = 0usize;
+                        match utxo_repo.delete_by_txid(&final_txid) {
+                            Ok(count) => { deleted_count += count; }
+                            Err(e) => {
+                                log::warn!("   ⚠️  Failed to remove ghost UTXO by signed txid: {}", e);
+                            }
+                        }
+                        // Fallback: also try pre-signing txid in case signAction didn't update it
+                        if final_txid != pre_signing_txid {
+                            match utxo_repo.delete_by_txid(&pre_signing_txid) {
+                                Ok(count) => { deleted_count += count; }
+                                Err(e) => {
+                                    log::warn!("   ⚠️  Failed to remove ghost UTXO by pre-signing txid: {}", e);
+                                }
+                            }
+                        }
+                        if deleted_count > 0 {
+                            log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", deleted_count);
+                        }
+
+                        // CRITICAL: Restore input UTXOs that were reserved for this transaction.
+                        // Since broadcast failed, these coins were never spent on-chain.
+                        match utxo_repo.restore_spent_by_txid(&final_txid) {
+                            Ok(count) if count > 0 => {
+                                log::info!("   ♻️  Restored {} input UTXO(s) from failed broadcast", count);
+                            }
+                            Ok(_) => {
+                                // spent_txid might still be placeholder if signing failed to update
+                                if let Some(ref placeholder) = reservation_placeholder {
+                                    let _ = utxo_repo.restore_spent_by_txid(placeholder);
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️  Failed to restore input UTXOs: {}", e);
+                            }
+                        }
+
+                        // Invalidate balance cache since we restored UTXOs
+                        state.balance_cache.invalidate();
+                    }
+
+                    // Note: Do NOT populate send_with_results here.
+                    // sendWithResults is only for transactions listed in sendWith[].
                     // Don't return error - still return the signed tx
                     // The app might want to retry broadcasting
                 }
@@ -3694,6 +4557,87 @@ pub async fn create_action(
     } else {
         log::info!("   ℹ️  Skipping broadcast (acceptDelayedBroadcast={}, noSend={})",
                    accept_delayed_broadcast, no_send);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SEND_WITH: Broadcast previously-created noSend transactions
+    // Per BRC-100 spec, sendWith contains TXIDs of transactions that were
+    // created with noSend=true and should now be broadcast alongside this tx.
+    // ═══════════════════════════════════════════════════════════════
+    if is_send_with {
+        log::info!("   📡 Processing sendWith: {} transaction(s) to broadcast", send_with_txids.len());
+
+        // Initialize sendWithResults if not already set by the main broadcast
+        let results = send_with_results.get_or_insert_with(Vec::new);
+
+        for sw_txid in &send_with_txids {
+            log::info!("   📡 Broadcasting sendWith txid: {}", sw_txid);
+
+            // Look up the signed raw tx from parent_transactions or transactions table
+            let sw_beef_hex = {
+                let db = state.database.lock().unwrap();
+
+                // First check parent_transactions (has signed raw tx if we stored it)
+                let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+                match parent_tx_repo.get_by_txid(sw_txid) {
+                    Ok(Some(cached)) if !cached.raw_hex.is_empty() => {
+                        log::info!("   ✅ Found sendWith tx {} in parent_transactions cache", &sw_txid[..16]);
+                        // Build a minimal BEEF V1 for broadcasting: just the raw tx
+                        // ARC accepts raw tx hex directly, so we can broadcast as-is
+                        Some(cached.raw_hex.clone())
+                    }
+                    _ => {
+                        // Fallback: check transactions table
+                        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                        match tx_repo.get_local_parent_tx(sw_txid) {
+                            Ok(Some(raw_tx_hex)) => {
+                                log::info!("   📋 Found sendWith tx {} in transactions table", &sw_txid[..16]);
+                                Some(raw_tx_hex)
+                            }
+                            _ => {
+                                log::warn!("   ⚠️  sendWith txid {} not found in local storage", sw_txid);
+                                None
+                            }
+                        }
+                    }
+                }
+            };
+
+            match sw_beef_hex {
+                Some(raw_tx_hex) => {
+                    // Broadcast the raw transaction
+                    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(sw_txid)).await {
+                        Ok(msg) => {
+                            log::info!("   ✅ sendWith broadcast success for {}: {}", &sw_txid[..16], msg);
+                            // Update broadcast status
+                            {
+                                let db = state.database.lock().unwrap();
+                                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                                let _ = tx_repo.update_broadcast_status(sw_txid, "broadcast");
+                            }
+                            results.push(SendWithResult {
+                                txid: sw_txid.clone(),
+                                status: "unproven".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️  sendWith broadcast failed for {}: {}", &sw_txid[..16], e);
+                            results.push(SendWithResult {
+                                txid: sw_txid.clone(),
+                                status: "failed".to_string(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    results.push(SendWithResult {
+                        txid: sw_txid.clone(),
+                        status: "failed".to_string(),
+                    });
+                }
+            }
+        }
+        log::info!("   📡 sendWith processing complete: {} result(s)", results.len());
     }
 
     // Build response inputs array (user inputs first, then wallet inputs)
@@ -3743,7 +4687,31 @@ pub async fn create_action(
         log::info!("   📤 Base64 encoded ({} chars): {}...", base64_tx.len(), &base64_tx[..std::cmp::min(80, base64_tx.len())]);
     }
 
-    HttpResponse::Ok().json(CreateActionResponse {
+    // Log complete response details before returning
+    log::info!("═══════════════════════════════════════════════════════");
+    log::info!("📤 createAction RESPONSE:");
+    log::info!("   txid: {:?}", Some(&final_txid));
+    log::info!("   tx (Atomic BEEF): {}", match &raw_tx {
+        Some(bytes) => format!("present ({} bytes)", bytes.len()),
+        None => "ABSENT (None)".to_string(),
+    });
+    log::info!("   sendWithResults: {:?}", send_with_results);
+    log::info!("   outputs: {} entries", response_outputs.len());
+    log::info!("   inputs: {} entries", response_inputs.len());
+    // Build noSendChange outpoints for noSend transactions.
+    // The SDK uses these to chain transactions: the change outpoints from this noSend tx
+    // become inputs (via options.noSendChange) in the next createAction call.
+    let no_send_change = if no_send && pending_change_utxo.is_some() && !final_txid.is_empty() {
+        let change_vout = req.outputs.len(); // Change is appended after user outputs
+        let outpoint = format!("{}.{}", final_txid, change_vout);
+        log::info!("   📋 noSendChange: {}", outpoint);
+        Some(vec![outpoint])
+    } else {
+        None
+    };
+
+    // Log the actual JSON that will be sent to the caller
+    let response = CreateActionResponse {
         reference,
         version: tx.version,
         lock_time: tx.lock_time,
@@ -3753,15 +4721,49 @@ pub async fn create_action(
         input_beef: None,
         txid: Some(final_txid),
         tx: raw_tx,
-        send_result,
-    })
+        send_with_results,
+        no_send_change,
+        signable_transaction: None,
+    };
+    match serde_json::to_string(&response) {
+        Ok(json_str) => {
+            if json_str.len() <= 4000 {
+                log::info!("📤 FULL RESPONSE JSON: {}", json_str);
+            } else {
+                log::info!("📤 RESPONSE JSON (first 4000 of {} chars): {}", json_str.len(), &json_str[..4000]);
+            }
+        }
+        Err(e) => log::warn!("   Failed to serialize response for logging: {}", e),
+    }
+    log::info!("═══════════════════════════════════════════════════════");
+    HttpResponse::Ok().json(response)
 }
 
-// Query confirmation status from WhatsOnChain API
+// Query confirmation status - tries ARC first, falls back to WhatsOnChain
 async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), String> {
+    let client = reqwest::Client::new();
+
+    // Try ARC first
+    match query_arc_tx_status(&client, txid).await {
+        Ok(arc_resp) => {
+            let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
+            if status == "MINED" {
+                // ARC reports MINED - return at least 1 confirmation and block height
+                let block_height = arc_resp.block_height.map(|h| h as u32);
+                // ARC doesn't report exact confirmation count, but MINED means >= 1
+                return Ok((1, block_height));
+            }
+            // Not yet mined - ARC knows about it but no confirmations
+            return Ok((0, None));
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  ARC confirmation check failed for {}: {}, falling back to WhatsOnChain", txid, e);
+        }
+    }
+
+    // Fall back to WhatsOnChain
     let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
 
-    let client = reqwest::Client::new();
     let response = client.get(&url)
         .send()
         .await
@@ -3781,17 +4783,45 @@ async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), Strin
     Ok((confirmations, block_height))
 }
 
-/// Check if a transaction exists on-chain via WhatsOnChain API
+/// Check if a transaction exists on-chain - tries ARC first, falls back to WhatsOnChain
 ///
 /// Returns Ok(true) if tx exists (even with 0 confirmations - in mempool)
 /// Returns Ok(false) if tx doesn't exist (404)
-/// Returns Err if API error
+/// Returns Err if both APIs fail
 async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
-
     log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
 
     let client = reqwest::Client::new();
+
+    // Try ARC first
+    match query_arc_tx_status(&client, txid).await {
+        Ok(arc_resp) => {
+            let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
+            match status {
+                "MINED" | "SEEN_ON_NETWORK" | "SEEN_IN_ORPHAN_MEMPOOL"
+                | "ANNOUNCED_TO_NETWORK" | "REQUESTED_BY_NETWORK"
+                | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK" | "STORED" => {
+                    log::info!("   ✅ Transaction exists (ARC status: {})", status);
+                    return Ok(true);
+                }
+                _ => {
+                    log::info!("   ⚠️  ARC returned status: {} - checking WhatsOnChain", status);
+                }
+            }
+        }
+        Err(e) => {
+            // ARC 404 means tx not known to ARC - fall through to WhatsOnChain
+            if e.contains("404") {
+                log::info!("   ℹ️  Transaction not known to ARC, checking WhatsOnChain...");
+            } else {
+                log::warn!("   ⚠️  ARC check failed: {}, falling back to WhatsOnChain", e);
+            }
+        }
+    }
+
+    // Fall back to WhatsOnChain
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+
     let response = client.get(&url)
         .send()
         .await
@@ -3806,7 +4836,7 @@ async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
         log::info!("   ⚠️  Transaction NOT found on-chain (404)");
         Ok(false)
     } else {
-        Err(format!("WhatsOnChain API returned status: {}", status))
+        Err(format!("API returned status: {}", status))
     }
 }
 
@@ -4236,7 +5266,7 @@ pub struct SignActionRequest {
     pub reference: String,
 
     #[serde(rename = "spends")]
-    pub spends: Option<serde_json::Value>, // Not used in simple implementation
+    pub spends: Option<serde_json::Value>, // SDK-provided unlock scripts: { "inputIndex": { "unlockingScript": hex } }
 }
 
 // Response structure for /signAction
@@ -4245,6 +5275,11 @@ pub struct SignActionResponse {
     pub txid: String,
     #[serde(rename = "rawTx")]
     pub raw_tx: String,
+    /// Input indices that weren't covered by pre-signing or spends (diagnostic).
+    /// Per BSV SDK model, all custom inputs should be signed via two-phase flow
+    /// (createSignature + signAction spends) before this point.
+    #[serde(rename = "unsignedInputs", skip_serializing_if = "Option::is_none")]
+    pub unsigned_inputs: Option<Vec<usize>>,
 }
 
 // /signAction - Sign transaction inputs
@@ -4286,13 +5321,55 @@ pub async fn sign_action(
     let user_input_infos = pending_tx.user_input_infos;
     let brc29_info = pending_tx.brc29_info;
     let input_beef = pending_tx.input_beef;
+    let reservation_placeholder = pending_tx.reservation_placeholder;
 
     let num_user_inputs = user_input_infos.len();
     let num_wallet_inputs = input_utxos.len();
     log::info!("   Signing {} inputs ({} user, {} wallet)...",
         tx.inputs.len(), num_user_inputs, num_wallet_inputs);
 
-    // Sign USER inputs that need signing (skip pre-signed ones)
+    // Process spends parameter: apply SDK-provided unlocking scripts.
+    // In two-phase flow, the SDK computes unlock scripts via createSignature
+    // and passes them here. Each entry maps input index → { unlockingScript, sequenceNumber }.
+    let mut spends_applied: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if let Some(spends) = &req.spends {
+        if let Some(spends_map) = spends.as_object() {
+            log::info!("   Processing {} spend(s) from SDK...", spends_map.len());
+            for (idx_str, spend_info) in spends_map {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    if idx < tx.inputs.len() {
+                        if let Some(script_hex) = spend_info.get("unlockingScript").and_then(|v| v.as_str()) {
+                            match hex::decode(script_hex) {
+                                Ok(script_bytes) => {
+                                    log::info!("   Input {} (spends): applying SDK-provided unlocking script ({} bytes)",
+                                        idx, script_bytes.len());
+                                    tx.inputs[idx].set_script(script_bytes);
+                                    spends_applied.insert(idx);
+
+                                    // Apply optional sequence number
+                                    if let Some(seq) = spend_info.get("sequenceNumber").and_then(|v| v.as_u64()) {
+                                        tx.inputs[idx].sequence = seq as u32;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("   Input {} (spends): invalid unlocking script hex: {}", idx, e);
+                                }
+                            }
+                        }
+                    } else {
+                        log::warn!("   Input {} (spends): index out of range (tx has {} inputs)", idx, tx.inputs.len());
+                    }
+                }
+            }
+        }
+    }
+
+    // Track inputs that remain unsigned (for two-phase flow detection)
+    let mut unsigned_inputs: Vec<usize> = Vec::new();
+
+    // Process USER inputs: apply pre-signed scripts and SDK-provided spends.
+    // Inputs without unlocking scripts are left unsigned — the SDK handles them
+    // via two-phase flow (createSignature + signAction with spends).
     for (i, user_input) in user_input_infos.iter().enumerate() {
         if user_input.is_pre_signed {
             log::info!("   Input {} (user): {}:{} - already pre-signed, skipping",
@@ -4300,14 +5377,19 @@ pub async fn sign_action(
             continue;
         }
 
-        log::info!("   Input {} (user): {}:{} - needs wallet signature",
-            i, &user_input.txid[..16], user_input.vout);
+        if spends_applied.contains(&i) {
+            log::info!("   Input {} (user): {}:{} - signed via spends parameter",
+                i, &user_input.txid[..16], user_input.vout);
+            continue;
+        }
 
-        // User input without pre-signed script - wallet needs to sign it
-        // This would require the wallet to have the private key for this UTXO
-        // For now, we'll skip this case and log a warning
-        // TODO: Implement signing for user inputs when wallet has the key
-        log::warn!("   ⚠️  User input {} requires signing but no key available - skipping", i);
+        // Input is neither pre-signed nor covered by spends — left unsigned.
+        // In two-phase flow (phase 1), this is expected for PushDrop inputs.
+        // The SDK will compute unlock scripts via createSignature and call
+        // signAction with spends in phase 2.
+        log::info!("   Input {} (user): {}:{} - left unsigned (SDK signs via two-phase)",
+            i, &user_input.txid[..16], user_input.vout);
+        unsigned_inputs.push(i);
     }
 
     // Sign WALLET inputs
@@ -4504,6 +5586,36 @@ pub async fn sign_action(
         let i = wallet_idx; // Keep original variable name for compatibility
         log::info!("   📥 Processing parent tx {}/{}: {}", i + 1, input_utxos.len(), utxo.txid);
 
+        // Deduplication: skip if this parent tx is already in the BEEF (e.g., from inputBEEF).
+        // This happens when a user input and a wallet input share the same parent transaction
+        // (e.g., spending a PushDrop token output AND change from the same tx).
+        if let Some(existing_idx) = beef.find_txid(&utxo.txid) {
+            log::info!("   ⏭️  Parent tx {} already in BEEF (index {}), skipping duplicate fetch", &utxo.txid[..16], existing_idx);
+            // Still try to attach a Merkle proof if not already present
+            if existing_idx < beef.tx_to_bump.len() && beef.tx_to_bump[existing_idx].is_none() {
+                // No BUMP yet — try to fetch one
+                let cached_proof_result = {
+                    let db = state.database.lock().unwrap();
+                    let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
+                    merkle_proof_repo.get_by_parent_txid(&utxo.txid)
+                };
+                if let Ok(Some(cached_proof)) = cached_proof_result {
+                    log::info!("   ✅ Attaching cached Merkle proof to existing BEEF entry (height: {})", cached_proof.block_height);
+                    let enhanced_tsc = {
+                        let db = state.database.lock().unwrap();
+                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
+                        merkle_proof_repo.to_tsc_json(&cached_proof)
+                    };
+                    if !enhanced_tsc.is_null() {
+                        if let Err(e) = beef.add_tsc_merkle_proof(&utxo.txid, existing_idx, &enhanced_tsc) {
+                            log::warn!("   ⚠️  Failed to attach Merkle proof: {}", e);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         // STEP 1: Try to get parent transaction from cache
         let parent_tx_bytes = {
             let db = state.database.lock().unwrap();
@@ -4639,10 +5751,29 @@ pub async fn sign_action(
                     }
                 }
                 Ok(None) => {
-                    drop(db); // Release lock before API call
-                    log::info!("   🌐 Cache miss - fetching parent tx {} from API...", utxo.txid);
-                    // Fetch from API
-                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                    // Step 2: Check if this is a local unbroadcast transaction
+                    // This handles transaction chaining where child tx spends outputs from
+                    // a parent tx that hasn't been confirmed/broadcast yet
+                    let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                    if let Ok(Some(local_raw_tx)) = tx_repo.get_local_parent_tx(&utxo.txid) {
+                        log::info!("   📋 Using local unbroadcast parent tx {} from transactions table", utxo.txid);
+                        drop(db); // Release lock before hex decode
+                        match hex::decode(&local_raw_tx) {
+                            Ok(bytes) => {
+                                // Mark this as a local (unconfirmed) parent for BEEF building
+                                // It won't have a merkle proof, so BEEF will include it as raw tx
+                                bytes
+                            }
+                            Err(e) => {
+                                log::error!("   ❌ Failed to decode local parent tx {}: {}", utxo.txid, e);
+                                continue; // Skip this parent transaction
+                            }
+                        }
+                    } else {
+                        drop(db); // Release lock before API call
+                        log::info!("   🌐 Cache miss - fetching parent tx {} from API...", utxo.txid);
+                        // Fetch from API
+                        match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
                         Ok(parent_tx_hex) => {
                             match hex::decode(&parent_tx_hex) {
                                 Ok(bytes) => {
@@ -4684,6 +5815,7 @@ pub async fn sign_action(
                             continue; // Skip this parent transaction
                         }
                     }
+                    } // Close else block for local tx check
                 }
                 Err(e) => {
                     drop(db); // Release lock
@@ -4819,6 +5951,79 @@ pub async fn sign_action(
         }
     }
 
+    // Phase 2: Include ancestry chain for unconfirmed parent transactions
+    // When a parent is unconfirmed (no BUMP), ARC needs its confirmed ancestors
+    // with BUMPs in the BEEF to validate the transaction chain.
+    //
+    // Wrapped in a timeout to prevent freezing if API calls hang.
+    {
+        let ancestry_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async {
+                // Identify unconfirmed parents (those with no BUMP)
+                let mut unconfirmed_indices: Vec<usize> = Vec::new();
+                for i in 0..beef.transactions.len() {
+                    if i < beef.tx_to_bump.len() && beef.tx_to_bump[i].is_none() {
+                        unconfirmed_indices.push(i);
+                    }
+                }
+
+                if unconfirmed_indices.is_empty() {
+                    return;
+                }
+
+                log::info!("   🔗 Found {} unconfirmed parent(s), building ancestry chains for ARC...", unconfirmed_indices.len());
+
+                // Collect input TXIDs from unconfirmed parents that need ancestry
+                let mut ancestor_txids_to_add: Vec<String> = Vec::new();
+
+                for &idx in &unconfirmed_indices {
+                    let tx_bytes = &beef.transactions[idx];
+                    if let Ok(parsed) = crate::beef::ParsedTransaction::from_bytes(tx_bytes) {
+                        for input in &parsed.inputs {
+                            // Only queue ancestors that aren't already in BEEF
+                            if beef.find_txid(&input.prev_txid).is_none() {
+                                log::info!("   📥 Queuing ancestor {} (parent of unconfirmed tx)", &input.prev_txid[..std::cmp::min(16, input.prev_txid.len())]);
+                                ancestor_txids_to_add.push(input.prev_txid.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Use build_beef_for_txid to add each ancestor chain.
+                // build_beef_for_txid stops at confirmed transactions (with BUMPs)
+                // and has a MAX_BEEF_ANCESTORS safety limit.
+                for ancestor_txid in &ancestor_txids_to_add {
+                    if beef.find_txid(ancestor_txid).is_some() {
+                        continue; // Already added by a previous iteration
+                    }
+                    log::info!("   🔗 Building ancestry chain for {}...", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())]);
+                    match crate::beef_helpers::build_beef_for_txid(
+                        ancestor_txid,
+                        &mut beef,
+                        &state.database,
+                        &client,
+                    ).await {
+                        Ok(_) => {
+                            log::info!("   ✅ Added ancestry chain for {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())]);
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️  Failed to build ancestry for {}: {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())], e);
+                            // Continue - partial ancestry is better than none
+                        }
+                    }
+                }
+
+                // Sort transactions topologically (parents before children) as required by BRC-62
+                beef.sort_topologically();
+            }
+        ).await;
+
+        if ancestry_result.is_err() {
+            log::warn!("   ⚠️  Ancestry chain building timed out (30s) - proceeding with partial BEEF");
+        }
+    }
+
     // Add the signed transaction as the main transaction (must be last)
     beef.set_main_transaction(signed_tx_bytes.clone());
 
@@ -4858,41 +6063,125 @@ pub async fn sign_action(
 
     // Update action with new TXID and status
     {
-        // Update TXID (signing changes the transaction, so TXID changes)
         use crate::database::TransactionRepository;
+        use crate::database::UtxoRepository;
+        use crate::action_storage::ActionStatus;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
+        let utxo_repo = UtxoRepository::new(db.connection());
+
+        // First, get the old (unsigned) txid before updating
+        // We need this to update any UTXOs that were created with the unsigned txid
+        let old_txid = match tx_repo.get_by_reference(&req.reference) {
+            Ok(Some(action)) => {
+                log::info!("   📝 Old (unsigned) txid: {}", action.txid);
+                Some(action.txid)
+            }
+            Ok(None) => {
+                log::warn!("   ⚠️  Transaction not found for reference: {}", req.reference);
+                None
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to get old transaction: {}", e);
+                None
+            }
+        };
+
+        // Update TXID in transactions table (signing changes the transaction, so TXID changes)
         if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone()) {
             log::warn!("   ⚠️  Failed to update TXID: {}", e);
         } else {
-            log::info!("   💾 TXID updated after signing");
+            log::info!("   💾 Transaction TXID updated: unsigned → signed");
+        }
+
+        // Update any UTXOs that were created with the unsigned txid (e.g., change outputs)
+        // This is critical for transaction chaining!
+        if let Some(ref old_tx) = old_txid {
+            if old_tx != &txid {
+                match utxo_repo.update_txid(old_tx, &txid) {
+                    Ok(count) => {
+                        if count > 0 {
+                            log::info!("   💾 Updated {} change UTXO(s) to use signed txid", count);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to update UTXO txids: {}", e);
+                    }
+                }
+            }
         }
 
         // Update status to "signed"
-        use crate::action_storage::ActionStatus;
         if let Err(e) = tx_repo.update_status(&txid, ActionStatus::Signed) {
             log::warn!("   ⚠️  Failed to update action status: {}", e);
         } else {
             log::info!("   💾 Action status updated: created → signed");
         }
 
-        // Mark UTXOs as spent in database
-        use crate::database::UtxoRepository;
-        let utxo_repo = UtxoRepository::new(db.connection());
-        let utxos_to_mark: Vec<_> = input_utxos.iter()
-            .map(|u| (u.txid.clone(), u.vout))
-            .collect();
+        // Update broadcast_status to "broadcast" — signAction returns a fully-signed
+        // Atomic BEEF to the SDK which will submit it to the overlay network.
+        // Without this, the status stays "pending" and startup cleanup deletes the UTXOs.
+        if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
+            log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+        } else {
+            log::info!("   💾 Broadcast status updated: pending → broadcast");
+        }
 
-        match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
-            Ok(count) => {
-                log::info!("   ✅ Marked {} UTXOs as spent in database", count);
-                // Invalidate balance cache (UTXOs were spent)
-                state.balance_cache.invalidate();
-                log::info!("   🔄 Balance cache invalidated (UTXOs marked as spent)");
+        // Update reserved UTXOs: placeholder spent_txid → final signed txid.
+        // Covers BOTH wallet UTXOs and user-provided basket outputs that were
+        // reserved during createAction with the same placeholder.
+        if let Some(ref placeholder) = reservation_placeholder {
+            match utxo_repo.update_spent_txid_batch(placeholder, &txid) {
+                Ok(count) => {
+                    log::info!("   ✅ Updated spent_txid on {} reserved UTXO(s): {} → {}",
+                        count,
+                        &placeholder[..std::cmp::min(20, placeholder.len())],
+                        &txid[..std::cmp::min(16, txid.len())]);
+                    state.balance_cache.invalidate();
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to update spent_txid from placeholder: {}", e);
+                }
+            }
+        } else {
+            // Fallback: no placeholder (shouldn't happen in normal flow).
+            // Mark wallet UTXOs as spent directly with the final txid.
+            let utxos_to_mark: Vec<_> = input_utxos.iter()
+                .map(|u| (u.txid.clone(), u.vout))
+                .collect();
+            match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
+                Ok(count) => {
+                    log::info!("   ✅ Marked {} wallet UTXOs as spent (no placeholder fallback)", count);
+                    state.balance_cache.invalidate();
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to mark wallet UTXOs as spent: {}", e);
+                }
+            }
+        }
+    }
+
+    // Cache signed raw tx in parent_transactions for BEEF ancestry.
+    // Only when all inputs are signed (phase 3 complete or single-phase).
+    // Future transactions spending outputs from this tx need the signed raw tx.
+    if unsigned_inputs.is_empty() {
+        let db = state.database.lock().unwrap();
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        match parent_tx_repo.upsert(None, &txid, &signed_tx_hex) {
+            Ok(_) => {
+                log::info!("   💾 Cached signed tx {} in parent_transactions for BEEF ancestry", &txid[..std::cmp::min(16, txid.len())]);
             }
             Err(e) => {
-                log::warn!("   ⚠️  Failed to mark UTXOs as spent: {}", e);
+                log::warn!("   ⚠️  Failed to cache signed tx in parent_transactions: {}", e);
             }
+        }
+    }
+
+    // Clean up pending transaction from memory when fully signed
+    if unsigned_inputs.is_empty() {
+        let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
+        if pending.remove(&req.reference).is_some() {
+            log::info!("   🗑️  Cleaned up pending transaction for reference {}", req.reference);
         }
     }
 
@@ -4905,9 +6194,17 @@ pub async fn sign_action(
 
     // Return regular Atomic BEEF (same for BRC-29 and non-BRC-29)
     log::info!("   📦 Returning Atomic BEEF (binary format)");
+    let unsigned_for_response = if unsigned_inputs.is_empty() {
+        None
+    } else {
+        log::warn!("   ⚠️  {} input(s) remain unsigned: {:?}", unsigned_inputs.len(), unsigned_inputs);
+        Some(unsigned_inputs)
+    };
+
     HttpResponse::Ok().json(SignActionResponse {
         txid,
         raw_tx: beef_hex,
+        unsigned_inputs: unsigned_for_response,
     })
 }
 
@@ -4969,6 +6266,7 @@ pub async fn process_action(
             return_txid_only: Some(false),
             no_send: None,
             randomize_outputs: None,
+            send_with: None,
         }),
         input_beef: None,
     };
@@ -5031,7 +6329,7 @@ pub async fn process_action(
     let status = if should_broadcast {
         log::info!("   Broadcasting to network...");
 
-        let broadcast_result = broadcast_transaction(&raw_tx).await;
+        let broadcast_result = broadcast_transaction(&raw_tx, Some(&state.database), Some(&txid)).await;
 
         // Handle "Missing inputs" error by checking UTXOs and marking them as spent
         if let Err(ref e) = broadcast_result {
@@ -5085,7 +6383,7 @@ pub async fn process_action(
             Ok(_) => {
                 log::info!("   ✅ Transaction broadcast successful!");
 
-                // Update action status to "unconfirmed"
+                // Update action status to "unconfirmed" and broadcast_status to "broadcast"
                 {
                     use crate::database::TransactionRepository;
                     use crate::action_storage::ActionStatus;
@@ -5096,6 +6394,9 @@ pub async fn process_action(
                     } else {
                         log::info!("   💾 Action status updated: signed → unconfirmed");
                     }
+                    if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
+                        log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                    }
                 }
 
                 "completed"
@@ -5103,9 +6404,10 @@ pub async fn process_action(
             Err(e) => {
                 log::error!("   ❌ Broadcast failed: {}", e);
 
-                // Update action status to "failed"
+                // Update action status to "failed" and broadcast_status to "failed"
                 {
                     use crate::database::TransactionRepository;
+                    use crate::database::UtxoRepository;
                     use crate::action_storage::ActionStatus;
                     let db = state.database.lock().unwrap();
                     let tx_repo = TransactionRepository::new(db.connection());
@@ -5113,6 +6415,21 @@ pub async fn process_action(
                         log::warn!("   ⚠️  Failed to update action status: {}", e);
                     } else {
                         log::info!("   💾 Action status updated: signed → failed");
+                    }
+                    if let Err(e) = tx_repo.update_broadcast_status(&txid, "failed") {
+                        log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                    }
+
+                    // CRITICAL: Remove ghost change UTXO since broadcast failed
+                    let utxo_repo = UtxoRepository::new(db.connection());
+                    match utxo_repo.delete_by_txid(&txid) {
+                        Ok(count) if count > 0 => {
+                            log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
+                        }
                     }
                 }
 
@@ -5131,16 +6448,113 @@ pub async fn process_action(
     })
 }
 
-// Broadcast transaction to BSV network (multiple broadcasters for redundancy)
-async fn broadcast_transaction(beef_or_raw_hex: &str) -> Result<String, String> {
-    // Extract raw transaction from BEEF if needed
-    // BEEF starts with 0100beef, 0200beef, or 01010101 (Atomic)
-    // Raw transaction starts with version (typically 01000000 or 02000000)
-    let raw_tx_hex = if beef_or_raw_hex.starts_with("0100beef")
+// (check_tx_exists_on_chain is defined earlier in the file)
+
+// Broadcast transaction to BSV network
+//
+// Strategy:
+// 1. If input is BEEF format → convert to V1, send BEEF directly to ARC (enables tx chaining)
+// 2. If ARC fails or input is raw tx → fall back to extracting raw tx and using WhatsOnChain
+//
+// ARC is preferred because it accepts BEEF with unconfirmed parent transactions,
+// solving the transaction chaining race condition where the second tx's parent
+// hasn't propagated yet.
+async fn broadcast_transaction(
+    beef_or_raw_hex: &str,
+    db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
+    txid_for_cache: Option<&str>,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let is_beef = beef_or_raw_hex.starts_with("0100beef")
         || beef_or_raw_hex.starts_with("0200beef")
-        || beef_or_raw_hex.starts_with("01010101")
-    {
-        log::info!("   📦 Input is BEEF format, extracting raw transaction...");
+        || beef_or_raw_hex.starts_with("01010101");
+
+    // Strategy 1: If BEEF, try ARC first (supports tx chaining via BEEF)
+    if is_beef {
+        log::info!("   📦 Input is BEEF format, attempting ARC broadcast with BEEF V1...");
+
+        // Parse BEEF and convert to V1 format for ARC
+        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+            Ok(beef) => {
+                match beef.to_v1_hex() {
+                    Ok(v1_hex) => {
+                        log::info!("   ✅ Converted BEEF to V1 format ({} hex chars)", v1_hex.len());
+
+                        // Try ARC with BEEF V1
+                        log::info!("   📡 Broadcasting BEEF V1 to ARC (GorillaPool)...");
+                        match broadcast_to_arc(&client, &v1_hex).await {
+                            Ok(arc_resp) => {
+                                let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
+                                let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
+                                let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
+                                log::info!("   🎉 ARC broadcast successful: {}", msg);
+
+                                // Detect ARC txid mismatch (expected for multi-tx BEEF submissions).
+                                // When submitting BEEF containing parent + child transactions, ARC may
+                                // return the parent's txid instead of the child's. We always use our
+                                // locally-computed txid for database operations, not ARC's response.
+                                // See: wallet-toolbox ARC provider does the same ("txid altered from...")
+                                if let Some(our_txid) = txid_for_cache {
+                                    if arc_txid != "unknown" && arc_txid != our_txid {
+                                        log::warn!("   ⚠️  ARC txid mismatch: ARC returned '{}', our computed txid is '{}'",
+                                            &arc_txid[..arc_txid.len().min(16)],
+                                            &our_txid[..our_txid.len().min(16)]);
+                                        log::info!("   ℹ️  Using locally-computed txid (expected for multi-tx BEEF)");
+                                    }
+                                }
+
+                                // Cache merkle proof from ARC if available
+                                if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
+                                    (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
+                                {
+                                    if !merkle_path.is_empty() {
+                                        log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
+                                        cache_arc_merkle_proof(db, cache_txid, merkle_path);
+                                    }
+                                }
+
+                                // Update broadcast_status and block_height if MINED
+                                if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
+                                    if status_str == "MINED" {
+                                        if let Some(height) = arc_resp.block_height {
+                                            log::info!("   📦 ARC reports MINED at height {}", height);
+                                            if let Ok(db_guard) = db.lock() {
+                                                let tx_repo = crate::database::TransactionRepository::new(db_guard.connection());
+                                                let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                return Ok(msg);
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️ ARC broadcast failed: {}", e);
+                                log::info!("   🔄 Falling back to raw tx broadcasters...");
+                                // Fall through to raw tx broadcast
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️ Failed to convert BEEF to V1: {}", e);
+                        log::info!("   🔄 Falling back to raw tx broadcasters...");
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("   ⚠️ Failed to parse BEEF: {}", e);
+                log::info!("   🔄 Falling back to raw tx broadcasters...");
+            }
+        }
+    }
+
+    // Strategy 2: Extract raw tx and use traditional broadcasters as fallback
+    let raw_tx_hex = if is_beef {
+        log::info!("   📦 Extracting raw transaction from BEEF for fallback broadcast...");
         match crate::beef::Beef::extract_raw_tx_hex(beef_or_raw_hex) {
             Ok(raw_hex) => {
                 log::info!("   ✅ Extracted raw tx ({} bytes)", raw_hex.len() / 2);
@@ -5156,57 +6570,37 @@ async fn broadcast_transaction(beef_or_raw_hex: &str) -> Result<String, String> 
         beef_or_raw_hex.to_string()
     };
 
-    // Use a client with reasonable timeout to avoid hanging
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let mut success_count = 0;
     let mut last_error = String::new();
 
-    // Broadcaster 1: GorillaPool
-    log::info!("   📡 Broadcasting to GorillaPool...");
+    // Fallback 1: GorillaPool mAPI (legacy)
+    log::info!("   📡 Broadcasting raw tx to GorillaPool (mAPI)...");
     match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
         Ok(response) => {
-            log::info!("   ✅ GorillaPool: {}", response);
-            success_count += 1;
+            log::info!("   🎉 GorillaPool mAPI: {}", response);
+            return Ok(response);
         }
         Err(e) => {
-            log::warn!("   ⚠️ GorillaPool failed: {}", e);
-            if last_error.is_empty() {
-                last_error = format!("GorillaPool: {}", e);
-            } else {
-                last_error = format!("{}; GorillaPool: {}", last_error, e);
-            }
+            log::warn!("   ⚠️ GorillaPool mAPI failed: {}", e);
+            last_error = format!("GorillaPool: {}", e);
         }
     }
 
-    // Broadcaster 2: WhatsOnChain
-    log::info!("   📡 Broadcasting to WhatsOnChain...");
+    // Fallback 2: WhatsOnChain
+    log::info!("   📡 Broadcasting raw tx to WhatsOnChain...");
     match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
         Ok(response) => {
-            log::info!("   ✅ WhatsOnChain: {}", response);
-            success_count += 1;
+            log::info!("   🎉 WhatsOnChain: {}", response);
+            return Ok(response);
         }
         Err(e) => {
             log::warn!("   ⚠️ WhatsOnChain failed: {}", e);
-            if last_error.is_empty() {
-                last_error = format!("WhatsOnChain: {}", e);
-            } else {
-                last_error = format!("{}; WhatsOnChain: {}", last_error, e);
-            }
+            last_error = format!("{}; WhatsOnChain: {}", last_error, e);
         }
     }
 
-    if success_count > 0 {
-        log::info!("   🎉 Broadcast successful to {} service(s)", success_count);
-        Ok(format!("Broadcast to {} service(s)", success_count))
-    } else {
-        log::error!("   ❌ All broadcasters failed!");
-        // Extract a clean, user-friendly error message
-        let clean_error = extract_core_error(&last_error);
-        Err(clean_error)
-    }
+    log::error!("   ❌ All broadcasters failed!");
+    let clean_error = extract_core_error(&last_error);
+    Err(clean_error)
 }
 
 // Helper function to extract a clean, user-friendly error message from broadcast errors
@@ -5339,6 +6733,219 @@ async fn broadcast_to_gorillapool(client: &reqwest::Client, raw_tx_hex: &str) ->
         }
     } else {
         Err(format!("{} - {}", status, text))
+    }
+}
+
+/// ARC API response structure
+/// See: https://bitcoin-sv.github.io/arc/api.html
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct ArcResponse {
+    /// Block hash (when mined)
+    #[serde(rename = "blockHash", default)]
+    pub block_hash: Option<String>,
+    /// Block height (when mined)
+    #[serde(rename = "blockHeight", default)]
+    pub block_height: Option<u64>,
+    /// Extra info from miner
+    #[serde(rename = "extraInfo", default)]
+    pub extra_info: Option<String>,
+    /// Competing transaction IDs (double spend)
+    #[serde(rename = "competingTxs", default)]
+    pub competing_txs: Option<Vec<String>>,
+    /// Merkle path (BUMP hex when mined)
+    #[serde(rename = "merklePath", default)]
+    pub merkle_path: Option<String>,
+    /// Timestamp
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    /// Transaction ID
+    #[serde(default)]
+    pub txid: Option<String>,
+    /// Transaction status string (e.g., "SEEN_ON_NETWORK", "MINED")
+    #[serde(rename = "txStatus", default)]
+    pub tx_status: Option<String>,
+    /// HTTP status code mirrored in body
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// Error title (for error responses)
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Error detail (for error responses)
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Error type (for error responses)
+    #[serde(rename = "type", default)]
+    pub error_type: Option<String>,
+}
+
+/// Broadcast transaction to GorillaPool ARC endpoint
+///
+/// ARC (A Record of Commitments) is BSV's modern transaction processor.
+/// It accepts BEEF V1 hex in JSON body: { "rawTx": "<beef_v1_hex>" }
+/// This enables transaction chaining since ARC validates parent transactions
+/// included in the BEEF structure without needing them to be already on-chain.
+///
+/// ARC endpoint: https://arc.gorillapool.io/v1/tx
+/// No API key required for GorillaPool.
+///
+/// HTTP status codes:
+/// - 200: Success (SEEN_ON_NETWORK, MINED, etc.)
+/// - 409: Already known (treat as success)
+/// - 460-469: BEEF-specific validation errors
+/// - 400/422/500: Other errors
+async fn broadcast_to_arc(client: &reqwest::Client, beef_v1_hex: &str) -> Result<ArcResponse, String> {
+    let url = "https://arc.gorillapool.io/v1/tx";
+
+    let body = serde_json::json!({
+        "rawTx": beef_v1_hex
+    });
+
+    log::info!("   📡 ARC: Sending BEEF V1 ({} hex chars) to {}", beef_v1_hex.len(), url);
+
+    let response = client.post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("ARC HTTP error: {}", e))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    log::info!("   📡 ARC response: HTTP {} - {}", status.as_u16(), &text[..text.len().min(500)]);
+
+    // Parse ARC response
+    let arc_response: ArcResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("ARC: Failed to parse response: {} - Body: {}", e, &text[..text.len().min(200)]))?;
+
+    match status.as_u16() {
+        200 | 201 => {
+            // Success - transaction accepted
+            let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+            let tx_status = arc_response.tx_status.as_deref().unwrap_or("ACCEPTED");
+            log::info!("   ✅ ARC accepted: txid={}, status={}", txid, tx_status);
+            if let Some(ref mp) = arc_response.merkle_path {
+                log::info!("   📋 ARC returned merklePath ({} hex chars)", mp.len());
+            }
+            Ok(arc_response)
+        }
+        409 => {
+            // Already known - treat as success
+            let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+            let tx_status = arc_response.tx_status.as_deref().unwrap_or("ALREADY_KNOWN");
+            log::info!("   ℹ️  ARC: Transaction already known: txid={}, status={}", txid, tx_status);
+            Ok(arc_response)
+        }
+        460..=469 => {
+            // BEEF-specific validation errors
+            let detail = arc_response.detail.unwrap_or_else(|| text.clone());
+            let title = arc_response.title.unwrap_or_else(|| format!("BEEF Error {}", status.as_u16()));
+            log::error!("   ❌ ARC BEEF validation error {}: {} - {}", status.as_u16(), title, detail);
+            Err(format!("ARC BEEF error {}: {} - {}", status.as_u16(), title, detail))
+        }
+        _ => {
+            // Other error
+            let detail = arc_response.detail
+                .or(arc_response.title)
+                .unwrap_or_else(|| text.clone());
+            log::error!("   ❌ ARC error {}: {}", status.as_u16(), detail);
+            Err(format!("ARC error {}: {}", status.as_u16(), detail))
+        }
+    }
+}
+
+/// Query transaction status from ARC
+///
+/// GET /v1/tx/{txid} - Returns status, merkle path, block info
+pub async fn query_arc_tx_status(client: &reqwest::Client, txid: &str) -> Result<ArcResponse, String> {
+    let url = format!("https://arc.gorillapool.io/v1/tx/{}", txid);
+
+    let response = client.get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("ARC status query HTTP error: {}", e))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    if status.is_success() {
+        serde_json::from_str(&text)
+            .map_err(|e| format!("ARC: Failed to parse status response: {} - Body: {}", e, &text[..text.len().min(200)]))
+    } else {
+        Err(format!("ARC status query failed: HTTP {} - {}", status.as_u16(), &text[..text.len().min(200)]))
+    }
+}
+
+/// Cache a merkle proof from ARC response into the database
+///
+/// Parses the BUMP hex from ARC's merklePath, converts to TSC format,
+/// and stores in the merkle_proofs table for future BEEF building.
+pub fn cache_arc_merkle_proof(
+    db: &std::sync::Mutex<crate::database::WalletDatabase>,
+    txid: &str,
+    merkle_path_hex: &str,
+) {
+    // Parse BUMP hex to TSC format
+    let tsc = match crate::beef::parse_bump_hex_to_tsc(merkle_path_hex) {
+        Ok(tsc) => tsc,
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to parse ARC merklePath for {}: {}", txid, e);
+            return;
+        }
+    };
+
+    let block_height = tsc["height"].as_u64().unwrap_or(0) as u32;
+    let tx_index = tsc["index"].as_u64().unwrap_or(0);
+    let nodes_json = match serde_json::to_string(&tsc["nodes"]) {
+        Ok(j) => j,
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", txid, e);
+            return;
+        }
+    };
+
+    let db_guard = match db.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to lock DB for merkle proof caching: {}", e);
+            return;
+        }
+    };
+
+    let conn = db_guard.connection();
+
+    // Ensure the transaction exists in parent_transactions table
+    let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
+    let parent_txn_id = match parent_tx_repo.get_id_by_txid(txid) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Transaction not in parent_transactions - try to insert a minimal record
+            // This can happen if ARC returns merklePath for a tx we haven't cached as a parent yet
+            log::info!("   📋 Transaction {} not in parent_transactions, creating placeholder", txid);
+            match parent_tx_repo.upsert(None, txid, "") {
+                Ok(id) => id,
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to create parent_transactions entry for {}: {}", txid, e);
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  DB error looking up parent_transactions for {}: {}", txid, e);
+            return;
+        }
+    };
+
+    // Store the merkle proof
+    let merkle_proof_repo = crate::database::MerkleProofRepository::new(conn);
+    match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, "", &nodes_json) {
+        Ok(_) => {
+            log::info!("   💾 Cached ARC merkle proof for {} (height: {}, index: {})", txid, block_height, tx_index);
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to cache ARC merkle proof for {}: {}", txid, e);
+        }
     }
 }
 
@@ -5734,6 +7341,8 @@ pub async fn send_transaction(
             address: Some(req.to_address.clone()),
             custom_instructions: None,
             output_description: None,
+            basket: None,  // Simple send doesn't use baskets
+            tags: None,    // Simple send doesn't use tags
         }],
         description: Some(format!("Send {} satoshis to {}", req.amount, req.to_address)),
         labels: Some(vec!["send".to_string(), "wallet".to_string()]),
@@ -5743,6 +7352,7 @@ pub async fn send_transaction(
             return_txid_only: Some(false),
             no_send: Some(true), // Don't let createAction broadcast - we'll do it ourselves
             randomize_outputs: Some(true), // Default behavior
+            send_with: None,
         }),
         input_beef: None,
     };
@@ -5889,7 +7499,7 @@ pub async fn send_transaction(
     log::info!("   📡 Broadcasting transaction...");
 
     // Broadcast the raw transaction
-    match broadcast_transaction(&raw_tx_hex).await {
+    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
 
@@ -5905,9 +7515,10 @@ pub async fn send_transaction(
         Err(e) => {
             log::error!("   ❌ Transaction broadcast failed: {}", e);
 
-            // Update transaction status to "failed" in database
+            // Update transaction status to "failed" in database and clean up ghost UTXOs
             {
                 use crate::database::TransactionRepository;
+                use crate::database::UtxoRepository;
                 use crate::action_storage::ActionStatus;
                 let db = state.database.lock().unwrap();
                 let tx_repo = TransactionRepository::new(db.connection());
@@ -5915,6 +7526,18 @@ pub async fn send_transaction(
                     log::warn!("   ⚠️  Failed to update transaction status in database: {}", db_err);
                 } else {
                     log::info!("   💾 Transaction status updated to 'failed' in database");
+                }
+
+                // CRITICAL: Remove ghost change UTXO since broadcast failed
+                let utxo_repo = UtxoRepository::new(db.connection());
+                match utxo_repo.delete_by_txid(&txid) {
+                    Ok(count) if count > 0 => {
+                        log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
+                    }
                 }
             }
 
@@ -6399,6 +8022,21 @@ pub struct InternalizeOutput {
     pub protocol: Option<String>,
     #[serde(rename = "paymentRemittance")]
     pub payment_remittance: Option<PaymentRemittance>,
+    #[serde(rename = "insertionRemittance")]
+    pub insertion_remittance: Option<InsertionRemittance>,
+}
+
+/// BRC-100 Insertion Remittance information
+/// Used for "basket insertion" protocol to assign received outputs to baskets
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InsertionRemittance {
+    /// Basket name (required, 1-300 bytes, will be normalized)
+    pub basket: String,
+    /// Optional tags for this output (each 1-300 bytes)
+    pub tags: Option<Vec<String>>,
+    /// Optional custom instructions (app-specific metadata)
+    #[serde(rename = "customInstructions")]
+    pub custom_instructions: Option<String>,
 }
 
 /// BRC-29 Payment Remittance information
@@ -6758,12 +8396,11 @@ pub async fn internalize_action(
 
         // Broadcast the transaction ourselves
         let raw_tx_hex = hex::encode(&main_tx_bytes);
-        match broadcast_transaction(&raw_tx_hex).await {
-            Ok(broadcast_txid) => {
-                if broadcast_txid != txid {
-                    log::warn!("   ⚠️  Broadcast TXID mismatch: expected {}, got {}", txid, broadcast_txid);
-                }
-                log::info!("   ✅ Transaction broadcast successfully: {}", broadcast_txid);
+        match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
+            Ok(broadcast_msg) => {
+                // broadcast_transaction returns a message string, not a txid.
+                // Our locally-computed txid is authoritative (passed via txid_for_cache).
+                log::info!("   ✅ Transaction broadcast successfully: {}", broadcast_msg);
             }
             Err(e) => {
                 log::error!("   ❌ Failed to broadcast transaction: {}", e);
@@ -6835,13 +8472,79 @@ pub async fn internalize_action(
 
     // Build a map of output index -> paymentRemittance for quick lookup
     let mut remittance_map: std::collections::HashMap<u32, PaymentRemittance> = std::collections::HashMap::new();
+    // BRC-100: Build a map of output index -> insertionRemittance for basket insertion
+    let mut insertion_map: std::collections::HashMap<u32, InsertionRemittance> = std::collections::HashMap::new();
+
     if let Some(ref outputs) = req.outputs {
         for output_spec in outputs {
-            if let Some(ref remittance) = output_spec.payment_remittance {
-                remittance_map.insert(output_spec.output_index, remittance.clone());
-                log::info!("   📩 Output {} has paymentRemittance from sender: {}",
-                    output_spec.output_index,
-                    &remittance.sender_identity_key[..std::cmp::min(16, remittance.sender_identity_key.len())]);
+            // Check protocol type
+            let protocol = output_spec.protocol.as_deref().unwrap_or("");
+
+            if protocol == "wallet payment" {
+                if let Some(ref remittance) = output_spec.payment_remittance {
+                    remittance_map.insert(output_spec.output_index, remittance.clone());
+                    log::info!("   📩 Output {} has paymentRemittance (wallet payment) from sender: {}",
+                        output_spec.output_index,
+                        &remittance.sender_identity_key[..std::cmp::min(16, remittance.sender_identity_key.len())]);
+                }
+            } else if protocol == "basket insertion" {
+                if let Some(ref insertion) = output_spec.insertion_remittance {
+                    // Validate and normalize basket name
+                    use crate::database::basket_repo::validate_and_normalize_basket_name;
+                    use crate::database::tag_repo::validate_and_normalize_tag;
+
+                    match validate_and_normalize_basket_name(&insertion.basket) {
+                        Ok(normalized_basket) => {
+                            // Validate and normalize tags
+                            let mut normalized_tags: Vec<String> = Vec::new();
+                            if let Some(ref tags) = insertion.tags {
+                                for tag in tags {
+                                    match validate_and_normalize_tag(tag) {
+                                        Ok(normalized) => {
+                                            if !normalized_tags.contains(&normalized) {
+                                                normalized_tags.push(normalized);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("   ❌ Output {} has invalid tag: {}", output_spec.output_index, e);
+                                            return HttpResponse::BadRequest().json(serde_json::json!({
+                                                "status": "error",
+                                                "code": "ERR_INVALID_TAG",
+                                                "description": format!("Output {}: {}", output_spec.output_index, e)
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Create normalized insertion remittance
+                            let normalized_insertion = InsertionRemittance {
+                                basket: normalized_basket.clone(),
+                                tags: if normalized_tags.is_empty() { None } else { Some(normalized_tags) },
+                                custom_instructions: insertion.custom_instructions.clone(),
+                            };
+                            insertion_map.insert(output_spec.output_index, normalized_insertion);
+                            log::info!("   🧺 Output {} has insertionRemittance (basket insertion) basket='{}'",
+                                output_spec.output_index, normalized_basket);
+                        }
+                        Err(e) => {
+                            log::error!("   ❌ Output {} has invalid basket name: {}", output_spec.output_index, e);
+                            return HttpResponse::BadRequest().json(serde_json::json!({
+                                "status": "error",
+                                "code": "ERR_INVALID_BASKET_NAME",
+                                "description": format!("Output {}: {}", output_spec.output_index, e)
+                            }));
+                        }
+                    }
+                }
+            } else if protocol.is_empty() {
+                // No protocol specified - check for paymentRemittance for backward compatibility
+                if let Some(ref remittance) = output_spec.payment_remittance {
+                    remittance_map.insert(output_spec.output_index, remittance.clone());
+                    log::info!("   📩 Output {} has paymentRemittance from sender: {}",
+                        output_spec.output_index,
+                        &remittance.sender_identity_key[..std::cmp::min(16, remittance.sender_identity_key.len())]);
+                }
             }
         }
     }
@@ -6934,6 +8637,111 @@ pub async fn internalize_action(
                 }
             }
         }
+    }
+
+    // ============================================================
+    // BRC-100 Basket Insertion: Store outputs with basket/tag assignments
+    // ============================================================
+    if !insertion_map.is_empty() {
+        log::info!("   🧺 Processing {} basket insertion outputs...", insertion_map.len());
+
+        let db = state.database.lock().unwrap();
+        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let tag_repo = crate::database::TagRepository::new(db.connection());
+        let address_repo = crate::database::AddressRepository::new(db.connection());
+        let wallet_repo = crate::database::WalletRepository::new(db.connection());
+
+        // Get wallet ID for external address creation
+        let wallet_id = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w.id.unwrap_or(1),
+            _ => 1,
+        };
+
+        for (output_index, insertion) in &insertion_map {
+            let output_index_usize = *output_index as usize;
+            if output_index_usize >= parsed_tx.outputs.len() {
+                log::warn!("   ⚠️  Basket insertion output index {} out of bounds", output_index);
+                continue;
+            }
+
+            let output = &parsed_tx.outputs[output_index_usize];
+            let satoshis = output.value;
+            let script_hex = hex::encode(&output.script);
+
+            // Get or create basket
+            let basket_id = match basket_repo.find_or_insert(&insertion.basket) {
+                Ok(id) => id,
+                Err(e) => {
+                    log::error!("   ❌ Failed to get basket '{}': {}", insertion.basket, e);
+                    continue;
+                }
+            };
+
+            // Get or create external address for this output
+            // (basket insertion outputs typically have custom scripts we can't derive)
+            let address_id = match address_repo.get_or_create_external_address(wallet_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    log::error!("   ❌ Failed to get external address: {}", e);
+                    continue;
+                }
+            };
+
+            // Build custom instructions JSON
+            let custom_json = if let Some(ref ci) = insertion.custom_instructions {
+                serde_json::json!({
+                    "type": "basket_insertion",
+                    "basket": insertion.basket,
+                    "appData": ci
+                }).to_string()
+            } else {
+                serde_json::json!({
+                    "type": "basket_insertion",
+                    "basket": insertion.basket
+                }).to_string()
+            };
+
+            // Insert UTXO with basket assignment
+            // Status is 'completed' because we've verified the BEEF/transaction
+            match utxo_repo.insert_output_with_basket(
+                Some(address_id),
+                &txid,
+                *output_index,
+                satoshis,
+                &script_hex,
+                Some(basket_id),
+                Some(&custom_json),
+                "completed",
+                None,  // No output description for internalized outputs
+            ) {
+                Ok(utxo_id) => {
+                    log::info!("   💾 Stored basket insertion UTXO {}:{} in basket '{}' ({} sats)",
+                              txid, output_index, insertion.basket, satoshis);
+
+                    // Assign tags if provided
+                    if let Some(ref tags) = insertion.tags {
+                        for tag in tags {
+                            if let Err(e) = tag_repo.assign_tag_to_output(utxo_id, tag) {
+                                log::warn!("   ⚠️  Failed to assign tag '{}' to UTXO: {}", tag, e);
+                            } else {
+                                log::info!("      🏷️  Tagged with '{}'", tag);
+                            }
+                        }
+                    }
+
+                    // Track as received
+                    total_received += satoshis;
+                    our_output_indices.push(*output_index);
+                }
+                Err(e) => {
+                    log::error!("   ❌ Failed to store basket insertion UTXO {}:{}: {}", txid, output_index, e);
+                }
+            }
+        }
+
+        // Update total received logging
+        log::info!("   🧺 Total from basket insertions: {} outputs processed", insertion_map.len());
     }
 
     // Store in action storage
@@ -7496,6 +9304,8 @@ pub struct ListOutputsRequest {
     pub include_tags: Option<bool>,
     #[serde(rename = "includeLabels")]
     pub include_labels: Option<bool>,
+    #[serde(rename = "includeOutputDescription")]
+    pub include_output_description: Option<bool>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -7507,7 +9317,7 @@ pub struct ListOutputsResponse {
     pub total_outputs: u32,
     pub outputs: Vec<WalletOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub BEEF: Option<String>,  // Hex-encoded BEEF if include='entire transactions'
+    pub BEEF: Option<Vec<u8>>,  // BEEF as byte array (SDK expects number[])
 }
 
 /// Wallet output structure
@@ -7526,6 +9336,9 @@ pub struct WalletOutput {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "outputDescription")]
+    pub output_description: Option<String>,
 }
 
 /// POST /listOutputs - BRC-100 Call Code 6
@@ -7546,62 +9359,73 @@ pub async fn list_outputs(
         }));
     }
 
-    // Get database
-    let db = state.database.lock().unwrap();
-    let basket_repo = crate::database::BasketRepository::new(db.connection());
-    let tag_repo = crate::database::TagRepository::new(db.connection());
-    let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+    // Get database - scoped to drop lock before BEEF building (which re-locks internally)
+    let (basket_id, filtered_utxos) = {
+        let db = state.database.lock().unwrap();
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let tag_repo = crate::database::TagRepository::new(db.connection());
+        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
 
-    // Resolve basket (find or create)
-    let basket_id = match basket_repo.find_or_insert(&req.basket) {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("   Failed to find or create basket: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to resolve basket: {}", e)
-            }));
-        }
-    };
+        // Resolve basket (find or create)
+        let basket_id = match basket_repo.find_or_insert(&req.basket) {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("   Failed to find or create basket: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to resolve basket: {}", e)
+                }));
+            }
+        };
 
-    // Resolve tags if provided
-    let tag_ids = if let Some(tags) = &req.tags {
-        if tags.is_empty() {
-            Vec::new()
+        // Resolve tags if provided
+        let tag_ids = if let Some(tags) = &req.tags {
+            if tags.is_empty() {
+                Vec::new()
+            } else {
+                match tag_repo.find_tag_ids(tags) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        log::error!("   Failed to resolve tags: {}", e);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": format!("Failed to resolve tags: {}", e)
+                        }));
+                    }
+                }
+            }
         } else {
-            match tag_repo.find_tag_ids(tags) {
-                Ok(ids) => ids,
+            Vec::new()
+        };
+
+        // Query outputs with SQL-based tag filtering (efficient single query)
+        let tag_query_mode = req.tag_query_mode.as_deref().unwrap_or("any");
+        let require_all_tags = tag_query_mode == "all";
+
+        let filtered_utxos = if !tag_ids.is_empty() {
+            // Use efficient SQL-based tag filtering
+            match utxo_repo.get_unspent_by_basket_with_tags(basket_id, Some(&tag_ids), require_all_tags) {
+                Ok(utxos) => utxos,
                 Err(e) => {
-                    log::error!("   Failed to resolve tags: {}", e);
+                    log::error!("   Failed to query outputs with tags: {}", e);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to resolve tags: {}", e)
+                        "error": format!("Failed to query outputs: {}", e)
                     }));
                 }
             }
-        }
-    } else {
-        Vec::new()
-    };
+        } else {
+            // No tags - just query by basket
+            match utxo_repo.get_unspent_by_basket(basket_id) {
+                Ok(utxos) => utxos,
+                Err(e) => {
+                    log::error!("   Failed to query outputs: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to query outputs: {}", e)
+                    }));
+                }
+            }
+        };
 
-    // Query outputs with filters
-    // TODO: Implement tag filtering in UtxoRepository
-    // For now, we'll query by basket only
-    let all_utxos = match utxo_repo.get_unspent_by_basket(basket_id) {
-        Ok(utxos) => utxos,
-        Err(e) => {
-            log::error!("   Failed to query outputs: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to query outputs: {}", e)
-            }));
-        }
-    };
-
-    // Apply tag filtering if tags provided
-    let filtered_utxos = if !tag_ids.is_empty() {
-        let tag_query_mode = req.tag_query_mode.as_deref().unwrap_or("any");
-        filter_utxos_by_tags(&db, &all_utxos, &tag_ids, tag_query_mode == "all")
-    } else {
-        all_utxos
-    };
+        (basket_id, filtered_utxos)
+    }; // db lock dropped here - safe for BEEF building to re-lock
 
     // Apply pagination
     let offset = req.offset.unwrap_or(0) as usize;
@@ -7620,13 +9444,17 @@ pub async fn list_outputs(
     let include_custom_instructions = req.include_custom_instructions.unwrap_or(false);
     let include_tags = req.include_tags.unwrap_or(false);
     let include_labels = req.include_labels.unwrap_or(false);
+    let include_output_description = req.include_output_description.unwrap_or(false);
 
     let mut outputs = Vec::new();
     let mut beef = crate::beef::Beef::new();
 
-    // Create HTTP client for BEEF building (if needed)
+    // Create HTTP client for BEEF building (if needed) with timeout to prevent hanging
     let client = if include_transactions {
-        Some(reqwest::Client::new())
+        Some(reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()))
     } else {
         None
     };
@@ -7634,24 +9462,32 @@ pub async fn list_outputs(
     for utxo in &paginated_utxos {
         let outpoint = format!("{}.{}", utxo.txid, utxo.vout);
 
-        // Get tags if requested
-        let tags = if include_tags {
-            if let Some(output_id) = utxo.id {
-                tag_repo.get_tags_for_output(output_id).ok()
-                    .filter(|t| !t.is_empty())
+        // Get tags and labels if requested (brief lock, released before BEEF building)
+        let (tags, labels) = if include_tags || include_labels {
+            let db = state.database.lock().unwrap();
+            let tag_repo = crate::database::TagRepository::new(db.connection());
+
+            let tags = if include_tags {
+                if let Some(output_id) = utxo.id {
+                    tag_repo.get_tags_for_output(output_id).ok()
+                        .filter(|t| !t.is_empty())
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        // Get labels if requested (from transaction)
-        let labels = if include_labels {
-            tag_repo.get_labels_for_txid(&utxo.txid).ok()
-                .filter(|l| !l.is_empty())
+            let labels = if include_labels {
+                tag_repo.get_labels_for_txid(&utxo.txid).ok()
+                    .filter(|l| !l.is_empty())
+            } else {
+                None
+            };
+
+            (tags, labels)
         } else {
-            None
+            (None, None)
         };
 
         let output = WalletOutput {
@@ -7670,6 +9506,11 @@ pub async fn list_outputs(
             },
             tags,
             labels,
+            output_description: if include_output_description {
+                utxo.output_description.clone()
+            } else {
+                None
+            },
         };
 
         // Build BEEF if requested
@@ -7696,10 +9537,10 @@ pub async fn list_outputs(
         outputs.push(output);
     }
 
-    // Serialize BEEF if built
-    let beef_hex = if include_transactions && !beef.transactions.is_empty() {
-        match beef.to_bytes() {
-            Ok(bytes) => Some(hex::encode(bytes)),
+    // Serialize BEEF if built (V1 format for overlay compatibility)
+    let beef_bytes = if include_transactions && !beef.transactions.is_empty() {
+        match beef.to_v1_bytes() {
+            Ok(bytes) => Some(bytes),
             Err(e) => {
                 log::warn!("   Failed to serialize BEEF: {}", e);
                 None
@@ -7709,12 +9550,10 @@ pub async fn list_outputs(
         None
     };
 
-    drop(db);
-
     HttpResponse::Ok().json(ListOutputsResponse {
         total_outputs: total_outputs as u32,
         outputs,
-        BEEF: beef_hex,
+        BEEF: beef_bytes,
     })
 }
 
@@ -8103,5 +9942,91 @@ pub async fn get_network() -> HttpResponse {
     // TODO: Could read from config file or environment variable later
     HttpResponse::Ok().json(serde_json::json!({
         "network": "mainnet"
+    }))
+}
+
+/// POST /wallet/cleanup - Scan and remove ghost UTXOs
+///
+/// Checks all unspent UTXOs against the blockchain and removes any that
+/// don't exist on-chain (ghost UTXOs from failed broadcasts).
+pub async fn wallet_cleanup(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("🧹 /wallet/cleanup called - scanning for ghost UTXOs...");
+
+    // Get all unspent UTXOs
+    let unspent_utxos: Vec<(String, u32, i64, i64)> = {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+
+        let mut stmt = match conn.prepare(
+            "SELECT txid, vout, satoshis, address_id FROM utxos WHERE is_spent = 0"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("   Failed to query UTXOs: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        };
+
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+
+    log::info!("   Found {} unspent UTXOs to check", unspent_utxos.len());
+
+    let mut checked = 0;
+    let mut ghosts_removed = 0;
+    let mut ghost_sats = 0i64;
+    let mut valid_count = 0;
+    let mut valid_sats = 0i64;
+
+    // Check unique txids (multiple UTXOs can share same txid with different vouts)
+    let mut checked_txids: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+
+    for (txid, vout, satoshis, _address_id) in &unspent_utxos {
+        checked += 1;
+
+        // Cache the on-chain check per txid
+        let is_on_chain = if let Some(&cached) = checked_txids.get(txid) {
+            cached
+        } else {
+            let result = check_tx_exists_on_chain(txid).await.unwrap_or(false);
+            checked_txids.insert(txid.clone(), result);
+            result
+        };
+
+        if is_on_chain {
+            valid_count += 1;
+            valid_sats += satoshis;
+        } else {
+            ghosts_removed += 1;
+            ghost_sats += satoshis;
+            log::warn!("   👻 Ghost UTXO: {}:{} ({} sats)", &txid[..std::cmp::min(16, txid.len())], vout, satoshis);
+
+            // Mark as spent
+            let db = state.database.lock().unwrap();
+            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            let _ = utxo_repo.mark_spent(txid, *vout, "ghost-cleanup");
+        }
+    }
+
+    log::info!("   🧹 Cleanup complete: {} checked, {} valid ({} sats), {} ghosts removed ({} sats)",
+              checked, valid_count, valid_sats, ghosts_removed, ghost_sats);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "checked": checked,
+        "valid": valid_count,
+        "validSats": valid_sats,
+        "ghostsRemoved": ghosts_removed,
+        "ghostSats": ghost_sats,
     }))
 }

@@ -32,7 +32,7 @@ pub struct Address {
 #[derive(Debug, Clone)]
 pub struct Utxo {
     pub id: Option<i64>,  // None for new UTXOs, Some(id) for existing
-    pub address_id: i64,  // References addresses(id)
+    pub address_id: Option<i64>,  // References addresses(id), nullable for basket outputs
     pub basket_id: Option<i64>,  // References baskets(id), nullable
     pub txid: String,
     pub vout: i32,
@@ -44,6 +44,7 @@ pub struct Utxo {
     pub spent_txid: Option<String>,
     pub spent_at: Option<i64>,  // Unix timestamp
     pub custom_instructions: Option<String>,  // BRC-29 custom instructions (added in v5)
+    pub output_description: Option<String>,  // BRC-100 output description (added in v14)
 }
 
 /// Parent transaction model matching the `parent_transactions` table

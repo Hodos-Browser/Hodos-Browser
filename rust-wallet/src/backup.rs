@@ -342,7 +342,7 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
     let utxo_exports: Vec<UtxoExport> = utxos.iter()
         .filter_map(|utxo| {
             // Get address for this UTXO
-            address_map.get(&utxo.address_id).map(|addr| UtxoExport {
+            utxo.address_id.and_then(|aid| address_map.get(&aid)).map(|addr| UtxoExport {
                 txid: utxo.txid.clone(),
                 vout: utxo.vout,
                 address: addr.address.clone(),

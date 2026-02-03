@@ -41,6 +41,9 @@ pub fn start_background_sync(db: Arc<Mutex<WalletDatabase>>) {
                     error!("❌ Periodic UTXO sync failed: {}", e);
                 }
             }
+
+            // BRC-100: Clean up failed/stale UTXOs
+            cleanup_failed_utxos(&db);
         }
     });
 }
@@ -145,4 +148,158 @@ async fn sync_utxos(db: &Arc<Mutex<WalletDatabase>>) -> Result<(), String> {
 
     info!("   ✅ Sync complete: {} addresses updated, {} errors", updated_count, error_count);
     Ok(())
+}
+
+/// Clean up failed and stale UTXOs
+///
+/// This function handles (matching SDK TaskFailAbandoned + TaskReviewStatus patterns):
+/// 1. UTXOs with status='failed' - remove from tracking
+/// 2. UTXOs with status='unproven' older than 1 hour - mark as failed
+/// 3. Stale pending-* reservations older than 5 minutes - restore to spendable
+/// 4. Outputs consumed by failed broadcasts - restore to spendable
+/// 5. Old spent UTXOs (>30 days) - clean up to save space
+///
+/// This is part of the optimistic UTXO creation flow (BRC-100):
+/// - UTXOs are created with status='unproven' after signing
+/// - Status changes to 'completed' after broadcast confirmation
+/// - Status changes to 'failed' if broadcast fails
+/// - This cleanup job removes failed UTXOs and times out stale ones
+fn cleanup_failed_utxos(db: &Arc<Mutex<WalletDatabase>>) {
+    info!("🧹 Running UTXO cleanup...");
+
+    let db_guard = match db.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            error!("   ❌ Failed to lock database for cleanup: {}", e);
+            return;
+        }
+    };
+
+    let conn = db_guard.connection();
+
+    // Check if status column exists (handles case where v9 migration hasn't run yet)
+    let status_column_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('utxos') WHERE name = 'status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0).unwrap_or(0) > 0),
+    ).unwrap_or(false);
+
+    if status_column_exists {
+        // Get current time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 1. Delete UTXOs with status='failed'
+        match conn.execute(
+            "DELETE FROM utxos WHERE status = 'failed'",
+            [],
+        ) {
+            Ok(count) if count > 0 => {
+                info!("   🗑️  Deleted {} failed UTXOs", count);
+            }
+            Ok(_) => {} // No failed UTXOs to clean up
+            Err(e) => {
+                warn!("   ⚠️  Failed to delete failed UTXOs: {}", e);
+            }
+        }
+
+        // 2. Mark 'unproven' UTXOs older than 1 hour as 'failed'
+        // This handles cases where broadcast succeeded but we never got confirmation
+        let one_hour_ago = now - 3600;
+        match conn.execute(
+            "UPDATE utxos SET status = 'failed' WHERE status = 'unproven' AND first_seen < ?1",
+            rusqlite::params![one_hour_ago],
+        ) {
+            Ok(count) if count > 0 => {
+                info!("   ⏱️  Marked {} stale 'unproven' UTXOs as 'failed'", count);
+            }
+            Ok(_) => {} // No stale UTXOs
+            Err(e) => {
+                warn!("   ⚠️  Failed to update stale UTXOs: {}", e);
+            }
+        }
+
+        // 3. Restore stale pending-* reservations older than 5 minutes
+        // (SDK equivalent: TaskFailAbandoned restores inputs from abandoned createAction calls)
+        // pending-* placeholders are set during createAction to reserve UTXOs.
+        // If createAction/signAction never completed, these should be released.
+        let five_minutes_ago = now - 300;
+        match conn.execute(
+            "UPDATE utxos SET is_spent = 0, spent_txid = NULL, spent_at = NULL
+             WHERE is_spent = 1 AND spent_txid LIKE 'pending-%'
+             AND spent_at IS NOT NULL AND spent_at < ?1",
+            rusqlite::params![five_minutes_ago],
+        ) {
+            Ok(count) if count > 0 => {
+                info!("   🔓 Restored {} stale pending reservation(s) (older than 5 min)", count);
+            }
+            Ok(_) => {} // No stale reservations
+            Err(e) => {
+                warn!("   ⚠️  Failed to restore stale reservations: {}", e);
+            }
+        }
+
+        // 4. Restore outputs consumed by failed broadcasts
+        // (SDK equivalent: TaskReviewStatus propagates transaction status to outputs)
+        // If a transaction's broadcast_status is 'failed', any UTXOs it consumed
+        // should be restored to spendable so they can be re-spent.
+        let broadcast_status_exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0).unwrap_or(0) > 0),
+        ).unwrap_or(false);
+
+        if broadcast_status_exists {
+            match conn.execute(
+                "UPDATE utxos SET is_spent = 0, spent_txid = NULL, spent_at = NULL
+                 WHERE is_spent = 1 AND spent_txid IN (
+                     SELECT txid FROM transactions WHERE broadcast_status = 'failed'
+                 )",
+                [],
+            ) {
+                Ok(count) if count > 0 => {
+                    info!("   🔓 Restored {} output(s) consumed by failed broadcast(s)", count);
+                }
+                Ok(_) => {} // No failed broadcast outputs
+                Err(e) => {
+                    warn!("   ⚠️  Failed to restore failed broadcast outputs: {}", e);
+                }
+            }
+
+            // 4b. Mark stale pending transactions as failed
+            // Transactions stuck in 'pending' broadcast_status for >15 minutes
+            let fifteen_minutes_ago = now - 900;
+            match conn.execute(
+                "UPDATE transactions SET broadcast_status = 'failed'
+                 WHERE broadcast_status = 'pending' AND timestamp < ?1",
+                rusqlite::params![fifteen_minutes_ago],
+            ) {
+                Ok(count) if count > 0 => {
+                    info!("   ⏱️  Marked {} stale pending transaction(s) as failed", count);
+                }
+                Ok(_) => {} // No stale pending transactions
+                Err(e) => {
+                    warn!("   ⚠️  Failed to mark stale pending transactions: {}", e);
+                }
+            }
+        }
+    } else {
+        info!("   ℹ️  Skipping status-based cleanup (status column not found - run migration v9)");
+    }
+
+    // 5. Clean up old spent UTXOs (older than 30 days) to save space
+    let utxo_repo = UtxoRepository::new(conn);
+    match utxo_repo.cleanup_old_spent(30) {
+        Ok(count) if count > 0 => {
+            info!("   🧹 Cleaned up {} old spent UTXOs", count);
+        }
+        Ok(_) => {} // No old UTXOs to clean
+        Err(e) => {
+            warn!("   ⚠️  Failed to cleanup old spent UTXOs: {}", e);
+        }
+    }
+
+    info!("🧹 UTXO cleanup complete");
 }

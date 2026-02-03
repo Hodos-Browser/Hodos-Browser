@@ -9,7 +9,22 @@
       "Bash(sqlite3:*)",
       "Bash(./kill-browser.sh)",
       "Bash(npx tsc:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:hub.bsvblockchain.org)",
+      "Bash(gh repo view:*)",
+      "Bash(gh search:*)",
+      "Bash(gh auth:*)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(cmd.exe /c:*)",
+      "Bash(gh api:*)",
+      "Bash(python3:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cargo check:*)",
+      "Bash(/mnt/c/Users/archb/.cargo/bin/cargo.exe check)"
     ]
   },
   "enableAllProjectMcpServers": true,

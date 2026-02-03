@@ -1,10 +1,12 @@
-# Vendor-Neutral Paymail Architecture
+# Open Paymail Protocol
 
 ## Abstract
 
-A decentralized, confederated payment addressing system that enables human-readable identifiers (`alice@paymail`) **without domain dependencies**. The system uses BitcoinSV blockchain for registration and overlay networks for resolution, eliminating the need for DNS and domain registration. **Confederation enables vendor-neutrality** - multiple independent operators run overlay service nodes, ensuring no single vendor controls the system. Payments authenticate operations through micropayments, eliminating API keys and vendor lock-in.
+A decentralized, confederated **payment addressing** system that enables human-readable identifiers (`alice@paymail`) **without domain dependencies**. The system uses BitcoinSV blockchain for registration and overlay networks for resolution, eliminating the need for DNS and domain registration. **Confederation enables openness** - multiple independent operators run overlay service nodes, ensuring no single vendor controls the system. Micropayments authenticate operations, eliminating API keys and vendor lock-in.
 
-**Core Innovation**: Protocol identifiers (`@paymail`) replace domain names, and blockchain-based overlay resolution replaces DNS lookup. This removes centralization points (registrars, ICANN, DNS) while maintaining human-readable addresses.
+**Core Innovation**: Protocol identifiers (`@paymail`) replace domain names, and blockchain-based overlay resolution replaces DNS lookup. This removes centralization points (registrars, ICANN, DNS) while maintaining human-readable payment addresses.
+
+**Important Distinction**: This is an **addressing protocol**, not an identity protocol. It solves "how do I route a payment to you using something memorable?" - not "who are you?" Identity is handled by the certificate and trust network layer (BRC-52, discoverByAttributes, discoverByIdentityKey). This protocol complements that layer by providing lightweight, human-readable payment routing.
 
 **Note**: This is an architectural proposal for a standardization process. It describes a grass-roots, free-market system that will require communication, coordination, and conventional acceptance of non-perfect solutions among participants. Feedback and collaboration are actively sought.
 
@@ -13,24 +15,25 @@ A decentralized, confederated payment addressing system that enables human-reada
 ## Index
 
 1. [Vision](#vision)
-2. [Architecture Overview](#architecture-overview)
-3. [How BitcoinSV Removes Domain Dependency](#how-bitcoinsv-removes-domain-dependency)
-4. [Migration & Coexistence with Traditional Paymail](#migration--coexistence-with-traditional-paymail)
-5. [Registration Process](#registration-process)
-6. [Address Resolution](#address-resolution)
-7. [Payment Delivery Flow](#payment-delivery-flow)
-8. [Overlay Network Architecture](#overlay-network-architecture)
-9. [API Standardization](#api-standardization)
-10. [Micropayment Economics](#micropayment-economics)
-11. [Name Marketplace & Transfer](#name-marketplace--transfer)
-12. [Security Model](#security-model)
-13. [Threat Model](#threat-model)
-14. [Key Recovery & Rotation](#key-recovery--rotation)
-15. [BRC Standards Integration](#brc-standards-integration)
-16. [Comparison: Traditional vs Vendor-Neutral Paymail](#comparison-traditional-vs-vendor-neutral-paymail)
-17. [Design Rationale](#design-rationale)
-18. [Questions & Open Discussion](#questions--open-discussion)
-19. [References](#references)
+2. [Addressing vs Identity](#addressing-vs-identity)
+3. [Architecture Overview](#architecture-overview)
+4. [How BitcoinSV Removes Domain Dependency](#how-bitcoinsv-removes-domain-dependency)
+5. [Migration & Coexistence with Traditional Paymail](#migration--coexistence-with-traditional-paymail)
+6. [Registration Process](#registration-process)
+7. [Address Resolution](#address-resolution)
+8. [Payment Delivery Flow](#payment-delivery-flow)
+9. [Overlay Network Architecture](#overlay-network-architecture)
+10. [API Standardization](#api-standardization)
+11. [Micropayment Economics](#micropayment-economics)
+12. [Name Marketplace & Transfer](#name-marketplace--transfer)
+13. [Security Model](#security-model)
+14. [Threat Model](#threat-model)
+15. [Key Recovery & Rotation](#key-recovery--rotation)
+16. [BRC Standards Integration](#brc-standards-integration)
+17. [Comparison: Traditional vs Open Paymail](#comparison-traditional-vs-open-paymail)
+18. [Design Rationale](#design-rationale)
+19. [Questions & Open Discussion](#questions--open-discussion)
+20. [References](#references)
 
 ---
 
@@ -45,7 +48,33 @@ A decentralized, confederated payment addressing system that enables human-reada
 
 **Example**: `alice@paymail` - The `@paymail` suffix signals overlay resolution, not DNS lookup. No domain registration needed.
 
-**Note on suffix flexibility**: Because no domain needs to be available or registered, the suffix can be anything the community agrees on - `@paymail`, `@Bitcoin`, `@BSV`, or even no suffix at all (just the alias). The only requirement is that the wallet recognizes the input as a vendor-neutral paymail address and routes it to overlay resolution. The suffix is purely a UX convention for human readability, not a technical constraint.
+**Note on suffix flexibility**: Because no domain needs to be available or registered, the suffix can be anything the community agrees on - `@paymail`, `@Bitcoin`, `@BSV`, or even no suffix at all (just the alias). The only requirement is that the wallet recognizes the input as an open paymail address and routes it to overlay resolution. The suffix is purely a UX convention for human readability, not a technical constraint.
+
+---
+
+## Addressing vs Identity
+
+This protocol solves **addressing** - not **identity**. These are distinct layers:
+
+| Layer | Question It Answers | Solved By |
+|-------|-------------------|-----------|
+| **Addressing** | "How do I route a payment to you?" | This protocol (Open Paymail) |
+| **Identity** | "Who are you? Prove it." | Certificates & Trust Networks (BRC-52) |
+
+### Why This Distinction Matters
+
+Real-world identity is contextual and messy. A person is known by different attributes in different contexts - an email at work, a gamertag in gaming, an SSN to the government. No single handle should be the canonical representation of a person's identity. The certificate and trust network model (BRC-52, `discoverByAttributes`, `discoverByIdentityKey`) handles this correctly: different certifiers attest to different attributes, and verifiers choose which certifiers they trust.
+
+**This protocol does not replace that model.** A paymail address is like a phone number - it tells you how to reach someone with a payment. It doesn't define who they are. A user might have multiple paymail addresses for different purposes.
+
+### How They Complement Each Other
+
+- **Paymail** provides lightweight, low-friction payment routing ("send to alice@paymail")
+- **Certificates** provide rich, contextual identity verification ("prove you're the Alice who works at Company X")
+- A paymail alias can itself be a certified attribute - a certifier can attest "this person controls alice@paymail"
+- Certificate discovery (`discoverByAttributes`) can resolve to the same keys, but requires the sender to know attributes AND trust specific certifiers - heavier weight than a simple alias lookup
+
+The addressing layer sits below the identity layer. For casual payments, a memorable alias is sufficient. For authenticated business interactions, certificates provide the richer verification needed.
 
 ---
 
@@ -71,7 +100,7 @@ Wallets query BRC-24 Lookup Services to resolve aliases to public keys. The over
 - Centralized: DNS controlled by ICANN/registrars
 - Censorship risk: Domains can be seized
 
-### Vendor-Neutral Paymail (Blockchain-Based)
+### Open Paymail (Blockchain-Based)
 
 **New approach**: `alice@paymail`
 - **No domain registration** - `@paymail` is a protocol identifier, not a domain
@@ -81,7 +110,7 @@ Wallets query BRC-24 Lookup Services to resolve aliases to public keys. The over
 
 ### The Key Difference
 
-| Aspect | Traditional Paymail | Vendor-Neutral Paymail |
+| Aspect | Traditional Paymail | Open Paymail |
 |--------|--------------------|--------------------|
 | Address format | `alice@domain.com` | `alice@paymail` |
 | Resolution | DNS lookup | Overlay network lookup |
@@ -95,19 +124,19 @@ Wallets query BRC-24 Lookup Services to resolve aliases to public keys. The over
 
 ## Migration & Coexistence with Traditional Paymail
 
-Traditional domain-based paymail and vendor-neutral paymail coexist as parallel resolution paths. Wallet developers are responsible for correctly handling both types for their users.
+Traditional domain-based paymail and open paymail coexist as parallel resolution paths. Wallet developers are responsible for correctly handling both types for their users.
 
 **Wallet Resolution Logic:**
 
 1. User enters a paymail address into the recipient field
 2. Wallet parses the suffix:
-   - If the suffix matches a recognized vendor-neutral protocol identifier (`@paymail`, `@bitcoin`, `@bsv`): execute overlay resolution path
+   - If the suffix matches a recognized open paymail protocol identifier (`@paymail`, `@bitcoin`, `@bsv`): execute overlay resolution path
    - If the suffix contains a domain indicator (`.com`, `.io`, etc.): execute traditional DNS-based paymail resolution
 3. Each path resolves to a public key and payment destination independently
 
 **Wallet Responsibility**: It is the wallet developer's responsibility to implement correct detection and routing for both paymail types. The two systems do not conflict - they use different resolution mechanisms triggered by the address format.
 
-**Suffix Registry**: A registry mechanism for recognized vendor-neutral suffixes needs to be designed and implemented as part of the standardization process. This determines which suffixes trigger overlay resolution vs. DNS resolution.
+**Suffix Registry**: A registry mechanism for recognized open paymail suffixes needs to be designed and implemented as part of the standardization process. This determines which suffixes trigger overlay resolution vs. DNS resolution.
 
 ---
 
@@ -361,11 +390,11 @@ Dedicated marketplaces can and should be built around this system:
 
 ## Security Model
 
-### Identity Verification
+### Ownership Verification
 
-Registration transactions are signed by registrant's keys using BRC-42/43 derivation. Key updates require signatures from current keys. On-chain records provide tamper-proof proof of ownership.
+Registration transactions are signed by registrant's keys using BRC-42/43 derivation. Key updates require signatures from current keys. On-chain records provide tamper-proof proof of address ownership.
 
-**Certificates Optional**: BRC-52 certificates can enhance identity verification but are not required for basic paymail functionality. The system prioritizes simplicity while allowing optional certificate integration.
+**Certificates Optional**: BRC-52 certificates can layer identity verification on top of address ownership, but are not required for basic paymail addressing. The addressing layer prioritizes simplicity; the identity layer (certificates, trust networks) handles richer verification when needed.
 
 ### Squatting Considerations
 
@@ -426,7 +455,7 @@ These are handled at the user/wallet level, not by the overlay system:
 - **Cloud key backup**: Encrypted key backups with specialized providers
 - **Hardware wallet integration**: Keys stored on dedicated signing devices
 
-These solutions exist in the broader Bitcoin wallet ecosystem and apply equally to vendor-neutral paymail. Wallet developers should integrate appropriate recovery options for their users.
+These solutions exist in the broader Bitcoin wallet ecosystem and apply equally to open paymail. Wallet developers should integrate appropriate recovery options for their users.
 
 ---
 
@@ -469,9 +498,9 @@ These solutions exist in the broader Bitcoin wallet ecosystem and apply equally 
 
 ---
 
-## Comparison: Traditional vs Vendor-Neutral Paymail
+## Comparison: Traditional vs Open Paymail
 
-| Aspect | Traditional Paymail | Vendor-Neutral Paymail |
+| Aspect | Traditional Paymail | Open Paymail |
 |--------|--------------------|--------------------|
 | Identity format | `alice@domain.com` | `alice@paymail` |
 | Resolution | DNS lookup | Overlay lookup |
@@ -502,7 +531,7 @@ BSV's low transaction fees make micropayment-funded services viable. Payment-as-
 
 ### Why BRC Standards
 
-Leveraging existing BRC standards ensures interoperability and reduces implementation complexity. Standards provide proven patterns for overlay networks, message relay, and key management. Vendor-neutral standards prevent lock-in.
+Leveraging existing BRC standards ensures interoperability and reduces implementation complexity. Standards provide proven patterns for overlay networks, message relay, and key management. Open standards prevent lock-in.
 
 ---
 
@@ -536,7 +565,7 @@ This section captures open questions and areas where community feedback is activ
 
 ### Q4: Suffix Governance
 
-**Challenge**: Who controls which suffixes (`@paymail`, `@bitcoin`, `@bsv`) are recognized as vendor-neutral protocol identifiers?
+**Challenge**: Who controls which suffixes (`@paymail`, `@bitcoin`, `@bsv`) are recognized as open paymail protocol identifiers?
 
 **Current approach**: A registry mechanism needs to be designed and implemented as part of the standardization process.
 

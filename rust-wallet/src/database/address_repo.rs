@@ -149,6 +149,25 @@ impl<'a> AddressRepository<'a> {
         Ok(addresses)
     }
 
+    /// Get the maximum address index for a wallet (excluding special indices like -1)
+    ///
+    /// This is more reliable than trusting wallet.current_index, which can get out of sync.
+    /// Returns None if no addresses exist (excluding index -1).
+    pub fn get_max_index(&self, wallet_id: i64) -> Result<Option<i32>> {
+        let result: rusqlite::Result<i32> = self.conn.query_row(
+            "SELECT MAX(\"index\") FROM addresses WHERE wallet_id = ?1 AND \"index\" >= 0",
+            rusqlite::params![wallet_id],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(max_index) => Ok(Some(max_index)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(rusqlite::Error::InvalidColumnType(_, _, rusqlite::types::Type::Null)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Update address balance
     pub fn update_balance(&self, address_id: i64, balance: i64) -> Result<()> {
         self.conn.execute(
@@ -227,5 +246,59 @@ impl<'a> AddressRepository<'a> {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Get or create a placeholder address for external/custom script outputs.
+    ///
+    /// This is used for basket insertion outputs where we can't derive keys
+    /// (custom scripts, external tokens, etc.) but still need to track the UTXO.
+    ///
+    /// Uses index = -2 to distinguish from:
+    /// - Regular derived addresses (index >= 0)
+    /// - Master pubkey address (index = -1)
+    ///
+    /// # Arguments
+    /// * `wallet_id` - The wallet ID to create the address for
+    ///
+    /// # Returns
+    /// The address ID (existing or newly created)
+    pub fn get_or_create_external_address(&self, wallet_id: i64) -> Result<i64> {
+        // Use index -2 to indicate "external" address
+        // (index -1 is already used for master pubkey address)
+        let external_index = -2;
+
+        // Try to find existing external address
+        let existing: Result<i64> = self.conn.query_row(
+            "SELECT id FROM addresses WHERE wallet_id = ?1 AND \"index\" = ?2",
+            rusqlite::params![wallet_id, external_index],
+            |row| row.get(0),
+        );
+
+        match existing {
+            Ok(id) => {
+                info!("   Using existing external address id={}", id);
+                Ok(id)
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                self.conn.execute(
+                    "INSERT INTO addresses (wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at)
+                     VALUES (?1, ?2, 'EXTERNAL', 'EXTERNAL', 0, 0, 0, ?3)",
+                    rusqlite::params![wallet_id, external_index, now],
+                )?;
+
+                let id = self.conn.last_insert_rowid();
+                info!("   ✅ Created external placeholder address with id={}", id);
+                Ok(id)
+            }
+            Err(e) => {
+                error!("   ❌ Failed to check for external address: {}", e);
+                Err(e)
+            }
+        }
     }
 }

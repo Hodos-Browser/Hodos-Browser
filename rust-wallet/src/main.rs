@@ -14,6 +14,7 @@ mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
 mod beef_helpers;  // NEW: BEEF building helpers for listOutputs
+// mod beef_ancestors;  // Disabled: recursive ancestor collection replaced by original single-level BEEF building
 mod database;  // NEW: Database module
 mod utxo_sync;  // NEW: Background UTXO sync service
 mod cache_errors;  // NEW: Unified error types for caching
@@ -22,8 +23,11 @@ mod cache_sync;  // NEW: Background cache sync service
 mod balance_cache;  // NEW: In-memory balance cache
 mod backup;  // NEW: Database backup and restore utilities
 mod recovery;  // NEW: Wallet recovery from mnemonic
+mod arc_status_poller;  // NEW: ARC transaction status poller
+mod fee_rate_cache;  // NEW: Dynamic fee rate from ARC policy
 mod script;  // NEW: Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // NEW: Certificate management (BRC-52)
+// mod utxo_validation;  // Disabled: on-chain UTXO validation removed (caused false positives)
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -31,6 +35,15 @@ use message_relay::MessageStore;
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
 use std::sync::Arc;
+use std::collections::HashMap;
+
+/// Info needed to re-derive a child private key for signing PushDrop inputs.
+/// Populated by getPublicKey (forSelf=true), consumed by signAction.
+#[derive(Debug, Clone)]
+pub struct DerivedKeyInfo {
+    pub invoice: String,              // BRC-43 invoice number (e.g., "2-todo tokens-1")
+    pub counterparty_pubkey: Vec<u8>, // 33-byte compressed counterparty public key
+}
 
 // Global app state
 pub struct AppState {
@@ -38,7 +51,11 @@ pub struct AppState {
     pub whitelist: Arc<DomainWhitelistManager>,
     pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
-    pub balance_cache: Arc<balance_cache::BalanceCache>,  // NEW: In-memory balance cache
+    pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
+    pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
+    pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
+    pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
+    pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
 }
 
 #[actix_web::main]
@@ -128,6 +145,78 @@ async fn main() -> std::io::Result<()> {
                 eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
             }
 
+            // Ensure "default" basket exists (for existing wallets created before BRC-100 support)
+            if let Err(e) = db.ensure_default_basket_exists() {
+                eprintln!("   ⚠️  Failed to ensure default basket exists: {}", e);
+            }
+
+            // Cleanup stale pending transactions (created but never broadcast)
+            // These occur when the process crashes between creating a transaction and broadcasting it.
+            // Their change UTXOs are ghost outputs that don't exist on-chain.
+            {
+                use database::{TransactionRepository, UtxoRepository};
+                let conn = db.connection();
+                let tx_repo = TransactionRepository::new(conn);
+
+                // Find transactions stuck in 'pending' for more than 5 minutes
+                match tx_repo.get_stale_pending_transactions(300) {
+                    Ok(stale_txs) if !stale_txs.is_empty() => {
+                        println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
+                        let utxo_repo = UtxoRepository::new(conn);
+
+                        for (txid, inputs) in &stale_txs {
+                            // 1. Delete ghost change UTXOs (outputs of the never-broadcast tx)
+                            match utxo_repo.delete_by_txid(txid) {
+                                Ok(count) if count > 0 => {
+                                    println!("   🗑️  Deleted {} ghost UTXO(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                }
+                                _ => {}
+                            }
+
+                            // 2. Restore input UTXOs that were marked as spent by this tx
+                            match utxo_repo.restore_spent_by_txid(txid) {
+                                Ok(count) if count > 0 => {
+                                    println!("   ♻️  Restored {} input UTXO(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                }
+                                _ => {}
+                            }
+
+                            // 3. Mark the transaction as 'failed'
+                            if let Err(e) = tx_repo.update_broadcast_status(txid, "failed") {
+                                eprintln!("   ⚠️  Failed to update status for {}: {}", &txid[..std::cmp::min(16, txid.len())], e);
+                            }
+
+                            println!("   ✅ Cleaned up stale tx {} ({} inputs)", &txid[..std::cmp::min(16, txid.len())], inputs.len());
+                        }
+                        println!("   ✅ Stale transaction cleanup complete");
+                    }
+                    Ok(_) => {
+                        // No stale transactions - normal case
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Failed to check for stale pending transactions: {}", e);
+                    }
+                }
+            }
+
+            // Safety net: Restore any UTXOs still marked with placeholder spent_txid.
+            // This catches cases where the handler crashed between UTXO reservation
+            // and txid update (e.g., signing failure, deadlock, process kill).
+            {
+                use database::UtxoRepository;
+                let conn = db.connection();
+                let utxo_repo = UtxoRepository::new(conn);
+                match utxo_repo.restore_pending_placeholders() {
+                    Ok(count) if count > 0 => {
+                        println!("♻️  Restored {} UTXO(s) with stale placeholder reservations", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("   ⚠️  Failed to restore placeholder UTXOs: {}", e);
+                    }
+                }
+            }
+
             Arc::new(Mutex::new(db))
         }
         Err(e) => {
@@ -139,12 +228,17 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // Clone database for background sync (before moving into app_state)
+    // Clone database for background services (before moving into app_state)
     let database_for_sync = database.clone();
+    let database_for_arc_poller = database.clone();
 
     // Initialize balance cache
     let balance_cache = Arc::new(balance_cache::BalanceCache::new());
     println!("✅ Balance cache initialized");
+
+    // Initialize fee rate cache (fetches from ARC /v1/policy)
+    let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());
+    println!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
 
     // Create app state
     let app_state = web::Data::new(AppState {
@@ -153,7 +247,13 @@ async fn main() -> std::io::Result<()> {
         message_store,
         auth_sessions,
         balance_cache,
+        fee_rate_cache,
+        utxo_selection_lock: Arc::new(tokio::sync::Mutex::new(())),  // Prevents concurrent UTXO selection
+        create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
+        derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
     });
+    println!("✅ UTXO selection lock initialized");
+    println!("✅ createAction serialization lock initialized");
 
     println!();
     println!("🌐 Starting HTTP server...");
@@ -206,6 +306,12 @@ async fn main() -> std::io::Result<()> {
         cache_sync::start_cache_sync_service(app_state_for_cache).await;
     });
     println!("   ✅ Cache sync will run every 10 minutes");
+    println!();
+
+    // Start ARC status poller (checks broadcast transactions for confirmation)
+    println!("🔄 Starting ARC status poller...");
+    arc_status_poller::start_arc_status_poller(database_for_arc_poller);
+    println!("   ✅ ARC poller will check every {} seconds", arc_status_poller::POLL_INTERVAL_SECONDS);
     println!();
 
     // Start HTTP server
@@ -297,6 +403,7 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))
+            .route("/wallet/cleanup", web::post().to(handlers::wallet_cleanup))
 
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))
