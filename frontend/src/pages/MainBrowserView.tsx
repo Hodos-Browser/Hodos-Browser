@@ -15,12 +15,14 @@ import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { TabBar } from '../components/TabBar';
+import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
 
 const MainBrowserView: React.FC = () => {
     // Address bar state
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
+    const [autocompleteText, setAutocompleteText] = useState<string>('');
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -49,20 +51,50 @@ const MainBrowserView: React.FC = () => {
         }
     }, [activeTabId, tabs, isEditingAddress]);
 
+    // Listen for autocomplete suggestions from omnibox overlay
+    React.useEffect(() => {
+        const handleAutocomplete = (event: MessageEvent) => {
+            if (event.data?.type === 'omnibox_autocomplete') {
+                const suggestion = event.data.suggestion;
+                if (suggestion && address && isEditingAddress) {
+                    // Only show autocomplete if suggestion starts with current input
+                    if (suggestion.toLowerCase().startsWith(address.toLowerCase())) {
+                        setAutocompleteText(suggestion.slice(address.length));
+                    } else {
+                        setAutocompleteText('');
+                    }
+                } else {
+                    setAutocompleteText('');
+                }
+            }
+        };
+
+        window.addEventListener('message', handleAutocomplete);
+        return () => window.removeEventListener('message', handleAutocomplete);
+    }, [address, isEditingAddress]);
+
     // Keyboard shortcuts
-    // TODO Phase 5: Restore Ctrl+L focus when Omnibox exposes focus method
     useKeyboardShortcuts({
         onNewTab: createTab,
         onCloseTab: closeActiveTab,
         onNextTab: nextTab,
         onPrevTab: prevTab,
         onSwitchToTab: switchToTabByIndex,
-        onFocusAddressBar: () => {}, // Temporarily disabled until Omnibox exposes focus method
+        onFocusAddressBar: () => {}, // TODO: Implement address bar focus functionality
         onReload: reload,
     });
 
-    const handleNavigate = (url: string) => {
-        navigate(url);
+    const handleNavigate = (input: string) => {
+        // Detect if input is a URL or search query
+        if (isUrl(input)) {
+            // It's a URL - normalize and navigate
+            const url = normalizeUrl(input);
+            navigate(url);
+        } else {
+            // It's a search query - search Google
+            const searchUrl = toGoogleSearchUrl(input);
+            navigate(searchUrl);
+        }
     };
 
     return (
@@ -153,22 +185,50 @@ const MainBrowserView: React.FC = () => {
                     type="text"
                     value={address}
                     onChange={(e) => {
-                        setAddress(e.target.value);
+                        const newValue = e.target.value;
+                        setAddress(newValue);
                         setIsEditingAddress(true);
+                        setAutocompleteText(''); // Clear autocomplete on input change
+
+                        // Send query to omnibox overlay for suggestions
+                        if (newValue.length > 0) {
+                            window.cefMessage?.send('omnibox_update_query', [newValue]);
+                            window.cefMessage?.send('omnibox_show', [newValue]);
+                        } else {
+                            window.cefMessage?.send('omnibox_hide', []);
+                        }
                     }}
                     onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                             handleNavigate(address);
                             setIsEditingAddress(false);
+                            setAutocompleteText('');
                             e.currentTarget.blur();
+                            // Navigation dismisses overlay
+                            window.cefMessage?.send('omnibox_hide', []);
+                        } else if (e.key === 'Escape') {
+                            // Escape dismisses overlay, keeps current input
+                            window.cefMessage?.send('omnibox_hide', []);
+                            setIsEditingAddress(false);
+                            setAutocompleteText('');
+                            e.currentTarget.blur();
+                        } else if (e.key === 'Tab' && autocompleteText) {
+                            // Tab accepts the autocomplete suggestion
+                            e.preventDefault();
+                            setAddress(address + autocompleteText);
+                            setAutocompleteText('');
                         }
                     }}
                     onFocus={(e) => {
                         e.target.select();
                         setIsEditingAddress(true);
+                        // Preemptive creation: create overlay subprocess on focus but don't show
+                        // Only shows when user types (see onChange handler)
+                        window.cefMessage?.send('omnibox_create', []);
                     }}
                     onBlur={() => {
                         setIsEditingAddress(false);
+                        setAutocompleteText('');
                     }}
                     placeholder="Search or enter address"
                     style={{

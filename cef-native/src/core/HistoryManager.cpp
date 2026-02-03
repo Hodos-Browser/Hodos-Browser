@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <algorithm>
 
 #define LOG_DEBUG_HISTORY(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO_HISTORY(msg) Logger::Log(msg, 1, 0)
@@ -630,5 +631,134 @@ std::vector<HistoryEntry> HistoryManager::GetHistorySimple(int limit) {
     LOG_INFO_HISTORY("📚 Simple query returned " + std::to_string(row_count) + " rows");
 
     sqlite3_finalize(stmt);
+    return entries;
+}
+
+std::string HistoryManager::extractDomain(const std::string& url) {
+    // Extract domain from URL (between :// and first /)
+    // Returns lowercase domain
+
+    size_t protocol_pos = url.find("://");
+    if (protocol_pos == std::string::npos) {
+        return "";
+    }
+
+    size_t domain_start = protocol_pos + 3;
+    size_t domain_end = url.find("/", domain_start);
+
+    std::string domain;
+    if (domain_end == std::string::npos) {
+        domain = url.substr(domain_start);
+    } else {
+        domain = url.substr(domain_start, domain_end - domain_start);
+    }
+
+    // Convert to lowercase
+    for (char& c : domain) {
+        c = std::tolower(static_cast<unsigned char>(c));
+    }
+
+    return domain;
+}
+
+std::vector<HistoryEntryWithScore> HistoryManager::SearchHistoryWithFrecency(const std::string& query, int limit) {
+    std::vector<HistoryEntryWithScore> entries;
+
+    // Try to open database if not already open
+    if (!history_db_ && !OpenDatabase()) {
+        LOG_INFO_HISTORY("⚠️ History database not available for frecency search");
+        return entries;
+    }
+
+    if (!history_db_) {
+        return entries;
+    }
+
+    LOG_INFO_HISTORY("🔍 SearchHistoryWithFrecency called with query: " + query);
+
+    // SQL query with frecency scoring
+    const char* sql = R"(
+        WITH norm AS (
+            SELECT MAX(visit_count) AS max_visits, MAX(last_visit_time) AS max_time
+            FROM urls WHERE hidden = 0
+        )
+        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time,
+            CASE
+                WHEN norm.max_visits > 0 AND norm.max_time > 0 THEN
+                    ((CAST(u.visit_count AS REAL) / norm.max_visits) * 0.5 +
+                     (CAST(u.last_visit_time AS REAL) / norm.max_time) * 0.5)
+                ELSE 0.0
+            END AS frecency_score
+        FROM urls u, norm
+        WHERE u.hidden = 0
+          AND (LOWER(u.url) LIKE LOWER(?) OR LOWER(u.title) LIKE LOWER(?))
+        ORDER BY frecency_score DESC
+        LIMIT ?
+    )";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare frecency query: " + std::string(sqlite3_errmsg(history_db_)));
+        return entries;
+    }
+
+    // Bind parameters with wildcards for LIKE matching
+    std::string pattern = "%" + query + "%";
+    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, limit);
+
+    LOG_INFO_HISTORY("📚 Executing frecency query with pattern: " + pattern);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        HistoryEntryWithScore entry_with_score;
+        entry_with_score.entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry_with_score.entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry_with_score.entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry_with_score.entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry_with_score.entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry_with_score.entry.visit_time = entry_with_score.entry.last_visit_time;
+        entry_with_score.entry.transition = 0;
+
+        entry_with_score.frecency_score = sqlite3_column_double(stmt, 5);
+
+        entries.push_back(entry_with_score);
+    }
+
+    sqlite3_finalize(stmt);
+
+    LOG_INFO_HISTORY("📚 Frecency query returned " + std::to_string(entries.size()) + " entries before domain boost");
+
+    // Apply 1.5x domain boost post-query
+    std::string query_lower = query;
+    for (char& c : query_lower) {
+        c = std::tolower(static_cast<unsigned char>(c));
+    }
+
+    for (auto& entry : entries) {
+        std::string domain = extractDomain(entry.entry.url);
+
+        // Check if query matches domain (domain starts with query or equals query)
+        if (!domain.empty() && (domain == query_lower || domain.find(query_lower) == 0)) {
+            entry.frecency_score *= 1.5;
+            LOG_INFO_HISTORY("📈 Domain boost applied to: " + entry.entry.url + " (new score: " + std::to_string(entry.frecency_score) + ")");
+        }
+    }
+
+    // Re-sort by final score descending
+    std::sort(entries.begin(), entries.end(),
+        [](const HistoryEntryWithScore& a, const HistoryEntryWithScore& b) {
+            return a.frecency_score > b.frecency_score;
+        });
+
+    LOG_INFO_HISTORY("✅ SearchHistoryWithFrecency returning " + std::to_string(entries.size()) + " entries");
+
     return entries;
 }

@@ -166,7 +166,7 @@ const App = () => {
         <Route path="/wallet" element={<WalletOverlayRoot />} />
         <Route path="/backup" element={<BackupOverlayRoot />} />
         <Route path="/brc100-auth" element={<BRC100AuthOverlayRoot />} />
-        <Route path="/omnibox-overlay" element={<OmniboxOverlayRoot />} />
+        <Route path="/omnibox" element={<OmniboxOverlayRoot />} />
       </Routes>
 
       {/* BRC-100 Authentication Modal */}

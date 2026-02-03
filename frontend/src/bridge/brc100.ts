@@ -440,9 +440,13 @@ declare global {
       history?: {
         get(params?: { limit?: number; offset?: number }): any[];
         search(params: { search?: string; startTime?: number; endTime?: number; limit?: number; offset?: number }): any[];
+        searchWithFrecency(params: { query: string; limit?: number }): any[];
         delete(url: string): boolean;
         clearAll(): boolean;
         clearRange(params: { startTime: number; endTime: number }): boolean;
+      };
+      googleSuggest?: {
+        fetch(query: string): number;
       };
       wallet?: {
         getStatus(): Promise<any>;

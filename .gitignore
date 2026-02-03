@@ -49,3 +49,5 @@ rust-wallet/HodosBrowser/
 **/wallet/wallet.db                                                                                                          
 **/wallet/wallet.db-shm                                                                                                      
 **/wallet/wallet.db-wal 
+.planning
+.claude

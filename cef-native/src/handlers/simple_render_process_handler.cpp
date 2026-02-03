@@ -197,6 +197,36 @@ private:
     IMPLEMENT_REFCOUNTING(OverlayCloseHandler);
 };
 
+// Handler for omnibox overlay.close() - sends omnibox_hide message
+class OmniboxCloseHandler : public CefV8Handler {
+public:
+    OmniboxCloseHandler() {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        LOG_DEBUG_RENDER("🔍 omnibox overlay.close() called");
+
+        // Send omnibox_hide message
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        if (context && context->GetFrame()) {
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("omnibox_hide");
+            context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
+            LOG_DEBUG_RENDER("✅ omnibox overlay.close() sent omnibox_hide message");
+        }
+
+        return true;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(OmniboxCloseHandler);
+};
+
 // Handler for history operations (cross-platform)
 class HistoryV8Handler : public CefV8Handler {
 public:
@@ -376,12 +406,103 @@ public:
 
             return true;
         }
+        else if (name == "searchWithFrecency") {
+            // arguments[0] = { query: string, limit?: number }
+            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
+                exception = "searchWithFrecency() requires a parameters object with query";
+                return true;
+            }
+
+            CefRefPtr<CefV8Value> params = arguments[0];
+
+            std::string query = "";
+            int limit = 6;
+
+            if (params->HasValue("query") && params->GetValue("query")->IsString()) {
+                query = params->GetValue("query")->GetStringValue().ToString();
+            }
+
+            if (params->HasValue("limit") && params->GetValue("limit")->IsInt()) {
+                limit = params->GetValue("limit")->GetIntValue();
+            }
+
+            LOG_INFO_RENDER("🔍 history.searchWithFrecency() called with query: " + query);
+
+            auto results = manager.SearchHistoryWithFrecency(query, limit);
+
+            // Convert to V8 array with score
+            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
+            for (size_t i = 0; i < results.size(); i++) {
+                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
+                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].entry.url), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].entry.title), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].entry.visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("lastVisitTime", CefV8Value::CreateDouble(static_cast<double>(results[i].entry.last_visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
+                entry_obj->SetValue("frecencyScore", CefV8Value::CreateDouble(results[i].frecency_score), V8_PROPERTY_ATTRIBUTE_NONE);
+
+                retval->SetValue(static_cast<int>(i), entry_obj);
+            }
+
+            LOG_INFO_RENDER("✅ searchWithFrecency returned " + std::to_string(results.size()) + " entries");
+            return true;
+        }
 
         return false;
     }
 
 private:
     IMPLEMENT_REFCOUNTING(HistoryV8Handler);
+};
+
+// ========== GOOGLE SUGGEST V8 HANDLER ==========
+// Handler for window.hodosBrowser.googleSuggest API
+class GoogleSuggestV8Handler : public CefV8Handler {
+public:
+    GoogleSuggestV8Handler() : nextRequestId_(1) {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        if (name == "fetch") {
+            // Expect one argument: query string
+            if (arguments.size() < 1 || !arguments[0]->IsString()) {
+                exception = "fetch() requires one string argument (query)";
+                return true;
+            }
+
+            std::string query = arguments[0]->GetStringValue();
+            int requestId = nextRequestId_++;
+
+            LOG_DEBUG_RENDER("🔍 googleSuggest.fetch() called with query: " + query + " (requestId: " + std::to_string(requestId) + ")");
+
+            // Send IPC message to browser process with requestId
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("google_suggest_request");
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            args->SetString(0, query);
+            args->SetInt(1, requestId);
+
+            CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+            CefRefPtr<CefBrowser> browser = context->GetBrowser();
+            browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, message);
+
+            LOG_DEBUG_RENDER("🔍 google_suggest_request sent to browser process with requestId: " + std::to_string(requestId));
+
+            // Return the request ID so JavaScript can match responses
+            retval = CefV8Value::CreateInt(requestId);
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    int nextRequestId_;
+    IMPLEMENT_REFCOUNTING(GoogleSuggestV8Handler);
 };
 
 SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
@@ -426,11 +547,15 @@ void SimpleRenderProcessHandler::OnContextCreated(
     std::string url = frame->GetURL().ToString();
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
     bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
+    bool isOmniboxOverlay = (url.find("/omnibox") != std::string::npos);
 
     if (isOverlayBrowser) {
         LOG_DEBUG_RENDER("🎯 OVERLAY BROWSER V8 CONTEXT CREATED!");
         LOG_DEBUG_RENDER("🎯 URL: " + url);
         LOG_DEBUG_RENDER("🎯 Setting up hodosBrowser for overlay browser");
+        if (isOmniboxOverlay) {
+            LOG_DEBUG_RENDER("🔍 Detected omnibox overlay - will inject overlay.close()");
+        }
     }
 
     CefRefPtr<CefV8Value> global = context->GetGlobal();
@@ -507,10 +632,18 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefRefPtr<CefV8Value> overlayObject = CefV8Value::CreateObject(nullptr, nullptr);
         hodosBrowser->SetValue("overlay", overlayObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-        // Add close method for overlay browsers - uses cefMessage internally
-        overlayObject->SetValue("close",
-            CefV8Value::CreateFunction("close", new OverlayCloseHandler()),
-            V8_PROPERTY_ATTRIBUTE_NONE);
+        // Add close method for overlay browsers
+        // Omnibox overlay sends "omnibox_hide", other overlays send "overlay_close"
+        if (isOmniboxOverlay) {
+            overlayObject->SetValue("close",
+                CefV8Value::CreateFunction("close", new OmniboxCloseHandler()),
+                V8_PROPERTY_ATTRIBUTE_NONE);
+            LOG_DEBUG_RENDER("🔍 Omnibox overlay.close() injected (sends omnibox_hide)");
+        } else {
+            overlayObject->SetValue("close",
+                CefV8Value::CreateFunction("close", new OverlayCloseHandler()),
+                V8_PROPERTY_ATTRIBUTE_NONE);
+        }
 
         LOG_DEBUG_RENDER("🎯 Overlay object created with close method");
     } else {
@@ -564,6 +697,9 @@ void SimpleRenderProcessHandler::OnContextCreated(
     historyObject->SetValue("search",
         CefV8Value::CreateFunction("search", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
+    historyObject->SetValue("searchWithFrecency",
+        CefV8Value::CreateFunction("searchWithFrecency", historyHandler),
+        V8_PROPERTY_ATTRIBUTE_NONE);
     historyObject->SetValue("delete",
         CefV8Value::CreateFunction("delete", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
@@ -577,7 +713,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("test", historyHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
 
-    LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(6) + " functions");
+    LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(7) + " functions");
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);
@@ -586,6 +722,19 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // Create the send function for cefMessage
     CefRefPtr<CefV8Value> sendFunction = CefV8Value::CreateFunction("send", new CefMessageSendHandler());
     cefMessageObject->SetValue("send", sendFunction, V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // Inject Google Suggest API for omnibox overlay only
+    if (isOmniboxOverlay) {
+        CefRefPtr<CefV8Value> googleSuggestObject = CefV8Value::CreateObject(nullptr, nullptr);
+        hodosBrowser->SetValue("googleSuggest", googleSuggestObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+
+        CefRefPtr<GoogleSuggestV8Handler> googleSuggestHandler = new GoogleSuggestV8Handler();
+        googleSuggestObject->SetValue("fetch",
+            CefV8Value::CreateFunction("fetch", googleSuggestHandler),
+            V8_PROPERTY_ATTRIBUTE_NONE);
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest API injected for omnibox overlay");
+    }
 
 #ifdef _WIN32
     // Register BRC-100 API (Windows-only)
@@ -1179,6 +1328,44 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         // Execute JavaScript callback
         std::string js = "if (window.onSetBackupModalStateResponse) { window.onSetBackupModalStateResponse(" + responseJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
+    // ========== OMNIBOX QUERY UPDATE ==========
+    if (message_name == "omnibox_query_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Omnibox query update received in renderer: " + query);
+
+        // Escape query for JavaScript string
+        std::string escapedQuery = escapeJsonForJs(query);
+
+        // Dispatch CustomEvent to JavaScript
+        std::string js = "window.dispatchEvent(new CustomEvent('omniboxQueryUpdate', { detail: { query: '" + escapedQuery + "' } }));";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 omniboxQueryUpdate event dispatched");
+        return true;
+    }
+
+    // ========== GOOGLE SUGGEST RESPONSE ==========
+    if (message_name == "google_suggest_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestionsJson = args->GetString(0);
+        int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson + " (requestId: " + std::to_string(requestId) + ")");
+
+        // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
+        std::string escapedJson = escapeJsonForJs(suggestionsJson);
+
+        // Dispatch custom event with suggestions and requestId
+        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: { suggestions: JSON.parse('" + escapedJson + "'), requestId: " + std::to_string(requestId) + " } }));";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
 
         return true;
     }

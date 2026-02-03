@@ -25,6 +25,7 @@ extern HWND g_settings_overlay_hwnd;
 extern HWND g_wallet_overlay_hwnd;
 extern HWND g_backup_overlay_hwnd;
 extern HWND g_brc100_auth_overlay_hwnd;
+extern HWND g_omnibox_overlay_hwnd;
 #endif
 
 SimpleApp::SimpleApp()
@@ -786,101 +787,6 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
 #endif // _WIN32
 
 #ifdef _WIN32
-void CreateOmniboxOverlay(HINSTANCE hInstance) {
-    LOG_INFO_APP("🔍 Creating omnibox overlay");
-
-    // Check if overlay already exists
-    extern HWND g_omnibox_overlay_hwnd;
-    if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
-        LOG_WARNING_APP("🔍 Omnibox overlay already exists, showing it");
-        ShowWindow(g_omnibox_overlay_hwnd, SW_SHOW);
-        SetForegroundWindow(g_omnibox_overlay_hwnd);
-        return;
-    }
-
-    // Get main window position
-    extern HWND g_hwnd;
-    RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
-    int width = mainRect.right - mainRect.left;
-
-    // Omnibox overlay: positioned at top, 300px height for dropdown
-    int overlayHeight = 300;
-
-    // Register window class if not already registered
-    WNDCLASSEX wc = {0};
-    wc.cbSize = sizeof(WNDCLASSEX);
-    if (!GetClassInfoEx(hInstance, L"CEFOmniboxOverlayWindow", &wc)) {
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = DefWindowProc;
-        wc.hInstance = hInstance;
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"CEFOmniboxOverlayWindow";
-        RegisterClassEx(&wc);
-    }
-
-    // Create overlay window (TOPMOST and LAYERED like wallet)
-    HWND omnibox_hwnd = CreateWindowEx(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        L"CEFOmniboxOverlayWindow",
-        L"Omnibox Overlay",
-        WS_POPUP | WS_VISIBLE,
-        mainRect.left, mainRect.top, width, overlayHeight,
-        g_hwnd, nullptr, hInstance, nullptr);
-
-    if (!omnibox_hwnd) {
-        LOG_ERROR_APP("❌ Failed to create omnibox overlay HWND");
-        return;
-    }
-
-    g_omnibox_overlay_hwnd = omnibox_hwnd;
-
-    // Set transparency (75% opaque background)
-    SetLayeredWindowAttributes(omnibox_hwnd, 0, 192, LWA_ALPHA);
-
-    // Enable mouse input
-    EnableWindow(omnibox_hwnd, TRUE);
-
-    // Create CEF browser in overlay
-    CefWindowInfo window_info;
-    window_info.windowless_rendering_enabled = true;
-    window_info.SetAsPopup(omnibox_hwnd, "OmniboxOverlay");
-
-    CefBrowserSettings settings;
-    settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
-    settings.javascript = STATE_ENABLED;
-    settings.javascript_access_clipboard = STATE_ENABLED;
-    settings.javascript_dom_paste = STATE_ENABLED;
-
-    CefRefPtr<SimpleHandler> handler(new SimpleHandler("omnibox_overlay"));
-    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(omnibox_hwnd, width, overlayHeight);
-    handler->SetRenderHandler(render_handler);
-
-    std::string url = "http://127.0.0.1:5137/omnibox-overlay";
-
-    bool result = CefBrowserHost::CreateBrowser(
-        window_info,
-        handler,
-        url,
-        settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
-
-    if (result) {
-        LOG_INFO_APP("✅ Omnibox overlay created");
-
-        // Enable mouse input
-        LONG exStyle = GetWindowLong(omnibox_hwnd, GWL_EXSTYLE);
-        SetWindowLong(omnibox_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-    } else {
-        LOG_ERROR_APP("❌ Failed to create omnibox overlay browser");
-    }
-}
-#endif // _WIN32
-
-#ifdef _WIN32
 void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     LOG_INFO_APP("📋 Creating settings menu dropdown overlay");
 
@@ -962,5 +868,192 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     } else {
         LOG_ERROR_APP("❌ Failed to create settings menu browser");
     }
+}
+
+void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
+    LOG_INFO_APP("🔍 Creating omnibox overlay with keep-alive pattern (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ")");
+
+    // Keep-alive check: if HWND already exists, conditionally show it
+    if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
+        LOG_INFO_APP("🔍 Omnibox overlay already exists");
+        if (showImmediately) {
+            ShowOmniboxOverlay();
+        }
+        return;
+    }
+
+    // Get main window dimensions
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+
+    // Get header dimensions
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position from header geometry
+    // Tab bar height: 40px, Toolbar height: 54px (total 94px)
+    // Address bar left offset: 8px padding + (3 buttons * 34px) + (3 gaps * 6px) = 128px
+    // Address bar right offset: similar for 3 right buttons = ~128px from right edge
+    int overlayX = mainRect.left + 160;
+    int overlayY = headerRect.top + 104;  // Flush below toolbar
+    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
+    int overlayHeight = 350;  // Max height, will be dynamically adjusted by content later
+
+    LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(overlayWidth) + "x" +
+                 std::to_string(overlayHeight));
+
+    // Create HWND for omnibox overlay
+    HWND omnibox_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFOmniboxOverlayWindow",
+        L"Omnibox Overlay",
+        WS_POPUP,
+        overlayX, overlayY, overlayWidth, overlayHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!omnibox_hwnd) {
+        LOG_ERROR_APP("❌ Failed to create omnibox overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position with SWP_NOACTIVATE (conditionally show)
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
+    SetWindowPos(omnibox_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, overlayWidth, overlayHeight,
+        flags);
+
+    // Store HWND globally
+    g_omnibox_overlay_hwnd = omnibox_hwnd;
+    LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
+
+    // Create CEF browser subprocess for omnibox overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(omnibox_hwnd, "OmniboxOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> omnibox_handler(new SimpleHandler("omnibox"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(omnibox_hwnd, overlayWidth, overlayHeight);
+    omnibox_handler->SetRenderHandler(render_handler);
+
+    // Minimal isolation: use global context (shared cache/cookies as per CONTEXT.md decision)
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, omnibox_handler,
+        "http://127.0.0.1:5137/omnibox",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("✅ Omnibox overlay browser created with subprocess");
+    } else {
+        LOG_ERROR_APP("❌ Failed to create omnibox overlay browser");
+    }
+}
+
+void ShowOmniboxOverlay() {
+    // Guard: verify HWND exists
+    if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
+        LOG_WARNING_APP("⚠️ Cannot show omnibox overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("🔍 Showing omnibox overlay");
+
+    // Install global mouse hook for click-outside detection
+    extern HHOOK g_omnibox_mouse_hook;
+    extern LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_omnibox_mouse_hook) {
+        g_omnibox_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, OmniboxMouseHookProc, nullptr, 0);
+        if (g_omnibox_mouse_hook) {
+            LOG_INFO_APP("✅ Omnibox mouse hook installed for click-outside detection");
+        } else {
+            LOG_WARNING_APP("⚠️ Failed to install omnibox mouse hook. Error: " + std::to_string(GetLastError()));
+        }
+    }
+
+    // Recalculate position in case address bar moved
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    int overlayX = mainRect.left + 160;
+    int overlayY = headerRect.top + 104;
+    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
+    int overlayHeight = 350;
+
+    // Force position and show with SWP_NOACTIVATE
+    SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, overlayWidth, overlayHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    // Remove WS_EX_TRANSPARENT to enable mouse input
+    LONG exStyle = GetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Clear any persistent focus states by executing blur on active element
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+    if (omnibox_browser && omnibox_browser->GetMainFrame()) {
+        omnibox_browser->GetHost()->WasResized();
+        omnibox_browser->GetHost()->Invalidate(PET_VIEW);
+
+        // Execute JavaScript to blur any focused elements
+        std::string blurJs = "if (document.activeElement) { document.activeElement.blur(); }";
+        omnibox_browser->GetMainFrame()->ExecuteJavaScript(blurJs, "about:blank", 0);
+
+        LOG_INFO_APP("🔍 Cleared focus states in omnibox browser");
+    }
+
+    LOG_INFO_APP("✅ Omnibox overlay shown");
+}
+
+void HideOmniboxOverlay() {
+    // Guard: verify HWND exists
+    if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
+        LOG_WARNING_APP("⚠️ Cannot hide omnibox overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("🔍 Hiding omnibox overlay");
+
+    // Remove global mouse hook
+    extern HHOOK g_omnibox_mouse_hook;
+    if (g_omnibox_mouse_hook) {
+        UnhookWindowsHookEx(g_omnibox_mouse_hook);
+        g_omnibox_mouse_hook = nullptr;
+        LOG_INFO_APP("✅ Omnibox mouse hook removed");
+    }
+
+    // Clear focus from omnibox browser before hiding
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+    if (omnibox_browser) {
+        omnibox_browser->GetHost()->SetFocus(false);
+        LOG_INFO_APP("✅ Cleared focus from omnibox browser");
+    }
+
+    // Hide window (keep-alive - don't destroy)
+    ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
+
+    // Return focus to header browser
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+        LOG_INFO_APP("✅ Returned focus to header browser");
+    }
+
+    LOG_INFO_APP("✅ Omnibox overlay hidden");
 }
 #endif // _WIN32
