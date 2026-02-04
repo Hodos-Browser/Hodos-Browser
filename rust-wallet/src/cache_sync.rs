@@ -41,15 +41,14 @@ async fn sync_cache_for_confirmed_utxos(
     let mut cached_count = 0;
     const BATCH_SIZE: usize = 50;  // Limit to avoid rate limits
 
-    // Get UTXOs without cached proofs
+    // Get UTXOs without proven_txs records (no immutable proof yet)
     let utxos_to_sync: Vec<(String, u32, Option<i64>)> = {
         let db = state.database.lock().unwrap();
         let mut stmt = db.connection().prepare(
             "SELECT DISTINCT u.txid, u.vout, u.id
              FROM utxos u
-             LEFT JOIN parent_transactions pt ON pt.txid = u.txid
-             LEFT JOIN merkle_proofs mp ON mp.parent_txn_id = pt.id
-             WHERE u.is_spent = 0 AND mp.id IS NULL
+             LEFT JOIN proven_txs pt ON pt.txid = u.txid
+             WHERE u.is_spent = 0 AND pt.provenTxId IS NULL
              LIMIT ?"
         )?;
 
@@ -100,13 +99,13 @@ async fn sync_cache_for_confirmed_utxos(
             }
         }
 
-        // 2. Fetch TSC proof (if transaction is confirmed)
+        // 2. Fetch TSC proof and create proven_txs record (if transaction is confirmed)
         {
             let has_proof = {
                 let db = state.database.lock().unwrap();
-                let merkle_proof_repo = MerkleProofRepository::new(db.connection());
-                merkle_proof_repo.get_by_parent_txid(&txid)?.is_some()
-            }; // db is dropped here when merkle_proof_repo goes out of scope
+                let proven_tx_repo = ProvenTxRepository::new(db.connection());
+                proven_tx_repo.get_by_txid(&txid).map(|r| r.is_some()).unwrap_or(false)
+            };
 
             if !has_proof {
                 // Fetch TSC proof from API (without holding database lock)
@@ -126,7 +125,6 @@ async fn sync_cache_for_confirmed_utxos(
 
                         // Enhance TSC proof with block height
                         let enhanced_tsc = if let Some(height) = cached_height {
-                            // Use cached height
                             let mut enhanced = tsc_json.clone();
                             enhanced["height"] = serde_json::json!(height);
                             enhanced
@@ -157,29 +155,71 @@ async fn sync_cache_for_confirmed_utxos(
                                 }
                             } // db lock dropped
 
-                            // Enhance TSC proof
                             let mut enhanced = tsc_json.clone();
                             enhanced["height"] = serde_json::json!(height);
                             enhanced
                         } else {
-                            // Should not reach here
                             continue;
                         };
 
-                        // Cache the proof (lock again for writing)
+                        // Create immutable proven_txs record
                         {
                             let db = state.database.lock().unwrap();
-                            let parent_tx_repo = ParentTransactionRepository::new(db.connection());
-                            if let Some(parent_txn_id) = parent_tx_repo.get_id_by_txid(&txid)? {
-                                let target_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-                                let nodes_json = serde_json::to_string(&enhanced_tsc["nodes"])?;
-                                let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                            let conn = db.connection();
 
-                                let merkle_proof_repo = MerkleProofRepository::new(db.connection());
-                                merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, target_hash, &nodes_json)?;
-                                cached_count += 1;
-                                log::debug!("   💾 Cached Merkle proof for {}", txid);
+                            let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
+                            let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                            let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
+
+                            // Serialize TSC JSON to bytes for merkle_path BLOB
+                            let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc)?;
+
+                            // Get raw_tx bytes from parent_transactions cache
+                            let raw_tx_bytes = {
+                                let parent_tx_repo = ParentTransactionRepository::new(conn);
+                                match parent_tx_repo.get_by_txid(&txid) {
+                                    Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
+                                    _ => Vec::new(),
+                                }
+                            };
+
+                            let proven_tx_repo = ProvenTxRepository::new(conn);
+                            match proven_tx_repo.insert_or_get(
+                                &txid, block_height, tx_index,
+                                &merkle_path_bytes, &raw_tx_bytes,
+                                block_hash, "",
+                            ) {
+                                Ok(proven_tx_id) => {
+                                    // Link to transaction if it exists
+                                    let _ = proven_tx_repo.link_transaction(&txid, proven_tx_id);
+
+                                    // Update transaction status to completed (proof = confirmed on-chain)
+                                    let tx_repo = TransactionRepository::new(conn);
+                                    if let Err(e) = tx_repo.update_broadcast_status(&txid, "confirmed") {
+                                        log::warn!("   ⚠️  Failed to update tx status for {}: {}", txid, e);
+                                    }
+                                    if let Err(e) = tx_repo.update_confirmations(&txid, 1, Some(block_height)) {
+                                        log::warn!("   ⚠️  Failed to update confirmations for {}: {}", txid, e);
+                                    }
+
+                                    // Update proven_tx_reqs if one exists for this txid
+                                    let req_repo = ProvenTxReqRepository::new(conn);
+                                    if let Ok(Some(req)) = req_repo.get_by_txid(&txid) {
+                                        let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
+                                        let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
+                                        let _ = req_repo.add_history_note(
+                                            req.proven_tx_req_id,
+                                            "completed",
+                                            &format!("Proof acquired via cache sync at height {}", block_height),
+                                        );
+                                    }
+
+                                    cached_count += 1;
+                                    log::info!("   💾 Created proven_txs record for {} (status updated)", txid);
+                                }
+                                Err(e) => {
+                                    log::warn!("   ⚠️  Failed to create proven_txs record for {}: {}", txid, e);
+                                }
                             }
                         }
                     }

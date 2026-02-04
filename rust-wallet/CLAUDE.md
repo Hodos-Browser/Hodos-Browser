@@ -49,9 +49,46 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/crypto/brc42.rs` | `derive_child_private_key`, `derive_child_public_key` |
 | `src/crypto/brc43.rs` | `InvoiceNumber`, `SecurityLevel`, `normalize_protocol_id` |
 | `src/crypto/signing.rs` | `sha256`, `hmac_sha256`, `verify_hmac_sha256` |
-| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository` |
+| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository`, `ProvenTxRepository`, `ProvenTxReqRepository` |
 | `src/database/helpers.rs` | `get_master_private_key_from_db`, `get_master_public_key_from_db` |
+| `src/database/proven_tx_repo.rs` | `ProvenTxRepository`: `insert_or_get`, `get_by_txid`, `get_merkle_proof_as_tsc`, `link_transaction` — immutable proof records |
+| `src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository`: `create`, `get_by_txid`, `update_status`, `link_proven_tx`, `add_history_note` — proof lifecycle tracking |
+| `src/arc_status_poller.rs` | Background ARC polling for MINED status, creates `proven_txs` records, reconciles with `cache_sync` |
+| `src/cache_sync.rs` | Background BEEF cache sync, creates `proven_txs` records from WhatsOnChain TSC proofs |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
+
+## Database Schema (V16)
+
+Current migration version: **V16**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+
+| Table | Purpose | Phase |
+|-------|---------|-------|
+| wallets | Master key storage (mnemonic, HD index) | Original |
+| addresses | HD address derivation cache | Original |
+| transactions | Transaction records, `new_status` column (V15), `proven_tx_id` FK (V16) | V15/V16 |
+| utxos | UTXO tracking (is_spent, spent_txid) | Original |
+| parent_transactions | Raw tx cache for BEEF building | Original |
+| merkle_proofs | **Deprecated** — no longer written to. Replaced by `proven_txs` (V16) | Original |
+| block_headers | Cached block headers | Original |
+| proven_txs | **Immutable** proof records (merkle path + raw tx). Created by ARC poller and cache_sync | V16 |
+| proven_tx_reqs | Proof acquisition lifecycle tracking. Created on broadcast, completed when proof acquired | V16 |
+| baskets | Output categorization | V14 |
+| output_tags / output_tag_map | Output tagging | V14 |
+| certificates / certificate_fields | BRC-52 identity certificates | V7 |
+| domain_whitelist | BRC-100 app permissions | Original |
+
+### Status System (V15+)
+
+Single `new_status` column replaces old dual `status` + `broadcast_status`:
+
+| new_status | Meaning |
+|------------|---------|
+| unprocessed | Created, not signed |
+| unsigned | Awaiting signatures (two-phase) |
+| sending | Being broadcast |
+| unproven | Broadcast, no merkle proof yet |
+| completed | Has merkle proof (proven on-chain) |
+| failed | Broadcast failed or rejected |
 
 ## Fee Calculation
 

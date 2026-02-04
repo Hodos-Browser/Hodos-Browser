@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Represents the status of a transaction action
+/// Represents the status of a transaction action (LEGACY - use TransactionStatus for new code)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ActionStatus {
     #[serde(rename = "created")]
@@ -33,6 +33,157 @@ impl ActionStatus {
             ActionStatus::Aborted => "aborted".to_string(),
             ActionStatus::Failed => "failed".to_string(),
         }
+    }
+}
+
+/// Consolidated transaction status aligned with BSV SDK wallet-toolbox.
+///
+/// Replaces the dual ActionStatus + broadcast_status system with a single
+/// status field. This is stored in the `new_status` column on the transactions table.
+///
+/// Mapping from old dual status:
+///   (created, pending)      → Unsigned
+///   (signed, broadcast)     → Sending
+///   (unconfirmed, broadcast)→ Unproven
+///   (pending, *)            → Unproven
+///   (confirmed, confirmed)  → Completed
+///   (aborted, *)            → Nosend
+///   (failed, failed)        → Failed
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TransactionStatus {
+    #[serde(rename = "completed")]
+    Completed,     // Proven/confirmed transaction (has merkle proof or 6+ confirmations)
+    #[serde(rename = "unprocessed")]
+    Unprocessed,   // Created but not yet handled
+    #[serde(rename = "sending")]
+    Sending,       // Being broadcast to network
+    #[serde(rename = "unproven")]
+    Unproven,      // Broadcast but not yet confirmed/proven
+    #[serde(rename = "unsigned")]
+    Unsigned,      // Created but not yet signed
+    #[serde(rename = "nosend")]
+    Nosend,        // Signed but intentionally not broadcast (aborted / data carrier)
+    #[serde(rename = "nonfinal")]
+    Nonfinal,      // Has future locktime, not yet finalized
+    #[serde(rename = "failed")]
+    Failed,        // Broadcast failed or rejected
+}
+
+impl TransactionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TransactionStatus::Completed => "completed",
+            TransactionStatus::Unprocessed => "unprocessed",
+            TransactionStatus::Sending => "sending",
+            TransactionStatus::Unproven => "unproven",
+            TransactionStatus::Unsigned => "unsigned",
+            TransactionStatus::Nosend => "nosend",
+            TransactionStatus::Nonfinal => "nonfinal",
+            TransactionStatus::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "completed" => TransactionStatus::Completed,
+            "unprocessed" => TransactionStatus::Unprocessed,
+            "sending" => TransactionStatus::Sending,
+            "unproven" => TransactionStatus::Unproven,
+            "unsigned" => TransactionStatus::Unsigned,
+            "nosend" => TransactionStatus::Nosend,
+            "nonfinal" => TransactionStatus::Nonfinal,
+            "failed" => TransactionStatus::Failed,
+            _ => TransactionStatus::Unprocessed, // safe default
+        }
+    }
+
+    /// Convert from legacy ActionStatus + broadcast_status to unified TransactionStatus
+    pub fn from_legacy(action_status: &ActionStatus, broadcast_status: Option<&str>) -> Self {
+        match (action_status, broadcast_status) {
+            (ActionStatus::Created, _) => TransactionStatus::Unsigned,
+            (ActionStatus::Signed, Some("broadcast")) => TransactionStatus::Sending,
+            (ActionStatus::Signed, _) => TransactionStatus::Sending,
+            (ActionStatus::Unconfirmed, _) => TransactionStatus::Unproven,
+            (ActionStatus::Pending, Some("confirmed")) => TransactionStatus::Completed,
+            (ActionStatus::Pending, _) => TransactionStatus::Unproven,
+            (ActionStatus::Confirmed, _) => TransactionStatus::Completed,
+            (ActionStatus::Aborted, _) => TransactionStatus::Nosend,
+            (ActionStatus::Failed, _) => TransactionStatus::Failed,
+        }
+    }
+
+    /// Convert to legacy ActionStatus (for backward compatibility with StoredAction/JSON)
+    pub fn to_action_status(&self) -> ActionStatus {
+        match self {
+            TransactionStatus::Completed => ActionStatus::Confirmed,
+            TransactionStatus::Unprocessed => ActionStatus::Created,
+            TransactionStatus::Sending => ActionStatus::Signed,
+            TransactionStatus::Unproven => ActionStatus::Unconfirmed,
+            TransactionStatus::Unsigned => ActionStatus::Created,
+            TransactionStatus::Nosend => ActionStatus::Aborted,
+            TransactionStatus::Nonfinal => ActionStatus::Created,
+            TransactionStatus::Failed => ActionStatus::Failed,
+        }
+    }
+}
+
+/// Status lifecycle for proof acquisition requests.
+/// Tracks the state of a proven_tx_reqs record from broadcast to proof.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ProvenTxReqStatus {
+    #[serde(rename = "unknown")]
+    Unknown,     // Initial state
+    #[serde(rename = "sending")]
+    Sending,     // Transaction being broadcast
+    #[serde(rename = "unsent")]
+    Unsent,      // Created but not sent
+    #[serde(rename = "nosend")]
+    Nosend,      // Not intended for broadcast
+    #[serde(rename = "unproven")]
+    Unproven,    // Broadcast but no proof yet
+    #[serde(rename = "invalid")]
+    Invalid,     // Invalid transaction
+    #[serde(rename = "unmined")]
+    Unmined,     // Confirmed unmined
+    #[serde(rename = "callback")]
+    Callback,    // Awaiting callback
+    #[serde(rename = "completed")]
+    Completed,   // Proof acquired
+}
+
+impl ProvenTxReqStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProvenTxReqStatus::Unknown => "unknown",
+            ProvenTxReqStatus::Sending => "sending",
+            ProvenTxReqStatus::Unsent => "unsent",
+            ProvenTxReqStatus::Nosend => "nosend",
+            ProvenTxReqStatus::Unproven => "unproven",
+            ProvenTxReqStatus::Invalid => "invalid",
+            ProvenTxReqStatus::Unmined => "unmined",
+            ProvenTxReqStatus::Callback => "callback",
+            ProvenTxReqStatus::Completed => "completed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "unknown" => ProvenTxReqStatus::Unknown,
+            "sending" => ProvenTxReqStatus::Sending,
+            "unsent" => ProvenTxReqStatus::Unsent,
+            "nosend" => ProvenTxReqStatus::Nosend,
+            "unproven" => ProvenTxReqStatus::Unproven,
+            "invalid" => ProvenTxReqStatus::Invalid,
+            "unmined" => ProvenTxReqStatus::Unmined,
+            "callback" => ProvenTxReqStatus::Callback,
+            "completed" => ProvenTxReqStatus::Completed,
+            _ => ProvenTxReqStatus::Unknown,
+        }
+    }
+
+    /// Whether this status is terminal (no further transitions expected)
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ProvenTxReqStatus::Completed | ProvenTxReqStatus::Invalid)
     }
 }
 

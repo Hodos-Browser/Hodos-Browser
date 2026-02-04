@@ -5593,23 +5593,16 @@ pub async fn sign_action(
             log::info!("   ⏭️  Parent tx {} already in BEEF (index {}), skipping duplicate fetch", &utxo.txid[..16], existing_idx);
             // Still try to attach a Merkle proof if not already present
             if existing_idx < beef.tx_to_bump.len() && beef.tx_to_bump[existing_idx].is_none() {
-                // No BUMP yet — try to fetch one
-                let cached_proof_result = {
+                // No BUMP yet — try to fetch one from proven_txs
+                let cached_tsc = {
                     let db = state.database.lock().unwrap();
-                    let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                    merkle_proof_repo.get_by_parent_txid(&utxo.txid)
+                    let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                    proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
                 };
-                if let Ok(Some(cached_proof)) = cached_proof_result {
-                    log::info!("   ✅ Attaching cached Merkle proof to existing BEEF entry (height: {})", cached_proof.block_height);
-                    let enhanced_tsc = {
-                        let db = state.database.lock().unwrap();
-                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                        merkle_proof_repo.to_tsc_json(&cached_proof)
-                    };
-                    if !enhanced_tsc.is_null() {
-                        if let Err(e) = beef.add_tsc_merkle_proof(&utxo.txid, existing_idx, &enhanced_tsc) {
-                            log::warn!("   ⚠️  Failed to attach Merkle proof: {}", e);
-                        }
+                if let Some(tsc) = cached_tsc {
+                    log::info!("   ✅ Attaching proven_txs Merkle proof to existing BEEF entry");
+                    if let Err(e) = beef.add_tsc_merkle_proof(&utxo.txid, existing_idx, &tsc) {
+                        log::warn!("   ⚠️  Failed to attach Merkle proof: {}", e);
                     }
                 }
             }
@@ -5850,65 +5843,71 @@ pub async fn sign_action(
 
         let tx_index = beef.add_parent_transaction(parent_tx_bytes);
 
-        // STEP 2: Try to get Merkle proof from cache
+        // STEP 2: Try to get Merkle proof from proven_txs
         let enhanced_tsc = {
-            let cached_proof_result = {
+            // Check proven_txs for cached proof
+            let cached_tsc = {
                 let db = state.database.lock().unwrap();
-                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                merkle_proof_repo.get_by_parent_txid(&utxo.txid)
-            }; // db is dropped here when merkle_proof_repo goes out of scope
+                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
+            };
 
-            match cached_proof_result {
-                Ok(Some(cached_proof)) => {
-                    log::info!("   ✅ Using cached Merkle proof for {} (height: {})", utxo.txid, cached_proof.block_height);
-                    // Create a new repo just for conversion (doesn't need to persist)
-                    {
-                        let db = state.database.lock().unwrap();
-                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                        merkle_proof_repo.to_tsc_json(&cached_proof)
-                    } // db is dropped here
+            match cached_tsc {
+                Some(tsc) => {
+                    log::info!("   ✅ Using proven_txs Merkle proof for {}", utxo.txid);
+                    tsc
                 }
-                Ok(None) => {
-                    // Release lock before API call
-                    log::info!("   🌐 Cache miss - fetching TSC proof from API...");
+                None => {
+                    // No proven_txs record — fetch from API
+                    log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
 
-                    // Fetch TSC proof from API (with retry logic)
                     match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
                         Ok(Some(tsc_json)) => {
-                            // Get block height from block header (cache or API)
-                            let db = state.database.lock().unwrap();
-                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                            match crate::cache_helpers::enhance_tsc_with_height(
-                                &client,
-                                &block_header_repo,
-                                &tsc_json,
-                            ).await {
-                                Ok(enhanced_tsc) => {
-                                    // Cache the proof
-                                    if let Some(parent_txn_id) = {
-                                        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
-                                        parent_tx_repo.get_id_by_txid(&utxo.txid).unwrap_or(None)
-                                    } {
-                                        let target_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-                                        match serde_json::to_string(&enhanced_tsc["nodes"]) {
-                                            Ok(nodes_json) => {
-                                                let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                                let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                            // Enhance with block height
+                            let enhanced_result = {
+                                let db = state.database.lock().unwrap();
+                                let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                                crate::cache_helpers::enhance_tsc_with_height(
+                                    &client,
+                                    &block_header_repo,
+                                    &tsc_json,
+                                ).await
+                            };
 
-                                                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                                                match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, target_hash, &nodes_json) {
-                                                    Ok(_) => {
-                                                        log::info!("   💾 Cached Merkle proof for {}", utxo.txid);
-                                                    }
-                                                    Err(e) => {
-                                                        log::warn!("   ⚠️  Failed to cache Merkle proof for {}: {}", utxo.txid, e);
-                                                        // Continue - caching failure shouldn't block transaction
-                                                    }
-                                                }
+                            match enhanced_result {
+                                Ok(enhanced_tsc) => {
+                                    // Cache as proven_txs record
+                                    {
+                                        let db = state.database.lock().unwrap();
+                                        let conn = db.connection();
+
+                                        let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
+                                        let tx_index_val = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                                        let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
+
+                                        let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc).unwrap_or_default();
+
+                                        // Get raw_tx from parent_transactions cache
+                                        let raw_tx_bytes = {
+                                            let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
+                                            match parent_tx_repo.get_by_txid(&utxo.txid) {
+                                                Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
+                                                _ => Vec::new(),
+                                            }
+                                        };
+
+                                        let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
+                                        match proven_tx_repo.insert_or_get(
+                                            &utxo.txid, block_height, tx_index_val,
+                                            &merkle_path_bytes, &raw_tx_bytes,
+                                            block_hash, "",
+                                        ) {
+                                            Ok(proven_tx_id) => {
+                                                let _ = proven_tx_repo.link_transaction(&utxo.txid, proven_tx_id);
+                                                log::info!("   💾 Created proven_txs record for {}", utxo.txid);
                                             }
                                             Err(e) => {
-                                                log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", utxo.txid, e);
-                                                // Continue - can still use the proof
+                                                log::warn!("   ⚠️  Failed to cache proven_tx for {}: {}", utxo.txid, e);
                                             }
                                         }
                                     }
@@ -5917,23 +5916,19 @@ pub async fn sign_action(
                                 }
                                 Err(e) => {
                                     log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", utxo.txid, e);
-                                    serde_json::Value::Null  // Return null to skip proof
+                                    serde_json::Value::Null
                                 }
                             }
                         }
                         Ok(None) => {
                             log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
-                            serde_json::Value::Null  // Return null to skip proof
+                            serde_json::Value::Null
                         }
                         Err(e) => {
                             log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
-                            serde_json::Value::Null  // Return null to skip proof
+                            serde_json::Value::Null
                         }
                     }
-                }
-                Err(e) => {
-                    log::warn!("   ⚠️  Database error checking cache: {}, skipping proof", e);
-                    serde_json::Value::Null  // Return null to skip proof
                 }
             }
         };
@@ -6125,6 +6120,25 @@ pub async fn sign_action(
             log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
         } else {
             log::info!("   💾 Broadcast status updated: pending → broadcast");
+        }
+
+        // Create proven_tx_req to track proof acquisition lifecycle
+        {
+            let conn = db.connection();
+            let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
+                Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(conn);
+            match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "sending") {
+                Ok(req_id) => {
+                    log::info!("   📋 Created proven_tx_req {} for {} (status: sending)", req_id, txid);
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to create proven_tx_req for {}: {}", txid, e);
+                    // Non-fatal: proof tracking is advisory, doesn't block the transaction
+                }
+            }
         }
 
         // Update reserved UTXOs: placeholder spent_txid → final signed txid.
@@ -6431,6 +6445,21 @@ pub async fn process_action(
                             log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
                         }
                     }
+
+                    // CRITICAL: Restore input UTXOs that were reserved for this transaction.
+                    // Since broadcast failed, these coins were never spent on-chain.
+                    match utxo_repo.restore_spent_by_txid(&txid) {
+                        Ok(count) if count > 0 => {
+                            log::info!("   ♻️  Restored {} input UTXO(s) from failed broadcast", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("   ⚠️  Failed to restore input UTXOs: {}", e);
+                        }
+                    }
+
+                    // Invalidate balance cache since we restored UTXOs
+                    state.balance_cache.invalidate();
                 }
 
                 "failed"
@@ -6473,81 +6502,72 @@ async fn broadcast_transaction(
         || beef_or_raw_hex.starts_with("0200beef")
         || beef_or_raw_hex.starts_with("01010101");
 
-    // Strategy 1: If BEEF, try ARC first (supports tx chaining via BEEF)
-    if is_beef {
-        log::info!("   📦 Input is BEEF format, attempting ARC broadcast with BEEF V1...");
-
-        // Parse BEEF and convert to V1 format for ARC
-        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-            Ok(beef) => {
-                match beef.to_v1_hex() {
-                    Ok(v1_hex) => {
-                        log::info!("   ✅ Converted BEEF to V1 format ({} hex chars)", v1_hex.len());
-
-                        // Try ARC with BEEF V1
-                        log::info!("   📡 Broadcasting BEEF V1 to ARC (GorillaPool)...");
-                        match broadcast_to_arc(&client, &v1_hex).await {
-                            Ok(arc_resp) => {
-                                let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
-                                let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
-                                let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
-                                log::info!("   🎉 ARC broadcast successful: {}", msg);
-
-                                // Detect ARC txid mismatch (expected for multi-tx BEEF submissions).
-                                // When submitting BEEF containing parent + child transactions, ARC may
-                                // return the parent's txid instead of the child's. We always use our
-                                // locally-computed txid for database operations, not ARC's response.
-                                // See: wallet-toolbox ARC provider does the same ("txid altered from...")
-                                if let Some(our_txid) = txid_for_cache {
-                                    if arc_txid != "unknown" && arc_txid != our_txid {
-                                        log::warn!("   ⚠️  ARC txid mismatch: ARC returned '{}', our computed txid is '{}'",
-                                            &arc_txid[..arc_txid.len().min(16)],
-                                            &our_txid[..our_txid.len().min(16)]);
-                                        log::info!("   ℹ️  Using locally-computed txid (expected for multi-tx BEEF)");
-                                    }
-                                }
-
-                                // Cache merkle proof from ARC if available
-                                if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
-                                    (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
-                                {
-                                    if !merkle_path.is_empty() {
-                                        log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
-                                        cache_arc_merkle_proof(db, cache_txid, merkle_path);
-                                    }
-                                }
-
-                                // Update broadcast_status and block_height if MINED
-                                if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
-                                    if status_str == "MINED" {
-                                        if let Some(height) = arc_resp.block_height {
-                                            log::info!("   📦 ARC reports MINED at height {}", height);
-                                            if let Ok(db_guard) = db.lock() {
-                                                let tx_repo = crate::database::TransactionRepository::new(db_guard.connection());
-                                                let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
-                                            }
-                                        }
-                                    }
-                                }
-
-                                return Ok(msg);
-                            }
-                            Err(e) => {
-                                log::warn!("   ⚠️ ARC broadcast failed: {}", e);
-                                log::info!("   🔄 Falling back to raw tx broadcasters...");
-                                // Fall through to raw tx broadcast
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("   ⚠️ Failed to convert BEEF to V1: {}", e);
-                        log::info!("   🔄 Falling back to raw tx broadcasters...");
-                    }
+    // Strategy 1: Extract raw transaction and send to ARC
+    // ARC validates inputs against its own UTXO set for confirmed parents.
+    // BEEF format is only needed for unconfirmed chains (overlay handles its own broadcasting).
+    {
+        let raw_tx_for_arc = if is_beef {
+            log::info!("   📦 Input is BEEF format, extracting raw tx for ARC broadcast...");
+            match crate::beef::Beef::extract_raw_tx_hex(beef_or_raw_hex) {
+                Ok(raw_hex) => {
+                    log::info!("   ✅ Extracted raw tx from BEEF ({} hex chars)", raw_hex.len());
+                    Some(raw_hex)
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️ Failed to extract raw tx from BEEF: {}", e);
+                    None
                 }
             }
-            Err(e) => {
-                log::warn!("   ⚠️ Failed to parse BEEF: {}", e);
-                log::info!("   🔄 Falling back to raw tx broadcasters...");
+        } else {
+            Some(beef_or_raw_hex.to_string())
+        };
+
+        if let Some(raw_hex) = raw_tx_for_arc {
+            log::info!("   📡 Broadcasting raw tx to ARC (GorillaPool)...");
+            match broadcast_to_arc(&client, &raw_hex).await {
+                Ok(arc_resp) => {
+                    let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
+                    let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
+
+                    // SEEN_IN_ORPHAN_MEMPOOL means ARC can't find parent UTXOs — not a real success
+                    if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
+                        log::warn!("   ⚠️ ARC returned SEEN_IN_ORPHAN_MEMPOOL — parent UTXOs not found");
+                        log::info!("   🔄 Falling back to other broadcasters...");
+                        // Fall through to fallback broadcasters
+                    } else {
+                        let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
+                        log::info!("   🎉 ARC broadcast successful: {}", msg);
+
+                        // Cache merkle proof from ARC if available
+                        if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
+                            (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
+                        {
+                            if !merkle_path.is_empty() {
+                                log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
+                                cache_arc_merkle_proof(db, cache_txid, merkle_path);
+                            }
+                        }
+
+                        // Update broadcast_status and block_height if MINED
+                        if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
+                            if status_str == "MINED" {
+                                if let Some(height) = arc_resp.block_height {
+                                    log::info!("   📦 ARC reports MINED at height {}", height);
+                                    if let Ok(db_guard) = db.lock() {
+                                        let tx_repo = crate::database::TransactionRepository::new(db_guard.connection());
+                                        let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(msg);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️ ARC broadcast failed: {}", e);
+                    log::info!("   🔄 Falling back to raw tx broadcasters...");
+                }
             }
         }
     }
@@ -6794,18 +6814,17 @@ pub struct ArcResponse {
 /// - 409: Already known (treat as success)
 /// - 460-469: BEEF-specific validation errors
 /// - 400/422/500: Other errors
-async fn broadcast_to_arc(client: &reqwest::Client, beef_v1_hex: &str) -> Result<ArcResponse, String> {
+async fn broadcast_to_arc(client: &reqwest::Client, raw_tx_hex: &str) -> Result<ArcResponse, String> {
     let url = "https://arc.gorillapool.io/v1/tx";
 
-    let body = serde_json::json!({
-        "rawTx": beef_v1_hex
-    });
+    let tx_bytes = hex::decode(raw_tx_hex)
+        .map_err(|e| format!("Failed to decode tx hex: {}", e))?;
 
-    log::info!("   📡 ARC: Sending BEEF V1 ({} hex chars) to {}", beef_v1_hex.len(), url);
+    log::info!("   📡 ARC: Sending raw tx ({} bytes) to {}", tx_bytes.len(), url);
 
     let response = client.post(url)
-        .header("Content-Type", "application/json")
-        .json(&body)
+        .header("Content-Type", "application/octet-stream")
+        .body(tx_bytes)
         .send()
         .await
         .map_err(|e| format!("ARC HTTP error: {}", e))?;
@@ -6881,6 +6900,11 @@ pub async fn query_arc_tx_status(client: &reqwest::Client, txid: &str) -> Result
 ///
 /// Parses the BUMP hex from ARC's merklePath, converts to TSC format,
 /// and stores in the merkle_proofs table for future BEEF building.
+/// Cache an ARC merkle proof as a proven_txs record.
+///
+/// Parses the BUMP hex merkle path from ARC, creates an immutable proven_txs record,
+/// and links it to the transaction. This replaces the old approach of writing to
+/// parent_transactions + merkle_proofs tables.
 pub fn cache_arc_merkle_proof(
     db: &std::sync::Mutex<crate::database::WalletDatabase>,
     txid: &str,
@@ -6895,12 +6919,14 @@ pub fn cache_arc_merkle_proof(
         }
     };
 
-    let block_height = tsc["height"].as_u64().unwrap_or(0) as u32;
+    let height = tsc["height"].as_u64().unwrap_or(0) as u32;
     let tx_index = tsc["index"].as_u64().unwrap_or(0);
-    let nodes_json = match serde_json::to_string(&tsc["nodes"]) {
-        Ok(j) => j,
+
+    // Serialize TSC JSON to bytes for proven_txs.merkle_path BLOB
+    let merkle_path_bytes = match serde_json::to_vec(&tsc) {
+        Ok(bytes) => bytes,
         Err(e) => {
-            log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", txid, e);
+            log::warn!("   ⚠️  Failed to serialize TSC JSON for {}: {}", txid, e);
             return;
         }
     };
@@ -6915,36 +6941,39 @@ pub fn cache_arc_merkle_proof(
 
     let conn = db_guard.connection();
 
-    // Ensure the transaction exists in parent_transactions table
-    let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
-    let parent_txn_id = match parent_tx_repo.get_id_by_txid(txid) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            // Transaction not in parent_transactions - try to insert a minimal record
-            // This can happen if ARC returns merklePath for a tx we haven't cached as a parent yet
-            log::info!("   📋 Transaction {} not in parent_transactions, creating placeholder", txid);
-            match parent_tx_repo.upsert(None, txid, "") {
-                Ok(id) => id,
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to create parent_transactions entry for {}: {}", txid, e);
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("   ⚠️  DB error looking up parent_transactions for {}: {}", txid, e);
-            return;
+    // Get raw_tx from transactions table
+    let raw_tx_bytes = {
+        let tx_repo = crate::database::TransactionRepository::new(conn);
+        match tx_repo.get_by_txid(txid) {
+            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+            _ => Vec::new(),
         }
     };
 
-    // Store the merkle proof
-    let merkle_proof_repo = crate::database::MerkleProofRepository::new(conn);
-    match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, "", &nodes_json) {
-        Ok(_) => {
-            log::info!("   💾 Cached ARC merkle proof for {} (height: {}, index: {})", txid, block_height, tx_index);
+    // Create immutable proven_txs record
+    let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
+    match proven_tx_repo.insert_or_get(
+        txid, height, tx_index,
+        &merkle_path_bytes, &raw_tx_bytes,
+        "", "",
+    ) {
+        Ok(proven_tx_id) => {
+            log::info!("   💾 Created proven_txs record {} for {} (height: {}, index: {})", proven_tx_id, txid, height, tx_index);
+
+            // Link transaction to proven_txs
+            if let Err(e) = proven_tx_repo.link_transaction(txid, proven_tx_id) {
+                log::warn!("   ⚠️  Failed to link transaction {} to proven_tx: {}", txid, e);
+            }
+
+            // Update proven_tx_reqs if one exists
+            let req_repo = crate::database::ProvenTxReqRepository::new(conn);
+            if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
+                let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
+                let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
+            }
         }
         Err(e) => {
-            log::warn!("   ⚠️  Failed to cache ARC merkle proof for {}: {}", txid, e);
+            log::warn!("   ⚠️  Failed to create proven_txs record for {}: {}", txid, e);
         }
     }
 }
@@ -7479,29 +7508,28 @@ pub async fn send_transaction(
         }
     };
 
-    log::info!("   📦 Extracting raw transaction from Atomic BEEF...");
+    log::info!("   📡 Broadcasting Atomic BEEF to ARC...");
 
-    // Extract raw transaction hex from Atomic BEEF
-    let raw_tx_hex = match extract_raw_tx_from_atomic_beef(&atomic_beef_hex) {
-        Ok(hex) => {
-            log::info!("   ✅ Raw transaction extracted: {} bytes", hex.len() / 2);
-            hex
-        },
-        Err(e) => {
-            log::error!("   Failed to extract raw transaction from BEEF: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to extract transaction: {}", e)
-            }));
-        }
-    };
-
-    log::info!("   📡 Broadcasting transaction...");
-
-    // Broadcast the raw transaction
-    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
+    // Broadcast the full Atomic BEEF (includes ancestry chain for ARC SPV validation)
+    // broadcast_transaction detects the 01010101 Atomic BEEF prefix, strips the header,
+    // converts to BEEF V1, and submits to ARC. This allows ARC to validate unconfirmed
+    // parent transactions that would be rejected as "missing inputs" in raw tx broadcast.
+    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
+
+            // Update broadcast status to "broadcast" (maps to new_status "unproven" in Phase 1)
+            // so ARC poller tracks this transaction for confirmation
+            {
+                use crate::database::TransactionRepository;
+                let db = state.database.lock().unwrap();
+                let tx_repo = TransactionRepository::new(db.connection());
+                if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
+                    log::warn!("   ⚠️  Failed to update broadcast status: {}", e);
+                } else {
+                    log::info!("   💾 Transaction broadcast status updated to 'broadcast'");
+                }
+            }
 
             let whats_on_chain_url = format!("https://whatsonchain.com/tx/{}", txid);
 
@@ -7539,6 +7567,21 @@ pub async fn send_transaction(
                         log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
                     }
                 }
+
+                // CRITICAL: Restore input UTXOs that were reserved for this transaction.
+                // Since broadcast failed, these coins were never spent on-chain.
+                match utxo_repo.restore_spent_by_txid(&txid) {
+                    Ok(count) if count > 0 => {
+                        log::info!("   ♻️  Restored {} input UTXO(s) from failed broadcast", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to restore input UTXOs: {}", e);
+                    }
+                }
+
+                // Invalidate balance cache since we restored UTXOs
+                state.balance_cache.invalidate();
             }
 
             // Extract a clean, user-friendly error message

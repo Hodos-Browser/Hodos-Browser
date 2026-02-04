@@ -4,7 +4,7 @@
 //! Each migration function creates a specific version of the schema.
 
 use rusqlite::{Connection, Result};
-use log::{info, error};
+use log::{info, warn, error};
 
 /// Create schema version 1 (initial schema)
 ///
@@ -1272,5 +1272,383 @@ pub fn create_schema_v14(conn: &Connection) -> Result<()> {
     )?;
 
     info!("   ✅ Schema version 14 migration complete");
+    Ok(())
+}
+
+/// Schema V15: Status Consolidation + UnFail Foundation
+///
+/// Phase 1 of wallet-toolbox alignment. Consolidates the dual status system
+/// (ActionStatus + broadcast_status) into a single `new_status` column aligned
+/// with the BSV SDK wallet-toolbox TransactionStatus values.
+///
+/// Also adds `failed_at` timestamp for the UnFail mechanism: when a transaction
+/// is marked failed, we record when. The cleanup job waits 30 minutes before
+/// permanently cleaning up, giving time to re-check the blockchain in case the
+/// transaction was actually mined (preventing fund loss from premature cleanup).
+///
+/// New status values: unsigned, sending, unproven, completed, nosend, nonfinal, failed, unprocessed
+///
+/// Mapping from old dual status:
+///   (created, pending)       → unsigned
+///   (signed, broadcast)      → sending
+///   (unconfirmed, broadcast) → unproven
+///   (pending, *)             → unproven
+///   (confirmed, confirmed)   → completed
+///   (aborted, *)             → nosend
+///   (failed, failed)         → failed
+pub fn create_schema_v15(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 15 (Status Consolidation + UnFail)...");
+
+    // Step 1: Add new_status column
+    info!("   Step 1: Adding new_status column to transactions table...");
+    let new_status_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !new_status_exists {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN new_status TEXT DEFAULT 'unsigned'",
+            [],
+        )?;
+        info!("   ✅ Added new_status column");
+    } else {
+        info!("   ✅ new_status column already exists");
+    }
+
+    // Step 2: Add failed_at column (timestamp when status was set to 'failed')
+    info!("   Step 2: Adding failed_at column to transactions table...");
+    let failed_at_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'failed_at'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !failed_at_exists {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN failed_at INTEGER",
+            [],
+        )?;
+        info!("   ✅ Added failed_at column");
+    } else {
+        info!("   ✅ failed_at column already exists");
+    }
+
+    // Step 3: Populate new_status from existing status + broadcast_status
+    info!("   Step 3: Populating new_status from legacy columns...");
+
+    // Check if broadcast_status column exists (v10 migration)
+    let has_broadcast_status: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if has_broadcast_status {
+        // Full mapping using both columns
+        // confirmed + confirmed → completed
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'completed'
+             WHERE status = 'confirmed' OR (broadcast_status = 'confirmed')",
+            [],
+        )?;
+        info!("      ✅ Set {} transactions to 'completed'", updated);
+
+        // failed + failed → failed (also set failed_at)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'failed', failed_at = ?1
+             WHERE new_status != 'completed' AND (status = 'failed' OR broadcast_status = 'failed')",
+            rusqlite::params![now],
+        )?;
+        info!("      ✅ Set {} transactions to 'failed'", updated);
+
+        // aborted → nosend
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'nosend'
+             WHERE new_status NOT IN ('completed', 'failed') AND status = 'aborted'",
+            [],
+        )?;
+        info!("      ✅ Set {} transactions to 'nosend'", updated);
+
+        // unconfirmed/pending + broadcast → unproven
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'unproven'
+             WHERE new_status NOT IN ('completed', 'failed', 'nosend')
+               AND status IN ('unconfirmed', 'pending')
+               AND broadcast_status IN ('broadcast', 'confirmed')",
+            [],
+        )?;
+        info!("      ✅ Set {} transactions to 'unproven'", updated);
+
+        // signed + broadcast → sending
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'sending'
+             WHERE new_status NOT IN ('completed', 'failed', 'nosend', 'unproven')
+               AND status = 'signed' AND broadcast_status = 'broadcast'",
+            [],
+        )?;
+        info!("      ✅ Set {} transactions to 'sending'", updated);
+
+        // created + pending → unsigned (everything else still in 'unsigned' default)
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'unsigned'
+             WHERE new_status NOT IN ('completed', 'failed', 'nosend', 'unproven', 'sending')
+               AND status = 'created'",
+            [],
+        )?;
+        info!("      ✅ Set {} transactions to 'unsigned'", updated);
+
+        // Catch-all: anything remaining that's broadcast but not categorized → unproven
+        let updated = conn.execute(
+            "UPDATE transactions SET new_status = 'unproven'
+             WHERE new_status = 'unsigned' AND broadcast_status = 'broadcast'",
+            [],
+        )?;
+        if updated > 0 {
+            info!("      ✅ Catch-all: set {} remaining broadcast transactions to 'unproven'", updated);
+        }
+    } else {
+        // No broadcast_status column — map from ActionStatus only
+        info!("      ℹ️  No broadcast_status column - mapping from status only");
+
+        conn.execute(
+            "UPDATE transactions SET new_status = 'completed' WHERE status = 'confirmed'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE transactions SET new_status = 'unproven' WHERE status IN ('unconfirmed', 'pending')",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE transactions SET new_status = 'sending' WHERE status = 'signed'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE transactions SET new_status = 'nosend' WHERE status = 'aborted'",
+            [],
+        )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "UPDATE transactions SET new_status = 'failed', failed_at = ?1 WHERE status = 'failed'",
+            rusqlite::params![now],
+        )?;
+        // created → unsigned (already the default)
+    }
+
+    // Step 4: Create index on new_status for efficient queries
+    info!("   Step 4: Creating index on new_status...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_new_status ON transactions(new_status)",
+        [],
+    )?;
+    info!("   ✅ Created idx_transactions_new_status index");
+
+    // Step 5: Create partial index for UnFail queries (failed transactions with timestamp)
+    info!("   Step 5: Creating index for UnFail queries...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_failed_at ON transactions(failed_at) WHERE new_status = 'failed'",
+        [],
+    )?;
+    info!("   ✅ Created idx_transactions_failed_at index");
+
+    info!("   ✅ Schema version 15 migration complete");
+    Ok(())
+}
+
+/// Migration v16: Proven Transaction Model
+///
+/// Creates `proven_txs` and `proven_tx_reqs` tables. Adds `proven_tx_id` FK to
+/// transactions. Migrates existing proof data from parent_transactions + merkle_proofs
+/// into proven_txs. Links completed transactions to their proven_txs records.
+pub fn create_schema_v16(conn: &Connection) -> Result<()> {
+    info!("=== Migration v16: Proven Transaction Model ===");
+
+    // Step 1: Create proven_txs table (immutable proof records)
+    info!("   Step 1: Creating proven_txs table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS proven_txs (
+            provenTxId INTEGER PRIMARY KEY AUTOINCREMENT,
+            txid TEXT NOT NULL UNIQUE,
+            height INTEGER NOT NULL,
+            tx_index INTEGER NOT NULL,
+            merkle_path BLOB NOT NULL,
+            raw_tx BLOB NOT NULL,
+            block_hash TEXT NOT NULL DEFAULT '',
+            merkle_root TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proven_txs_txid ON proven_txs(txid)",
+        [],
+    )?;
+    info!("   ✅ Created proven_txs table");
+
+    // Step 2: Create proven_tx_reqs table (mutable proof request lifecycle)
+    info!("   Step 2: Creating proven_tx_reqs table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS proven_tx_reqs (
+            provenTxReqId INTEGER PRIMARY KEY AUTOINCREMENT,
+            proven_tx_id INTEGER REFERENCES proven_txs(provenTxId),
+            status TEXT NOT NULL DEFAULT 'unknown',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            notified INTEGER NOT NULL DEFAULT 0,
+            txid TEXT NOT NULL UNIQUE,
+            batch TEXT,
+            history TEXT NOT NULL DEFAULT '{}',
+            notify TEXT NOT NULL DEFAULT '{}',
+            raw_tx BLOB NOT NULL,
+            input_beef BLOB,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proven_tx_reqs_status ON proven_tx_reqs(status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proven_tx_reqs_txid ON proven_tx_reqs(txid)",
+        [],
+    )?;
+    info!("   ✅ Created proven_tx_reqs table");
+
+    // Step 3: Add proven_tx_id FK column to transactions table
+    info!("   Step 3: Adding proven_tx_id to transactions table...");
+    let has_proven_tx_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'proven_tx_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_proven_tx_id {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN proven_tx_id INTEGER REFERENCES proven_txs(provenTxId)",
+            [],
+        )?;
+        info!("   ✅ Added proven_tx_id column to transactions");
+    } else {
+        info!("   ⏭️  proven_tx_id column already exists, skipping");
+    }
+
+    // Step 4: Migrate existing proof data from parent_transactions + merkle_proofs → proven_txs
+    info!("   Step 4: Migrating existing proof data to proven_txs...");
+
+    // Check if merkle_proofs table exists (it should, but be safe)
+    let has_merkle_proofs: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='merkle_proofs'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if has_merkle_proofs {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Query existing merkle proofs joined with parent transactions and block headers
+        let mut stmt = conn.prepare(
+            "SELECT pt.txid, mp.block_height, mp.tx_index, mp.target_hash, mp.nodes,
+                    pt.raw_hex, pt.cached_at,
+                    COALESCE(bh.block_hash, '') as bh_hash
+             FROM merkle_proofs mp
+             INNER JOIN parent_transactions pt ON mp.parent_txn_id = pt.id
+             LEFT JOIN block_headers bh ON bh.height = mp.block_height"
+        )?;
+
+        let rows: Vec<(String, u32, u64, String, String, String, i64, String)> = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,      // txid
+                row.get::<_, i64>(1)? as u32,  // block_height
+                row.get::<_, i64>(2)? as u64,  // tx_index
+                row.get::<_, String>(3)?,       // target_hash
+                row.get::<_, String>(4)?,       // nodes (JSON string)
+                row.get::<_, String>(5)?,       // raw_hex
+                row.get::<_, i64>(6)?,          // cached_at
+                row.get::<_, String>(7)?,       // block_hash
+            ))
+        })?.filter_map(|r| r.ok()).collect();
+
+        let mut migrated_count = 0;
+        for (txid, block_height, tx_index, target_hash, nodes_json, raw_hex, cached_at, block_hash) in &rows {
+            // Reconstruct TSC JSON from merkle proof fields
+            // The nodes column is already a JSON string like '["hash1","hash2","*"]'
+            let nodes_value: serde_json::Value = serde_json::from_str(nodes_json)
+                .unwrap_or_else(|_| serde_json::json!([]));
+
+            let tsc_json = serde_json::json!({
+                "index": tx_index,
+                "target": target_hash,
+                "nodes": nodes_value,
+                "height": block_height
+            });
+
+            let merkle_path_bytes = serde_json::to_vec(&tsc_json)
+                .unwrap_or_default();
+
+            // Decode raw_hex to bytes for raw_tx BLOB
+            let raw_tx_bytes = hex::decode(raw_hex).unwrap_or_default();
+
+            // Insert into proven_txs (IGNORE if txid already exists)
+            match conn.execute(
+                "INSERT OR IGNORE INTO proven_txs
+                 (txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8)",
+                rusqlite::params![
+                    txid, *block_height as i64, *tx_index as i64,
+                    merkle_path_bytes, raw_tx_bytes, block_hash,
+                    cached_at, now
+                ],
+            ) {
+                Ok(_) => migrated_count += 1,
+                Err(e) => warn!("   ⚠️  Failed to migrate proof for {}: {}", txid, e),
+            }
+        }
+        info!("   ✅ Migrated {} proof records to proven_txs", migrated_count);
+    } else {
+        info!("   ⏭️  No merkle_proofs table found, skipping data migration");
+    }
+
+    // Step 5: Link completed transactions to their proven_txs records
+    info!("   Step 5: Linking completed transactions to proven_txs...");
+
+    // Check which status column to use
+    let has_new_status: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    let status_filter = if has_new_status {
+        "new_status = 'completed'"
+    } else {
+        "status = 'confirmed'"
+    };
+
+    let linked = conn.execute(
+        &format!(
+            "UPDATE transactions SET proven_tx_id = (
+                SELECT provenTxId FROM proven_txs WHERE proven_txs.txid = transactions.txid
+            ) WHERE {} AND proven_tx_id IS NULL AND EXISTS (
+                SELECT 1 FROM proven_txs WHERE proven_txs.txid = transactions.txid
+            )", status_filter
+        ),
+        [],
+    )?;
+    info!("   ✅ Linked {} completed transactions to proven_txs", linked);
+
+    info!("   ✅ Schema version 16 migration complete");
     Ok(())
 }

@@ -1,7 +1,7 @@
 # State Maintenance & Reconciliation — Transition Plan
 
 **Created**: 2026-02-03
-**Status**: Draft — awaiting phase-by-phase approval before implementation
+**Status**: In Progress — Phase 1 ✅ Complete, Phase 2 ✅ Complete, Phases 3-8 Pending
 **Objective**: Evolve the Hodos Rust wallet database and state management to align with the BSV SDK wallet-toolbox, enabling future multi-user support, cloud sync, and wallet export/import interoperability.
 **See also**: `WALLET_BACKUP_AND_RECOVERY_PLAN.md` — backup file export, on-chain encrypted backup, and cloud sync scaffolding (interleaved with this plan's phases).
 
@@ -401,11 +401,22 @@ WHERE o.spendable = 1
 
 ## 4. Phased Implementation Plan
 
-### Phase 1: Status Consolidation + UnFail Foundation
+### Phase 1: Status Consolidation + UnFail Foundation ✅ COMPLETE
 
 **Goal**: Replace the dual status system with single TransactionStatus. Add the UnFail delay mechanism.
 
 **Why first**: This is the foundation for everything. It fixes the most dangerous bug (premature failure cleanup) and simplifies the status model that all subsequent phases depend on.
+
+**Completed**: 2026-02-03 | **Migration**: V15 | **Branch**: wallet-toolbox-alignment
+
+#### Implementation Notes
+
+- V15 migration adds `new_status` and `failed_at` columns to transactions table
+- `update_broadcast_status()` kept as compatibility shim — internally maps old status names to new `new_status` values (e.g., `"confirmed"` → `"completed"`, `"broadcast"` → `"unproven"`)
+- Old `status` and `broadcast_status` columns preserved for rollback safety
+- ARC poller queries `WHERE new_status IN ('sending', 'unproven')`
+- Balance/UTXO queries filter on `new_status` instead of `broadcast_status`
+- UnFail delay deferred to Phase 6 (Monitor pattern) for proper implementation
 
 #### Schema Changes (Migration v15)
 
@@ -438,31 +449,19 @@ CREATE INDEX idx_transactions_new_status ON transactions(new_status);
 
 | File | Change |
 |---|---|
-| `src/action_storage.rs` | Replace `ActionStatus` enum with `TransactionStatus` enum matching SDK values |
-| `src/database/transaction_repo.rs` | All methods: read/write `new_status` instead of `status`+`broadcast_status`. Remove `update_broadcast_status()`. Add `update_status()` that writes `new_status` + sets `failed_at` when transitioning to `failed` |
-| `src/database/utxo_repo.rs` | Update `get_unspent_by_addresses()` and `calculate_balance()` LEFT JOIN to filter on `new_status` instead of `broadcast_status` |
-| `src/handlers.rs` | All status transitions: replace dual updates with single `new_status` update. Map: createAction→`unprocessed`, signAction→`unsigned`→`sending`, processAction success→`unproven`, processAction fail→`failed`, broadcast confirmed→`completed` |
+| `src/action_storage.rs` | Added `TransactionStatus` enum matching SDK values alongside existing `ActionStatus` |
+| `src/database/transaction_repo.rs` | All methods: read/write `new_status` instead of `status`+`broadcast_status`. `update_broadcast_status()` kept as shim mapping to `new_status` values |
+| `src/database/utxo_repo.rs` | Updated `get_unspent_by_addresses()` and `calculate_balance()` LEFT JOIN to filter on `new_status` instead of `broadcast_status` |
+| `src/handlers.rs` | All status transitions: use single `new_status` update. Map: createAction→`unprocessed`, signAction→`unsigned`→`sending`, broadcast success→`unproven`, broadcast fail→`failed` |
 | `src/arc_status_poller.rs` | Query `WHERE new_status IN ('sending', 'unproven')`. Update to `completed` or `failed` |
-| `src/utxo_sync.rs` | `cleanup_failed_utxos()`: query `new_status` instead of `broadcast_status`. Add UnFail delay: skip cleanup for transactions where `failed_at > now - 1800` (30 min). Add re-verification step for recently failed txs |
 | `src/main.rs` | Startup cleanup: query `new_status` instead of `broadcast_status` |
 
-#### UnFail Mechanism (New)
+#### Testing Results
 
-Add to `utxo_sync.rs` cleanup cycle:
-```
-Before cleaning up a failed transaction:
-1. Check failed_at timestamp
-2. If failed_at > now - 30 minutes: SKIP (too recent to clean up)
-3. If failed_at > now - 5 minutes AND failed_at < now - 30 minutes:
-   Query WhatsOnChain GET /v1/bsv/main/tx/{txid}
-   If found on-chain:
-     → Set status to 'completed' or 'unproven'
-     → Clear failed_at
-     → Keep all UTXOs as-is (they're valid)
-   If not found:
-     → Leave as failed, will be cleaned up after 30 min
-4. If failed_at < now - 30 minutes: proceed with normal cleanup
-```
+- Fresh DB: V15 migration creates `new_status` column, `failed_at` column, and index
+- Existing DB: All 311 transactions correctly migrated (298 failed, 13 unproven)
+- Balance unchanged at 644,544 sats after migration
+- All status transitions verified through BEEF transaction testing
 
 #### Risk: LOW-MEDIUM
 - Migration is additive (new column, old columns preserved)
@@ -471,11 +470,37 @@ Before cleaning up a failed transaction:
 
 ---
 
-### Phase 2: Proven Transaction Model
+### Phase 2: Proven Transaction Model ✅ COMPLETE
 
 **Goal**: Add `proven_txs` and `proven_tx_reqs` tables. Merge existing parent_transactions + merkle_proofs into proven_txs. Establish immutable proof records.
 
 **Why second**: The proven transaction model is the foundation for reliable proof tracking, UnFail recovery (re-checking proofs), and the monitor pattern's TaskCheckForProofs.
+
+**Completed**: 2026-02-04 | **Migration**: V16 | **Branch**: wallet-toolbox-alignment
+
+#### Implementation Notes
+
+- V16 migration creates `proven_txs` and `proven_tx_reqs` tables, adds `proven_tx_id` FK to `transactions`
+- Data migration converts existing `merkle_proofs` + `parent_transactions` into `proven_txs` records
+  - TSC JSON reconstructed from merkle_proofs fields (block_height, tx_index, target_hash, nodes)
+  - Serialized to bytes for merkle_path BLOB storage
+  - Raw tx hex decoded to bytes for raw_tx BLOB storage
+- BEEF construction reads proofs from `proven_txs` instead of `merkle_proofs`
+- `proven_tx_reqs` created on every broadcast in `sign_action()` with status `'sending'`
+- ARC poller creates `proven_txs` records when transactions reach MINED status
+- Cache sync creates `proven_txs` records from WhatsOnChain TSC proofs
+- Old `parent_transactions` table preserved as raw tx cache for BEEF building
+- Old `merkle_proofs` table preserved but no longer written to
+
+#### Bug Found & Fixed During Testing
+
+**cache_sync / ARC poller race condition**: When `cache_sync` created a `proven_txs` record before the ARC poller ran, the transaction's `new_status` remained `'unproven'` and `proven_tx_reqs.status` remained `'sending'` because:
+1. `cache_sync` wasn't updating transaction status or `proven_tx_reqs` after proof creation
+2. ARC poller got 404 from ARC API (transaction not tracked by ARC) and silently skipped
+
+**Fix applied to both services**:
+- `cache_sync.rs`: Now updates `new_status` to `'completed'` and `proven_tx_reqs` to `'completed'` after creating `proven_txs` record
+- `arc_status_poller.rs`: Added early reconciliation check — before querying ARC, checks if `proven_txs` record already exists and reconciles statuses directly
 
 #### Schema Changes (Migration v16)
 
@@ -488,12 +513,12 @@ CREATE TABLE IF NOT EXISTS proven_txs (
     tx_index INTEGER NOT NULL,
     merkle_path BLOB NOT NULL,
     raw_tx BLOB NOT NULL,
-    block_hash TEXT NOT NULL,
-    merkle_root TEXT NOT NULL,
+    block_hash TEXT NOT NULL DEFAULT '',
+    merkle_root TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
-CREATE INDEX idx_proven_txs_txid ON proven_txs(txid);
+CREATE INDEX IF NOT EXISTS idx_proven_txs_txid ON proven_txs(txid);
 
 -- Create proven_tx_reqs table (mutable proof request tracking)
 CREATE TABLE IF NOT EXISTS proven_tx_reqs (
@@ -511,43 +536,43 @@ CREATE TABLE IF NOT EXISTS proven_tx_reqs (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
-CREATE INDEX idx_proven_tx_reqs_status ON proven_tx_reqs(status);
-CREATE INDEX idx_proven_tx_reqs_txid ON proven_tx_reqs(txid);
+CREATE INDEX IF NOT EXISTS idx_proven_tx_reqs_status ON proven_tx_reqs(status);
+CREATE INDEX IF NOT EXISTS idx_proven_tx_reqs_txid ON proven_tx_reqs(txid);
 
 -- Add provenTxId FK to transactions table
 ALTER TABLE transactions ADD COLUMN proven_tx_id INTEGER REFERENCES proven_txs(provenTxId);
 
--- Migrate existing data: parent_transactions + merkle_proofs → proven_txs
-INSERT INTO proven_txs (txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root, created_at, updated_at)
-SELECT pt.txid, mp.block_height, mp.tx_index,
-       CAST(mp.nodes AS BLOB),  -- JSON nodes → will need runtime conversion to binary MerklePath
-       CAST(pt.raw_hex AS BLOB),
-       COALESCE(bh.block_hash, ''),
-       '',  -- merkle_root computed at runtime if needed
-       pt.cached_at,
-       pt.cached_at
-FROM parent_transactions pt
-INNER JOIN merkle_proofs mp ON mp.parent_txn_id = pt.id
-LEFT JOIN block_headers bh ON bh.height = mp.block_height;
-
--- Link existing confirmed transactions to their proven_txs
-UPDATE transactions SET proven_tx_id = (
-    SELECT provenTxId FROM proven_txs WHERE proven_txs.txid = transactions.txid
-) WHERE new_status = 'completed' AND EXISTS (
-    SELECT 1 FROM proven_txs WHERE proven_txs.txid = transactions.txid
-);
+-- Data migration from merkle_proofs + parent_transactions → proven_txs (done in Rust)
+-- Link existing transactions to proven_txs records
 ```
 
 #### Rust Code Changes
 
 | File | Change |
 |---|---|
-| `src/database/models.rs` | Add `ProvenTx` and `ProvenTxReq` model structs |
-| `src/database/proven_tx_repo.rs` | **New file**: `get_by_txid()`, `insert()` (immutable — no update method), `get_by_id()` |
-| `src/database/proven_tx_req_repo.rs` | **New file**: `create()`, `get_by_txid()`, `update_status()`, `increment_attempts()`, `get_pending()`, `add_history_note()` |
-| `src/arc_status_poller.rs` | On MINED: create proven_tx record, link to transaction via proven_tx_id, create/update proven_tx_req to 'completed' |
-| `src/cache_sync.rs` | Migrate to write proven_txs instead of separate parent_transactions + merkle_proofs |
-| `src/handlers.rs` | signAction: create proven_tx_req with status='sending' for broadcast transactions |
+| `src/database/models.rs` | Added `ProvenTx` and `ProvenTxReq` model structs |
+| `src/database/proven_tx_repo.rs` | **New file**: `insert_or_get()` (immutable insert-or-return-existing), `get_by_txid()`, `get_by_id()`, `get_merkle_proof_as_tsc()`, `link_transaction()` |
+| `src/database/proven_tx_req_repo.rs` | **New file**: `create()`, `get_by_txid()`, `update_status()`, `increment_attempts()`, `get_pending()`, `link_proven_tx()`, `add_history_note()` |
+| `src/database/mod.rs` | Export new modules and types |
+| `src/database/migrations.rs` | Added `create_schema_v16()` with data migration from merkle_proofs |
+| `src/database/connection.rs` | Added V16 migration runner |
+| `src/action_storage.rs` | Added `ProvenTxReqStatus` enum |
+| `src/arc_status_poller.rs` | Added `create_proven_tx_from_arc()`, early reconciliation check for existing proofs |
+| `src/cache_sync.rs` | Write to `proven_txs` instead of `merkle_proofs`, update tx/req status after proof creation |
+| `src/beef_helpers.rs` | Read proofs from `proven_txs` via `get_merkle_proof_as_tsc()` instead of `merkle_proofs` |
+| `src/handlers.rs` | Rewrote `cache_arc_merkle_proof()` to create `proven_txs` records, updated `sign_action()` proof reads, create `proven_tx_req` on broadcast |
+
+#### Testing Results
+
+- **Fresh DB**: All tables created with correct columns, indexes, and auto-indexes
+- **V15→V16 Migration**: 22 proof records migrated to `proven_txs` (matched `merkle_proofs` count exactly). Balance unchanged at 644,544 sats
+- **Data Reconciliation**: 12 transactions had proofs but weren't marked `completed` (pre-existing data inconsistency from before Phase 1). Reconciled via manual UPDATE
+- **Runtime**: `proven_tx_req` created with status `'sending'` on broadcast. After mining, `cache_sync` created `proven_txs` record and updated all statuses to `'completed'`
+- **BEEF Construction**: Multiple transaction types tested successfully:
+  - BRC-29 payment transactions with `proven_txs` merkle proofs
+  - TODO app create/complete with inputBEEF and ancestry chains
+  - Two-phase signing (createAction → signAction)
+  - All showed `✅ Using proven_txs Merkle proof` in logs
 
 #### Risk: LOW
 - Purely additive (new tables, new FK column)
@@ -994,16 +1019,16 @@ DROP TABLE IF EXISTS merkle_proofs;        -- replaced by proven_txs
 
 ### Per-Phase Migration Summary
 
-| Phase | Migration Type | Reversibility | Data at Risk |
-|---|---|---|---|
-| 1 (Status) | Column addition + data transform | Full rollback (old columns kept) | None |
-| 2 (Proven Txs) | New tables + data copy | Full rollback (old tables kept) | None |
-| 3 (Users) | New table + column additions | Full rollback | None |
-| 4 (Outputs) | New table + data migration | Rollback via old utxos table | **Medium**: UTXO state is critical |
-| 5 (Labels etc) | New tables + data copy | Full rollback | None |
-| 6 (Monitor) | Code-only (new background tasks) | Full rollback (revert code) | None |
-| 7 (Derivation) | Data backfill on outputs | Rollback via addresses table | **High**: key derivation is critical |
-| 8 (Cleanup) | Table/column drops | **Not reversible** — backup required | N/A (dead data) |
+| Phase | Migration Type | Reversibility | Data at Risk | Status |
+|---|---|---|---|---|
+| 1 (Status) | Column addition + data transform | Full rollback (old columns kept) | None | ✅ Complete |
+| 2 (Proven Txs) | New tables + data copy | Full rollback (old tables kept) | None | ✅ Complete |
+| 3 (Users) | New table + column additions | Full rollback | None | Pending |
+| 4 (Outputs) | New table + data migration | Rollback via old utxos table | **Medium**: UTXO state is critical | Pending |
+| 5 (Labels etc) | New tables + data copy | Full rollback | None | Pending |
+| 6 (Monitor) | Code-only (new background tasks) | Full rollback (revert code) | None | Pending |
+| 7 (Derivation) | Data backfill on outputs | Rollback via addresses table | **High**: key derivation is critical | Pending |
+| 8 (Cleanup) | Table/column drops | **Not reversible** — backup required | N/A (dead data) | Pending |
 
 ### Backup Requirements
 
@@ -1056,4 +1081,6 @@ After all 8 phases are complete, the Hodos database will have tables that closel
 
 ---
 
-*End of transition plan. Each phase should be reviewed and approved individually before implementation begins.*
+*End of transition plan. Each phase is reviewed and approved individually before implementation begins.*
+
+*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Next: Phase 3 (Multi-User Foundation).*

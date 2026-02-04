@@ -15,13 +15,15 @@ pub mod helpers;
 pub mod parent_transaction_repo;
 pub mod merkle_proof_repo;
 pub mod block_header_repo;
+pub mod proven_tx_repo;
+pub mod proven_tx_req_repo;
 pub mod basket_repo;
 pub mod tag_repo;
 pub mod certificate_repo;
 pub mod message_relay_repo;
 
 pub use connection::WalletDatabase;
-pub use models::{Wallet, Address, Utxo, ParentTransaction, MerkleProof, BlockHeader, Basket, OutputTag, OutputTagMap};
+pub use models::{Wallet, Address, Utxo, ParentTransaction, MerkleProof, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
 pub use wallet_repo::WalletRepository;
 pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;
@@ -31,6 +33,8 @@ pub use helpers::{get_master_private_key_from_db, get_master_public_key_from_db,
 pub use parent_transaction_repo::ParentTransactionRepository;
 pub use merkle_proof_repo::MerkleProofRepository;
 pub use block_header_repo::BlockHeaderRepository;
+pub use proven_tx_repo::ProvenTxRepository;
+pub use proven_tx_req_repo::ProvenTxReqRepository;
 pub use basket_repo::BasketRepository;
 pub use tag_repo::TagRepository;
 pub use certificate_repo::CertificateRepository;

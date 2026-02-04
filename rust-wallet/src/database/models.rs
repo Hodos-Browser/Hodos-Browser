@@ -79,6 +79,42 @@ pub struct BlockHeader {
     pub cached_at: i64,  // Unix timestamp
 }
 
+/// Proven transaction model matching the `proven_txs` table.
+/// Records are IMMUTABLE — once created, never updated.
+/// Stores a confirmed transaction along with its merkle proof.
+#[derive(Debug, Clone)]
+pub struct ProvenTx {
+    pub proven_tx_id: i64,
+    pub txid: String,
+    pub height: u32,
+    pub tx_index: u64,
+    pub merkle_path: Vec<u8>,    // TSC JSON serialized as bytes
+    pub raw_tx: Vec<u8>,         // Raw transaction bytes
+    pub block_hash: String,
+    pub merkle_root: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Proven transaction request model matching the `proven_tx_reqs` table.
+/// Tracks the lifecycle of proof acquisition for a broadcast transaction.
+#[derive(Debug, Clone)]
+pub struct ProvenTxReq {
+    pub proven_tx_req_id: i64,
+    pub proven_tx_id: Option<i64>,  // Links to proven_txs once proof acquired
+    pub status: String,              // ProvenTxReqStatus value
+    pub attempts: i32,
+    pub notified: bool,
+    pub txid: String,
+    pub batch: Option<String>,
+    pub history: String,             // JSON timestamped state transition log
+    pub notify: String,              // JSON list of transaction IDs to notify
+    pub raw_tx: Vec<u8>,
+    pub input_beef: Option<Vec<u8>>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// Basket model matching the `baskets` table
 #[derive(Debug, Clone)]
 pub struct Basket {

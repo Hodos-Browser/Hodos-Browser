@@ -4,6 +4,7 @@
 
 use rusqlite::{Connection, Result};
 use log::{info, warn};
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use super::Utxo;
 
@@ -73,7 +74,7 @@ impl<'a> UtxoRepository<'a> {
 
     /// Get all unspent UTXOs for a list of addresses
     ///
-    /// Excludes UTXOs from transactions that were never broadcast ('pending')
+    /// Excludes UTXOs from transactions that were never broadcast ('unsigned')
     /// or that failed to broadcast ('failed'). This prevents spending outputs
     /// that don't exist on-chain, which would cause ARC to reject the BEEF.
     pub fn get_unspent_by_addresses(&self, address_ids: &[i64]) -> Result<Vec<Utxo>> {
@@ -81,9 +82,9 @@ impl<'a> UtxoRepository<'a> {
             return Ok(Vec::new());
         }
 
-        // Check if broadcast_status column exists (migration v10)
-        let has_broadcast_status: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+        // Check if new_status column exists (migration v15)
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
             [],
             |row| Ok(row.get::<_, i64>(0)? > 0),
         ).unwrap_or(false);
@@ -93,32 +94,51 @@ impl<'a> UtxoRepository<'a> {
             .map(|_| "?".to_string())
             .collect();
 
-        let query = if has_broadcast_status {
+        let query = if has_new_status {
             // LEFT JOIN with transactions to filter out UTXOs from never-broadcast
             // or failed transactions. The LEFT JOIN means:
-            // - UTXOs from external incoming transactions (no match) → t.broadcast_status IS NULL → included
-            // - UTXOs from broadcast/confirmed transactions → included
-            // - UTXOs from pending/failed transactions → excluded
+            // - UTXOs from external incoming transactions (no match) → t.new_status IS NULL → included
+            // - UTXOs from sending/unproven/completed transactions → included
+            // - UTXOs from unsigned/failed transactions → excluded
             format!(
                 "SELECT u.id, u.address_id, u.basket_id, u.txid, u.vout, u.satoshis, u.script,
                         u.first_seen, u.last_updated, u.is_spent, u.spent_txid, u.spent_at, u.custom_instructions, u.output_description
                  FROM utxos u
                  LEFT JOIN transactions t ON u.txid = t.txid
                  WHERE u.address_id IN ({}) AND u.is_spent = 0
-                   AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))
+                   AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))
                  ORDER BY u.satoshis DESC",
                 placeholders.join(",")
             )
         } else {
-            // Pre-migration fallback: no broadcast_status filtering
-            format!(
-                "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                        first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions, output_description
-                 FROM utxos
-                 WHERE address_id IN ({}) AND is_spent = 0
-                 ORDER BY satoshis DESC",
-                placeholders.join(",")
-            )
+            // Pre-v15 fallback: check broadcast_status
+            let has_broadcast_status: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+                [],
+                |row| Ok(row.get::<_, i64>(0)? > 0),
+            ).unwrap_or(false);
+
+            if has_broadcast_status {
+                format!(
+                    "SELECT u.id, u.address_id, u.basket_id, u.txid, u.vout, u.satoshis, u.script,
+                            u.first_seen, u.last_updated, u.is_spent, u.spent_txid, u.spent_at, u.custom_instructions, u.output_description
+                     FROM utxos u
+                     LEFT JOIN transactions t ON u.txid = t.txid
+                     WHERE u.address_id IN ({}) AND u.is_spent = 0
+                       AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))
+                     ORDER BY u.satoshis DESC",
+                    placeholders.join(",")
+                )
+            } else {
+                format!(
+                    "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
+                            first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions, output_description
+                     FROM utxos
+                     WHERE address_id IN ({}) AND is_spent = 0
+                     ORDER BY satoshis DESC",
+                    placeholders.join(",")
+                )
+            }
         };
 
         let mut stmt = self.conn.prepare(&query)?;
@@ -274,7 +294,7 @@ impl<'a> UtxoRepository<'a> {
 
     /// Calculate total balance from unspent UTXOs for given addresses
     ///
-    /// Excludes UTXOs from transactions that were never broadcast ('pending')
+    /// Excludes UTXOs from transactions that were never broadcast ('unsigned')
     /// or that failed to broadcast ('failed'), matching the same filter used
     /// in get_unspent_by_addresses() for consistency.
     pub fn calculate_balance(&self, address_ids: &[i64]) -> Result<i64> {
@@ -282,9 +302,9 @@ impl<'a> UtxoRepository<'a> {
             return Ok(0);
         }
 
-        // Check if broadcast_status column exists (migration v10)
-        let has_broadcast_status: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+        // Check if new_status column exists (migration v15)
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
             [],
             |row| Ok(row.get::<_, i64>(0)? > 0),
         ).unwrap_or(false);
@@ -293,22 +313,40 @@ impl<'a> UtxoRepository<'a> {
             .map(|_| "?".to_string())
             .collect();
 
-        let query = if has_broadcast_status {
+        let query = if has_new_status {
             format!(
                 "SELECT COALESCE(SUM(u.satoshis), 0)
                  FROM utxos u
                  LEFT JOIN transactions t ON u.txid = t.txid
                  WHERE u.address_id IN ({}) AND u.is_spent = 0
-                   AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))",
+                   AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))",
                 placeholders.join(",")
             )
         } else {
-            format!(
-                "SELECT COALESCE(SUM(satoshis), 0)
-                 FROM utxos
-                 WHERE address_id IN ({}) AND is_spent = 0",
-                placeholders.join(",")
-            )
+            // Pre-v15 fallback
+            let has_broadcast_status: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+                [],
+                |row| Ok(row.get::<_, i64>(0)? > 0),
+            ).unwrap_or(false);
+
+            if has_broadcast_status {
+                format!(
+                    "SELECT COALESCE(SUM(u.satoshis), 0)
+                     FROM utxos u
+                     LEFT JOIN transactions t ON u.txid = t.txid
+                     WHERE u.address_id IN ({}) AND u.is_spent = 0
+                       AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))",
+                    placeholders.join(",")
+                )
+            } else {
+                format!(
+                    "SELECT COALESCE(SUM(satoshis), 0)
+                     FROM utxos
+                     WHERE address_id IN ({}) AND is_spent = 0",
+                    placeholders.join(",")
+                )
+            }
         };
 
         let balance: i64 = self.conn.query_row(
@@ -712,6 +750,64 @@ impl<'a> UtxoRepository<'a> {
         }
 
         Ok(rows_affected)
+    }
+
+    /// Reconcile UTXOs for an address against the blockchain API response.
+    ///
+    /// Marks unspent UTXOs in the database as externally spent if they are
+    /// NOT present in the API response (meaning they were spent on-chain
+    /// by a transaction the wallet doesn't know about).
+    ///
+    /// Only reconciles UTXOs older than `grace_period_secs` to avoid marking
+    /// recently-created wallet UTXOs that haven't propagated to the API yet.
+    ///
+    /// # Arguments
+    /// * `address_id` - The database ID of the address to reconcile
+    /// * `api_utxos` - The UTXOs returned by WhatsOnChain for this address
+    /// * `grace_period_secs` - Don't reconcile UTXOs newer than this many seconds
+    ///
+    /// # Returns
+    /// The number of stale UTXOs marked as externally spent
+    pub fn reconcile_for_address(
+        &self,
+        address_id: i64,
+        api_utxos: &[crate::utxo_fetcher::UTXO],
+        grace_period_secs: i64,
+    ) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let grace_cutoff = now - grace_period_secs;
+
+        // Build set of (txid, vout) from API response
+        let api_set: HashSet<(String, i32)> = api_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout as i32))
+            .collect();
+
+        // Get all unspent UTXOs for this address from DB (older than grace period)
+        let mut stmt = self.conn.prepare(
+            "SELECT txid, vout FROM utxos WHERE address_id = ?1 AND is_spent = 0 AND first_seen < ?2"
+        )?;
+        let db_utxos: Vec<(String, i32)> = stmt.query_map(
+            rusqlite::params![address_id, grace_cutoff],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
+        )?.filter_map(|r| r.ok()).collect();
+
+        let mut stale_count = 0;
+        for (txid, vout) in &db_utxos {
+            if !api_set.contains(&(txid.clone(), *vout)) {
+                self.conn.execute(
+                    "UPDATE utxos SET is_spent = 1, spent_txid = 'external-spend', spent_at = ?1
+                     WHERE txid = ?2 AND vout = ?3 AND is_spent = 0",
+                    rusqlite::params![now, txid, vout],
+                )?;
+                stale_count += 1;
+                info!("   🔄 Marked stale UTXO {}:{} as externally spent (not in blockchain API)", txid, vout);
+            }
+        }
+
+        Ok(stale_count)
     }
 
     /// Update the txid of a specific UTXO (e.g., after signing changes the txid).

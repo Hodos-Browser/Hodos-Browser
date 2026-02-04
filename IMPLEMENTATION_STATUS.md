@@ -645,4 +645,75 @@ The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity
 
 ---
 
-**Last Updated**: January 5, 2025
+**Last Updated**: February 4, 2026
+
+---
+
+## State Maintenance & Reconciliation — Wallet-Toolbox Alignment
+
+**Branch**: wallet-toolbox-alignment
+**Plan**: `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md`
+**Goal**: Align wallet database schema with BSV SDK wallet-toolbox for future interoperability
+
+### Phase 1: Status Consolidation — COMPLETED (2026-02-03)
+
+**Migration V15** — Replaced dual status system (`status` + `broadcast_status`) with single `new_status` column matching SDK `TransactionStatus` values.
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/action_storage.rs` | Added `TransactionStatus` enum |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v15()` |
+| `rust-wallet/src/database/connection.rs` | Added V15 migration runner |
+| `rust-wallet/src/database/transaction_repo.rs` | Read/write `new_status`, `update_broadcast_status()` maps to new values |
+| `rust-wallet/src/database/utxo_repo.rs` | Updated balance/UTXO queries to filter on `new_status` |
+| `rust-wallet/src/handlers.rs` | Status transitions use `new_status` |
+| `rust-wallet/src/arc_status_poller.rs` | Query `WHERE new_status IN ('sending', 'unproven')` |
+| `rust-wallet/src/main.rs` | Startup cleanup uses `new_status` |
+
+### Phase 2: Proven Transaction Model — COMPLETED (2026-02-04)
+
+**Migration V16** — Added `proven_txs` (immutable proof records) and `proven_tx_reqs` (proof lifecycle tracking). Migrated existing `merkle_proofs` data. All proof reads/writes now use `proven_txs`.
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/proven_tx_repo.rs` | `ProvenTxRepository` — immutable proof record CRUD |
+| `rust-wallet/src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository` — proof lifecycle tracking |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `ProvenTx`, `ProvenTxReq` structs |
+| `rust-wallet/src/database/mod.rs` | Export new modules |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v16()` with data migration |
+| `rust-wallet/src/database/connection.rs` | Added V16 migration runner |
+| `rust-wallet/src/action_storage.rs` | Added `ProvenTxReqStatus` enum |
+| `rust-wallet/src/arc_status_poller.rs` | Create `proven_txs` on MINED, early reconciliation check |
+| `rust-wallet/src/cache_sync.rs` | Write to `proven_txs`, update tx/req status |
+| `rust-wallet/src/beef_helpers.rs` | Read proofs from `proven_txs` |
+| `rust-wallet/src/handlers.rs` | Rewrite `cache_arc_merkle_proof()`, create `proven_tx_req` on broadcast |
+
+#### Bug Fixed
+
+Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` created a proof before ARC poller ran, transaction status wasn't updated. Fixed by adding status updates to `cache_sync` and early reconciliation check to ARC poller.
+
+### Remaining Phases (Pending)
+
+| Phase | Goal | Migration |
+|-------|------|-----------|
+| 3 | Multi-User Foundation (users table, userId FKs) | V17 |
+| 4 | Output Model Transition (utxos → outputs) | V18 |
+| 5 | Labels, Commissions, Supporting Tables | V19 |
+| 6 | Monitor Pattern (background service restructure) | V20 |
+| 7 | Per-Output Key Derivation | V21 |
+| 8 | Cleanup (deprecated table removal) | V22 |
+
+### Known Issues / Future Work
+
+- **UTXO sync disabled**: Background UTXO sync commented out in `main.rs`. Will be redesigned as manual trigger in Phase 6 (Monitor pattern)
+- **Staleness timeout needed**: ARC poller should auto-mark transactions as failed if unproven for >7 days. Deferred to Phase 6
+- **Old tables preserved**: `merkle_proofs` and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8

@@ -799,6 +799,60 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 15 (Status Consolidation + UnFail)
+        if current_version < 15 {
+            info!("   Applying migration to version 15...");
+            match migrations::create_schema_v15(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 15...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (15)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 15 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 15 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 16 (Proven Transaction Model)
+        if current_version < 16 {
+            info!("   Applying migration to version 16...");
+            match migrations::create_schema_v16(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 16...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (16)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 16 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 16 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -158,7 +158,7 @@ async fn main() -> std::io::Result<()> {
                 let conn = db.connection();
                 let tx_repo = TransactionRepository::new(conn);
 
-                // Find transactions stuck in 'pending' for more than 5 minutes
+                // Find transactions stuck in 'unsigned' (never broadcast) for more than 5 minutes
                 match tx_repo.get_stale_pending_transactions(300) {
                     Ok(stale_txs) if !stale_txs.is_empty() => {
                         println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
@@ -293,10 +293,11 @@ async fn main() -> std::io::Result<()> {
     println!("✅ Server ready - CEF browser can now connect!");
     println!();
 
-    // Start background UTXO sync task
-    println!("🔄 Starting background UTXO sync service...");
-    utxo_sync::start_background_sync(database_for_sync);
-    println!("   ✅ Background sync will run every {} seconds", utxo_sync::SYNC_INTERVAL_SECONDS);
+    // Background UTXO sync — disabled for now, will be redesigned in Phase 6 (Monitor pattern)
+    // with manual trigger for the user instead of automatic background polling.
+    // utxo_sync::start_background_sync(database_for_sync);
+    // println!("🔄 Background UTXO sync enabled");
+    let _ = database_for_sync; // suppress unused variable warning
     println!();
 
     // Start background cache sync service
