@@ -1388,5 +1388,61 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== COOKIE/CACHE RESPONSE HANDLERS ==========
+
+    if (message_name == "cookie_get_all_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string cookiesJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(cookiesJson);
+        std::string js = "if (window.onCookieGetAllResponse) { window.onCookieGetAllResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteResponse) { window.onCookieDeleteResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_domain_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteDomainResponse) { window.onCookieDeleteDomainResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_all_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteAllResponse) { window.onCookieDeleteAllResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cache_clear_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCacheClearResponse) { window.onCacheClearResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cache_get_size_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCacheGetSizeResponse) { window.onCacheGetSizeResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
     return false;
 }

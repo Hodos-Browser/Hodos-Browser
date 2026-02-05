@@ -17,6 +17,7 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/GoogleSuggestService.h"
+#include "../../include/core/CookieManager.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -2433,6 +2434,43 @@ bool SimpleHandler::OnProcessMessageReceived(
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         LOG_DEBUG_BROWSER("📤 Google Suggest response sent: " + response.dump() + " (requestId: " + std::to_string(requestId) + ")");
 
+        return true;
+    }
+
+    // ========== COOKIE MANAGEMENT MESSAGES ==========
+
+    if (message_name == "cookie_get_all") {
+        CookieManager::HandleGetAllCookies(browser);
+        return true;
+    }
+
+    if (message_name == "cookie_delete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0).ToString();
+        std::string name = args->GetString(1).ToString();
+        CookieManager::HandleDeleteCookie(browser, url, name);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_domain") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        CookieManager::HandleDeleteDomainCookies(browser, domain);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_all") {
+        CookieManager::HandleDeleteAllCookies(browser);
+        return true;
+    }
+
+    if (message_name == "cache_clear") {
+        CookieManager::HandleClearCache(browser);
+        return true;
+    }
+
+    if (message_name == "cache_get_size") {
+        CookieManager::HandleGetCacheSize(browser);
         return true;
     }
 
