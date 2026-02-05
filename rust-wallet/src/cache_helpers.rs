@@ -26,8 +26,71 @@ pub async fn fetch_parent_transaction_from_api(
         .map_err(|e| CacheError::Api(format!("Failed to read parent tx response: {}", e)))
 }
 
-/// Fetch TSC Merkle proof from WhatsOnChain API (with retry logic for null proofs)
+/// Fetch TSC Merkle proof - tries ARC first, falls back to WhatsOnChain
+///
+/// ARC returns merkle proofs in BUMP format (BRC-74) which we convert to TSC.
+/// WhatsOnChain returns TSC format directly.
+/// ARC is preferred because it's the same service we broadcast to, so it's
+/// more likely to have proofs for recently-mined transactions.
 pub async fn fetch_tsc_proof_from_api(
+    client: &Client,
+    txid: &str,
+) -> CacheResult<Option<Value>> {
+    // Try ARC first
+    match fetch_tsc_proof_from_arc(client, txid).await {
+        Ok(Some(tsc)) => {
+            log::info!("   ✅ Got merkle proof from ARC for {}", txid);
+            return Ok(Some(tsc));
+        }
+        Ok(None) => {
+            log::info!("   ℹ️  ARC has no merkle proof for {} (not yet mined), trying WhatsOnChain...", txid);
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  ARC merkle proof fetch failed for {}: {}, trying WhatsOnChain...", txid, e);
+        }
+    }
+
+    // Fall back to WhatsOnChain
+    fetch_tsc_proof_from_whatsonchain(client, txid).await
+}
+
+/// Fetch merkle proof from ARC and convert BUMP to TSC format
+async fn fetch_tsc_proof_from_arc(
+    client: &Client,
+    txid: &str,
+) -> CacheResult<Option<Value>> {
+    let arc_response = crate::handlers::query_arc_tx_status(client, txid).await
+        .map_err(|e| CacheError::Api(format!("ARC query failed: {}", e)))?;
+
+    let status = arc_response.tx_status.as_deref().unwrap_or("UNKNOWN");
+
+    if status != "MINED" {
+        // Transaction not yet mined - no merkle proof available
+        return Ok(None);
+    }
+
+    // Extract merklePath and convert from BUMP to TSC
+    let merkle_path = match arc_response.merkle_path {
+        Some(ref path) if !path.is_empty() => path,
+        _ => return Ok(None),
+    };
+
+    let tsc = crate::beef::parse_bump_hex_to_tsc(merkle_path)
+        .map_err(|e| CacheError::InvalidData(format!("Failed to parse ARC BUMP: {}", e)))?;
+
+    // ARC's BUMP includes block_height but not the target hash.
+    // The TSC from parse_bump_hex_to_tsc has height, index, nodes, and target="".
+    // We need to add block height from the ARC response if not already present.
+    let mut tsc = tsc;
+    if let Some(height) = arc_response.block_height {
+        tsc["height"] = serde_json::json!(height);
+    }
+
+    Ok(Some(tsc))
+}
+
+/// Fetch TSC Merkle proof from WhatsOnChain API (with retry logic for null proofs)
+async fn fetch_tsc_proof_from_whatsonchain(
     client: &Client,
     txid: &str,
 ) -> CacheResult<Option<Value>> {

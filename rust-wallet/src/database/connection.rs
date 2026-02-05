@@ -123,6 +123,12 @@ impl WalletDatabase {
         // Create wallet (generates mnemonic)
         let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet()?;
 
+        // Create the "default" basket for change outputs (BRC-99 requirement)
+        use super::BasketRepository;
+        let basket_repo = BasketRepository::new(&self.conn);
+        basket_repo.find_or_insert("default")?;
+        info!("   ✅ Created 'default' basket for change outputs");
+
         // Parse mnemonic and derive master keys
         let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_phrase)
             .map_err(|e| rusqlite::Error::SqliteFailure(
@@ -308,6 +314,24 @@ impl WalletDatabase {
 
         address_repo.create(&master_address_model)?;
         info!("   ✅ Master pubkey address created with index -1");
+
+        Ok(())
+    }
+
+    /// Ensure the "default" basket exists for wallet change outputs
+    ///
+    /// This should be called on startup for existing wallets that may have been
+    /// created before the default basket was added. Safe to call multiple times.
+    pub fn ensure_default_basket_exists(&self) -> Result<()> {
+        use super::BasketRepository;
+
+        info!("🧺 Checking if 'default' basket exists...");
+
+        let basket_repo = BasketRepository::new(&self.conn);
+
+        // find_or_insert is idempotent - will create if missing, return existing if present
+        basket_repo.find_or_insert("default")?;
+        info!("   ✅ 'default' basket exists (created if missing)");
 
         Ok(())
     }
@@ -609,6 +633,166 @@ impl WalletDatabase {
                 }
                 Err(e) => {
                     error!("❌ Migration to version 8 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 9 (Basket & Tag Support Enhancements)
+        if current_version < 9 {
+            info!("   Applying migration to version 9...");
+            match migrations::create_schema_v9(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 9...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (9)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 9 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 9 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 10 (Transaction Chaining Support)
+        if current_version < 10 {
+            info!("   Applying migration to version 10...");
+            match migrations::create_schema_v10(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 10...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (10)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 10 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 10 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 11 (Fix Orphan UTXOs)
+        if current_version < 11 {
+            info!("   Applying migration to version 11...");
+            match migrations::create_schema_v11(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 11...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (11)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 11 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 11 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Apply migration to version 12 (Basket Output Tracking - nullable address_id)
+        if current_version < 12 {
+            info!("   Applying migration to version 12...");
+            match migrations::create_schema_v12(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 12...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (12)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 12 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 12 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        if current_version < 13 {
+            info!("   Applying migration to version 13...");
+            match migrations::create_schema_v13(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 13...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (13)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 13 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 13 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        if current_version < 14 {
+            info!("   Applying migration to version 14...");
+            match migrations::create_schema_v14(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 14...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (14)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 14 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 14 failed: {}", e);
                     error!("   Error details: {:?}", e);
                     return Err(e);
                 }

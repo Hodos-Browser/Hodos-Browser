@@ -414,7 +414,154 @@ impl Beef {
         Ok(bytes)
     }
 
-    /// Serialize BEEF to hex string
+    /// Sort transactions in topological order (parents before children)
+    ///
+    /// BRC-62 requires transactions in topological order so that each
+    /// transaction's inputs reference an earlier transaction in the BEEF
+    /// (or a BUMP-verified ancestor). This is critical when including
+    /// unconfirmed parent chains for ARC BEEF validation.
+    pub fn sort_topologically(&mut self) {
+        use sha2::{Sha256, Digest};
+        use std::collections::{HashMap, VecDeque};
+
+        let n = self.transactions.len();
+        if n <= 1 {
+            return; // Nothing to sort
+        }
+
+        // Calculate TXID (wire format) for each transaction in BEEF
+        let mut txid_to_index: HashMap<Vec<u8>, usize> = HashMap::new();
+        for (i, tx) in self.transactions.iter().enumerate() {
+            let hash1 = Sha256::digest(tx);
+            let hash2 = Sha256::digest(&hash1);
+            txid_to_index.insert(hash2.to_vec(), i);
+        }
+
+        // Build dependency graph: in_beef_deps[i] = indices of in-BEEF parents for tx i
+        let mut in_degree: Vec<usize> = vec![0; n];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        for (i, tx) in self.transactions.iter().enumerate() {
+            if let Ok(parsed) = ParsedTransaction::from_bytes(tx) {
+                for input in &parsed.inputs {
+                    if let Ok(txid_bytes) = hex::decode(&input.prev_txid) {
+                        // prev_txid is display format (reversed), convert to wire
+                        let wire_txid: Vec<u8> = txid_bytes.iter().rev().copied().collect();
+                        if let Some(&parent_idx) = txid_to_index.get(&wire_txid) {
+                            if parent_idx != i {
+                                in_degree[i] += 1;
+                                dependents[parent_idx].push(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm: start with txs that have no in-BEEF parents
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for i in 0..n {
+            if in_degree[i] == 0 {
+                queue.push_back(i);
+            }
+        }
+
+        let mut sorted_order: Vec<usize> = Vec::with_capacity(n);
+        while let Some(idx) = queue.pop_front() {
+            sorted_order.push(idx);
+            for &dep in &dependents[idx] {
+                in_degree[dep] -= 1;
+                if in_degree[dep] == 0 {
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        // If sort is incomplete (cycle), keep original order
+        if sorted_order.len() != n {
+            log::warn!("   ⚠️  Topological sort incomplete ({}/{}), keeping original order", sorted_order.len(), n);
+            return;
+        }
+
+        // Check if already sorted
+        let already_sorted = sorted_order.iter().enumerate().all(|(i, &v)| i == v);
+        if already_sorted {
+            log::info!("   ✅ BEEF transactions already in topological order");
+            return;
+        }
+
+        // Reorder transactions and tx_to_bump
+        let old_txs = self.transactions.clone();
+        let old_bumps = self.tx_to_bump.clone();
+
+        for (new_i, &old_i) in sorted_order.iter().enumerate() {
+            self.transactions[new_i] = old_txs[old_i].clone();
+            if old_i < old_bumps.len() && new_i < self.tx_to_bump.len() {
+                self.tx_to_bump[new_i] = old_bumps[old_i];
+            }
+        }
+
+        log::info!("   ✅ Topologically sorted {} BEEF transactions", n);
+    }
+
+    /// Serialize BEEF to V1 format bytes (BRC-62)
+    ///
+    /// V1 format per transaction: [raw_tx][has_bump: 0x00/0x01][bump_index: varint if 0x01]
+    /// This is required for ARC API which only accepts BEEF V1.
+    pub fn to_v1_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+
+        // Write V1 version marker (0x0100beef)
+        bytes.extend_from_slice(&BEEF_V1_MARKER);
+
+        // Write number of BUMPs (merkle proofs)
+        write_varint(&mut bytes, self.bumps.len() as u64);
+
+        // Write BUMPs (same format for V1 and V2)
+        for bump in &self.bumps {
+            write_bump(&mut bytes, bump)?;
+        }
+
+        // Write number of transactions
+        write_varint(&mut bytes, self.transactions.len() as u64);
+        log::info!("   🔢 Writing {} transactions to BEEF V1", self.transactions.len());
+
+        // Write transactions using BEEF V1 format
+        // V1 format: [raw_tx][has_bump: 0x00/0x01][bump_index: varint if 0x01]
+        for (i, tx) in self.transactions.iter().enumerate() {
+            log::info!("      TX {}: {} bytes (V1 format)", i, tx.len());
+
+            // Write raw transaction bytes first (self-describing, no length prefix)
+            bytes.extend(tx);
+
+            // Write BUMP association flag after transaction
+            if i < self.tx_to_bump.len() {
+                if let Some(bump_index) = self.tx_to_bump[i] {
+                    bytes.push(0x01); // has BUMP
+                    write_varint(&mut bytes, bump_index as u64);
+                    log::info!("         BEEF V1: has BUMP at index {}", bump_index);
+                } else {
+                    bytes.push(0x00); // no BUMP
+                    log::info!("         BEEF V1: no BUMP");
+                }
+            } else {
+                bytes.push(0x00); // no BUMP (no mapping available)
+                log::info!("         BEEF V1: no BUMP (no mapping)");
+            }
+        }
+
+        Ok(bytes)
+    }
+
+    /// Serialize BEEF to V1 format hex string
+    ///
+    /// Required for ARC API which only accepts BEEF V1 hex.
+    pub fn to_v1_hex(&self) -> Result<String, String> {
+        let bytes = self.to_v1_bytes()?;
+        Ok(hex::encode(bytes))
+    }
+
+    /// Serialize BEEF to hex string (uses current version marker, typically V2)
     pub fn to_hex(&self) -> Result<String, String> {
         let bytes = self.to_bytes()?;
         Ok(hex::encode(bytes))
@@ -451,8 +598,10 @@ impl Beef {
         txid_be.reverse();
         atomic_beef.extend(&txid_be);
 
-        // 3. Append standard BEEF structure
-        let beef_bytes = self.to_bytes()?;
+        // 3. Append standard BEEF structure (V1 format for overlay compatibility)
+        // Overlays in the BSV ecosystem expect BEEF V1 (BRC-62, magic 0100beef).
+        // Using V2 here causes overlays to reject all outputs (outputsToAdmit: []).
+        let beef_bytes = self.to_v1_bytes()?;
         atomic_beef.extend(&beef_bytes);
 
         Ok(hex::encode(atomic_beef))
@@ -947,6 +1096,114 @@ fn tsc_proof_to_bump(
         tree_height,
         levels,
     })
+}
+
+/// Parse a BUMP hex string (BRC-74 merklePath from ARC) and convert to TSC JSON format
+///
+/// ARC returns merklePath as BUMP-format hex (BRC-74). This function converts it
+/// to TSC format compatible with our merkle_proofs database table.
+///
+/// BUMP format: block_height(varint) + tree_height(u8) + levels[num_nodes(varint) + nodes[offset(varint) + flags(u8) + hash(32 bytes if not duplicate)]]
+///
+/// TSC format: { "height": u32, "index": u64, "nodes": ["hex_hash", ...], "target": "" }
+///
+/// # Arguments
+/// * `bump_hex` - BUMP hex string from ARC merklePath response
+///
+/// # Returns
+/// TSC-compatible JSON value, or error if parsing fails
+pub fn parse_bump_hex_to_tsc(bump_hex: &str) -> Result<serde_json::Value, String> {
+    let bytes = hex::decode(bump_hex)
+        .map_err(|e| format!("Invalid BUMP hex: {}", e))?;
+
+    if bytes.is_empty() {
+        return Err("Empty BUMP data".to_string());
+    }
+
+    let mut cursor = std::io::Cursor::new(bytes.as_slice());
+
+    // Read block height
+    let block_height = read_varint(&mut cursor)? as u32;
+
+    // Read tree height
+    let tree_height = read_u8(&mut cursor)?;
+
+    if tree_height == 0 {
+        return Err("Invalid BUMP: tree height is 0".to_string());
+    }
+
+    // Parse levels to extract tx_index and sibling hashes
+    let mut tx_index: u64 = 0;
+    let mut tsc_nodes: Vec<String> = Vec::with_capacity(tree_height as usize);
+
+    for level in 0..tree_height as usize {
+        let num_nodes = read_varint(&mut cursor)? as usize;
+
+        let mut txid_offset: Option<u64> = None;
+        let mut sibling_hash: Option<String> = None;
+        let mut sibling_is_duplicate = false;
+
+        for _ in 0..num_nodes {
+            let offset = read_varint(&mut cursor)?;
+            let flags = read_u8(&mut cursor)?;
+
+            if flags & 0x01 != 0 {
+                // Duplicate flag - no hash follows
+                if level == 0 {
+                    if flags & 0x02 != 0 {
+                        // This is the TXID and it's a duplicate (shouldn't happen at level 0)
+                        txid_offset = Some(offset);
+                    } else {
+                        sibling_is_duplicate = true;
+                    }
+                } else {
+                    sibling_is_duplicate = true;
+                }
+            } else {
+                // Hash follows (32 bytes)
+                let mut hash = vec![0u8; 32];
+                use std::io::Read;
+                cursor.read_exact(&mut hash)
+                    .map_err(|e| format!("Failed to read BUMP hash at level {}: {}", level, e))?;
+
+                if flags & 0x02 != 0 {
+                    // TXID flag - this node is the transaction
+                    txid_offset = Some(offset);
+                } else {
+                    // Sibling hash - reverse to display format for TSC
+                    hash.reverse();
+                    sibling_hash = Some(hex::encode(&hash));
+                }
+            }
+        }
+
+        // At level 0, extract tx_index from the TXID node offset
+        if level == 0 {
+            if let Some(offset) = txid_offset {
+                tx_index = offset;
+            }
+        }
+
+        // Add sibling hash to TSC nodes array
+        if sibling_is_duplicate {
+            tsc_nodes.push("*".to_string());
+        } else if let Some(hash) = sibling_hash {
+            tsc_nodes.push(hash);
+        } else {
+            // No sibling found at this level - use "*" as fallback
+            tsc_nodes.push("*".to_string());
+        }
+    }
+
+    log::info!("   📋 Parsed BUMP: block_height={}, tx_index={}, tree_height={}, {} sibling nodes",
+        block_height, tx_index, tree_height, tsc_nodes.len());
+
+    Ok(serde_json::json!({
+        "height": block_height,
+        "index": tx_index,
+        "nodes": tsc_nodes,
+        "target": "",  // Block hash not available from BUMP - will be looked up if needed
+    }))
 }
 
 /// Write a merkle proof (BUMP)

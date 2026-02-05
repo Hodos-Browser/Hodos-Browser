@@ -3,41 +3,47 @@
 > **Official Specification**: [BRC-100 Wallet Interface](https://bsv.brc.dev/wallet/0100)
 > **Full Spec Document**: `reference/BRC100_spec.md`
 
-## 🎯 Current Status: 26/28 BRC-100 Methods Implemented (93%)! 🎉
+## Current Status: 26/28 BRC-100 Methods Implemented (93%)
 
-**Latest Achievement**: `discoverByAttributes` (Call Code 22) - Certificate attribute search complete!
-**Previous Achievement**: BRC-2 Encrypt/Decrypt endpoints (Call Codes 11, 12) - ToolBSV image generation working!
+**Latest Achievement**: Basket & tag system complete with SDK-style optimistic locking, background cleanup, and output description storage (V14 migration).
+**Previous Achievement**: `discoverByAttributes` (Call Code 22) - Certificate attribute search complete.
 
-**Current Focus**: Third-party test vectors for validation. Only 2 BRC-69 methods remaining (low priority).
+**Current Focus**: Real-world testing of tag functionality and internalizeAction basket insertion. Only 2 BRC-69 methods remaining (low priority).
 
 ---
 
-## 🗄️ **Database Migration Complete!**
+## Database Migration Complete
 
-**Status**: ✅ All wallet database phases complete (Phases 1-9)
-
-**Achievement**: Successfully migrated from JSON file storage to SQLite database with full backup/recovery support.
+**Status**: All wallet database phases complete (Phases 1-9), schema at V14.
 
 **Key Features Implemented**:
-- ✅ **SQLite Database** - Single-file database at `%APPDATA%/HodosBrowser/wallet/wallet.db`
-- ✅ **UTXO Caching** - Eliminates API calls during transactions
-- ✅ **BEEF/SPV Caching** - Parent transactions, Merkle proofs, and block headers cached
-- ✅ **Background Sync** - Automatic UTXO and cache updates (every 5-10 minutes)
-- ✅ **Performance Optimization** - Database indexes and in-memory balance cache
-- ✅ **Backup & Recovery** - File-based backup, JSON export, and recovery from mnemonic
-- ✅ **Schema Ready** - Baskets, certificates, and messages tables ready for future features
+- **SQLite Database** - Single-file database at `%APPDATA%/HodosBrowser/wallet/wallet.db`
+- **UTXO Caching** - Eliminates API calls during transactions
+- **BEEF/SPV Caching** - Parent transactions, Merkle proofs, and block headers cached
+- **Background Sync** - Automatic UTXO and cache updates (every 5 minutes)
+- **Background Cleanup** - Periodic stale reservation recovery, failed broadcast restoration, pending tx timeout
+- **Performance Optimization** - Database indexes and in-memory balance cache
+- **Backup & Recovery** - File-based backup, JSON export, and recovery from mnemonic
+- **Basket & Tag System** - Full BRC-100 basket/tag output tracking with SDK-style optimistic locking
+- **Output Description** - `outputDescription` field stored and returned via `listOutputs`
 
 **Implementation Guide**: See `development-docs/DATABASE_IMPLEMENTATION_GUIDE.md` for complete details.
 
-**Completed Phases**:
-1. ✅ Database Foundation
-2. ✅ Data Migration (JSON → SQLite)
-3. ✅ Core Functionality Migration
-4. ✅ UTXO Management & Caching
-5. ✅ BEEF/SPV Caching
-6. ✅ Performance Optimization
-7. ✅ Backup & Recovery
-8. ⏳ Browser Database (deferred to separate sprint)
+**Schema Migrations** (in `rust-wallet/src/database/migrations.rs`):
+
+| Version | Content |
+|---------|---------|
+| V1 | Foundation: wallets, addresses, utxos (with basket_id FK), baskets, parent_transactions, merkle_proofs, block_headers |
+| V2-V4 | Data migration, UTXO management, indexes |
+| V5 | custom_instructions column on utxos |
+| V6 | output_tags table, output_tag_map table, soft-delete support |
+| V7-V8 | Certificates, backup |
+| V9 | UTXO status column, basket partial index, basket/tag normalization |
+| V10 | broadcast_status on transactions (pending/broadcast/confirmed/failed) |
+| V11 | Transaction tracking enhancements |
+| V12 | Nullable address_id on utxos (for basket outputs without HD wallet addresses) |
+| V13 | Persistent derived key cache (PushDrop signing across restarts) |
+| V14 | output_description column on utxos (BRC-100 output description storage) |
 
 ---
 
@@ -66,14 +72,22 @@
 | SQLite persistence | ✅ Complete | `relay_messages` table with indexes |
 | Message expiry | ✅ Complete | Auto-cleanup of expired messages |
 | `MessageRelayRepository` | ✅ Complete | Full CRUD operations |
-| WebSocket push | ❌ Not implemented | Optional - polling works for now |
-| End-to-end encryption | ❌ Not implemented | BRC-2 primitives available if needed |
-| Federation (BRC-34/35) | ❌ Not implemented | Future enhancement |
+| WebSocket push | ❌ Not implemented | Optional - polling works for now (server-side feature) |
+| End-to-end encryption | ✅ Available | BRC-2 `/encrypt` `/decrypt` endpoints work - apps use them before/after relay |
+| Federation (BRC-34/35) | ❌ Not implemented | Server-side feature - not needed for client wallet |
 
 ### Remaining Work (Optional Enhancements)
-- **WebSocket/Socket.IO**: Real-time push notifications instead of polling
-- **End-to-end encryption**: Encrypt message bodies using BRC-2 (primitives exist in `crypto/brc2.rs`)
-- **Federation**: Cross-relay discovery via BRC-34/35 (not needed for single-relay use)
+- **WebSocket/Socket.IO**: Server-side feature for real-time push (we're a client, not a relay server)
+- **Federation**: Server-side multi-relay infrastructure (BRC-34/35)
+
+### Clarification: End-to-End Encryption
+The message relay is a "dumb pipe" - it stores and forwards message bodies without knowing their contents. **End-to-end encryption is an APPLICATION-level concern**:
+1. App encrypts message body using our `/encrypt` endpoint (BRC-2)
+2. App sends encrypted blob via `/sendMessage`
+3. Recipient fetches via `/listMessages`
+4. Recipient decrypts using our `/decrypt` endpoint
+
+This is the correct architecture - the relay never sees plaintext. Our BRC-2 implementation is **fully working** with ToolBSV.
 
 ---
 
@@ -169,22 +183,20 @@ For managing UTXOs, tracking digital assets, and identity certificates.
 
 | Call Code | Method | Status | Internal Test | Real-World Test | Notes |
 |-----------|--------|--------|---------------|-----------------|-------|
-| 6 | `listOutputs` | ✅ | ✅ | ⏳ | **COMPLETE & VERIFIED** - All BRC-100 parameters implemented<br>✅ Basket/tag filtering, BEEF support, pagination<br>⏳ Needs real-world app testing |
-| 7 | `relinquishOutput` | ✅ | ✅ | ⏳ | **COMPLETE & VERIFIED** - Removes output from basket tracking<br>⏳ Needs real-world app testing |
-| 17 | `acquireCertificate` | ✅ | ✅ | ✅ | **COMPLETE** - Working with socialcert.net<br>✅ Supports 'direct' and 'issuance' protocols<br>✅ Certifier creates transaction, we verify and store<br>✅ Fixed "Not on Chain" issue (extract txid from revocationOutpoint) |
+| 6 | `listOutputs` | ✅ | ✅ | ✅ | **COMPLETE** - Basket/tag SQL filtering, BEEF support, pagination, outputDescription<br>✅ Tested with todo.metanet.app |
+| 7 | `relinquishOutput` | ✅ | ✅ | ⏳ | **COMPLETE** - Removes output from basket tracking |
+| 17 | `acquireCertificate` | ✅ | ✅ | ✅ | **COMPLETE** - Working with socialcert.net |
 | 18 | `listCertificates` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real-world apps |
 | 19 | `proveCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing with real verifiers |
 | 20 | `relinquishCertificate` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Needs testing |
 | 21 | `discoverByIdentityKey` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Searches certificates by subject public key |
 | 22 | `discoverByAttributes` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Searches certificates by decrypted field values |
-| 24 | `waitForAuthentication` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Validates wallet exists in database<br>✅ **Already in HTTP interceptor** |
-| 25 | `getHeight` | ✅ | ✅ | ❌ | Get blockchain height<br>✅ **COMPLETE** - Fetches from WhatsOnChain `/chain/info`<br>✅ **Already in HTTP interceptor** |
-| 26 | `getHeaderForHeight` | ✅ | ✅ | ❌ | Get block header by height<br>✅ **COMPLETE** - Cache-first with API fallback, constructs 80-byte header<br>✅ **Already in HTTP interceptor** |
-| 27 | `getNetwork` | ✅ | ✅ | ❌ | Return "mainnet" or "testnet"<br>✅ **COMPLETE** - Returns hardcoded "mainnet"<br>✅ **Already in HTTP interceptor** |
+| 24 | `waitForAuthentication` | ✅ | ⏳ | ❌ | **IMPLEMENTED** - Validates wallet exists in database |
+| 25 | `getHeight` | ✅ | ✅ | ❌ | **COMPLETE** - Fetches from WhatsOnChain `/chain/info` |
+| 26 | `getHeaderForHeight` | ✅ | ✅ | ❌ | **COMPLETE** - Cache-first with API fallback, constructs 80-byte header |
+| 27 | `getNetwork` | ✅ | ✅ | ❌ | **COMPLETE** - Returns hardcoded "mainnet" |
 
-**Database Support**: ✅ Schema includes `baskets`, `certificates`, `utxos`, `block_headers` tables - ready for implementation after database migration.
-
-**⚠️ Important Notes**:
+**Important Notes**:
 - **Database Migrations**: Migrations run automatically when the wallet starts (`WalletDatabase::new()`). After adding new tables/columns, restart the wallet to apply migrations.
 - **HTTP Interceptor**: When implementing new endpoints, add them to `isWalletEndpoint()` in `cef-native/src/core/HttpRequestInterceptor.cpp` to ensure requests are intercepted.
 - **Migration Safety**: Migrations use `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE` with existence checks - they won't overwrite existing data.
@@ -199,21 +211,153 @@ Privacy features and advanced cryptography.
 | 11 | `encrypt` | ✅ | ✅ | ✅ | **COMPLETE** - BRC-2 encryption with BRC-42 key derivation |
 | 12 | `decrypt` | ✅ | ✅ | ✅ | **COMPLETE** - BRC-2 decryption, ToolBSV image generation working |
 
-#### **Group E: Specialized Features (Priority 5)**
-Advanced wallet features for specific use cases.
+#### **~~Group E: Non-Standard Methods~~** ❌ **REMOVED**
 
-*Note: Some of these call codes are not in the standard BRC-100 spec (codes 1-28)*
+*The following methods were listed in error - they are NOT part of BRC-100:*
+- ~~`getTransactionWithOutputs`~~ - Not in BRC-100 spec
+- ~~`getSpendingLimits`~~ - Not in BRC-100 spec
+- ~~`getProtocolRestrictions`~~ - Not in BRC-100 spec
+- ~~`getBasketRestrictions`~~ - Not in BRC-100 spec
 
-| Call Code | Method | Status | Internal Test | Real-World Test | Notes |
-|-----------|--------|--------|---------------|-----------------|-------|
-| ? | `getTransactionWithOutputs` | ❌ | ❌ | ❌ | Get full transaction data (non-standard?) |
-| ? | `getSpendingLimits` | ❌ | ❌ | ❌ | Query spending limits (non-standard?) |
-| ? | `getProtocolRestrictions` | ❌ | ❌ | ❌ | Query protocol permissions (non-standard?) |
-| ? | `getBasketRestrictions` | ❌ | ❌ | ❌ | Query basket permissions (non-standard?) |
+These may have been from a different implementation reference or placeholder ideas. BRC-100 defines exactly 28 methods (call codes 1-28), all of which are covered in Groups A-D above.
 
 ---
 
-## 🎯 Implementation Strategy
+## Basket, Tag & Output Tracking System
+
+**Status**: Core implementation complete and tested with real apps (todo.metanet.app). SDK-compared and verified against BSV TypeScript SDK (wallet-toolbox).
+
+### Overview
+
+Baskets and tags are BRC-100 organizational tools for categorizing and querying UTXOs:
+- **Baskets**: Named containers grouping outputs by purpose (e.g., "todo tokens", "game items")
+- **Tags**: Additional labels for fine-grained filtering (e.g., "weapon", "rare", "level-10")
+- **Output Description**: Short description (5-50 bytes UTF-8) stored per output
+
+### Database Schema
+
+| Migration | Tables/Columns | Purpose |
+|-----------|---------------|---------|
+| V1 | `baskets` table, `basket_id` FK on `utxos` | Basket storage and UTXO association |
+| V5 | `custom_instructions` on `utxos` | BRC-78 payment protocol data |
+| V6 | `output_tags`, `output_tag_map` tables | Tag storage with soft-delete support |
+| V9 | `status` on `utxos`, basket partial index | UTXO lifecycle tracking |
+| V10 | `broadcast_status` on `transactions` | Transaction broadcast state tracking |
+| V12 | `address_id` nullable on `utxos` | Basket outputs without HD wallet addresses |
+| V13 | `derived_key_cache` table | PushDrop signing key persistence across restarts |
+| V14 | `output_description` on `utxos` | BRC-100 output description storage |
+
+### Repository Layer
+
+**`basket_repo.rs`**:
+- `validate_and_normalize_basket_name()` — trim, lowercase, BRC-99 rules (rejects "default", "p " prefix)
+- `find_or_insert()` — auto-normalizes, updates `last_used`, creates on demand
+
+**`tag_repo.rs`**:
+- `validate_and_normalize_tag()` — trim, lowercase, 1-300 bytes UTF-8
+- `assign_tag_to_output()` — find-or-insert tag, create mapping, soft-delete aware
+- `find_tag_ids()` — batch tag name to ID resolution for queries
+- `get_tags_for_output()` — JOIN tag_map, returns tag name strings
+
+**`utxo_repo.rs`**:
+- `insert_output_with_basket()` — nullable `address_id`, `basket_id`, `status`, `custom_instructions`, `output_description`
+- `get_unspent_by_basket()` — `WHERE basket_id = ? AND is_spent = 0`
+- `get_unspent_by_basket_with_tags()` — SQL JOINs with `all`/`any` mode (single query, no N+1)
+- `mark_multiple_spent()` / `restore_spent_by_txid()` / `update_spent_txid_batch()` — optimistic locking primitives
+
+### createAction Flow
+
+1. **Validation** (~line 2942 in `handlers.rs`): Validates/normalizes basket names, tags, and output descriptions. Returns 400 on invalid input.
+2. **Output loop** (~line 3706): Collects `PendingBasketOutput` structs with vout, satoshis, script_hex, basket_name, tags, custom_instructions, output_description.
+3. **Change UTXO** (~line 4014): Change output inserted with `basket_repo.find_or_insert("default")`.
+4. **Basket output insertion** (~line 4093): For each pending basket output:
+   - `basket_repo.find_or_insert(&basket_name)` to get/create basket
+   - `utxo_repo.insert_output_with_basket(...)` with all fields including output_description
+   - `tag_repo.assign_tag_to_output(utxo_id, &tag_name)` per tag
+5. **Txid reconciliation**: After signing, pre-signing txid updated to final signed txid.
+
+### SDK-Style Optimistic Locking
+
+When a basket output is consumed as a user-provided input in a subsequent `createAction`:
+
+1. **createAction**: After parsing user inputs, marks matching local UTXOs as `is_spent=1, spent_txid="pending-{timestamp}"`. Shares the same placeholder as wallet UTXO reservation.
+2. **PendingTransaction**: Stores `reservation_placeholder: Option<String>` so `signAction` can reference it.
+3. **signAction**: Updates `spent_txid` from placeholder to final signed txid via `update_spent_txid_batch()`. Covers both wallet UTXOs and user-provided basket outputs.
+4. **Failure recovery**: `restore_spent_by_txid()` restores all UTXOs sharing the `spent_txid` on broadcast failure. `restore_pending_placeholders()` catches stale reservations on startup.
+
+### listOutputs (Call Code 6)
+
+- Validates basket name (rejects "default" per BRC-100)
+- Resolves tag names to IDs via `tag_repo.find_tag_ids()`
+- SQL-based filtering with `all`/`any` tag query modes
+- Pagination (offset/limit, max 10000)
+- Optional fields: `includeTags`, `includeCustomInstructions`, `includeOutputDescription`, `includeLabels`
+- Optional BEEF building for `include: "entire transactions"`
+
+### internalizeAction Basket Insertion
+
+- Parses `InternalizeOutput` with `InsertionRemittance` (basket, tags, custom_instructions)
+- For `protocol: "basket insertion"`: validates basket/tags, inserts UTXO with basket, assigns tags
+- Uses `address_id = None` for externally-received basket outputs
+
+### Background Cleanup (`utxo_sync.rs`)
+
+Runs every 5 minutes alongside the existing background UTXO sync:
+
+| Task | SQL Query | SDK Equivalent |
+|------|-----------|---------------|
+| Restore stale pending reservations (>5 min) | `UPDATE utxos SET is_spent = 0 WHERE spent_txid LIKE 'pending-%' AND spent_at < now - 300` | TaskFailAbandoned (8 min) |
+| Restore outputs from failed broadcasts | `UPDATE utxos SET is_spent = 0 WHERE spent_txid IN (SELECT txid FROM transactions WHERE broadcast_status = 'failed')` | TaskReviewStatus Query 2 |
+| Mark stale pending transactions as failed (>15 min) | `UPDATE transactions SET broadcast_status = 'failed' WHERE broadcast_status = 'pending' AND timestamp < now - 900` | TaskFailAbandoned tx status update |
+| Delete failed UTXOs | `DELETE FROM utxos WHERE status = 'failed'` | (existing) |
+| Timeout unproven UTXOs (>1 hour) | `UPDATE utxos SET status = 'failed' WHERE status = 'unproven' AND first_seen < now - 3600` | (existing) |
+| Clean old spent UTXOs (>30 days) | `cleanup_old_spent(30)` | (existing) |
+
+### SDK Comparison Summary
+
+All implemented functions have been compared against the BSV TypeScript SDK (wallet-toolbox):
+
+| Area | Status |
+|------|--------|
+| Tag normalization (trim + lowercase) | Matches SDK |
+| Tag deduplication | Matches SDK (explicit dedup vs implicit unique key) |
+| Tag assignment in createAction | Functionally equivalent |
+| Tag filtering in listOutputs (all/any modes) | Matches SDK; our tag normalization on queries is *more correct* |
+| internalizeAction basket insertion | Matches SDK pattern |
+| Basket name validation (BRC-99) | Matches SDK |
+| Optimistic locking (reserve in createAction, update in signAction) | Matches SDK |
+| Broadcast failure rollback (immediate) | Matches SDK |
+| Periodic background cleanup | Matches SDK (stale reservation + failed broadcast restoration) |
+| Output description storage | Matches SDK (V14 migration) |
+| Permissioned baskets ("p " prefix) | Rejection matches SDK minimal behavior |
+
+### Testing Status
+
+**Tested with real app (todo.metanet.app)**:
+- Create token with basket, listOutputs by basket, spend token (two-phase PushDrop)
+- Optimistic locking, change output basket, txid reconciliation, BEEF ancestry
+- Startup recovery of stale placeholder reservations
+
+**Not yet tested with real app**:
+- Tag creation, filtering (`any`/`all` modes), `include_tags` response
+- internalizeAction basket insertion (needs app sending basket outputs)
+- Broadcast failure rollback (needs simulated failure)
+- Output description round-trip (create with description, retrieve via listOutputs)
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/handlers.rs` | createAction basket/tag validation & insertion, signAction placeholder update, listOutputs, internalizeAction |
+| `rust-wallet/src/database/basket_repo.rs` | Basket validation, normalization, find_or_insert |
+| `rust-wallet/src/database/tag_repo.rs` | Tag validation, normalization, assignment, filtering |
+| `rust-wallet/src/database/utxo_repo.rs` | insert_output_with_basket, basket/tag SQL queries, optimistic locking primitives |
+| `rust-wallet/src/database/migrations.rs` | V1 (baskets), V6 (tags), V9 (status), V10 (broadcast), V12 (nullable addr), V14 (output_description) |
+| `rust-wallet/src/utxo_sync.rs` | Background cleanup: stale reservations, failed broadcasts, pending tx timeout |
+
+---
+
+## Implementation Strategy
 
 ### ~~Phase 1: Fix Authentication~~ ✅ **COMPLETE!** (Oct 22-23)
 **Goal**: ✅ Get `verifySignature` and BRC-104 authentication working with ToolBSV.
@@ -284,10 +428,15 @@ Advanced wallet features for specific use cases.
 - ✅ Recovery from mnemonic
 - ✅ Restore functionality
 
-**Basket Implementation**:
-- ✅ Database schema ready (`baskets` table, `basket_id` in `utxos`)
-- ⏳ Basket assignment logic (pending)
-- ⏳ Basket queries and filtering (pending)
+**Basket & Tag Implementation** (completed Feb 2026):
+- ✅ Database schema: `baskets`, `output_tags`, `output_tag_map` tables with indexes
+- ✅ Basket assignment in `createAction` and `internalizeAction`
+- ✅ Tag assignment with normalization and deduplication
+- ✅ `listOutputs` with basket/tag SQL filtering (all/any modes)
+- ✅ SDK-style optimistic locking for user-provided basket inputs
+- ✅ Background cleanup job for stale reservations and failed broadcasts
+- ✅ Output description storage (V14 migration)
+- See "Basket, Tag & Output Tracking System" section below for full details.
 
 **Success Criteria - ALL MET**:
 - ✅ Database migration complete
@@ -886,18 +1035,22 @@ mod tests {
 
 ---
 
-**Last Updated**: January 9, 2025
-**Current Status**: 26/28 BRC-100 methods implemented (93%)
+**Last Updated**: February 3, 2026
+**Current Status**: 26/28 BRC-100 methods implemented (93%), database schema at V14
 **Progress**:
-- ✅ Group A: Identity & Authentication - **COMPLETE** (7/7)
-- ✅ Group B: Transaction Operations - **COMPLETE** (5/5)
-- ✅ Group C: Output Management & Blockchain Queries - **COMPLETE** (5/5)
-- ✅ Group C: Certificate Management - **COMPLETE** (6/6) - including discoverByAttributes
-- ✅ Group D: Encryption - **COMPLETE** (2/2) - encrypt/decrypt working with ToolBSV
-- ❌ Group D: Key Linkage - NOT STARTED (0/2) - Low priority, rarely used
-- ✅ Group E: waitForAuthentication - **COMPLETE** (1/1)
+- Group A: Identity & Authentication - **COMPLETE** (8/8) - includes waitForAuthentication
+- Group B: Transaction Operations - **COMPLETE** (5/5) - BRC-29 payments, BEEF/SPV
+- Group C: Output Management & Blockchain Queries - **COMPLETE** (5/5) - basket/tag system with SDK-style optimistic locking
+- Group C: Certificate Management - **COMPLETE** (6/6) - including discoverByAttributes
+- Group D: Encryption - **COMPLETE** (2/2) - encrypt/decrypt working with ToolBSV
+- Group D: Key Linkage - NOT STARTED (0/2) - Low priority, client audit/compliance feature
 
-**Next Milestone**: Third-party test vectors for validation of certificate and output methods
+**Recent Additions (Feb 2026)**:
+- Basket & tag system fully compared against BSV TypeScript SDK (wallet-toolbox)
+- SDK-style optimistic locking (reserve user-provided inputs in createAction, update in signAction)
+- Background cleanup job (stale reservations, failed broadcast restoration, pending tx timeout)
+- Output description storage (V14 migration, validation, listOutputs response)
+- Derived key cache (V13 migration, PushDrop signing persistence across restarts)
 
 ---
 

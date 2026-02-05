@@ -267,6 +267,244 @@ impl<'a> TransactionRepository<'a> {
         Ok(())
     }
 
+    /// Get raw transaction hex by txid
+    ///
+    /// This is more efficient than get_by_txid when you only need the raw tx.
+    pub fn get_raw_tx(&self, txid: &str) -> Result<Option<String>> {
+        let result: std::result::Result<String, rusqlite::Error> = self.conn.query_row(
+            "SELECT raw_tx FROM transactions WHERE txid = ?1",
+            rusqlite::params![txid],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(raw_tx) => Ok(Some(raw_tx)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get raw transaction hex for a local (unbroadcast or unconfirmed) transaction
+    ///
+    /// Used for BEEF building when a child transaction spends outputs from
+    /// a parent transaction that hasn't been confirmed yet.
+    /// Returns the raw_tx if found and broadcast_status is not 'confirmed'.
+    pub fn get_local_parent_tx(&self, txid: &str) -> Result<Option<String>> {
+        info!("   🔍 Looking for local parent tx {} in transactions table...", txid);
+
+        // Check if broadcast_status column exists (migration v10 might not have run)
+        let column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        info!("   📊 broadcast_status column exists: {}", column_exists);
+
+        // First, check if ANY transaction with this txid exists (for debugging)
+        let any_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM transactions WHERE txid = ?1",
+            rusqlite::params![txid],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        info!("   📊 Transaction with txid {} exists in table: {}", txid, any_exists);
+
+        if any_exists {
+            // Log the broadcast_status for debugging
+            if let Ok(status) = self.conn.query_row::<String, _, _>(
+                "SELECT COALESCE(broadcast_status, 'NULL') FROM transactions WHERE txid = ?1",
+                rusqlite::params![txid],
+                |row| row.get(0),
+            ) {
+                info!("   📊 Transaction {} has broadcast_status: '{}'", txid, status);
+            }
+            // Also check if raw_tx is populated
+            if let Ok(raw_tx_len) = self.conn.query_row::<i64, _, _>(
+                "SELECT LENGTH(raw_tx) FROM transactions WHERE txid = ?1",
+                rusqlite::params![txid],
+                |row| row.get(0),
+            ) {
+                info!("   📊 Transaction {} has raw_tx length: {}", txid, raw_tx_len);
+            }
+        }
+
+        let result: std::result::Result<String, rusqlite::Error> = if column_exists {
+            // Only return raw_tx if transaction is not confirmed
+            // (confirmed transactions should be fetched from API to get merkle proof)
+            self.conn.query_row(
+                "SELECT raw_tx FROM transactions WHERE txid = ?1 AND broadcast_status != 'confirmed'",
+                rusqlite::params![txid],
+                |row| row.get(0),
+            )
+        } else {
+            // Migration hasn't run yet - return any matching transaction
+            self.conn.query_row(
+                "SELECT raw_tx FROM transactions WHERE txid = ?1",
+                rusqlite::params![txid],
+                |row| row.get(0),
+            )
+        };
+
+        match result {
+            Ok(raw_tx) => {
+                info!("   📋 Found local parent tx {} in database ({} bytes)", txid, raw_tx.len());
+                Ok(Some(raw_tx))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                info!("   ❌ Local parent tx {} NOT found in transactions table", txid);
+                Ok(None)
+            }
+            Err(e) => {
+                error!("   ❌ Error querying local parent tx {}: {}", txid, e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Update broadcast status
+    pub fn update_broadcast_status(&self, txid: &str, status: &str) -> Result<()> {
+        // Check if broadcast_status column exists
+        let column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if column_exists {
+            self.conn.execute(
+                "UPDATE transactions SET broadcast_status = ?1 WHERE txid = ?2",
+                rusqlite::params![status, txid],
+            )?;
+            info!("   ✅ Updated broadcast_status to '{}' for txid {}", status, txid);
+        }
+        Ok(())
+    }
+
+    /// Update raw_tx for a transaction (e.g., after signing replaces unsigned tx with signed tx).
+    ///
+    /// This is critical for BEEF building: when a subsequent transaction spends outputs from
+    /// this transaction, the BEEF builder needs the SIGNED raw_tx to include as a parent.
+    /// The unsigned version has a different txid and would make the BEEF invalid.
+    pub fn update_raw_tx(&self, txid: &str, raw_tx: &str) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE transactions SET raw_tx = ?1 WHERE txid = ?2",
+            rusqlite::params![raw_tx, txid],
+        )?;
+
+        if rows > 0 {
+            info!("   ✅ Updated raw_tx for txid {} ({} hex chars)", txid, raw_tx.len());
+        } else {
+            info!("   ℹ️  No transaction found with txid {} to update raw_tx", txid);
+        }
+        Ok(())
+    }
+
+    /// Update the txid of a transaction record (e.g., after signing changes the txid).
+    ///
+    /// BSV txids include unlocking scripts, so signing changes the txid.
+    /// This updates the stored record from the pre-signing txid to the post-signing txid.
+    pub fn rename_txid(&self, old_txid: &str, new_txid: &str) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE transactions SET txid = ?1 WHERE txid = ?2",
+            rusqlite::params![new_txid, old_txid],
+        )?;
+
+        if rows > 0 {
+            info!("   ✅ Updated transaction txid: {} → {}",
+                &old_txid[..std::cmp::min(16, old_txid.len())],
+                &new_txid[..std::cmp::min(16, new_txid.len())]);
+        } else {
+            log::warn!("   ⚠️  No transaction found with txid {} to update", &old_txid[..std::cmp::min(16, old_txid.len())]);
+        }
+
+        Ok(())
+    }
+
+    /// Get the broadcast_status of a transaction by txid.
+    ///
+    /// Returns:
+    /// - `Ok(Some(status))` if the transaction exists and has a broadcast_status
+    /// - `Ok(None)` if the transaction doesn't exist or the column doesn't exist
+    /// - `Err` on database errors
+    pub fn get_broadcast_status(&self, txid: &str) -> Result<Option<String>> {
+        // Check if broadcast_status column exists
+        let column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if !column_exists {
+            return Ok(None);
+        }
+
+        match self.conn.query_row(
+            "SELECT broadcast_status FROM transactions WHERE txid = ?1",
+            rusqlite::params![txid],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(status) => Ok(status),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get all transactions with broadcast_status = 'pending' that are older than the given age in seconds.
+    ///
+    /// These are transactions that were created but never broadcast (e.g., process crashed
+    /// between creating the transaction and broadcasting it). Their UTXOs are ghost outputs
+    /// that don't exist on-chain and should be cleaned up.
+    ///
+    /// Returns a list of (txid, list of input txid:vout pairs) for cleanup.
+    pub fn get_stale_pending_transactions(&self, max_age_secs: i64) -> Result<Vec<(String, Vec<(String, u32)>)>> {
+        // Check if broadcast_status column exists
+        let column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if !column_exists {
+            return Ok(Vec::new());
+        }
+
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - max_age_secs;
+
+        // Get stale pending transaction IDs and their DB IDs
+        let mut stmt = self.conn.prepare(
+            "SELECT id, txid FROM transactions WHERE broadcast_status = 'pending' AND timestamp < ?1"
+        )?;
+
+        let rows: Vec<(i64, String)> = stmt.query_map(
+            rusqlite::params![cutoff],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<Result<Vec<_>>>()?;
+
+        let mut result = Vec::new();
+
+        for (tx_db_id, txid) in rows {
+            // Get the inputs for this transaction so we can restore them
+            let mut input_stmt = self.conn.prepare(
+                "SELECT txid, vout FROM transaction_inputs WHERE transaction_id = ?1"
+            )?;
+
+            let inputs: Vec<(String, u32)> = input_stmt.query_map(
+                rusqlite::params![tx_db_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)? as u32)),
+            )?
+            .collect::<Result<Vec<_>>>()?;
+
+            result.push((txid, inputs));
+        }
+
+        Ok(result)
+    }
+
     /// List all transactions with optional filters
     pub fn list_transactions(&self, label_filter: Option<&Vec<String>>, label_mode: Option<&str>) -> Result<Vec<StoredAction>> {
         // Get all transaction IDs

@@ -35,11 +35,12 @@ impl<'a> UtxoRepository<'a> {
             )?;
 
             if exists {
-                // Update existing UTXO (update last_updated, ensure not marked as spent if it's still unspent)
+                // Update existing UTXO - only update last_updated timestamp
+                // IMPORTANT: Do NOT change is_spent status here!
+                // UTXOs marked as spent should only be un-spent if the spending transaction
+                // was rejected by the network (handled separately in failed tx cleanup)
                 self.conn.execute(
-                    "UPDATE utxos
-                     SET last_updated = ?1, is_spent = 0, spent_txid = NULL, spent_at = NULL
-                     WHERE txid = ?2 AND vout = ?3 AND is_spent = 1",
+                    "UPDATE utxos SET last_updated = ?1 WHERE txid = ?2 AND vout = ?3",
                     rusqlite::params![now, utxo.txid, utxo.vout as i32],
                 )?;
             } else {
@@ -71,23 +72,54 @@ impl<'a> UtxoRepository<'a> {
     }
 
     /// Get all unspent UTXOs for a list of addresses
+    ///
+    /// Excludes UTXOs from transactions that were never broadcast ('pending')
+    /// or that failed to broadcast ('failed'). This prevents spending outputs
+    /// that don't exist on-chain, which would cause ARC to reject the BEEF.
     pub fn get_unspent_by_addresses(&self, address_ids: &[i64]) -> Result<Vec<Utxo>> {
         if address_ids.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Check if broadcast_status column exists (migration v10)
+        let has_broadcast_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
         // Build query with placeholders
         let placeholders: Vec<String> = (0..address_ids.len())
             .map(|_| "?".to_string())
             .collect();
-        let query = format!(
-            "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
-             FROM utxos
-             WHERE address_id IN ({}) AND is_spent = 0
-             ORDER BY satoshis DESC",
-            placeholders.join(",")
-        );
+
+        let query = if has_broadcast_status {
+            // LEFT JOIN with transactions to filter out UTXOs from never-broadcast
+            // or failed transactions. The LEFT JOIN means:
+            // - UTXOs from external incoming transactions (no match) → t.broadcast_status IS NULL → included
+            // - UTXOs from broadcast/confirmed transactions → included
+            // - UTXOs from pending/failed transactions → excluded
+            format!(
+                "SELECT u.id, u.address_id, u.basket_id, u.txid, u.vout, u.satoshis, u.script,
+                        u.first_seen, u.last_updated, u.is_spent, u.spent_txid, u.spent_at, u.custom_instructions, u.output_description
+                 FROM utxos u
+                 LEFT JOIN transactions t ON u.txid = t.txid
+                 WHERE u.address_id IN ({}) AND u.is_spent = 0
+                   AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))
+                 ORDER BY u.satoshis DESC",
+                placeholders.join(",")
+            )
+        } else {
+            // Pre-migration fallback: no broadcast_status filtering
+            format!(
+                "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
+                        first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions, output_description
+                 FROM utxos
+                 WHERE address_id IN ({}) AND is_spent = 0
+                 ORDER BY satoshis DESC",
+                placeholders.join(",")
+            )
+        };
 
         let mut stmt = self.conn.prepare(&query)?;
         let utxos = stmt.query_map(
@@ -107,6 +139,7 @@ impl<'a> UtxoRepository<'a> {
                     spent_txid: row.get(10)?,
                     spent_at: row.get(11)?,
                     custom_instructions: row.get(12).ok(),  // May not exist in older schemas
+                    output_description: row.get(13).ok(),   // May not exist pre-v14
                 })
             },
         )?
@@ -171,7 +204,7 @@ impl<'a> UtxoRepository<'a> {
     pub fn get_unspent_by_basket(&self, basket_id: i64) -> Result<Vec<Utxo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
+                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions, output_description
              FROM utxos
              WHERE basket_id = ?1 AND is_spent = 0
              ORDER BY satoshis DESC"
@@ -194,6 +227,7 @@ impl<'a> UtxoRepository<'a> {
                     spent_txid: row.get(10)?,
                     spent_at: row.get(11)?,
                     custom_instructions: row.get(12).ok(),  // May not exist in older schemas
+                    output_description: row.get(13).ok(),   // May not exist pre-v14
                 })
             },
         )?
@@ -206,7 +240,7 @@ impl<'a> UtxoRepository<'a> {
     pub fn get_by_txid_vout(&self, txid: &str, vout: u32) -> Result<Option<Utxo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, address_id, basket_id, txid, vout, satoshis, script,
-                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions
+                    first_seen, last_updated, is_spent, spent_txid, spent_at, custom_instructions, output_description
              FROM utxos
              WHERE txid = ?1 AND vout = ?2"
         )?;
@@ -228,6 +262,7 @@ impl<'a> UtxoRepository<'a> {
                     spent_txid: row.get(10)?,
                     spent_at: row.get(11)?,
                     custom_instructions: row.get(12).ok(),  // May not exist in older schemas
+                    output_description: row.get(13).ok(),   // May not exist pre-v14
                 })
             },
         ) {
@@ -238,20 +273,43 @@ impl<'a> UtxoRepository<'a> {
     }
 
     /// Calculate total balance from unspent UTXOs for given addresses
+    ///
+    /// Excludes UTXOs from transactions that were never broadcast ('pending')
+    /// or that failed to broadcast ('failed'), matching the same filter used
+    /// in get_unspent_by_addresses() for consistency.
     pub fn calculate_balance(&self, address_ids: &[i64]) -> Result<i64> {
         if address_ids.is_empty() {
             return Ok(0);
         }
 
+        // Check if broadcast_status column exists (migration v10)
+        let has_broadcast_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
         let placeholders: Vec<String> = (0..address_ids.len())
             .map(|_| "?".to_string())
             .collect();
-        let query = format!(
-            "SELECT COALESCE(SUM(satoshis), 0)
-             FROM utxos
-             WHERE address_id IN ({}) AND is_spent = 0",
-            placeholders.join(",")
-        );
+
+        let query = if has_broadcast_status {
+            format!(
+                "SELECT COALESCE(SUM(u.satoshis), 0)
+                 FROM utxos u
+                 LEFT JOIN transactions t ON u.txid = t.txid
+                 WHERE u.address_id IN ({}) AND u.is_spent = 0
+                   AND (t.broadcast_status IS NULL OR t.broadcast_status NOT IN ('pending', 'failed'))",
+                placeholders.join(",")
+            )
+        } else {
+            format!(
+                "SELECT COALESCE(SUM(satoshis), 0)
+                 FROM utxos
+                 WHERE address_id IN ({}) AND is_spent = 0",
+                placeholders.join(",")
+            )
+        };
 
         let balance: i64 = self.conn.query_row(
             &query,
@@ -288,5 +346,392 @@ impl<'a> UtxoRepository<'a> {
             rusqlite::params![utxo_id],
         )?;
         Ok(())
+    }
+
+    /// Insert a new UTXO with optional basket_id and status
+    ///
+    /// This method is used for BRC-100 outputs that need basket/tag tracking.
+    /// Unlike `upsert_utxos`, this always creates a new record (no upsert).
+    ///
+    /// # Arguments
+    /// * `address_id` - The address ID this UTXO belongs to
+    /// * `txid` - Transaction ID
+    /// * `vout` - Output index
+    /// * `satoshis` - Amount in satoshis
+    /// * `script_hex` - Hex-encoded locking script
+    /// * `basket_id` - Optional basket ID for BRC-100 tracking
+    /// * `custom_instructions` - Optional custom instructions (BRC-78)
+    /// * `status` - UTXO status ('unproven', 'completed', 'failed')
+    /// * `output_description` - Optional output description (BRC-100, 5-50 bytes UTF-8)
+    ///
+    /// # Returns
+    /// The ID of the newly created UTXO
+    pub fn insert_output_with_basket(
+        &self,
+        address_id: Option<i64>,
+        txid: &str,
+        vout: u32,
+        satoshis: i64,
+        script_hex: &str,
+        basket_id: Option<i64>,
+        custom_instructions: Option<&str>,
+        status: &str,
+        output_description: Option<&str>,
+    ) -> Result<i64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Check if status column exists (handles case where v9 migration hasn't run yet)
+        let status_column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('utxos') WHERE name = 'status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if status_column_exists {
+            // Full insert with status and output_description columns
+            self.conn.execute(
+                "INSERT INTO utxos (
+                    address_id, basket_id, txid, vout, satoshis, script,
+                    first_seen, last_updated, is_spent, custom_instructions, status, output_description
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11)",
+                rusqlite::params![
+                    address_id,
+                    basket_id,
+                    txid,
+                    vout as i32,
+                    satoshis,
+                    script_hex,
+                    now,
+                    now,
+                    custom_instructions.unwrap_or(""),
+                    status,
+                    output_description,
+                ],
+            )?;
+            info!("   ✅ Inserted UTXO {}:{} with basket_id={:?}, status='{}'",
+                  txid, vout, basket_id, status);
+        } else {
+            // Fallback insert without status column (pre-v9 migration)
+            warn!("   ⚠️  status column not found - inserting without status (run migration v9)");
+            self.conn.execute(
+                "INSERT INTO utxos (
+                    address_id, basket_id, txid, vout, satoshis, script,
+                    first_seen, last_updated, is_spent, custom_instructions
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+                rusqlite::params![
+                    address_id,
+                    basket_id,
+                    txid,
+                    vout as i32,
+                    satoshis,
+                    script_hex,
+                    now,
+                    now,
+                    custom_instructions.unwrap_or(""),
+                ],
+            )?;
+            info!("   ✅ Inserted UTXO {}:{} with basket_id={:?} (no status column)",
+                  txid, vout, basket_id);
+        }
+
+        let id = self.conn.last_insert_rowid();
+        Ok(id)
+    }
+
+    /// Update UTXO status
+    ///
+    /// Used for optimistic UTXO creation flow:
+    /// - Create with status='unproven' after signing
+    /// - Update to 'completed' after broadcast confirmation
+    /// - Update to 'failed' if broadcast fails
+    pub fn update_status(&self, txid: &str, vout: u32, status: &str) -> Result<()> {
+        // Check if status column exists (handles case where v9 migration hasn't run yet)
+        let status_column_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('utxos') WHERE name = 'status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if !status_column_exists {
+            warn!("   ⚠️  status column not found - skipping status update (run migration v9)");
+            return Ok(());
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET status = ?1, last_updated = ?2 WHERE txid = ?3 AND vout = ?4",
+            rusqlite::params![status, now, txid, vout as i32],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Updated UTXO {}:{} status to '{}'", txid, vout, status);
+        } else {
+            warn!("   ⚠️  No UTXO found for {}:{} to update status", txid, vout);
+        }
+
+        Ok(())
+    }
+
+    /// Assign a basket to an existing UTXO
+    pub fn assign_basket(&self, utxo_id: i64, basket_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE utxos SET basket_id = ?1 WHERE id = ?2",
+            rusqlite::params![basket_id, utxo_id],
+        )?;
+        info!("   ✅ Assigned basket_id={} to UTXO id={}", basket_id, utxo_id);
+        Ok(())
+    }
+
+    /// Get unspent UTXOs by basket with tag filtering (SQL-based for efficiency)
+    ///
+    /// This is more efficient than the N+1 approach of querying tags per UTXO.
+    /// Uses SQL JOINs to filter in a single query.
+    ///
+    /// # Arguments
+    /// * `basket_id` - The basket ID to filter by
+    /// * `tag_ids` - Optional tag IDs to filter by
+    /// * `require_all_tags` - If true, UTXO must have ALL tags (AND). If false, ANY tag (OR).
+    pub fn get_unspent_by_basket_with_tags(
+        &self,
+        basket_id: i64,
+        tag_ids: Option<&[i64]>,
+        require_all_tags: bool,
+    ) -> Result<Vec<Utxo>> {
+        // If no tags provided, use the simple basket query
+        let tag_ids = match tag_ids {
+            Some(ids) if !ids.is_empty() => ids,
+            _ => return self.get_unspent_by_basket(basket_id),
+        };
+
+        let query = if require_all_tags {
+            // ALL mode: UTXO must have every requested tag
+            // Use GROUP BY and HAVING COUNT = number of tags
+            let tag_count = tag_ids.len();
+            let placeholders: String = (0..tag_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+
+            format!(
+                "SELECT u.id, u.address_id, u.basket_id, u.txid, u.vout, u.satoshis, u.script,
+                        u.first_seen, u.last_updated, u.is_spent, u.spent_txid, u.spent_at, u.custom_instructions, u.output_description
+                 FROM utxos u
+                 INNER JOIN output_tag_map otm ON u.id = otm.output_id AND otm.is_deleted = 0
+                 WHERE u.basket_id = ?1 AND u.is_spent = 0 AND otm.output_tag_id IN ({})
+                 GROUP BY u.id
+                 HAVING COUNT(DISTINCT otm.output_tag_id) = {}
+                 ORDER BY u.satoshis DESC",
+                placeholders, tag_count
+            )
+        } else {
+            // ANY mode: UTXO must have at least one of the requested tags
+            let placeholders: String = (0..tag_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+
+            format!(
+                "SELECT DISTINCT u.id, u.address_id, u.basket_id, u.txid, u.vout, u.satoshis, u.script,
+                        u.first_seen, u.last_updated, u.is_spent, u.spent_txid, u.spent_at, u.custom_instructions, u.output_description
+                 FROM utxos u
+                 INNER JOIN output_tag_map otm ON u.id = otm.output_id AND otm.is_deleted = 0
+                 WHERE u.basket_id = ?1 AND u.is_spent = 0 AND otm.output_tag_id IN ({})
+                 ORDER BY u.satoshis DESC",
+                placeholders
+            )
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+
+        // Build params: basket_id followed by tag_ids
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        params.push(Box::new(basket_id));
+        for tag_id in tag_ids {
+            params.push(Box::new(*tag_id));
+        }
+
+        let utxos = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                Ok(Utxo {
+                    id: Some(row.get(0)?),
+                    address_id: row.get(1)?,
+                    basket_id: row.get(2)?,
+                    txid: row.get(3)?,
+                    vout: row.get(4)?,
+                    satoshis: row.get(5)?,
+                    script: row.get(6)?,
+                    first_seen: row.get(7)?,
+                    last_updated: row.get(8)?,
+                    is_spent: row.get(9)?,
+                    spent_txid: row.get(10)?,
+                    spent_at: row.get(11)?,
+                    custom_instructions: row.get(12)?,
+                    output_description: row.get(13).ok(),  // May not exist pre-v14
+                })
+            },
+        )?;
+
+        let mut result = Vec::new();
+        for utxo in utxos {
+            result.push(utxo?);
+        }
+
+        info!("   Found {} UTXOs in basket {} with tag filter (require_all={})",
+              result.len(), basket_id, require_all_tags);
+        Ok(result)
+    }
+
+    /// Update UTXO txid after signing
+    ///
+    /// When a transaction is signed, the txid changes (from unsigned to signed).
+    /// This method updates any UTXOs that were created with the unsigned txid
+    /// to use the new signed txid.
+    ///
+    /// This is critical for transaction chaining - without this update,
+    /// a child transaction trying to spend the change output won't be able
+    /// to find the parent transaction in the local database.
+    pub fn update_txid(&self, old_txid: &str, new_txid: &str) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET txid = ?1, last_updated = ?2 WHERE txid = ?3",
+            rusqlite::params![new_txid, now, old_txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Updated {} UTXO(s) txid: {} → {}", rows_affected, old_txid, new_txid);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Restore UTXOs that were marked as spent by a specific transaction.
+    ///
+    /// Used during stale pending transaction cleanup: when a transaction was created
+    /// but never broadcast, the inputs it consumed need to be restored to unspent.
+    ///
+    /// # Arguments
+    /// * `spent_txid` - The txid of the never-broadcast transaction that consumed these UTXOs
+    ///
+    /// # Returns
+    /// The number of UTXOs restored
+    pub fn restore_spent_by_txid(&self, spent_txid: &str) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET is_spent = 0, spent_txid = NULL, spent_at = NULL
+             WHERE spent_txid = ?1 AND is_spent = 1",
+            rusqlite::params![spent_txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ♻️  Restored {} UTXO(s) that were spent by {}", rows_affected, &spent_txid[..std::cmp::min(16, spent_txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Delete all UTXOs with the given txid
+    ///
+    /// Used for cleaning up ghost UTXOs from failed broadcasts.
+    /// When a transaction fails to broadcast, any change UTXOs created
+    /// for it need to be removed to prevent balance inflation.
+    ///
+    /// # Arguments
+    /// * `txid` - The transaction ID whose UTXOs should be deleted
+    ///
+    /// # Returns
+    /// The number of UTXOs deleted
+    pub fn delete_by_txid(&self, txid: &str) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM utxos WHERE txid = ?1",
+            rusqlite::params![txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   🗑️  Deleted {} UTXO(s) with txid {}", rows_affected, &txid[..std::cmp::min(16, txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Restore all UTXOs that were reserved with a `pending-*` placeholder spent_txid.
+    ///
+    /// This handles the case where the wallet process crashed or the handler hung
+    /// between UTXO reservation and broadcast. The placeholder format `pending-{timestamp}`
+    /// indicates the UTXO was reserved but the transaction was never completed.
+    ///
+    /// # Returns
+    /// The number of UTXOs restored
+    pub fn restore_pending_placeholders(&self) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET is_spent = 0, spent_txid = NULL, spent_at = NULL
+             WHERE is_spent = 1 AND spent_txid LIKE 'pending-%'",
+            [],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ♻️  Restored {} UTXO(s) with stale placeholder reservations", rows_affected);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Update the spent_txid for all UTXOs reserved with a given placeholder.
+    ///
+    /// After signing, the real txid is known. This updates the placeholder to the
+    /// actual spending transaction ID so that cleanup/rollback can find them correctly.
+    ///
+    /// # Arguments
+    /// * `placeholder_txid` - The `pending-{timestamp}` placeholder used during reservation
+    /// * `real_txid` - The actual signed transaction ID
+    ///
+    /// # Returns
+    /// The number of UTXOs updated
+    pub fn update_spent_txid_batch(&self, placeholder_txid: &str, real_txid: &str) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET spent_txid = ?1
+             WHERE spent_txid = ?2 AND is_spent = 1",
+            rusqlite::params![real_txid, placeholder_txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Updated spent_txid on {} UTXO(s): {} → {}",
+                rows_affected,
+                &placeholder_txid[..std::cmp::min(20, placeholder_txid.len())],
+                &real_txid[..std::cmp::min(16, real_txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Update the txid of a specific UTXO (e.g., after signing changes the txid).
+    ///
+    /// # Arguments
+    /// * `old_txid` - The pre-signing transaction ID
+    /// * `vout` - The output index
+    /// * `new_txid` - The post-signing transaction ID
+    pub fn update_utxo_txid(&self, old_txid: &str, vout: u32, new_txid: &str) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "UPDATE utxos SET txid = ?1 WHERE txid = ?2 AND vout = ?3",
+            rusqlite::params![new_txid, old_txid, vout as i32],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Updated UTXO txid: {}:{} → {}:{}",
+                &old_txid[..std::cmp::min(16, old_txid.len())], vout,
+                &new_txid[..std::cmp::min(16, new_txid.len())], vout);
+        }
+
+        Ok(rows_affected)
     }
 }

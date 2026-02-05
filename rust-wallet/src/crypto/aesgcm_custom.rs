@@ -84,8 +84,6 @@ fn gctr(input: &[u8], initial_counter_block: &[u8; 16], key: &[u8; 32]) -> Vec<u
 
 /// Process IV to get preCounterBlock (matching TypeScript SDK exactly)
 fn process_iv_to_pre_counter_block(iv: &[u8], hash_sub_key: &[u8; 16]) -> [u8; 16] {
-    use hex;
-
     if iv.len() == 12 {
         // Standard 12-byte nonce: pad to 16 bytes and add 0x01
         let mut result = [0u8; 16];
@@ -98,7 +96,7 @@ fn process_iv_to_pre_counter_block(iv: &[u8], hash_sub_key: &[u8; 16]) -> [u8; 1
         // Non-standard IV length: process through GHASH
         log::info!("      IV processing: {}-byte IV → processing through GHASH", iv.len());
         let mut pre_counter_block = iv.to_vec();
-        log::info!("      Step 1: IV (hex): {}", hex::encode(&pre_counter_block));
+        // log::info!("      Step 1: IV (hex): {}", hex::encode(&pre_counter_block));
 
         // Pad to 16-byte boundary
         let padding = (16 - (iv.len() % 16)) % 16;
@@ -120,11 +118,11 @@ fn process_iv_to_pre_counter_block(iv: &[u8], hash_sub_key: &[u8; 16]) -> [u8; 1
         pre_counter_block.extend_from_slice(&length_bytes);
         log::info!("      Step 4: Added 4 zero bytes + length encoding ({} bits = {:?})", length_bits, length_bytes);
         log::info!("      Step 5: Total GHASH input length: {} bytes", pre_counter_block.len());
-        log::info!("      Step 5: GHASH input (hex, first 64): {}", hex::encode(&pre_counter_block[..pre_counter_block.len().min(64)]));
+        // log::info!("      Step 5: GHASH input (hex, first 64): {}", hex::encode(&pre_counter_block[..pre_counter_block.len().min(64)]));
 
         // GHASH the whole thing (returns [u8; 16])
         let result = ghash::ghash(&pre_counter_block, hash_sub_key);
-        log::info!("      Step 6: GHASH result (preCounterBlock, hex): {}", hex::encode(&result));
+        // log::info!("      Step 6: GHASH result (preCounterBlock, hex): {}", hex::encode(&result));
         result
     }
 }
@@ -137,31 +135,29 @@ pub fn aesgcm_custom(
     iv: &[u8],
     key: &[u8; 32],
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    use hex;
-
     log::info!("   🔐 Custom AESGCM encryption (internal):");
     log::info!("      Plaintext length: {} bytes", plaintext.len());
-    log::info!("      Plaintext (hex): {}", hex::encode(plaintext));
+    // log::info!("      Plaintext (hex): {}", hex::encode(plaintext));
     log::info!("      IV length: {} bytes", iv.len());
-    log::info!("      IV (hex): {}", hex::encode(iv));
+    // log::info!("      IV (hex): {}", hex::encode(iv));
     log::info!("      Additional data length: {} bytes", additional_data.len());
 
     // 1. Generate hash subkey (encrypt zero block)
     let hash_sub_key = ghash::generate_hash_subkey(key);
-    log::info!("      Hash subkey (hex): {}", hex::encode(&hash_sub_key));
+    // log::info!("      Hash subkey (hex): {}", hex::encode(&hash_sub_key));
 
     // 2. Process IV to get preCounterBlock
     let pre_counter_block = process_iv_to_pre_counter_block(iv, &hash_sub_key);
-    log::info!("      PreCounterBlock (hex): {}", hex::encode(&pre_counter_block));
+    // log::info!("      PreCounterBlock (hex): {}", hex::encode(&pre_counter_block));
 
     // 3. Increment preCounterBlock for first counter
     let initial_counter = increment_least_significant_32_bits(&pre_counter_block);
-    log::info!("      Initial counter (hex): {}", hex::encode(&initial_counter));
+    // log::info!("      Initial counter (hex): {}", hex::encode(&initial_counter));
 
     // 4. Encrypt plaintext using GCTR
     let ciphertext = gctr(plaintext, &initial_counter, key);
     log::info!("      Ciphertext length: {} bytes", ciphertext.len());
-    log::info!("      Ciphertext (hex): {}", hex::encode(&ciphertext));
+    // log::info!("      Ciphertext (hex): {}", hex::encode(&ciphertext));
 
     // 5. Build plainTag for authentication
     let mut plain_tag = additional_data.to_vec();
@@ -192,13 +188,13 @@ pub fn aesgcm_custom(
     plain_tag.extend_from_slice(&get_bytes((ciphertext.len() * 8) as u32));
 
     // 6. Generate authentication tag
-    log::info!("      PlainTag length: {} bytes", plain_tag.len());
-    log::info!("      PlainTag (hex, first 64): {}", hex::encode(&plain_tag[..plain_tag.len().min(64)]));
+    // log::info!("      PlainTag length: {} bytes", plain_tag.len());
+    // log::info!("      PlainTag (hex, first 64): {}", hex::encode(&plain_tag[..plain_tag.len().min(64)]));
     let tag_hash = ghash::ghash(&plain_tag, &hash_sub_key);
-    log::info!("      Tag hash (GHASH result, hex): {}", hex::encode(&tag_hash));
+    // log::info!("      Tag hash (GHASH result, hex): {}", hex::encode(&tag_hash));
     let auth_tag = gctr(&tag_hash, &pre_counter_block, key);
-    log::info!("      Auth tag (hex): {}", hex::encode(&auth_tag));
-    log::info!("      Auth tag length: {} bytes", auth_tag.len());
+    // log::info!("      Auth tag (hex): {}", hex::encode(&auth_tag));
+    // log::info!("      Auth tag length: {} bytes", auth_tag.len());
 
     Ok((ciphertext, auth_tag))
 }

@@ -802,3 +802,475 @@ pub fn create_schema_v8(conn: &Connection) -> Result<()> {
     info!("   ✅ Schema version 8 migration complete");
     Ok(())
 }
+
+/// Create schema version 9 (Basket & Tag Support Enhancements)
+///
+/// Adds support for:
+/// - UTXO status tracking ('unproven', 'completed', 'failed')
+/// - Basket partial index for efficient listOutputs queries
+/// - Normalization of existing basket and tag names (trim + lowercase)
+///
+/// This migration enables BRC-100 basket and tag functionality.
+pub fn create_schema_v9(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 9 (Basket & Tag Support Enhancements)...");
+
+    // Step 1: Add status column to utxos table
+    info!("   Step 1: Adding status column to utxos table...");
+    let status_column_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('utxos') WHERE name = 'status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !status_column_exists {
+        conn.execute(
+            "ALTER TABLE utxos ADD COLUMN status TEXT DEFAULT 'completed'",
+            [],
+        )?;
+        info!("   ✅ Added status column to utxos table");
+
+        // Explicitly set existing UTXOs to 'completed' (belt and suspenders)
+        // Even though DEFAULT handles this, being explicit is safer
+        let updated = conn.execute(
+            "UPDATE utxos SET status = 'completed' WHERE status IS NULL",
+            [],
+        )?;
+        info!("   ✅ Set status='completed' for {} existing UTXOs", updated);
+    } else {
+        info!("   ✅ status column already exists");
+    }
+
+    // Step 2: Add partial index for status queries (only index non-completed for performance)
+    info!("   Step 2: Creating partial index for UTXO status...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_utxos_status ON utxos(status) WHERE status != 'completed'",
+        [],
+    )?;
+    info!("   ✅ Created idx_utxos_status partial index");
+
+    // Step 3: Add basket partial index for efficient listOutputs queries
+    info!("   Step 3: Creating basket partial index for unspent UTXOs...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_utxos_basket_unspent ON utxos(basket_id, is_spent) WHERE is_spent = 0",
+        [],
+    )?;
+    info!("   ✅ Created idx_utxos_basket_unspent partial index");
+
+    // Step 4: Normalize existing basket names (trim + lowercase)
+    info!("   Step 4: Normalizing existing basket names...");
+    normalize_existing_baskets(conn)?;
+
+    // Step 5: Normalize existing tag names (trim + lowercase)
+    info!("   Step 5: Normalizing existing tag names...");
+    normalize_existing_tags(conn)?;
+
+    info!("   ✅ Schema version 9 migration complete");
+    Ok(())
+}
+
+/// Normalize existing basket names to trim + lowercase
+///
+/// This ensures consistency with the new normalization rules:
+/// - "Game Items" becomes "game items"
+/// - "  WEAPONS  " becomes "weapons"
+///
+/// If normalization creates duplicates, they are merged.
+fn normalize_existing_baskets(conn: &Connection) -> Result<()> {
+    // Get all existing baskets
+    let mut stmt = conn.prepare("SELECT id, name FROM baskets")?;
+    let baskets: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if baskets.is_empty() {
+        info!("      No existing baskets to normalize");
+        return Ok(());
+    }
+
+    let mut normalized_count = 0;
+    let mut merged_count = 0;
+
+    for (id, name) in &baskets {
+        let normalized = name.trim().to_lowercase();
+
+        if normalized != *name {
+            // Check if normalized name already exists (different basket)
+            let existing: std::result::Result<i64, rusqlite::Error> = conn.query_row(
+                "SELECT id FROM baskets WHERE name = ?1 AND id != ?2",
+                rusqlite::params![&normalized, id],
+                |row| row.get(0),
+            );
+
+            match existing {
+                Ok(existing_id) => {
+                    // Merge: update all UTXOs to use existing basket, delete duplicate
+                    conn.execute(
+                        "UPDATE utxos SET basket_id = ?1 WHERE basket_id = ?2",
+                        rusqlite::params![existing_id, id],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM baskets WHERE id = ?1",
+                        rusqlite::params![id],
+                    )?;
+                    info!("      🔀 Merged basket '{}' (id={}) into '{}' (id={})",
+                          name, id, normalized, existing_id);
+                    merged_count += 1;
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    // No conflict: just rename
+                    conn.execute(
+                        "UPDATE baskets SET name = ?1 WHERE id = ?2",
+                        rusqlite::params![&normalized, id],
+                    )?;
+                    info!("      📝 Normalized basket '{}' -> '{}'", name, normalized);
+                    normalized_count += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    info!("      ✅ Normalized {} baskets, merged {} duplicates", normalized_count, merged_count);
+    Ok(())
+}
+
+/// Normalize existing tag names to trim + lowercase
+///
+/// This ensures consistency with the new normalization rules.
+/// If normalization creates duplicates, they are merged.
+fn normalize_existing_tags(conn: &Connection) -> Result<()> {
+    // Get all existing tags
+    let mut stmt = conn.prepare("SELECT id, tag FROM output_tags")?;
+    let tags: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if tags.is_empty() {
+        info!("      No existing tags to normalize");
+        return Ok(());
+    }
+
+    let mut normalized_count = 0;
+    let mut merged_count = 0;
+
+    for (id, tag) in &tags {
+        let normalized = tag.trim().to_lowercase();
+
+        if normalized != *tag {
+            let existing: std::result::Result<i64, rusqlite::Error> = conn.query_row(
+                "SELECT id FROM output_tags WHERE tag = ?1 AND id != ?2",
+                rusqlite::params![&normalized, id],
+                |row| row.get(0),
+            );
+
+            match existing {
+                Ok(existing_id) => {
+                    // Merge: update tag mappings, delete duplicate
+                    conn.execute(
+                        "UPDATE output_tag_map SET output_tag_id = ?1 WHERE output_tag_id = ?2",
+                        rusqlite::params![existing_id, id],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM output_tags WHERE id = ?1",
+                        rusqlite::params![id],
+                    )?;
+                    info!("      🔀 Merged tag '{}' (id={}) into '{}' (id={})",
+                          tag, id, normalized, existing_id);
+                    merged_count += 1;
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    conn.execute(
+                        "UPDATE output_tags SET tag = ?1 WHERE id = ?2",
+                        rusqlite::params![&normalized, id],
+                    )?;
+                    info!("      📝 Normalized tag '{}' -> '{}'", tag, normalized);
+                    normalized_count += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    info!("      ✅ Normalized {} tags, merged {} duplicates", normalized_count, merged_count);
+    Ok(())
+}
+
+/// Create schema version 10 (Transaction Chaining Support)
+///
+/// Adds support for:
+/// - broadcast_status column on transactions to track broadcast state
+///   Values: 'pending', 'broadcast', 'confirmed', 'failed'
+///
+/// This enables proper BEEF building for child transactions that spend
+/// outputs from unbroadcast parent transactions.
+pub fn create_schema_v10(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 10 (Transaction Chaining Support)...");
+
+    // Step 1: Add broadcast_status column to transactions table
+    info!("   Step 1: Adding broadcast_status column to transactions table...");
+    let column_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !column_exists {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN broadcast_status TEXT DEFAULT 'pending'",
+            [],
+        )?;
+        info!("   ✅ Added broadcast_status column to transactions table");
+
+        // Set existing transactions to 'confirmed' (they were created before this tracking)
+        // Transactions that have block_height are definitely confirmed
+        let updated_confirmed = conn.execute(
+            "UPDATE transactions SET broadcast_status = 'confirmed' WHERE block_height IS NOT NULL",
+            [],
+        )?;
+        info!("   ✅ Set broadcast_status='confirmed' for {} transactions with block_height", updated_confirmed);
+
+        // Transactions without block_height but with confirmations > 0 are also confirmed
+        let updated_with_confirmations = conn.execute(
+            "UPDATE transactions SET broadcast_status = 'confirmed' WHERE confirmations > 0 AND broadcast_status != 'confirmed'",
+            [],
+        )?;
+        info!("   ✅ Set broadcast_status='confirmed' for {} transactions with confirmations", updated_with_confirmations);
+
+        // Remaining transactions (no block_height, no confirmations) are assumed broadcast
+        // (they were created before we added this tracking, so we don't know for sure)
+        let updated_broadcast = conn.execute(
+            "UPDATE transactions SET broadcast_status = 'broadcast' WHERE broadcast_status = 'pending' OR broadcast_status IS NULL",
+            [],
+        )?;
+        info!("   ✅ Set broadcast_status='broadcast' for {} legacy transactions", updated_broadcast);
+    } else {
+        info!("   ✅ broadcast_status column already exists");
+    }
+
+    // Step 2: Create index for efficient queries by broadcast_status
+    info!("   Step 2: Creating index for broadcast_status...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_broadcast_status ON transactions(broadcast_status)",
+        [],
+    )?;
+    info!("   ✅ Created idx_transactions_broadcast_status index");
+
+    // Step 3: Create index for txid lookups (should already exist, but ensure it does)
+    info!("   Step 3: Ensuring txid index exists...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_txid ON transactions(txid)",
+        [],
+    )?;
+    info!("   ✅ Verified idx_transactions_txid index");
+
+    info!("   ✅ Schema version 10 migration complete");
+    Ok(())
+}
+
+/// Create schema version 11 (Fix Orphan UTXOs)
+///
+/// This migration fixes UTXOs that were created with unsigned txids before
+/// the signing process updated the transaction's txid. These "orphan" UTXOs
+/// reference txids that no longer exist in the transactions table.
+///
+/// The fix works by matching orphan UTXOs with transactions based on:
+/// - Output vout (position)
+/// - Output satoshis (amount)
+/// - Output script (locking script)
+///
+/// This is a one-time cleanup for legacy data. New transactions won't have
+/// this problem because we now update UTXO txids after signing.
+pub fn create_schema_v11(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 11 (Fix Orphan UTXOs)...");
+
+    // Step 1: Find orphan UTXOs (UTXOs whose txid doesn't exist in transactions table)
+    info!("   Step 1: Finding orphan UTXOs...");
+
+    let mut orphan_stmt = conn.prepare(
+        "SELECT u.id, u.txid, u.vout, u.satoshis, u.script
+         FROM utxos u
+         WHERE NOT EXISTS (
+             SELECT 1 FROM transactions t WHERE t.txid = u.txid
+         )
+         AND u.is_spent = 0"
+    )?;
+
+    let orphans: Vec<(i64, String, i32, i64, Option<String>)> = orphan_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,      // id
+            row.get::<_, String>(1)?,   // txid
+            row.get::<_, i32>(2)?,      // vout
+            row.get::<_, i64>(3)?,      // satoshis
+            row.get::<_, Option<String>>(4)?, // script
+        ))
+    })?.collect::<Result<Vec<_>>>()?;
+
+    info!("   📊 Found {} orphan UTXOs to fix", orphans.len());
+
+    if orphans.is_empty() {
+        info!("   ✅ No orphan UTXOs found - nothing to fix");
+        info!("   ✅ Schema version 11 migration complete");
+        return Ok(());
+    }
+
+    // Step 2: For each orphan UTXO, try to find matching transaction by output characteristics
+    info!("   Step 2: Matching orphan UTXOs with transactions...");
+
+    let mut fixed_count = 0;
+    let mut unfixed_count = 0;
+
+    for (utxo_id, old_txid, vout, satoshis, script) in orphans {
+        info!("   🔍 Processing orphan UTXO {} (txid: {}:{})", utxo_id, &old_txid[..16], vout);
+
+        // Try to find a transaction with matching output
+        // We match on vout, satoshis, and script (if available)
+        let matching_txid: Option<String> = if let Some(ref script_hex) = script {
+            // Match by vout + satoshis + script (most precise)
+            conn.query_row(
+                "SELECT t.txid
+                 FROM transactions t
+                 JOIN transaction_outputs o ON o.transaction_id = t.id
+                 WHERE o.vout = ?1 AND o.satoshis = ?2 AND o.script = ?3
+                 LIMIT 1",
+                rusqlite::params![vout, satoshis, script_hex],
+                |row| row.get(0),
+            ).ok()
+        } else {
+            // Match by vout + satoshis only (less precise, but better than nothing)
+            conn.query_row(
+                "SELECT t.txid
+                 FROM transactions t
+                 JOIN transaction_outputs o ON o.transaction_id = t.id
+                 WHERE o.vout = ?1 AND o.satoshis = ?2
+                 LIMIT 1",
+                rusqlite::params![vout, satoshis],
+                |row| row.get(0),
+            ).ok()
+        };
+
+        match matching_txid {
+            Some(new_txid) => {
+                // Update the UTXO's txid
+                conn.execute(
+                    "UPDATE utxos SET txid = ?1 WHERE id = ?2",
+                    rusqlite::params![new_txid, utxo_id],
+                )?;
+                info!("   ✅ Fixed UTXO {}: {} → {}", utxo_id, &old_txid[..16], &new_txid[..16]);
+                fixed_count += 1;
+            }
+            None => {
+                // Could not find matching transaction
+                // This UTXO might reference a transaction that was never stored locally
+                // (e.g., synced from API but parent tx not in our DB)
+                info!("   ⚠️  Could not match UTXO {} (txid: {}:{}) - may be from external source",
+                      utxo_id, &old_txid[..16], vout);
+                unfixed_count += 1;
+            }
+        }
+    }
+
+    info!("   📊 Migration results:");
+    info!("      - Fixed: {} UTXOs", fixed_count);
+    info!("      - Unfixed: {} UTXOs (external/legacy)", unfixed_count);
+
+    info!("   ✅ Schema version 11 migration complete");
+    Ok(())
+}
+
+/// Create schema version 12 (Basket Output Tracking - nullable address_id)
+///
+/// Makes address_id nullable in the utxos table to support basket outputs
+/// that don't correspond to a known HD wallet address (e.g., token scripts,
+/// custom OP_RETURN+P2PKH outputs from createAction with basket property).
+///
+/// SQLite doesn't support ALTER COLUMN to change NOT NULL constraints,
+/// so we recreate the table with the new schema.
+pub fn create_schema_v12(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 12 (Basket Output Tracking - nullable address_id)...");
+
+    // Step 1: Recreate utxos table with nullable address_id
+    info!("   Step 1: Recreating utxos table with nullable address_id...");
+
+    conn.execute_batch("
+        CREATE TABLE utxos_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address_id INTEGER,
+            basket_id INTEGER,
+            txid TEXT NOT NULL,
+            vout INTEGER NOT NULL,
+            satoshis INTEGER NOT NULL,
+            script TEXT NOT NULL,
+            first_seen INTEGER NOT NULL,
+            last_updated INTEGER NOT NULL,
+            is_spent BOOLEAN NOT NULL DEFAULT 0,
+            spent_txid TEXT,
+            spent_at INTEGER,
+            custom_instructions TEXT,
+            status TEXT DEFAULT 'completed',
+            FOREIGN KEY (address_id) REFERENCES addresses(id) ON DELETE CASCADE,
+            FOREIGN KEY (basket_id) REFERENCES baskets(id) ON DELETE SET NULL,
+            UNIQUE(txid, vout)
+        );
+
+        INSERT INTO utxos_new SELECT * FROM utxos;
+
+        DROP TABLE utxos;
+
+        ALTER TABLE utxos_new RENAME TO utxos;
+    ")?;
+
+    info!("   ✅ Recreated utxos table with nullable address_id");
+
+    // Step 2: Recreate indexes
+    info!("   Step 2: Recreating indexes...");
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_utxos_address_id ON utxos(address_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_utxos_txid_vout ON utxos(txid, vout)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_utxos_basket_id ON utxos(basket_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_utxos_status ON utxos(status) WHERE status != 'completed'", [])?;
+
+    info!("   ✅ Indexes recreated");
+    info!("   ✅ Schema version 12 migration complete");
+    Ok(())
+}
+
+/// Schema V13: Persistent derived key cache for PushDrop signing
+///
+/// When getPublicKey is called with forSelf=true, the wallet derives a child key
+/// for locking PushDrop tokens. To sign those tokens later (even after restart),
+/// we need to remember the derivation parameters (invoice + counterparty).
+pub fn create_schema_v13(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 13 (Persistent derived key cache)...");
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS derived_key_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            derived_pubkey TEXT NOT NULL UNIQUE,
+            invoice TEXT NOT NULL,
+            counterparty_pubkey TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_derived_key_cache_pubkey ON derived_key_cache(derived_pubkey);
+    ")?;
+
+    info!("   ✅ Schema version 13 migration complete");
+    Ok(())
+}
+
+/// Schema V14: Output description storage for basket outputs
+///
+/// BRC-100 createAction outputs can include an `outputDescription` field (5-50 bytes UTF-8)
+/// that describes the output. This is stored alongside custom_instructions for retrieval
+/// via listOutputs. Matches the SDK's `OutputX.outputDescription` field.
+pub fn create_schema_v14(conn: &Connection) -> Result<()> {
+    info!("   Creating schema version 14 (Output description for basket outputs)...");
+
+    conn.execute(
+        "ALTER TABLE utxos ADD COLUMN output_description TEXT",
+        [],
+    )?;
+
+    info!("   ✅ Schema version 14 migration complete");
+    Ok(())
+}

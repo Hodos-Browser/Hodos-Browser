@@ -23,39 +23,46 @@ pub async fn fetch_transaction_for_beef(
     db: &Mutex<WalletDatabase>,
     client: &Client,
 ) -> Result<Vec<u8>, String> {
-    let db_guard = db.lock().unwrap();
-    let conn = db_guard.connection();
-
     // Step 1: Check transactions table (wallet's own transactions)
-    let tx_repo = TransactionRepository::new(conn);
-    if let Ok(Some(stored_action)) = tx_repo.get_by_txid(txid) {
-        let raw_tx_hex = stored_action.raw_tx;
-        if !raw_tx_hex.is_empty() {
-            drop(db_guard); // Release lock before hex decode
-            match hex::decode(&raw_tx_hex) {
-                Ok(bytes) => {
-                    // Verify TXID matches
-                    let hash1 = Sha256::digest(&bytes);
-                    let hash2 = Sha256::digest(&hash1);
-                    let calculated_txid: Vec<u8> = hash2.into_iter().rev().collect();
-                    let calculated_txid_hex = hex::encode(calculated_txid);
-
-                    if calculated_txid_hex == txid {
-                        log::info!("   ✅ Found transaction {} in transactions table", txid);
-                        return Ok(bytes);
-                    } else {
-                        log::warn!("   ⚠️  TXID mismatch for {} in transactions table, trying cache...", txid);
-                    }
-                },
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to decode transaction {} hex: {}, trying cache...", txid, e);
-                },
+    // IMPORTANT: Lock must be scoped so it's dropped before Step 2
+    let step1_hex: Option<String> = {
+        let db_guard = db.lock().unwrap();
+        let conn = db_guard.connection();
+        let tx_repo = TransactionRepository::new(conn);
+        match tx_repo.get_by_txid(txid) {
+            Ok(Some(stored_action)) => {
+                let raw_tx = stored_action.raw_tx;
+                if !raw_tx.is_empty() { Some(raw_tx) } else { None }
             }
+            _ => None,
+        }
+    }; // db_guard is ALWAYS dropped here
+
+    if let Some(raw_tx_hex) = step1_hex {
+        match hex::decode(&raw_tx_hex) {
+            Ok(bytes) => {
+                // Verify TXID matches
+                let hash1 = Sha256::digest(&bytes);
+                let hash2 = Sha256::digest(&hash1);
+                let calculated_txid: Vec<u8> = hash2.into_iter().rev().collect();
+                let calculated_txid_hex = hex::encode(calculated_txid);
+
+                if calculated_txid_hex == txid {
+                    log::info!("   ✅ Found transaction {} in transactions table", txid);
+                    return Ok(bytes);
+                } else {
+                    log::warn!("   ⚠️  TXID mismatch for {} in transactions table, trying cache...", txid);
+                }
+            },
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to decode transaction {} hex: {}, trying cache...", txid, e);
+            },
         }
     }
 
     // Step 2: Check parent_transactions table (cached parent transactions)
-    {
+    // IMPORTANT: Lock must be scoped so it's dropped before Step 3
+    let step2_hex: Option<String> = {
         let db_guard = db.lock().unwrap();
         let conn = db_guard.connection();
         let parent_tx_repo = ParentTransactionRepository::new(conn);
@@ -66,30 +73,37 @@ pub async fn fetch_transaction_for_beef(
                 match parent_tx_repo.verify_txid(txid, &cached.raw_hex) {
                     Ok(true) => {
                         log::info!("   ✅ Found transaction {} in parent_transactions cache", txid);
-                        drop(db_guard); // Release lock before hex decode
-                        match hex::decode(&cached.raw_hex) {
-                            Ok(bytes) => return Ok(bytes),
-                            Err(e) => {
-                                log::warn!("   ⚠️  Failed to decode cached transaction {}: {}, fetching from API", txid, e);
-                            },
-                        }
+                        Some(cached.raw_hex)
                     },
                     Ok(false) => {
                         log::warn!("   ⚠️  Cached transaction {} failed TXID verification, fetching from API", txid);
+                        None
                     },
                     Err(e) => {
                         log::warn!("   ⚠️  Error verifying cached transaction {}: {}, fetching from API", txid, e);
+                        None
                     },
                 }
             },
             Ok(None) => {
                 log::info!("   🌐 Cache miss - fetching transaction {} from API...", txid);
+                None
             },
             Err(e) => {
                 log::warn!("   ⚠️  Database error checking cache: {}, fetching from API", e);
+                None
             },
         }
-    } // db_guard is dropped here
+    }; // db_guard is ALWAYS dropped here
+
+    if let Some(cached_hex) = step2_hex {
+        match hex::decode(&cached_hex) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to decode cached transaction {}: {}, fetching from API", txid, e);
+            },
+        }
+    }
 
     // Step 3: Fetch from API
     match fetch_parent_transaction_from_api(client, txid).await {
@@ -129,6 +143,10 @@ pub async fn fetch_transaction_for_beef(
     }
 }
 
+/// Maximum number of ancestor transactions to include in a single BEEF build.
+/// Prevents runaway ancestry walks from freezing the app.
+const MAX_BEEF_ANCESTORS: usize = 50;
+
 /// Recursively build BEEF for a transaction and its parent transactions
 ///
 /// This function uses a queue-based approach to avoid async recursion issues.
@@ -138,7 +156,8 @@ pub async fn fetch_transaction_for_beef(
 /// 3. Parses it to get inputs
 /// 4. Adds it to BEEF
 /// 5. Fetches Merkle proof if available
-/// 6. Processes parent transactions iteratively
+/// 6. Only queues parent transactions if current tx has NO merkle proof
+///    (confirmed transactions with BUMPs don't need their parents in BEEF)
 pub async fn build_beef_for_txid(
     txid: &str,
     beef: &mut Beef,
@@ -157,6 +176,12 @@ pub async fn build_beef_for_txid(
             continue;
         }
 
+        // Safety limit: prevent runaway ancestry walks
+        if processed.len() >= MAX_BEEF_ANCESTORS {
+            log::warn!("   ⚠️  Reached maximum ancestor limit ({}) for BEEF building, stopping", MAX_BEEF_ANCESTORS);
+            break;
+        }
+
         // Skip if already in BEEF
         if beef.find_txid(&current_txid).is_some() {
             processed.insert(current_txid);
@@ -166,17 +191,51 @@ pub async fn build_beef_for_txid(
         log::info!("   📥 Building BEEF for transaction {}", current_txid);
 
         // Fetch transaction (from cache or API)
-        let tx_bytes = fetch_transaction_for_beef(&current_txid, db, client).await?;
+        let tx_bytes = match fetch_transaction_for_beef(&current_txid, db, client).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to fetch transaction {}: {}, skipping", current_txid, e);
+                processed.insert(current_txid);
+                continue;
+            }
+        };
 
         // Parse transaction to get inputs
-        let parsed = ParsedTransaction::from_bytes(&tx_bytes)
-            .map_err(|e| format!("Failed to parse transaction {}: {}", current_txid, e))?;
+        let parsed = match ParsedTransaction::from_bytes(&tx_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to parse transaction {}: {}, skipping", current_txid, e);
+                processed.insert(current_txid);
+                continue;
+            }
+        };
 
         // Add transaction to BEEF (as parent, not main)
         let tx_index = beef.add_parent_transaction(tx_bytes.clone());
 
+        // Check if this is a local unbroadcast transaction (no proof possible)
+        // Transactions with broadcast_status pending/failed/broadcast haven't been mined,
+        // so there's no merkle proof to fetch. Skip expensive API calls.
+        let skip_proof_fetch = {
+            let db_guard = db.lock().unwrap();
+            let conn = db_guard.connection();
+            let tx_repo = TransactionRepository::new(conn);
+            match tx_repo.get_broadcast_status(&current_txid) {
+                Ok(Some(ref status)) if status == "confirmed" => false,
+                Ok(Some(ref status)) => {
+                    log::info!("   ⏭️  Transaction {} has status '{}', skipping proof fetch", current_txid, status);
+                    true
+                }
+                Ok(None) => false, // Not in our transactions table → might need proof from API
+                Err(_) => false,   // Error checking → try anyway
+            }
+        };
+
         // Fetch Merkle proof if available
-        let enhanced_tsc = {
+        let has_bump;
+        let enhanced_tsc = if skip_proof_fetch {
+            serde_json::Value::Null
+        } else {
             let db_guard = db.lock().unwrap();
             let conn = db_guard.connection();
             let merkle_proof_repo = MerkleProofRepository::new(conn);
@@ -198,10 +257,17 @@ pub async fn build_beef_for_txid(
                     log::info!("   🌐 Cache miss - fetching TSC proof from API...");
                     match fetch_tsc_proof_from_api(client, &current_txid).await {
                         Ok(Some(tsc_json)) => {
-                            let db_guard = db.lock().unwrap();
-                            let conn = db_guard.connection();
-                            let block_header_repo = BlockHeaderRepository::new(conn);
-                            match enhance_tsc_with_height(client, &block_header_repo, &tsc_json).await {
+                            // IMPORTANT: Lock must be scoped to avoid deadlock.
+                            // enhance_tsc_with_height needs BlockHeaderRepository (borrows from db_guard),
+                            // so we hold the lock during the call, then drop it before re-locking to cache.
+                            let enhanced_result = {
+                                let db_guard = db.lock().unwrap();
+                                let conn = db_guard.connection();
+                                let block_header_repo = BlockHeaderRepository::new(conn);
+                                enhance_tsc_with_height(client, &block_header_repo, &tsc_json).await
+                            }; // db_guard dropped here - safe to re-lock below
+
+                            match enhanced_result {
                                 Ok(enhanced_tsc) => {
                                     {
                                         let db_guard = db.lock().unwrap();
@@ -249,17 +315,25 @@ pub async fn build_beef_for_txid(
         if !enhanced_tsc.is_null() {
             if let Err(e) = beef.add_tsc_merkle_proof(&current_txid, tx_index, &enhanced_tsc) {
                 log::warn!("   ⚠️  Failed to add TSC Merkle proof for {}: {}", current_txid, e);
+                has_bump = false;
             } else {
                 log::info!("   ✅ Added TSC Merkle proof (BUMP) to BEEF for {}", current_txid);
+                has_bump = true;
             }
+        } else {
+            has_bump = false;
         }
 
-        // Add parent transactions to queue
-        for input in parsed.inputs {
-            let parent_txid = input.prev_txid;
-            if !processed.contains(&parent_txid) && beef.find_txid(&parent_txid).is_none() {
-                log::info!("   🔄 Queuing parent transaction {}", parent_txid);
-                queue.push(parent_txid);
+        // Only queue parent transactions if this tx has NO merkle proof.
+        // A transaction with a BUMP is proven by its block inclusion -
+        // its parents are not needed in the BEEF.
+        if !has_bump {
+            for input in parsed.inputs {
+                let parent_txid = input.prev_txid;
+                if !processed.contains(&parent_txid) && beef.find_txid(&parent_txid).is_none() {
+                    log::info!("   🔄 Queuing parent transaction {}", parent_txid);
+                    queue.push(parent_txid);
+                }
             }
         }
 

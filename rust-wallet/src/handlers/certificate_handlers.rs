@@ -2515,14 +2515,15 @@ async fn create_certificate_transaction(
     // Certificate tx: 1-2 inputs (P2PKH) + 1 certificate output + 1 change output
     let certificate_script_len = locking_script_bytes.len();
     let output_script_lengths = vec![certificate_script_len, 25]; // certificate + P2PKH change
+    let fee_rate_sats_per_kb = state.fee_rate_cache.get_rate().await;
     let estimated_fee = crate::handlers::estimate_fee_for_transaction(
         2,  // Estimate 2 inputs
         &output_script_lengths,
         false,  // Change already included in output_script_lengths
-        crate::handlers::DEFAULT_SATS_PER_KB
+        fee_rate_sats_per_kb
     ) as i64;
-    log::info!("   📊 Certificate tx fee estimate: {} satoshis (script: {} bytes)",
-        estimated_fee, certificate_script_len);
+    log::info!("   📊 Certificate tx fee estimate: {} satoshis (script: {} bytes, rate: {} sat/KB)",
+        estimated_fee, certificate_script_len, fee_rate_sats_per_kb);
 
     let total_needed = certificate_output_amount + estimated_fee;
 
@@ -2574,7 +2575,7 @@ async fn create_certificate_transaction(
             // Convert database UTXOs to fetcher format (reuse helper)
             db_utxos.iter()
                 .filter_map(|db_utxo| {
-                    address_id_map.get(&db_utxo.address_id)
+                    db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
                         .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
                 })
                 .collect::<Vec<_>>()
@@ -2822,7 +2823,7 @@ async fn create_certificate_transaction(
         .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize transaction: {}", e)))?;
 
     log::info!("   📡 Broadcasting certificate transaction...");
-    let broadcast_result = broadcast_transaction(&raw_tx_hex).await;
+    let broadcast_result = broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await;
 
     // Handle "Missing inputs" error by checking UTXOs and retrying
     if let Err(ref e) = broadcast_result {
