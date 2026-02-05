@@ -634,11 +634,11 @@ ALTER TABLE certificate_fields ADD COLUMN user_id INTEGER REFERENCES users(userI
 | `src/database/mod.rs` | Export `user_repo` module, `User` model, and `UserRepository` |
 | `src/main.rs` | Added `current_user_id: i64` to `AppState`, initialized from default user on startup |
 
-#### Testing Required
+#### Testing Results
 
-- [ ] **Fresh DB**: Verify users table created, default user created when wallet is created
-- [ ] **V16→V17 Migration**: Verify user_id columns added to transactions/baskets/output_tags/certificates/certificate_fields, existing data backfilled with user_id=1
-- [ ] **Runtime**: Verify `AppState.current_user_id` populated correctly on startup
+- [x] **Fresh DB**: Users table created, default user created when wallet is created
+- [x] **V16→V17 Migration**: user_id columns added to transactions/baskets/output_tags/certificates/certificate_fields, existing data backfilled with user_id=1
+- [x] **Runtime**: `AppState.current_user_id` populated correctly on startup (logs show `👤 Default user ID: 1`)
 
 #### Risk: LOW
 - Additive only
