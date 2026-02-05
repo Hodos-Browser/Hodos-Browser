@@ -438,3 +438,112 @@ if (!(window.hodosBrowser as any).omnibox) {
     },
   };
 }
+
+// Cookie Management API
+if (!(window.hodosBrowser as any).cookies) {
+  (window.hodosBrowser as any).cookies = {
+    getAll: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          resolve([]);
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        }, 5000);
+
+        window.onCookieGetAllResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        };
+        window.onCookieGetAllError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        };
+        window.cefMessage?.send('cookie_get_all', []);
+      });
+    },
+
+    deleteCookie: (url: string, name: string) => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteResponse;
+          delete window.onCookieDeleteError;
+        };
+        window.onCookieDeleteError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteResponse;
+          delete window.onCookieDeleteError;
+        };
+        window.cefMessage?.send('cookie_delete', [url, name]);
+      });
+    },
+
+    deleteDomainCookies: (domain: string) => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteDomainResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteDomainResponse;
+          delete window.onCookieDeleteDomainError;
+        };
+        window.onCookieDeleteDomainError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteDomainResponse;
+          delete window.onCookieDeleteDomainError;
+        };
+        window.cefMessage?.send('cookie_delete_domain', [domain]);
+      });
+    },
+
+    deleteAllCookies: () => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteAllResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteAllResponse;
+          delete window.onCookieDeleteAllError;
+        };
+        window.onCookieDeleteAllError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteAllResponse;
+          delete window.onCookieDeleteAllError;
+        };
+        window.cefMessage?.send('cookie_delete_all', []);
+      });
+    },
+
+    clearCache: () => {
+      return new Promise((resolve, reject) => {
+        window.onCacheClearResponse = (data: any) => {
+          resolve(data);
+          delete window.onCacheClearResponse;
+          delete window.onCacheClearError;
+        };
+        window.onCacheClearError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCacheClearResponse;
+          delete window.onCacheClearError;
+        };
+        window.cefMessage?.send('cache_clear', []);
+      });
+    },
+
+    getCacheSize: () => {
+      return new Promise((resolve, reject) => {
+        window.onCacheGetSizeResponse = (data: any) => {
+          resolve(data);
+          delete window.onCacheGetSizeResponse;
+          delete window.onCacheGetSizeError;
+        };
+        window.onCacheGetSizeError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCacheGetSizeResponse;
+          delete window.onCacheGetSizeError;
+        };
+        window.cefMessage?.send('cache_get_size', []);
+      });
+    },
+  };
+}
