@@ -1,6 +1,7 @@
 import type { AddressData } from './address';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
+import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
 
 declare global {
   interface Window {
@@ -12,6 +13,14 @@ declare global {
         delete: (url: string) => boolean;
         clearAll: () => boolean;
         clearRange: (params: ClearRangeParams) => boolean;
+      };
+      cookies: {
+        getAll: () => Promise<CookieData[]>;
+        deleteCookie: (url: string, name: string) => Promise<CookieDeleteResponse>;
+        deleteDomainCookies: (domain: string) => Promise<CookieDeleteResponse>;
+        deleteAllCookies: () => Promise<CookieDeleteResponse>;
+        clearCache: () => Promise<{ success: boolean }>;
+        getCacheSize: () => Promise<CacheSizeResponse>;
       };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
@@ -82,6 +91,18 @@ declare global {
     onMarkWalletBackedUpError?: (error: string) => void;
     onGetBackupModalStateResponse?: (data: { shown: boolean }) => void;
     onSetBackupModalStateResponse?: (data: { success: boolean }) => void;
+    onCookieGetAllResponse?: (data: CookieData[]) => void;
+    onCookieGetAllError?: (error: string) => void;
+    onCookieDeleteResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteError?: (error: string) => void;
+    onCookieDeleteDomainResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteDomainError?: (error: string) => void;
+    onCookieDeleteAllResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteAllError?: (error: string) => void;
+    onCacheClearResponse?: (data: { success: boolean }) => void;
+    onCacheClearError?: (error: string) => void;
+    onCacheGetSizeResponse?: (data: CacheSizeResponse) => void;
+    onCacheGetSizeError?: (error: string) => void;
     allSystemsReady?: boolean;
      __overlayReady?: boolean;
   }
