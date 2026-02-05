@@ -49,7 +49,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/crypto/brc42.rs` | `derive_child_private_key`, `derive_child_public_key` |
 | `src/crypto/brc43.rs` | `InvoiceNumber`, `SecurityLevel`, `normalize_protocol_id` |
 | `src/crypto/signing.rs` | `sha256`, `hmac_sha256`, `verify_hmac_sha256` |
-| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository`, `ProvenTxRepository`, `ProvenTxReqRepository` |
+| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository`, `ProvenTxRepository`, `ProvenTxReqRepository`, `UserRepository` |
 | `src/database/helpers.rs` | `get_master_private_key_from_db`, `get_master_public_key_from_db` |
 | `src/database/proven_tx_repo.rs` | `ProvenTxRepository`: `insert_or_get`, `get_by_txid`, `get_merkle_proof_as_tsc`, `link_transaction` — immutable proof records |
 | `src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository`: `create`, `get_by_txid`, `update_status`, `link_proven_tx`, `add_history_note` — proof lifecycle tracking |
@@ -57,25 +57,43 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/cache_sync.rs` | Background BEEF cache sync, creates `proven_txs` records from WhatsOnChain TSC proofs |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
 
-## Database Schema (V16)
+## Database Schema (V17)
 
-Current migration version: **V16**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+Current migration version: **V17**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
 
 | Table | Purpose | Phase |
 |-------|---------|-------|
 | wallets | Master key storage (mnemonic, HD index) | Original |
+| users | Identity mapping (master pubkey → userId). Default user created from wallet. | V17 |
 | addresses | HD address derivation cache | Original |
-| transactions | Transaction records, `new_status` column (V15), `proven_tx_id` FK (V16) | V15/V16 |
+| transactions | Transaction records, `new_status` (V15), `proven_tx_id` FK (V16), `user_id` FK (V17) | V15-V17 |
 | utxos | UTXO tracking (is_spent, spent_txid) | Original |
 | parent_transactions | Raw tx cache for BEEF building | Original |
 | merkle_proofs | **Deprecated** — no longer written to. Replaced by `proven_txs` (V16) | Original |
 | block_headers | Cached block headers | Original |
 | proven_txs | **Immutable** proof records (merkle path + raw tx). Created by ARC poller and cache_sync | V16 |
 | proven_tx_reqs | Proof acquisition lifecycle tracking. Created on broadcast, completed when proof acquired | V16 |
-| baskets | Output categorization | V14 |
-| output_tags / output_tag_map | Output tagging | V14 |
-| certificates / certificate_fields | BRC-52 identity certificates | V7 |
+| baskets | Output categorization, `user_id` FK (V17) | V14/V17 |
+| output_tags / output_tag_map | Output tagging, `user_id` FK (V17) | V14/V17 |
+| certificates / certificate_fields | BRC-52 identity certificates, `user_id` FK (V17) | V7/V17 |
 | domain_whitelist | BRC-100 app permissions | Original |
+
+### Multi-User Foundation (V17)
+
+Phase 3 of wallet-toolbox alignment. Adds `users` table and `user_id` foreign keys to core tables.
+All existing data is linked to the default user (ID 1), whose `identity_key` is the wallet's master public key.
+
+```
+wallets table (mnemonic, HD derivation root)
+    │
+    ▼ derives master public key
+users table (identity_key = master pubkey)
+    │
+    ▼ user_id FK
+transactions, baskets, certificates, etc.
+```
+
+`AppState.current_user_id` holds the active user ID for all operations.
 
 ### Status System (V15+)
 

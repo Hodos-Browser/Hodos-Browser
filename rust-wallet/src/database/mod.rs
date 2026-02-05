@@ -21,9 +21,10 @@ pub mod basket_repo;
 pub mod tag_repo;
 pub mod certificate_repo;
 pub mod message_relay_repo;
+pub mod user_repo;
 
 pub use connection::WalletDatabase;
-pub use models::{Wallet, Address, Utxo, ParentTransaction, MerkleProof, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
+pub use models::{Wallet, User, Address, Utxo, ParentTransaction, MerkleProof, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
 pub use wallet_repo::WalletRepository;
 pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;
@@ -39,3 +40,4 @@ pub use basket_repo::BasketRepository;
 pub use tag_repo::TagRepository;
 pub use certificate_repo::CertificateRepository;
 pub use message_relay_repo::{MessageRelayRepository, RelayMessage, MessageRelayStats};
+pub use user_repo::UserRepository;

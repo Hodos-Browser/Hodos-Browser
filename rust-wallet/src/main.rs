@@ -56,6 +56,7 @@ pub struct AppState {
     pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
     pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
+    pub current_user_id: i64,  // Default user ID for all operations (multi-user foundation, Phase 3)
 }
 
 #[actix_web::main]
@@ -102,7 +103,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize database (primary storage)
     let db_path = wallet_dir.join("wallet.db");
-    let database = match WalletDatabase::new(db_path.clone()) {
+    let (database, default_user_id) = match WalletDatabase::new(db_path.clone()) {
         Ok(db) => {
             println!("✅ Database initialized");
             println!("   Database path: {}", db_path.display());
@@ -217,7 +218,29 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
-            Arc::new(Mutex::new(db))
+            // Get default user ID for AppState (multi-user foundation, Phase 3)
+            let default_user_id: i64 = {
+                use database::UserRepository;
+                let conn = db.connection();
+                let user_repo = UserRepository::new(conn);
+                match user_repo.get_default() {
+                    Ok(Some(user)) => {
+                        let uid = user.user_id.unwrap_or(1);
+                        println!("👤 Default user ID: {}", uid);
+                        uid
+                    }
+                    Ok(None) => {
+                        println!("⚠️  No default user found (new database without wallet)");
+                        1  // Placeholder - will be created when wallet is created
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Failed to get default user: {}", e);
+                        1  // Fallback to user ID 1
+                    }
+                }
+            };
+
+            (Arc::new(Mutex::new(db)), default_user_id)
         }
         Err(e) => {
             eprintln!("❌ Failed to initialize database: {}", e);
@@ -231,6 +254,7 @@ async fn main() -> std::io::Result<()> {
     // Clone database for background services (before moving into app_state)
     let database_for_sync = database.clone();
     let database_for_arc_poller = database.clone();
+    let current_user_id = default_user_id;
 
     // Initialize balance cache
     let balance_cache = Arc::new(balance_cache::BalanceCache::new());
@@ -251,6 +275,7 @@ async fn main() -> std::io::Result<()> {
         utxo_selection_lock: Arc::new(tokio::sync::Mutex::new(())),  // Prevents concurrent UTXO selection
         create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
+        current_user_id,  // Multi-user foundation (Phase 3)
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");

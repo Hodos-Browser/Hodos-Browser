@@ -14,6 +14,18 @@ pub struct Wallet {
     pub created_at: i64,  // Unix timestamp
 }
 
+/// User model matching the `users` table.
+/// Represents an identity (master public key) that owns wallet data.
+/// For single-user wallets, there is one default user linked to the wallet's master key.
+#[derive(Debug, Clone)]
+pub struct User {
+    pub user_id: Option<i64>,  // None for new users, Some(id) for existing
+    pub identity_key: String,  // Master public key (hex-encoded, 33 bytes compressed)
+    pub active_storage: String,  // Storage mode: "local" (default)
+    pub created_at: i64,  // Unix timestamp
+    pub updated_at: i64,  // Unix timestamp
+}
+
 /// Address model matching the `addresses` table
 #[derive(Debug, Clone)]
 pub struct Address {

@@ -623,6 +623,23 @@ ALTER TABLE certificate_fields ADD COLUMN user_id INTEGER REFERENCES users(userI
 | `src/main.rs` | AppState: add current_user_id field |
 | All repos | Add userId parameter where needed (backward-compatible: default to current user) |
 
+#### Rust Code Changes (Implemented)
+
+| File | Change |
+|---|---|
+| `src/database/models.rs` | Added `User` model struct with fields: `user_id`, `identity_key`, `active_storage`, `created_at`, `updated_at` |
+| `src/database/user_repo.rs` | **New file**: `UserRepository` with `create()`, `get_by_id()`, `get_by_identity_key()`, `get_default()`, `update_active_storage()` |
+| `src/database/migrations.rs` | Added `create_schema_v17()`: creates users table, derives identity_key from mnemonic, creates default user, adds user_id columns to 5 tables, backfills existing data, creates indexes |
+| `src/database/connection.rs` | Added V17 migration runner |
+| `src/database/mod.rs` | Export `user_repo` module, `User` model, and `UserRepository` |
+| `src/main.rs` | Added `current_user_id: i64` to `AppState`, initialized from default user on startup |
+
+#### Testing Required
+
+- [ ] **Fresh DB**: Verify users table created, default user created when wallet is created
+- [ ] **V16→V17 Migration**: Verify user_id columns added to transactions/baskets/output_tags/certificates/certificate_fields, existing data backfilled with user_id=1
+- [ ] **Runtime**: Verify `AppState.current_user_id` populated correctly on startup
+
 #### Risk: LOW
 - Additive only
 - All existing data gets the single default user's ID

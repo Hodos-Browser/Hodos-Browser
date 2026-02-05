@@ -5,6 +5,9 @@
 
 use rusqlite::{Connection, Result};
 use log::{info, warn, error};
+use bip39::{Mnemonic, Language};
+use bip32::XPrv;
+use secp256k1::{Secp256k1, SecretKey, PublicKey};
 
 /// Create schema version 1 (initial schema)
 ///
@@ -1651,4 +1654,259 @@ pub fn create_schema_v16(conn: &Connection) -> Result<()> {
 
     info!("   ✅ Schema version 16 migration complete");
     Ok(())
+}
+
+/// Migration v17: Multi-User Foundation
+///
+/// Creates `users` table and adds `user_id` foreign keys to core tables.
+/// Creates a default user from the existing wallet's master public key.
+/// This is plumbing for wallet-toolbox alignment where data is scoped by user.
+///
+/// For single-user wallets (our current model), there is exactly one user
+/// whose identity_key is the wallet's master public key.
+pub fn create_schema_v17(conn: &Connection) -> Result<()> {
+    info!("=== Migration v17: Multi-User Foundation ===");
+
+    // Step 1: Create users table
+    info!("   Step 1: Creating users table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS users (
+            userId INTEGER PRIMARY KEY AUTOINCREMENT,
+            identity_key TEXT NOT NULL UNIQUE,
+            active_storage TEXT NOT NULL DEFAULT 'local',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_identity_key ON users(identity_key)",
+        [],
+    )?;
+    info!("   ✅ Created users table");
+
+    // Step 2: Derive identity key from wallet's master public key and create default user
+    info!("   Step 2: Creating default user from wallet master key...");
+
+    // Check if there's a wallet to derive from
+    let wallet_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM wallets",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    let default_user_id: Option<i64> = if wallet_exists {
+        // Get the mnemonic from the primary wallet
+        let mnemonic_str: String = conn.query_row(
+            "SELECT mnemonic FROM wallets ORDER BY id ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // Derive master public key (identity key) from mnemonic
+        let identity_key = derive_identity_key_from_mnemonic(&mnemonic_str)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Failed to derive identity key: {}", e))
+            ))?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert default user
+        conn.execute(
+            "INSERT INTO users (identity_key, active_storage, created_at, updated_at)
+             VALUES (?1, 'local', ?2, ?3)",
+            rusqlite::params![identity_key, now, now],
+        )?;
+
+        let user_id = conn.last_insert_rowid();
+        info!("   ✅ Created default user with ID {} and identity_key: {}...",
+              user_id, &identity_key[..16]);
+        Some(user_id)
+    } else {
+        info!("   ⏭️  No wallet found, skipping default user creation");
+        None
+    };
+
+    // Step 3: Add user_id columns to core tables
+    info!("   Step 3: Adding user_id columns to core tables...");
+
+    // transactions table
+    let has_user_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'user_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_user_id {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN user_id INTEGER REFERENCES users(userId)",
+            [],
+        )?;
+        info!("   ✅ Added user_id to transactions");
+    } else {
+        info!("   ⏭️  transactions.user_id already exists");
+    }
+
+    // baskets table
+    let has_user_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('baskets') WHERE name = 'user_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_user_id {
+        conn.execute(
+            "ALTER TABLE baskets ADD COLUMN user_id INTEGER REFERENCES users(userId)",
+            [],
+        )?;
+        info!("   ✅ Added user_id to baskets");
+    } else {
+        info!("   ⏭️  baskets.user_id already exists");
+    }
+
+    // output_tags table
+    let has_user_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('output_tags') WHERE name = 'user_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_user_id {
+        conn.execute(
+            "ALTER TABLE output_tags ADD COLUMN user_id INTEGER REFERENCES users(userId)",
+            [],
+        )?;
+        info!("   ✅ Added user_id to output_tags");
+    } else {
+        info!("   ⏭️  output_tags.user_id already exists");
+    }
+
+    // certificates table
+    let has_user_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('certificates') WHERE name = 'user_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_user_id {
+        conn.execute(
+            "ALTER TABLE certificates ADD COLUMN user_id INTEGER REFERENCES users(userId)",
+            [],
+        )?;
+        info!("   ✅ Added user_id to certificates");
+    } else {
+        info!("   ⏭️  certificates.user_id already exists");
+    }
+
+    // certificate_fields table
+    let has_user_id: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('certificate_fields') WHERE name = 'user_id'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_user_id {
+        conn.execute(
+            "ALTER TABLE certificate_fields ADD COLUMN user_id INTEGER REFERENCES users(userId)",
+            [],
+        )?;
+        info!("   ✅ Added user_id to certificate_fields");
+    } else {
+        info!("   ⏭️  certificate_fields.user_id already exists");
+    }
+
+    // Step 4: Backfill user_id for all existing data
+    if let Some(user_id) = default_user_id {
+        info!("   Step 4: Backfilling user_id for existing data...");
+
+        let updated = conn.execute(
+            "UPDATE transactions SET user_id = ?1 WHERE user_id IS NULL",
+            rusqlite::params![user_id],
+        )?;
+        info!("      ✅ Updated {} transactions", updated);
+
+        let updated = conn.execute(
+            "UPDATE baskets SET user_id = ?1 WHERE user_id IS NULL",
+            rusqlite::params![user_id],
+        )?;
+        info!("      ✅ Updated {} baskets", updated);
+
+        let updated = conn.execute(
+            "UPDATE output_tags SET user_id = ?1 WHERE user_id IS NULL",
+            rusqlite::params![user_id],
+        )?;
+        info!("      ✅ Updated {} output_tags", updated);
+
+        let updated = conn.execute(
+            "UPDATE certificates SET user_id = ?1 WHERE user_id IS NULL",
+            rusqlite::params![user_id],
+        )?;
+        info!("      ✅ Updated {} certificates", updated);
+
+        let updated = conn.execute(
+            "UPDATE certificate_fields SET user_id = ?1 WHERE user_id IS NULL",
+            rusqlite::params![user_id],
+        )?;
+        info!("      ✅ Updated {} certificate_fields", updated);
+    } else {
+        info!("   Step 4: No default user to backfill (empty wallet)");
+    }
+
+    // Step 5: Create indexes for user_id lookups
+    info!("   Step 5: Creating user_id indexes...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_baskets_user_id ON baskets(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_tags_user_id ON output_tags(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_certificates_user_id ON certificates(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_certificate_fields_user_id ON certificate_fields(user_id)",
+        [],
+    )?;
+    info!("   ✅ Created user_id indexes");
+
+    info!("   ✅ Schema version 17 migration complete");
+    Ok(())
+}
+
+/// Helper function to derive identity key (master public key as hex) from mnemonic
+fn derive_identity_key_from_mnemonic(mnemonic_str: &str) -> std::result::Result<String, String> {
+    // Parse mnemonic
+    let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_str)
+        .map_err(|e| format!("Invalid mnemonic: {}", e))?;
+
+    // Generate seed from mnemonic (no password)
+    let seed = mnemonic.to_seed("");
+
+    // Create BIP32 master key from seed
+    let master_key = XPrv::new(&seed)
+        .map_err(|e| format!("Failed to create master key: {}", e))?;
+
+    // Extract 32-byte master private key
+    let private_key_bytes = master_key.private_key().to_bytes();
+
+    // Derive public key
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&private_key_bytes)
+        .map_err(|e| format!("Invalid private key: {}", e))?;
+
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+
+    // Return compressed public key as hex string
+    Ok(hex::encode(public_key.serialize()))
 }
