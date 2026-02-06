@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { Box, IconButton, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
-import CookiesPanel from '../components/CookiesPanel';
+import { CookiePanelOverlay } from '../components/CookiePanelOverlay';
 
 /**
  * CookiePanelOverlayRoot - Right-side panel overlay for cookie management.
@@ -66,15 +66,14 @@ const CookiePanelOverlayRoot: React.FC = () => {
         </IconButton>
       </Box>
 
-      {/* Cookie panel content (scrollable) */}
+      {/* Cookie panel content (compact, optimized for overlay) */}
       <Box
         sx={{
           flex: 1,
-          overflow: 'auto',
-          p: 2,
+          overflow: 'hidden',
         }}
       >
-        <CookiesPanel />
+        <CookiePanelOverlay />
       </Box>
     </Box>
   );
