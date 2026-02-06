@@ -115,6 +115,7 @@ set(SOURCES
     src/core/HistoryManager.cpp
     src/core/GoogleSuggestService.cpp
     src/core/CookieManager.cpp
+    src/core/CookieBlockManager.cpp
 )
 
 # Platform-specific handler files
@@ -172,6 +173,8 @@ elseif(WIN32)
         src/core/HistoryManager.cpp
         include/core/CookieManager.h
         src/core/CookieManager.cpp
+        include/core/CookieBlockManager.h
+        src/core/CookieBlockManager.cpp
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
 endif()

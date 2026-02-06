@@ -18,6 +18,7 @@
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/GoogleSuggestService.h"
 #include "../../include/core/CookieManager.h"
+#include "../../include/core/CookieBlockManager.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -2481,6 +2482,22 @@ CefRefPtr<CefRequestHandler> SimpleHandler::GetRequestHandler() {
     return this;
 }
 
+// CookieFilterResourceHandler - Returns CookieBlockManager as CookieAccessFilter
+// for non-wallet requests so cookie blocking applies to all browsing.
+class CookieFilterResourceHandler : public CefResourceRequestHandler {
+public:
+    CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override {
+        if (CookieBlockManager::GetInstance().IsInitialized()) {
+            return &CookieBlockManager::GetInstance();
+        }
+        return nullptr;
+    }
+    IMPLEMENT_REFCOUNTING(CookieFilterResourceHandler);
+};
+
 CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     CefRefPtr<CefBrowser> browser,
     CefRefPtr<CefFrame> frame,
@@ -2518,7 +2535,12 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 #endif
     }
 
-    // For other requests, use default handling
+    // For non-wallet requests, return CookieFilterResourceHandler
+    // to apply cookie blocking to all browsing traffic
+    if (CookieBlockManager::GetInstance().IsInitialized()) {
+        return new CookieFilterResourceHandler();
+    }
+
     return nullptr;
 }
 

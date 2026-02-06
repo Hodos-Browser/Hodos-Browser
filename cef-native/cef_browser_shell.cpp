@@ -28,6 +28,7 @@
 #include "include/core/WalletService.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
+#include "include/core/CookieBlockManager.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -1184,6 +1185,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_INFO("✅ HistoryManager initialized successfully");
     } else {
         LOG_ERROR("❌ Failed to initialize HistoryManager");
+    }
+
+    // Initialize CookieBlockManager with same cache path
+    LOG_INFO("Initializing CookieBlockManager...");
+    if (CookieBlockManager::GetInstance().Initialize(cache_dir)) {
+        LOG_INFO("✅ CookieBlockManager initialized successfully");
+    } else {
+        LOG_ERROR("❌ Failed to initialize CookieBlockManager");
     }
 
     // 💡 Optionally pass handles to app instance
