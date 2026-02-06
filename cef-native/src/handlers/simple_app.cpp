@@ -116,18 +116,7 @@ void SimpleApp::OnContextInitialized() {
     log << "→ global g_hwnd: " << g_hwnd << "\n";
     log << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
     log << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
-
-    // Guard: Only create browsers in the browser process, not in render processes
-    // g_header_hwnd is set in WinMain BEFORE CefInitialize, so it's valid in browser process
-    // but remains nullptr in all render processes
-    if (!g_header_hwnd || !IsWindow(g_header_hwnd)) {
-        log << "⏭  Skipping browser creation (render process - g_header_hwnd not set)\n";
-        log << "========================================\n";
-        log.close();
-        return;
-    }
-
-    log << "✅  Browser process detected (g_header_hwnd valid) - creating browsers\n";
+    log << "→ Proceeding without guard (original 625af25 behavior)\n";
     log << "========================================\n";
     log.close();
 
