@@ -2,6 +2,7 @@ import type { AddressData } from './address';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
 import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
+import type { BlockedDomainEntry, BlockLogEntry, BlockDomainResponse, UnblockDomainResponse, AllowThirdPartyResponse, BlockedCountResponse, ClearBlockLogResponse } from './cookieBlocking';
 
 declare global {
   interface Window {
@@ -21,6 +22,17 @@ declare global {
         deleteAllCookies: () => Promise<CookieDeleteResponse>;
         clearCache: () => Promise<{ success: boolean }>;
         getCacheSize: () => Promise<CacheSizeResponse>;
+      };
+      cookieBlocking: {
+        blockDomain: (domain: string, isWildcard: boolean) => Promise<BlockDomainResponse>;
+        unblockDomain: (domain: string) => Promise<UnblockDomainResponse>;
+        getBlockList: () => Promise<BlockedDomainEntry[]>;
+        allowThirdParty: (domain: string) => Promise<AllowThirdPartyResponse>;
+        removeThirdPartyAllow: (domain: string) => Promise<AllowThirdPartyResponse>;
+        getBlockLog: (limit: number, offset: number) => Promise<BlockLogEntry[]>;
+        clearBlockLog: () => Promise<ClearBlockLogResponse>;
+        getBlockedCount: () => Promise<BlockedCountResponse>;
+        resetBlockedCount: () => Promise<void>;
       };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
@@ -103,6 +115,24 @@ declare global {
     onCacheClearError?: (error: string) => void;
     onCacheGetSizeResponse?: (data: CacheSizeResponse) => void;
     onCacheGetSizeError?: (error: string) => void;
+    onCookieBlockDomainResponse?: (data: BlockDomainResponse) => void;
+    onCookieBlockDomainError?: (error: string) => void;
+    onCookieUnblockDomainResponse?: (data: UnblockDomainResponse) => void;
+    onCookieUnblockDomainError?: (error: string) => void;
+    onCookieBlocklistResponse?: (data: BlockedDomainEntry[]) => void;
+    onCookieBlocklistError?: (error: string) => void;
+    onCookieAllowThirdPartyResponse?: (data: AllowThirdPartyResponse) => void;
+    onCookieAllowThirdPartyError?: (error: string) => void;
+    onCookieRemoveThirdPartyAllowResponse?: (data: AllowThirdPartyResponse) => void;
+    onCookieRemoveThirdPartyAllowError?: (error: string) => void;
+    onCookieBlockLogResponse?: (data: BlockLogEntry[]) => void;
+    onCookieBlockLogError?: (error: string) => void;
+    onCookieClearBlockLogResponse?: (data: ClearBlockLogResponse) => void;
+    onCookieClearBlockLogError?: (error: string) => void;
+    onCookieBlockedCountResponse?: (data: BlockedCountResponse) => void;
+    onCookieBlockedCountError?: (error: string) => void;
+    onCookieResetBlockedCountResponse?: () => void;
+    onCookieResetBlockedCountError?: (error: string) => void;
     allSystemsReady?: boolean;
      __overlayReady?: boolean;
   }
