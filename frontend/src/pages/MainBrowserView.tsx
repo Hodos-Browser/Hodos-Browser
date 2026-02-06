@@ -177,10 +177,14 @@ const MainBrowserView: React.FC = () => {
     };
 
     const handleViewCookies = () => {
+        console.log('🍪 NEW CODE: Sending cookie_panel_show IPC message');
         setShieldMenuAnchor(null);
         // Show cookie panel overlay instead of navigating to history page
         if (window.cefMessage) {
             window.cefMessage.send('cookie_panel_show');
+            console.log('🍪 IPC message sent: cookie_panel_show');
+        } else {
+            console.error('🍪 ERROR: window.cefMessage not available');
         }
     };
 
@@ -391,7 +395,12 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Shield Badge - Cookie Blocking */}
                 <IconButton
-                    onClick={(e) => setShieldMenuAnchor(e.currentTarget)}
+                    onClick={() => {
+                        console.log('🍪 Shield clicked - sending cookie_panel_show');
+                        if (window.cefMessage) {
+                            window.cefMessage.send('cookie_panel_show');
+                        }
+                    }}
                     size="small"
                     title="Cookie blocking"
                     sx={{
