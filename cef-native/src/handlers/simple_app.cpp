@@ -1119,12 +1119,14 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
     // Get main window dimensions
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
 
     // Calculate position - right side panel (similar to wallet overlay positioning)
     int panelWidth = 450;  // Wide enough for cookie list and controls
-    int panelHeight = mainRect.bottom - mainRect.top;  // Full height
+    int panelHeight = 450;  // Full height
     int overlayX = mainRect.right - panelWidth;  // Right edge of window
-    int overlayY = mainRect.top;
+    int overlayY = headerRect.top + 104;
 
     LOG_INFO_APP("🍪 Creating cookie panel overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
@@ -1184,6 +1186,26 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
 
     if (result) {
         LOG_INFO_APP("✅ Cookie panel overlay browser created with subprocess");
+
+        // If showing immediately, install mouse hook and enable mouse input
+        if (showImmediately) {
+            extern HHOOK g_cookie_panel_mouse_hook;
+            extern LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+            if (!g_cookie_panel_mouse_hook) {
+                g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
+                if (g_cookie_panel_mouse_hook) {
+                    LOG_INFO_APP("✅ Cookie panel mouse hook installed for click-outside detection");
+                } else {
+                    LOG_WARNING_APP("⚠️ Failed to install cookie panel mouse hook. Error: " + std::to_string(GetLastError()));
+                }
+            }
+
+            // Enable mouse input
+            LONG exStyle = GetWindowLong(cookie_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(cookie_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            LOG_INFO_APP("✅ Mouse input enabled for cookie panel overlay");
+        }
     } else {
         LOG_ERROR_APP("❌ Failed to create cookie panel overlay browser");
     }
@@ -1210,14 +1232,16 @@ void ShowCookiePanelOverlay() {
         }
     }
 
-    // Recalculate position in case window moved/resized
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
 
-    int panelWidth = 450;
-    int panelHeight = mainRect.bottom - mainRect.top;
-    int overlayX = mainRect.right - panelWidth;
-    int overlayY = mainRect.top;
+    // Calculate position - right side panel (similar to wallet overlay positioning)
+    int panelWidth = 450;  // Wide enough for cookie list and controls
+    int panelHeight = 450;  // Full height
+    int overlayX = mainRect.right - panelWidth;  // Right edge of window
+    int overlayY = headerRect.top + 104;
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,

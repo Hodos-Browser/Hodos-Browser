@@ -454,10 +454,10 @@ std::string CookieBlockManager::GetBlockLog(int limit, int offset) {
         sqlite3_bind_int(stmt, 2, offset);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             nlohmann::json entry;
-            entry["cookieDomain"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            entry["pageUrl"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            entry["cookie_domain"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            entry["page_url"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             entry["reason"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-            entry["blockedAt"] = sqlite3_column_int64(stmt, 3);
+            entry["blocked_at"] = sqlite3_column_int64(stmt, 3);
             result.push_back(entry);
         }
         sqlite3_finalize(stmt);
