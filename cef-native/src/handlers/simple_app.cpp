@@ -127,10 +127,18 @@ void SimpleApp::OnContextInitialized() {
         return;
     }
 
-    log << "✅  Browser process detected (g_header_hwnd valid) - creating browsers\n";
+    log << "✅  Browser process detected (g_header_hwnd valid)\n";
+    log << "⏭  Skipping browser creation - browsers created manually after full window setup\n";
+    log << "   (same pattern as macOS - OnContextInitialized runs too early)\n";
     log << "========================================\n";
     log.close();
 
+    // NOTE: Browser creation moved to WinMain after CefInitialize
+    // OnContextInitialized runs too early - windows aren't fully set up yet
+    // Creating browsers here results in top-level windows instead of embedded children
+    return;
+
+    // ───── OLD CODE BELOW - NO LONGER EXECUTED ─────
     std::ofstream log_trace("startup_log.txt", std::ios::app);
     log_trace << "🔍 Starting header browser setup...\n";
     log_trace.flush();
@@ -151,11 +159,15 @@ void SimpleApp::OnContextInitialized() {
     log2 << "📊 Header setup:\n";
     log2 << "→ g_header_hwnd: " << g_header_hwnd << "\n";
     log2 << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
+    log2 << "→ IsWindowVisible(g_header_hwnd): " << IsWindowVisible(g_header_hwnd) << "\n";
     log2 << "→ headerRect: " << headerWidth << "x" << headerHeight << "\n";
-    log2.close();
 
     CefWindowInfo header_window_info;
+    log2 << "🔍 Before SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
     header_window_info.SetAsChild(g_header_hwnd, CefRect(0, 0, headerWidth, headerHeight));
+    log2 << "🔍 After SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
+    log2 << "🔍 After SetAsChild - parent HWND: " << header_window_info.parent_window << "\n";
+    log2.close();
 
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
