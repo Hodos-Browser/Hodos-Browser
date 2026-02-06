@@ -1374,16 +1374,34 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string suggestionsJson = args->GetString(0);
         int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson + " (requestId: " + std::to_string(requestId) + ")");
+        LOG_DEBUG_RENDER("🔍 Google Suggest response received (length: " + std::to_string(suggestionsJson.length()) + "): " + suggestionsJson.substr(0, 200) + " (requestId: " + std::to_string(requestId) + ")");
 
-        // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
-        std::string escapedJson = escapeJsonForJs(suggestionsJson);
+        try {
+            // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
+            std::string escapedJson = escapeJsonForJs(suggestionsJson);
 
-        // Dispatch custom event with suggestions and requestId
-        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: { suggestions: JSON.parse('" + escapedJson + "'), requestId: " + std::to_string(requestId) + " } }));";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_DEBUG_RENDER("🔍 Escaped JSON (length: " + std::to_string(escapedJson.length()) + "): " + escapedJson.substr(0, 200));
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
+            // Use try-catch in JavaScript to prevent crashes
+            std::string js =
+                "try { "
+                "  var parsedSuggestions = JSON.parse('" + escapedJson + "'); "
+                "  window.dispatchEvent(new CustomEvent('googleSuggestResponse', { "
+                "    detail: { suggestions: parsedSuggestions, requestId: " + std::to_string(requestId) + " } "
+                "  })); "
+                "} catch(e) { "
+                "  console.error('Failed to parse Google suggestions:', e, 'JSON:', '" + escapedJson + "'); "
+                "}";
+
+            if (frame) {
+                frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+                LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
+            } else {
+                LOG_DEBUG_RENDER("⚠️ Frame is null, cannot dispatch Google Suggest response");
+            }
+        } catch (const std::exception& e) {
+            LOG_DEBUG_RENDER("❌ Exception in google_suggest_response handler: " + std::string(e.what()));
+        }
 
         return true;
     }
