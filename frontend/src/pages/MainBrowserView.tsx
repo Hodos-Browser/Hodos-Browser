@@ -178,7 +178,10 @@ const MainBrowserView: React.FC = () => {
 
     const handleViewCookies = () => {
         setShieldMenuAnchor(null);
-        createTab('http://127.0.0.1:5137/history?tab=cookies');
+        // Show cookie panel overlay instead of navigating to history page
+        if (window.cefMessage) {
+            window.cefMessage.send('cookie_panel_show');
+        }
     };
 
     return (
