@@ -121,6 +121,7 @@ CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::omnibox_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::cookie_panel_browser_ = nullptr;
 
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
@@ -157,6 +158,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxBrowser() {
     return omnibox_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
+    return cookie_panel_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -607,6 +612,23 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "cookiepanel") {
+        cookie_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized.");
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // CRITICAL: Set focus so interactions work
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Cookie panel browser focus enabled");
+
+        // Delayed resize/invalidate to fix first-render black screen issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -677,6 +699,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "omnibox" && browser == omnibox_browser_) {
         std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
         omnibox_browser_ = nullptr;
+    } else if (role_ == "cookiepanel" && browser == cookie_panel_browser_) {
+        std::cout << "  → Cookie panel overlay browser cleanup" << std::endl;
+        cookie_panel_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -1022,6 +1047,38 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay hidden");
 #else
         LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "cookie_panel_show") {
+#ifdef _WIN32
+        extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern void ShowCookiePanelOverlay();
+        extern HWND g_cookie_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        // Create if doesn't exist, otherwise show
+        if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
+            CreateCookiePanelOverlay(g_hInstance, true);
+        } else {
+            ShowCookiePanelOverlay();
+        }
+
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay shown");
+#else
+        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "cookie_panel_hide") {
+#ifdef _WIN32
+        extern void HideCookiePanelOverlay();
+        HideCookiePanelOverlay();
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
 #endif
         return true;
     }

@@ -53,9 +53,11 @@ HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
+HWND g_cookie_panel_overlay_hwnd = nullptr;
 
-// Global mouse hook for omnibox click-outside detection
+// Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
+HHOOK g_cookie_panel_mouse_hook = nullptr;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -162,6 +164,18 @@ void ShutdownApplication() {
         }
         DestroyWindow(g_omnibox_overlay_hwnd);
         g_omnibox_overlay_hwnd = nullptr;
+    }
+
+    if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd)) {
+        LOG_INFO("🔄 Destroying cookie panel overlay window...");
+        // Remove mouse hook if still installed
+        if (g_cookie_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_cookie_panel_mouse_hook);
+            g_cookie_panel_mouse_hook = nullptr;
+            LOG_INFO("🔄 Cookie panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_cookie_panel_overlay_hwnd);
+        g_cookie_panel_overlay_hwnd = nullptr;
     }
 
 
@@ -1017,6 +1031,114 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Cookie Panel Mouse Hook for click-outside detection
+LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        // Check for mouse down events (left or right button)
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            // Only process if cookie panel overlay is visible
+            if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+
+                // Get overlay window rect
+                RECT overlayRect;
+                GetWindowRect(g_cookie_panel_overlay_hwnd, &overlayRect);
+
+                // Check if click is outside overlay bounds
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside cookie panel overlay bounds - dismissing");
+                    extern void HideCookiePanelOverlay();
+                    HideCookiePanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_cookie_panel_mouse_hook, nCode, wParam, lParam);
+}
+
+// Cookie Panel Overlay Window Procedure
+LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            LOG_DEBUG("👆 Cookie Panel Overlay HWND received WM_MOUSEACTIVATE");
+            // CRITICAL: Return MA_NOACTIVATE to prevent focus theft
+            return MA_NOACTIVATE;
+
+        case WM_SETCURSOR: {
+            // Default arrow cursor for cookie panel (has both clickable and scrollable areas)
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+
+        case WM_MOUSEMOVE: {
+            // Forward mouse moves to CEF for hover states
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+            if (cookie_browser) {
+                cookie_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            LOG_DEBUG("🖱️ Cookie Panel Overlay received WM_LBUTTONDOWN");
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            // Forward clicks to cookie panel browser
+            CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+            if (cookie_browser) {
+                cookie_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                cookie_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+                LOG_DEBUG("🧠 Left-click sent to cookie panel overlay browser");
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // Forward mouse wheel events for scrolling
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+            if (cookie_browser) {
+                cookie_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            LOG_DEBUG("❌ Cookie Panel Overlay received WM_CLOSE - hiding window");
+            // Keep-alive: hide instead of destroy
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            LOG_DEBUG("❌ Cookie Panel Overlay received WM_DESTROY - cleaning up");
+            // No cleanup - window persists
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            // Allow normal z-order changes for better window management
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
     CefMainArgs main_args(hInstance);
@@ -1147,6 +1269,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&omniboxOverlayClass)) {
         LOG_DEBUG("❌ Failed to register omnibox overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Cookie Panel overlay window class
+    WNDCLASS cookiePanelOverlayClass = {};
+    cookiePanelOverlayClass.lpfnWndProc = CookiePanelOverlayWndProc;
+    cookiePanelOverlayClass.hInstance = hInstance;
+    cookiePanelOverlayClass.lpszClassName = L"CEFCookiePanelOverlayWindow";
+
+    if (!RegisterClass(&cookiePanelOverlayClass)) {
+        LOG_DEBUG("❌ Failed to register cookie panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",

@@ -44,6 +44,7 @@ public:
     static CefRefPtr<CefBrowser> GetBRC100AuthBrowser();
     static CefRefPtr<CefBrowser> GetSettingsMenuBrowser();
     static CefRefPtr<CefBrowser> GetOmniboxBrowser();
+    static CefRefPtr<CefBrowser> GetCookiePanelBrowser();
     static std::string pending_panel_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
@@ -141,6 +142,7 @@ private:
     static CefRefPtr<CefBrowser> brc100_auth_browser_;
     static CefRefPtr<CefBrowser> settings_menu_browser_;
     static CefRefPtr<CefBrowser> omnibox_browser_;
+    static CefRefPtr<CefBrowser> cookie_panel_browser_;
 
     /**
      * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)
