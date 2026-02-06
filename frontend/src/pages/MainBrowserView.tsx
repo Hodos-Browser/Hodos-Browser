@@ -35,6 +35,8 @@ const MainBrowserView: React.FC = () => {
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const [autocompleteText, setAutocompleteText] = useState<string>('');
+    const [userTypedText, setUserTypedText] = useState('https://metanetapps.com/');
+    const addressInputRef = React.useRef<HTMLInputElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -122,22 +124,44 @@ const MainBrowserView: React.FC = () => {
         const handleAutocomplete = (event: MessageEvent) => {
             if (event.data?.type === 'omnibox_autocomplete') {
                 const suggestion = event.data.suggestion;
-                if (suggestion && address && isEditingAddress) {
+                if (suggestion && userTypedText && isEditingAddress) {
                     // Only show autocomplete if suggestion starts with current input
-                    if (suggestion.toLowerCase().startsWith(address.toLowerCase())) {
-                        setAutocompleteText(suggestion.slice(address.length));
+                    if (suggestion.toLowerCase().startsWith(userTypedText.toLowerCase())) {
+                        const autocompletePart = suggestion.slice(userTypedText.length);
+                        setAutocompleteText(autocompletePart);
+                        // Update the full address to include autocomplete
+                        setAddress(suggestion);
                     } else {
                         setAutocompleteText('');
+                        setAddress(userTypedText);
                     }
                 } else {
                     setAutocompleteText('');
+                    setAddress(userTypedText);
                 }
             }
         };
 
         window.addEventListener('message', handleAutocomplete);
         return () => window.removeEventListener('message', handleAutocomplete);
-    }, [address, isEditingAddress]);
+    }, [userTypedText, isEditingAddress]);
+
+    // Apply text selection to highlight autocomplete portion
+    React.useEffect(() => {
+        if (autocompleteText && isEditingAddress && addressInputRef.current) {
+            const input = addressInputRef.current;
+            const userLength = userTypedText.length;
+            const fullLength = address.length;
+
+            // Set selection to highlight the autocomplete part
+            // Use setTimeout to ensure this happens after React updates the DOM
+            setTimeout(() => {
+                if (document.activeElement === input) {
+                    input.setSelectionRange(userLength, fullLength);
+                }
+            }, 0);
+        }
+    }, [autocompleteText, address, userTypedText, isEditingAddress]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -274,11 +298,15 @@ const MainBrowserView: React.FC = () => {
                 {/* Address Bar with Inline Autocomplete */}
                 <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
                     <input
+                        ref={addressInputRef}
                         type="text"
                         value={address}
                         onChange={(e) => {
                             const newValue = e.target.value;
+
+                            // Update both the display value and the user-typed portion
                             setAddress(newValue);
+                            setUserTypedText(newValue);
                             setIsEditingAddress(true);
                             setAutocompleteText(''); // Clear autocomplete on input change
 
@@ -292,9 +320,11 @@ const MainBrowserView: React.FC = () => {
                         }}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter') {
+                                // Navigate to the address (use full text with autocomplete if present)
                                 handleNavigate(address);
                                 setIsEditingAddress(false);
                                 setAutocompleteText('');
+                                setUserTypedText(address);
                                 e.currentTarget.blur();
                                 // Navigation dismisses overlay
                                 window.cefMessage?.send('omnibox_hide', []);
@@ -303,12 +333,19 @@ const MainBrowserView: React.FC = () => {
                                 window.cefMessage?.send('omnibox_hide', []);
                                 setIsEditingAddress(false);
                                 setAutocompleteText('');
+                                setAddress(userTypedText);
                                 e.currentTarget.blur();
-                            } else if (e.key === 'Tab' && autocompleteText) {
-                                // Tab accepts the autocomplete suggestion
+                            } else if ((e.key === 'Tab' || e.key === 'ArrowRight' || e.key === 'End') && autocompleteText) {
+                                // Tab, Right arrow, or End accepts the autocomplete suggestion
                                 e.preventDefault();
-                                setAddress(address + autocompleteText);
+                                setUserTypedText(address);
                                 setAutocompleteText('');
+                                // Move cursor to end
+                                setTimeout(() => {
+                                    if (addressInputRef.current) {
+                                        addressInputRef.current.setSelectionRange(address.length, address.length);
+                                    }
+                                }, 0);
                             }
                         }}
                         onFocus={(e) => {
@@ -321,10 +358,11 @@ const MainBrowserView: React.FC = () => {
                         onBlur={() => {
                             setIsEditingAddress(false);
                             setAutocompleteText('');
+                            setAddress(userTypedText);
                         }}
                         placeholder="Search or enter address"
                         style={{
-                            width: '100%',
+                            width: '98%',
                             height: 36,
                             borderRadius: 20,
                             paddingLeft: 16,
@@ -336,25 +374,6 @@ const MainBrowserView: React.FC = () => {
                             outline: 'none',
                         }}
                     />
-                    {/* Inline autocomplete text overlay */}
-                    {autocompleteText && isEditingAddress && (
-                        <span
-                            style={{
-                                position: 'absolute',
-                                left: 16,
-                                top: '50%',
-                                transform: 'translateY(-50%)',
-                                fontSize: 14,
-                                color: 'rgba(0, 0, 0, 0.4)',
-                                pointerEvents: 'none',
-                                userSelect: 'none',
-                                whiteSpace: 'pre',
-                            }}
-                        >
-                            <span style={{ visibility: 'hidden' }}>{address}</span>
-                            {autocompleteText}
-                        </span>
-                    )}
                 </Box>
 
                 {/* Wallet Button */}
