@@ -131,11 +131,28 @@ void SimpleApp::OnContextInitialized() {
     log << "========================================\n";
     log.close();
 
+    std::ofstream log_trace("startup_log.txt", std::ios::app);
+    log_trace << "🔍 Starting header browser setup...\n";
+    log_trace.flush();
+
     // ───── header Browser Setup ─────
     RECT headerRect;
+    log_trace << "🔍 About to call GetClientRect on g_header_hwnd: " << g_header_hwnd << "\n";
+    log_trace.flush();
+
     GetClientRect(g_header_hwnd, &headerRect);
+
+    log_trace << "🔍 GetClientRect succeeded\n";
+    log_trace.close();
     int headerWidth = headerRect.right - headerRect.left;
     int headerHeight = headerRect.bottom - headerRect.top;
+
+    std::ofstream log2("startup_log.txt", std::ios::app);
+    log2 << "📊 Header setup:\n";
+    log2 << "→ g_header_hwnd: " << g_header_hwnd << "\n";
+    log2 << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
+    log2 << "→ headerRect: " << headerWidth << "x" << headerHeight << "\n";
+    log2.close();
 
     CefWindowInfo header_window_info;
     header_window_info.SetAsChild(g_header_hwnd, CefRect(0, 0, headerWidth, headerHeight));
@@ -155,6 +172,10 @@ void SimpleApp::OnContextInitialized() {
             CefRequestContext::GetGlobalContext()
         );
         std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
+
+        std::ofstream log3("startup_log.txt", std::ios::app);
+        log3 << "✅ Header browser creation result: " << (header_result ? "success" : "failed") << "\n";
+        log3.close();
     } catch (...) {
         std::ofstream errLog("startup_log.txt", std::ios::app);
         errLog << "❌ header browser creation threw an exception!\n";
@@ -171,6 +192,13 @@ void SimpleApp::OnContextInitialized() {
 
     LOG_INFO_APP("📑 Creating initial tab with TabManager...");
 
+    std::ofstream log4("startup_log.txt", std::ios::app);
+    log4 << "📊 Tab setup:\n";
+    log4 << "→ g_hwnd: " << g_hwnd << "\n";
+    log4 << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
+    log4 << "→ tabHeight: " << tabHeight << "\n";
+    log4.close();
+
     try {
         int initial_tab_id = TabManager::GetInstance().CreateTab(
             "https://metanetapps.com/",
@@ -183,6 +211,10 @@ void SimpleApp::OnContextInitialized() {
 
         LOG_INFO_APP("✅ Initial tab created: ID " + std::to_string(initial_tab_id));
         std::cout << "Initial tab created: ID " << initial_tab_id << std::endl;
+
+        std::ofstream log5("startup_log.txt", std::ios::app);
+        log5 << "✅ Initial tab creation result: ID = " << initial_tab_id << "\n";
+        log5.close();
     } catch (...) {
         std::ofstream errLog("startup_log.txt", std::ios::app);
         errLog << "❌ Initial tab creation threw an exception!\n";
