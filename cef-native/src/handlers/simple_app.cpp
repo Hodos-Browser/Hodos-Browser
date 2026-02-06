@@ -127,18 +127,10 @@ void SimpleApp::OnContextInitialized() {
         return;
     }
 
-    log << "✅  Browser process detected (g_header_hwnd valid)\n";
-    log << "⏭  Skipping browser creation - browsers created manually after full window setup\n";
-    log << "   (same pattern as macOS - OnContextInitialized runs too early)\n";
+    log << "✅  Browser process detected (g_header_hwnd valid) - creating browsers\n";
     log << "========================================\n";
     log.close();
 
-    // NOTE: Browser creation moved to WinMain after CefInitialize
-    // OnContextInitialized runs too early - windows aren't fully set up yet
-    // Creating browsers here results in top-level windows instead of embedded children
-    return;
-
-    // ───── OLD CODE BELOW - NO LONGER EXECUTED ─────
     std::ofstream log_trace("startup_log.txt", std::ios::app);
     log_trace << "🔍 Starting header browser setup...\n";
     log_trace.flush();
