@@ -29,6 +29,7 @@
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
+#include "include/core/BookmarkManager.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -1325,6 +1326,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_INFO("✅ CookieBlockManager initialized successfully");
     } else {
         LOG_ERROR("❌ Failed to initialize CookieBlockManager");
+    }
+
+    // Initialize BookmarkManager with same cache path
+    LOG_INFO("Initializing BookmarkManager...");
+    if (BookmarkManager::GetInstance().Initialize(cache_dir)) {
+        LOG_INFO("BookmarkManager initialized successfully");
+    } else {
+        LOG_ERROR("Failed to initialize BookmarkManager");
     }
 
     // 💡 Optionally pass handles to app instance
