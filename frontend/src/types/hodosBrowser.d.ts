@@ -3,6 +3,7 @@ import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
 import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
 import type { BlockedDomainEntry, BlockLogEntry, BlockDomainResponse, UnblockDomainResponse, AllowThirdPartyResponse, BlockedCountResponse, ClearBlockLogResponse } from './cookieBlocking';
+import type { BookmarkData, FolderData, BookmarkAddResponse, BookmarkUpdateResponse, BookmarkRemoveResponse, BookmarkSearchResponse, BookmarkGetAllResponse, BookmarkIsBookmarkedResponse, FolderCreateResponse, FolderUpdateResponse, FolderRemoveResponse } from './bookmarks';
 
 declare global {
   interface Window {
@@ -33,6 +34,24 @@ declare global {
         clearBlockLog: () => Promise<ClearBlockLogResponse>;
         getBlockedCount: () => Promise<BlockedCountResponse>;
         resetBlockedCount: () => Promise<void>;
+      };
+      bookmarks: {
+        add: (url: string, title: string, folderId?: number, tags?: string[]) => Promise<BookmarkAddResponse>;
+        get: (id: number) => Promise<BookmarkData>;
+        update: (id: number, fields: { title?: string; url?: string; folderId?: number | null; tags?: string[] }) => Promise<BookmarkUpdateResponse>;
+        remove: (id: number) => Promise<BookmarkRemoveResponse>;
+        search: (query: string, limit?: number, offset?: number) => Promise<BookmarkSearchResponse>;
+        getAll: (folderId?: number, limit?: number, offset?: number) => Promise<BookmarkGetAllResponse>;
+        isBookmarked: (url: string) => Promise<BookmarkIsBookmarkedResponse>;
+        getAllTags: () => Promise<string[]>;
+        updateLastAccessed: (id: number) => Promise<BookmarkUpdateResponse>;
+        folders: {
+          create: (name: string, parentId?: number) => Promise<FolderCreateResponse>;
+          list: (parentId?: number) => Promise<{ folders: FolderData[] }>;
+          update: (id: number, name: string) => Promise<FolderUpdateResponse>;
+          remove: (id: number) => Promise<FolderRemoveResponse>;
+          getTree: () => Promise<FolderData[]>;
+        };
       };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
@@ -133,6 +152,20 @@ declare global {
     onCookieBlockedCountError?: (error: string) => void;
     onCookieResetBlockedCountResponse?: () => void;
     onCookieResetBlockedCountError?: (error: string) => void;
+    onBookmarkAddResponse?: (data: BookmarkAddResponse) => void;
+    onBookmarkGetResponse?: (data: BookmarkData) => void;
+    onBookmarkUpdateResponse?: (data: BookmarkUpdateResponse) => void;
+    onBookmarkRemoveResponse?: (data: BookmarkRemoveResponse) => void;
+    onBookmarkSearchResponse?: (data: BookmarkSearchResponse) => void;
+    onBookmarkGetAllResponse?: (data: BookmarkGetAllResponse) => void;
+    onBookmarkIsBookmarkedResponse?: (data: BookmarkIsBookmarkedResponse) => void;
+    onBookmarkGetAllTagsResponse?: (data: string[]) => void;
+    onBookmarkUpdateLastAccessedResponse?: (data: BookmarkUpdateResponse) => void;
+    onBookmarkFolderCreateResponse?: (data: FolderCreateResponse) => void;
+    onBookmarkFolderListResponse?: (data: { folders: FolderData[] }) => void;
+    onBookmarkFolderUpdateResponse?: (data: FolderUpdateResponse) => void;
+    onBookmarkFolderRemoveResponse?: (data: FolderRemoveResponse) => void;
+    onBookmarkFolderGetTreeResponse?: (data: FolderData[]) => void;
     allSystemsReady?: boolean;
      __overlayReady?: boolean;
   }

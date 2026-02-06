@@ -770,3 +770,250 @@ if (!(window.hodosBrowser as any).cookieBlocking) {
     },
   };
 }
+
+// ==========================================
+// BOOKMARK API
+// ==========================================
+if (!(window.hodosBrowser as any).bookmarks) {
+  (window.hodosBrowser as any).bookmarks = {
+    add: (url: string, title: string, folderId?: number, tags?: string[]) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark add timeout'));
+          delete window.onBookmarkAddResponse;
+        }, 5000);
+
+        window.onBookmarkAddResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkAddResponse;
+        };
+
+        window.cefMessage?.send('bookmark_add', [url, title, folderId?.toString() ?? '', JSON.stringify(tags ?? [])]);
+      });
+    },
+
+    get: (id: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark get timeout'));
+          delete window.onBookmarkGetResponse;
+        }, 5000);
+
+        window.onBookmarkGetResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkGetResponse;
+        };
+
+        window.cefMessage?.send('bookmark_get', [id.toString()]);
+      });
+    },
+
+    update: (id: number, fields: { title?: string; url?: string; folderId?: number | null; tags?: string[] }) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark update timeout'));
+          delete window.onBookmarkUpdateResponse;
+        }, 5000);
+
+        window.onBookmarkUpdateResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkUpdateResponse;
+        };
+
+        window.cefMessage?.send('bookmark_update', [id.toString(), JSON.stringify(fields)]);
+      });
+    },
+
+    remove: (id: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark remove timeout'));
+          delete window.onBookmarkRemoveResponse;
+        }, 5000);
+
+        window.onBookmarkRemoveResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkRemoveResponse;
+        };
+
+        window.cefMessage?.send('bookmark_remove', [id.toString()]);
+      });
+    },
+
+    search: (query: string, limit?: number, offset?: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark search timeout'));
+          delete window.onBookmarkSearchResponse;
+        }, 5000);
+
+        window.onBookmarkSearchResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkSearchResponse;
+        };
+
+        window.cefMessage?.send('bookmark_search', [query, (limit ?? 50).toString(), (offset ?? 0).toString()]);
+      });
+    },
+
+    getAll: (folderId?: number, limit?: number, offset?: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark getAll timeout'));
+          delete window.onBookmarkGetAllResponse;
+        }, 5000);
+
+        window.onBookmarkGetAllResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkGetAllResponse;
+        };
+
+        window.cefMessage?.send('bookmark_get_all', [(folderId ?? -1).toString(), (limit ?? 50).toString(), (offset ?? 0).toString()]);
+      });
+    },
+
+    isBookmarked: (url: string) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark isBookmarked timeout'));
+          delete window.onBookmarkIsBookmarkedResponse;
+        }, 5000);
+
+        window.onBookmarkIsBookmarkedResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkIsBookmarkedResponse;
+        };
+
+        window.cefMessage?.send('bookmark_is_bookmarked', [url]);
+      });
+    },
+
+    getAllTags: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark getAllTags timeout'));
+          delete window.onBookmarkGetAllTagsResponse;
+        }, 5000);
+
+        window.onBookmarkGetAllTagsResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkGetAllTagsResponse;
+        };
+
+        window.cefMessage?.send('bookmark_get_all_tags', []);
+      });
+    },
+
+    updateLastAccessed: (id: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Bookmark updateLastAccessed timeout'));
+          delete window.onBookmarkUpdateLastAccessedResponse;
+        }, 5000);
+
+        window.onBookmarkUpdateLastAccessedResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onBookmarkUpdateLastAccessedResponse;
+        };
+
+        window.cefMessage?.send('bookmark_update_last_accessed', [id.toString()]);
+      });
+    },
+
+    folders: {
+      create: (name: string, parentId?: number) => {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Bookmark folder create timeout'));
+            delete window.onBookmarkFolderCreateResponse;
+          }, 5000);
+
+          window.onBookmarkFolderCreateResponse = (data: any) => {
+            clearTimeout(timeout);
+            resolve(data);
+            delete window.onBookmarkFolderCreateResponse;
+          };
+
+          window.cefMessage?.send('bookmark_folder_create', [name, (parentId ?? -1).toString()]);
+        });
+      },
+
+      list: (parentId?: number) => {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Bookmark folder list timeout'));
+            delete window.onBookmarkFolderListResponse;
+          }, 5000);
+
+          window.onBookmarkFolderListResponse = (data: any) => {
+            clearTimeout(timeout);
+            resolve(data);
+            delete window.onBookmarkFolderListResponse;
+          };
+
+          window.cefMessage?.send('bookmark_folder_list', [(parentId ?? -1).toString()]);
+        });
+      },
+
+      update: (id: number, name: string) => {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Bookmark folder update timeout'));
+            delete window.onBookmarkFolderUpdateResponse;
+          }, 5000);
+
+          window.onBookmarkFolderUpdateResponse = (data: any) => {
+            clearTimeout(timeout);
+            resolve(data);
+            delete window.onBookmarkFolderUpdateResponse;
+          };
+
+          window.cefMessage?.send('bookmark_folder_update', [id.toString(), name]);
+        });
+      },
+
+      remove: (id: number) => {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Bookmark folder remove timeout'));
+            delete window.onBookmarkFolderRemoveResponse;
+          }, 5000);
+
+          window.onBookmarkFolderRemoveResponse = (data: any) => {
+            clearTimeout(timeout);
+            resolve(data);
+            delete window.onBookmarkFolderRemoveResponse;
+          };
+
+          window.cefMessage?.send('bookmark_folder_remove', [id.toString()]);
+        });
+      },
+
+      getTree: () => {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Bookmark folder getTree timeout'));
+            delete window.onBookmarkFolderGetTreeResponse;
+          }, 5000);
+
+          window.onBookmarkFolderGetTreeResponse = (data: any) => {
+            clearTimeout(timeout);
+            resolve(data);
+            delete window.onBookmarkFolderGetTreeResponse;
+          };
+
+          window.cefMessage?.send('bookmark_folder_get_tree', []);
+        });
+      },
+    },
+  };
+}
