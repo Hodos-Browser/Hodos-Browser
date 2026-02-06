@@ -1054,7 +1054,7 @@ CefRefPtr<CefCookieAccessFilter> HttpRequestInterceptor::GetCookieAccessFilter(
     CefRefPtr<CefFrame> frame,
     CefRefPtr<CefRequest> request) {
     if (CookieBlockManager::GetInstance().IsInitialized()) {
-        return &CookieBlockManager::GetInstance();
+        return new CookieAccessFilterWrapper();
     }
     return nullptr;
 }

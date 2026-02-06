@@ -29,7 +29,7 @@ struct BlockLogEntry {
     int64_t blocked_at;
 };
 
-class CookieBlockManager : public CefCookieAccessFilter {
+class CookieBlockManager {
 public:
     static CookieBlockManager& GetInstance();
 
@@ -55,22 +55,20 @@ public:
     int GetBlockedCountForBrowser(int browser_id);
     void ResetBlockedCount(int browser_id);
 
-    // CefCookieAccessFilter overrides (called on IO thread)
+    // Cookie filtering methods (called on IO thread by CookieAccessFilterWrapper)
     bool CanSendCookie(CefRefPtr<CefBrowser> browser,
                        CefRefPtr<CefFrame> frame,
                        CefRefPtr<CefRequest> request,
-                       const CefCookie& cookie) override;
+                       const CefCookie& cookie);
 
     bool CanSaveCookie(CefRefPtr<CefBrowser> browser,
                        CefRefPtr<CefFrame> frame,
                        CefRefPtr<CefRequest> request,
                        CefRefPtr<CefResponse> response,
-                       const CefCookie& cookie) override;
+                       const CefCookie& cookie);
 
     // Check if initialized
     bool IsInitialized() const { return db_ != nullptr; }
-
-    IMPLEMENT_REFCOUNTING(CookieBlockManager);
 
 private:
     CookieBlockManager() = default;
@@ -110,4 +108,27 @@ private:
     // Prevent copying
     CookieBlockManager(const CookieBlockManager&) = delete;
     CookieBlockManager& operator=(const CookieBlockManager&) = delete;
+};
+
+// CookieAccessFilterWrapper - Refcounted wrapper that delegates to singleton CookieBlockManager
+// This is necessary because CEF expects refcounted objects, but CookieBlockManager is a singleton.
+// Use this when you need to return a CefRefPtr<CefCookieAccessFilter>.
+class CookieAccessFilterWrapper : public CefCookieAccessFilter {
+public:
+    bool CanSendCookie(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       CefRefPtr<CefRequest> request,
+                       const CefCookie& cookie) override {
+        return CookieBlockManager::GetInstance().CanSendCookie(browser, frame, request, cookie);
+    }
+
+    bool CanSaveCookie(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       CefRefPtr<CefRequest> request,
+                       CefRefPtr<CefResponse> response,
+                       const CefCookie& cookie) override {
+        return CookieBlockManager::GetInstance().CanSaveCookie(browser, frame, request, response, cookie);
+    }
+
+    IMPLEMENT_REFCOUNTING(CookieAccessFilterWrapper);
 };

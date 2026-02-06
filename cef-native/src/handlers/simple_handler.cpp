@@ -2623,8 +2623,8 @@ CefRefPtr<CefRequestHandler> SimpleHandler::GetRequestHandler() {
     return this;
 }
 
-// CookieFilterResourceHandler - Returns CookieBlockManager as CookieAccessFilter
-// for non-wallet requests so cookie blocking applies to all browsing.
+// CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
+// so cookie blocking applies to all browsing.
 class CookieFilterResourceHandler : public CefResourceRequestHandler {
 public:
     CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
@@ -2632,7 +2632,7 @@ public:
         CefRefPtr<CefFrame> frame,
         CefRefPtr<CefRequest> request) override {
         if (CookieBlockManager::GetInstance().IsInitialized()) {
-            return &CookieBlockManager::GetInstance();
+            return new CookieAccessFilterWrapper();
         }
         return nullptr;
     }
