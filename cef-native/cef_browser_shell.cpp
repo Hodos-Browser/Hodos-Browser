@@ -1055,7 +1055,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CefString(&settings.cache_path).FromString(user_data_path + "\\Default");
 
     // Persist session cookies across browser restarts
-    settings.persist_session_cookies = true;
+    // TEMPORARILY DISABLED - testing if this causes extra windows
+    // settings.persist_session_cookies = true;
 
     // Enable CEF's runtime API for JavaScript communication
     CefString(&settings.javascript_flags).FromASCII("--expose-gc --allow-running-insecure-content");
