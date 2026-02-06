@@ -880,6 +880,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 18 (Output Model Transition - Phase 4A)
+        if current_version < 18 {
+            info!("   Applying migration to version 18...");
+            match migrations::create_schema_v18(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 18...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (18)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 18 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 18 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 

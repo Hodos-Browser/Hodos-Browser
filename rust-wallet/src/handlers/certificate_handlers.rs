@@ -2528,7 +2528,7 @@ async fn create_certificate_transaction(
     let total_needed = certificate_output_amount + estimated_fee;
 
     // Get addresses from database (reuse from createAction)
-    use crate::database::{address_to_address_info, utxo_to_fetcher_utxo};
+    use crate::database::{address_to_address_info, output_to_fetcher_utxo};
     let addresses = {
         let db = state.database.lock().unwrap();
         let wallet_repo = WalletRepository::new(db.connection());
@@ -2551,37 +2551,21 @@ async fn create_certificate_transaction(
     }
 
     // Fetch UTXOs (reuse caching logic from createAction)
-    use crate::database::{UtxoRepository, AddressRepository};
+    use crate::database::{OutputRepository, AddressRepository};
+    const DEFAULT_USER_ID: i64 = 1;
     let db = state.database.lock().unwrap();
-    let address_repo = AddressRepository::new(db.connection());
-    let utxo_repo = UtxoRepository::new(db.connection());
+    let output_repo = OutputRepository::new(db.connection());
 
-    // Get address IDs and create address index map
-    let mut address_id_map: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
-    let mut address_ids = Vec::new();
-
-    for addr in &addresses {
-        if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-            if let Some(addr_id) = db_addr.id {
-                address_ids.push(addr_id);
-                address_id_map.insert(addr_id, addr.index);
-            }
-        }
-    }
-
-    // Get UTXOs from database cache first (same logic as createAction)
-    let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
-        Ok(db_utxos) => {
-            // Convert database UTXOs to fetcher format (reuse helper)
-            db_utxos.iter()
-                .filter_map(|db_utxo| {
-                    db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
-                        .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
-                })
+    // Get spendable outputs from database cache first (same logic as createAction)
+    let mut all_utxos = match output_repo.get_spendable_by_user(DEFAULT_USER_ID) {
+        Ok(db_outputs) => {
+            // Convert database outputs to fetcher format
+            db_outputs.iter()
+                .map(|output| output_to_fetcher_utxo(output))
                 .collect::<Vec<_>>()
         }
         Err(e) => {
-            log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
+            log::warn!("   Failed to get outputs from database: {}, falling back to API", e);
             Vec::new()
         }
     };
@@ -2604,23 +2588,19 @@ async fn create_certificate_transaction(
 
         // Cache UTXOs to database (same logic as createAction)
         let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let utxo_repo = UtxoRepository::new(db.connection());
+        let output_repo = OutputRepository::new(db.connection());
 
-        for addr in &addresses {
-            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-                if let Some(addr_id) = db_addr.id {
-                    let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index)
-                        .cloned()
-                        .collect();
-
-                    if !addr_utxos.is_empty() {
-                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
-                        }
-                    }
-                }
+        for utxo in &api_utxos {
+            // Upsert output (insert if not exists)
+            if let Err(e) = output_repo.upsert_received_utxo(
+                DEFAULT_USER_ID,
+                &utxo.txid,
+                utxo.vout,
+                utxo.satoshis,
+                &utxo.script,
+                utxo.address_index,
+            ) {
+                log::warn!("   Failed to cache output {}:{}: {}", &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
             }
         }
         drop(db);
@@ -2859,20 +2839,20 @@ async fn create_certificate_transaction(
                 }
             }
 
-            // Mark spent UTXOs in database
+            // Mark spent outputs in database
             if !spent_utxos.is_empty() {
-                log::info!("   🔄 Marking {} UTXO(s) as spent in database...", spent_utxos.len());
+                log::info!("   🔄 Marking {} output(s) as spent in database...", spent_utxos.len());
                 let db = state.database.lock().unwrap();
-                let utxo_repo = UtxoRepository::new(db.connection());
+                let output_repo = OutputRepository::new(db.connection());
                 for (txid, vout) in &spent_utxos {
-                    let _ = utxo_repo.mark_spent(txid, *vout, "unknown");
+                    let _ = output_repo.mark_spent(txid, *vout, "unknown");
                     log::info!("      ✅ Marked {}:{} as spent", txid, vout);
                 }
                 drop(db);
 
-                // Return error - the spent UTXOs are now marked, so a retry will work
+                // Return error - the spent outputs are now marked, so a retry will work
                 return Err(CertificateError::Database(format!(
-                    "Transaction failed: {} UTXO(s) were already spent on-chain. They have been marked as spent in the database. Please retry the certificate acquisition.",
+                    "Transaction failed: {} output(s) were already spent on-chain. They have been marked as spent in the database. Please retry the certificate acquisition.",
                     spent_utxos.len()
                 )));
             }
@@ -2890,21 +2870,21 @@ async fn create_certificate_transaction(
         }
     }
 
-    // Mark UTXOs as spent in database (same as createAction)
+    // Mark outputs as spent in database (same as createAction)
     {
         let db = state.database.lock().unwrap();
-        use crate::database::UtxoRepository;
-        let utxo_repo = UtxoRepository::new(db.connection());
-        let utxos_to_mark: Vec<_> = selected_utxos.iter()
+        use crate::database::OutputRepository;
+        let output_repo = OutputRepository::new(db.connection());
+        let outputs_to_mark: Vec<_> = selected_utxos.iter()
             .map(|u| (u.txid.clone(), u.vout))
             .collect();
 
-        match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
+        match output_repo.mark_multiple_spent(&outputs_to_mark, &txid) {
             Ok(count) => {
-                log::info!("   ✅ Marked {} UTXOs as spent in database", count);
+                log::info!("   ✅ Marked {} outputs as spent in database", count);
             }
             Err(e) => {
-                log::warn!("   ⚠️  Failed to mark UTXOs as spent: {}", e);
+                log::warn!("   ⚠️  Failed to mark outputs as spent: {}", e);
             }
         }
     }

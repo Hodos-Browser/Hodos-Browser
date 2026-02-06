@@ -248,6 +248,36 @@ impl<'a> AddressRepository<'a> {
         Ok(())
     }
 
+    /// Clear pending_utxo_check flag for addresses older than max_age_hours
+    ///
+    /// This prevents addresses from being pending forever if no UTXOs are ever
+    /// received. The address can still receive UTXOs later - they'll be detected
+    /// by periodic UTXO sync.
+    ///
+    /// # Arguments
+    /// * `max_age_hours` - Maximum hours an address can remain pending
+    ///
+    /// # Returns
+    /// Number of addresses that had their pending flag cleared
+    pub fn clear_stale_pending_addresses(&self, max_age_hours: i64) -> Result<usize> {
+        let cutoff = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - (max_age_hours * 3600);
+
+        let rows_affected = self.conn.execute(
+            "UPDATE addresses SET pending_utxo_check = 0
+             WHERE pending_utxo_check = 1 AND created_at < ?1",
+            rusqlite::params![cutoff],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   🧹 Cleared {} stale pending address(es) older than {} hours", rows_affected, max_age_hours);
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Get or create a placeholder address for external/custom script outputs.
     ///
     /// This is used for basket insertion outputs where we can't derive keys

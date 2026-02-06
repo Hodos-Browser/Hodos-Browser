@@ -1910,3 +1910,333 @@ fn derive_identity_key_from_mnemonic(mnemonic_str: &str) -> std::result::Result<
     // Return compressed public key as hex string
     Ok(hex::encode(public_key.serialize()))
 }
+
+/// Migration v18: Output Model Transition (Phase 4A)
+///
+/// Creates `outputs` table to replace `utxos` with wallet-toolbox compatible schema.
+/// Migrates existing UTXO data to outputs table with proper derivation info.
+/// The `utxos` table is kept intact for parallel operation during transition.
+///
+/// Key changes:
+/// - `spendable` (bool) replaces `is_spent` (inverted logic)
+/// - `spent_by` (FK) replaces `spent_txid` (text)
+/// - `derivation_prefix`/`derivation_suffix` replace `address_id` lookup
+/// - `transaction_id` FK links output to creating transaction
+/// - `user_id` FK for multi-user support (from Phase 3)
+pub fn create_schema_v18(conn: &Connection) -> Result<()> {
+    info!("=== Migration v18: Output Model Transition (Phase 4A) ===");
+
+    // Step 1: Create outputs table
+    info!("   Step 1: Creating outputs table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS outputs (
+            outputId INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(userId),
+            transaction_id INTEGER REFERENCES transactions(id),
+            basket_id INTEGER REFERENCES baskets(id),
+            spendable INTEGER NOT NULL DEFAULT 0,
+            change INTEGER NOT NULL DEFAULT 0,
+            vout INTEGER NOT NULL,
+            satoshis INTEGER NOT NULL,
+            provided_by TEXT NOT NULL DEFAULT 'you',
+            purpose TEXT NOT NULL DEFAULT '',
+            type TEXT NOT NULL DEFAULT '',
+            output_description TEXT,
+            txid TEXT,
+            sender_identity_key TEXT,
+            derivation_prefix TEXT,
+            derivation_suffix TEXT,
+            custom_instructions TEXT,
+            spent_by INTEGER REFERENCES transactions(id),
+            sequence_number INTEGER,
+            spending_description TEXT,
+            script_length INTEGER,
+            script_offset INTEGER,
+            locking_script BLOB,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    info!("   ✅ Created outputs table");
+
+    // Step 2: Create indexes
+    info!("   Step 2: Creating indexes...");
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outputs_spendable ON outputs(spendable)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outputs_user_id ON outputs(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outputs_txid ON outputs(txid)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outputs_basket_id ON outputs(basket_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outputs_transaction_id ON outputs(transaction_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outputs_txid_vout ON outputs(txid, vout)",
+        [],
+    )?;
+    info!("   ✅ Created indexes");
+
+    // Step 3: Get default user ID
+    let default_user_id: i64 = conn.query_row(
+        "SELECT userId FROM users ORDER BY userId ASC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+    info!("   Using default user ID: {}", default_user_id);
+
+    // Step 4: Migrate data from utxos → outputs
+    info!("   Step 4: Migrating data from utxos to outputs...");
+
+    // Count utxos for progress reporting
+    let utxo_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM utxos",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    info!("      Found {} UTXOs to migrate", utxo_count);
+
+    if utxo_count > 0 {
+        // Migrate basic fields with SQL INSERT...SELECT
+        // We'll handle derivation_prefix/suffix in a second pass
+        let migrated = conn.execute(
+            "INSERT INTO outputs (
+                user_id, transaction_id, basket_id, spendable, change, vout, satoshis,
+                provided_by, purpose, type, output_description, txid,
+                custom_instructions, locking_script, created_at, updated_at
+            )
+            SELECT
+                ?1,                                           -- user_id (default user)
+                t.id,                                         -- transaction_id (from txid lookup)
+                u.basket_id,                                  -- basket_id
+                CASE
+                    WHEN u.is_spent = 1 THEN 0                -- spent = not spendable
+                    WHEN u.status = 'failed' THEN 0           -- failed = not spendable
+                    ELSE 1                                     -- unspent + not failed = spendable
+                END,                                          -- spendable
+                0,                                            -- change (unknown for legacy)
+                u.vout,                                       -- vout
+                u.satoshis,                                   -- satoshis
+                'you',                                        -- provided_by
+                '',                                           -- purpose
+                '',                                           -- type
+                u.output_description,                         -- output_description
+                u.txid,                                       -- txid
+                u.custom_instructions,                        -- custom_instructions
+                CAST(u.script AS BLOB),                       -- locking_script (hex→blob)
+                u.first_seen,                                 -- created_at
+                u.last_updated                                -- updated_at
+            FROM utxos u
+            LEFT JOIN transactions t ON t.txid = u.txid",
+            rusqlite::params![default_user_id],
+        )?;
+        info!("      ✅ Migrated {} rows to outputs", migrated);
+
+        // Step 5: Set spent_by for spent outputs
+        info!("   Step 5: Setting spent_by for spent outputs...");
+        let spent_updated = conn.execute(
+            "UPDATE outputs SET spent_by = (
+                SELECT t.id FROM transactions t
+                WHERE t.txid = (
+                    SELECT u.spent_txid FROM utxos u
+                    WHERE u.txid = outputs.txid AND u.vout = outputs.vout
+                )
+            )
+            WHERE spendable = 0 AND spent_by IS NULL",
+            [],
+        )?;
+        info!("      ✅ Set spent_by for {} spent outputs", spent_updated);
+
+        // Step 6: Populate derivation_prefix/suffix from address index
+        info!("   Step 6: Populating derivation info from addresses...");
+        populate_derivation_info(conn)?;
+    } else {
+        info!("      ✅ No UTXOs to migrate (empty wallet)");
+    }
+
+    // Step 7: Verify migration
+    info!("   Step 7: Verifying migration...");
+    let output_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM outputs",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if output_count == utxo_count {
+        info!("      ✅ Row count matches: {} outputs", output_count);
+    } else {
+        warn!("      ⚠️  Row count mismatch: {} utxos vs {} outputs", utxo_count, output_count);
+    }
+
+    // Verify spendable counts
+    let unspent_utxos: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM utxos WHERE is_spent = 0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let spendable_outputs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM outputs WHERE spendable = 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if unspent_utxos == spendable_outputs {
+        info!("      ✅ Spendable count matches: {} spendable outputs", spendable_outputs);
+    } else {
+        warn!("      ⚠️  Spendable mismatch: {} unspent utxos vs {} spendable outputs", unspent_utxos, spendable_outputs);
+    }
+
+    // Verify balance
+    let utxo_balance: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(satoshis), 0) FROM utxos WHERE is_spent = 0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let output_balance: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(satoshis), 0) FROM outputs WHERE spendable = 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if utxo_balance == output_balance {
+        info!("      ✅ Balance matches: {} satoshis", output_balance);
+    } else {
+        warn!("      ⚠️  Balance mismatch: {} utxo balance vs {} output balance", utxo_balance, output_balance);
+    }
+
+    info!("   ✅ Schema version 18 migration complete");
+    Ok(())
+}
+
+/// Populate derivation_prefix/suffix for outputs based on address index
+///
+/// Derivation mapping:
+/// - index >= 0: derivation_prefix = "2-receive address", derivation_suffix = "{index}"
+/// - index == -1: derivation_prefix = NULL, derivation_suffix = NULL (master pubkey)
+/// - index < -1: Parse custom_instructions for BRC-29 derivation params
+fn populate_derivation_info(conn: &Connection) -> Result<()> {
+    // Query outputs joined with utxos and addresses to get derivation info
+    let mut stmt = conn.prepare(
+        "SELECT o.outputId, u.address_id, a.\"index\", o.custom_instructions
+         FROM outputs o
+         INNER JOIN utxos u ON u.txid = o.txid AND u.vout = o.vout
+         LEFT JOIN addresses a ON a.id = u.address_id"
+    )?;
+
+    let rows: Vec<(i64, Option<i64>, Option<i32>, Option<String>)> = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,           // outputId
+            row.get::<_, Option<i64>>(1)?,   // address_id
+            row.get::<_, Option<i32>>(2)?,   // index
+            row.get::<_, Option<String>>(3)?, // custom_instructions
+        ))
+    })?.filter_map(|r| r.ok()).collect();
+
+    let mut hd_count = 0;
+    let mut master_count = 0;
+    let mut brc29_count = 0;
+    let mut no_address_count = 0;
+
+    for (output_id, address_id, index, custom_instructions) in rows {
+        match (address_id, index) {
+            (Some(_), Some(idx)) if idx >= 0 => {
+                // Regular HD address: "2-receive address-{index}"
+                conn.execute(
+                    "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2 WHERE outputId = ?3",
+                    rusqlite::params!["2-receive address", idx.to_string(), output_id],
+                )?;
+                hd_count += 1;
+            }
+            (Some(_), Some(-1)) => {
+                // Master pubkey address: NULL derivation (root key)
+                // Already NULL by default, just count
+                master_count += 1;
+            }
+            (Some(_), Some(idx)) if idx < -1 => {
+                // BRC-29 derived address: parse custom_instructions
+                if let Some(ref instructions) = custom_instructions {
+                    if let Some((prefix, suffix)) = parse_brc29_derivation(instructions) {
+                        conn.execute(
+                            "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2 WHERE outputId = ?3",
+                            rusqlite::params![prefix, suffix, output_id],
+                        )?;
+                        brc29_count += 1;
+                    } else {
+                        warn!("      ⚠️  Could not parse BRC-29 derivation for output {}", output_id);
+                    }
+                } else {
+                    warn!("      ⚠️  BRC-29 output {} has no custom_instructions", output_id);
+                }
+            }
+            (None, _) => {
+                // Basket output without address (e.g., token scripts)
+                // No derivation info needed - these use custom logic
+                no_address_count += 1;
+            }
+            _ => {
+                // Unexpected case
+                warn!("      ⚠️  Unexpected address/index for output {}: address_id={:?}, index={:?}",
+                      output_id, address_id, index);
+            }
+        }
+    }
+
+    info!("      ✅ Set derivation for {} HD addresses", hd_count);
+    if master_count > 0 {
+        info!("      ✅ {} master pubkey outputs (no derivation)", master_count);
+    }
+    if brc29_count > 0 {
+        info!("      ✅ Parsed derivation for {} BRC-29 outputs", brc29_count);
+    }
+    if no_address_count > 0 {
+        info!("      ✅ {} basket outputs (no address derivation)", no_address_count);
+    }
+
+    Ok(())
+}
+
+/// Parse BRC-29 custom_instructions JSON to extract derivation params
+///
+/// Expected format:
+/// {
+///   "senderPublicKey": "02abc...",
+///   "invoiceNumber": "2-some protocol-keyid"
+/// }
+///
+/// Returns (derivation_prefix, derivation_suffix) parsed from invoiceNumber
+fn parse_brc29_derivation(instructions: &str) -> Option<(String, String)> {
+    // Parse JSON
+    let json: serde_json::Value = serde_json::from_str(instructions).ok()?;
+
+    // Get invoice number
+    let invoice = json.get("invoiceNumber")?.as_str()?;
+
+    // Parse BRC-43 invoice format: "{securityLevel}-{protocolId}-{keyId}"
+    // e.g., "2-payment protocol-abc123"
+    let parts: Vec<&str> = invoice.splitn(3, '-').collect();
+    if parts.len() >= 3 {
+        // prefix = "{securityLevel}-{protocolId}", suffix = "{keyId}"
+        let prefix = format!("{}-{}", parts[0], parts[1]);
+        let suffix = parts[2].to_string();
+        Some((prefix, suffix))
+    } else if parts.len() == 2 {
+        // Handle edge case: "{securityLevel}-{protocolId}" with no keyId
+        let prefix = format!("{}-{}", parts[0], parts[1]);
+        Some((prefix, String::new()))
+    } else {
+        None
+    }
+}

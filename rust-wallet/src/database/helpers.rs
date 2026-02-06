@@ -340,14 +340,45 @@ pub fn address_to_address_info(addr: &super::Address) -> crate::json_storage::Ad
     }
 }
 
-/// Convert database Utxo to utxo_fetcher::UTXO (for compatibility with existing code)
-pub fn utxo_to_fetcher_utxo(utxo: &super::Utxo, address_index: i32) -> crate::utxo_fetcher::UTXO {
+/// Convert database Output to utxo_fetcher::UTXO
+///
+/// This adapter allows the signing code to work with Output structs from the
+/// new wallet-toolbox compatible outputs table.
+///
+/// Key mappings:
+/// - `derivation_prefix="2-receive address"` + `derivation_suffix="{n}"` → `address_index = n`
+/// - `derivation_prefix=NULL` → `address_index = -1` (master pubkey or unknown)
+/// - `locking_script` (BLOB) → `script` (hex string)
+pub fn output_to_fetcher_utxo(output: &super::Output) -> crate::utxo_fetcher::UTXO {
+    // Derive address_index from derivation_prefix/suffix
+    let address_index: i32 = match (&output.derivation_prefix, &output.derivation_suffix) {
+        (Some(prefix), Some(suffix)) if prefix == "2-receive address" => {
+            // Standard HD wallet address: suffix is the index
+            suffix.parse::<i32>().unwrap_or(-1)
+        }
+        (None, None) => {
+            // Master pubkey or unknown derivation
+            -1
+        }
+        _ => {
+            // BRC-29 or other custom derivation - use -2 to signal custom
+            // The signing code will use custom_instructions for derivation
+            -2
+        }
+    };
+
+    // Convert locking_script BLOB to hex string
+    let script = output.locking_script
+        .as_ref()
+        .map(|bytes| hex::encode(bytes))
+        .unwrap_or_default();
+
     crate::utxo_fetcher::UTXO {
-        txid: utxo.txid.clone(),
-        vout: utxo.vout as u32,
-        satoshis: utxo.satoshis,
-        script: utxo.script.clone(),
+        txid: output.txid.clone().unwrap_or_default(),
+        vout: output.vout as u32,
+        satoshis: output.satoshis,
+        script,
         address_index,
-        custom_instructions: utxo.custom_instructions.clone(),
+        custom_instructions: output.custom_instructions.clone(),
     }
 }

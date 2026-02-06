@@ -153,9 +153,9 @@ async fn main() -> std::io::Result<()> {
 
             // Cleanup stale pending transactions (created but never broadcast)
             // These occur when the process crashes between creating a transaction and broadcasting it.
-            // Their change UTXOs are ghost outputs that don't exist on-chain.
+            // Their change outputs are ghost outputs that don't exist on-chain.
             {
-                use database::{TransactionRepository, UtxoRepository};
+                use database::{TransactionRepository, OutputRepository};
                 let conn = db.connection();
                 let tx_repo = TransactionRepository::new(conn);
 
@@ -163,21 +163,21 @@ async fn main() -> std::io::Result<()> {
                 match tx_repo.get_stale_pending_transactions(300) {
                     Ok(stale_txs) if !stale_txs.is_empty() => {
                         println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
-                        let utxo_repo = UtxoRepository::new(conn);
+                        let output_repo = OutputRepository::new(conn);
 
                         for (txid, inputs) in &stale_txs {
-                            // 1. Delete ghost change UTXOs (outputs of the never-broadcast tx)
-                            match utxo_repo.delete_by_txid(txid) {
+                            // 1. Delete ghost change outputs (outputs of the never-broadcast tx)
+                            match output_repo.delete_by_txid(txid) {
                                 Ok(count) if count > 0 => {
-                                    println!("   🗑️  Deleted {} ghost UTXO(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                    println!("   🗑️  Deleted {} ghost output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
                                 }
                                 _ => {}
                             }
 
-                            // 2. Restore input UTXOs that were marked as spent by this tx
-                            match utxo_repo.restore_spent_by_txid(txid) {
+                            // 2. Restore input outputs that were marked as spent by this tx
+                            match output_repo.restore_by_spending_description(txid) {
                                 Ok(count) if count > 0 => {
-                                    println!("   ♻️  Restored {} input UTXO(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                    println!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
                                 }
                                 _ => {}
                             }
@@ -200,20 +200,21 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
-            // Safety net: Restore any UTXOs still marked with placeholder spent_txid.
-            // This catches cases where the handler crashed between UTXO reservation
+            // Restore any outputs with stale placeholder reservations.
+            // This catches cases where the handler crashed between output reservation
             // and txid update (e.g., signing failure, deadlock, process kill).
             {
-                use database::UtxoRepository;
+                use database::OutputRepository;
                 let conn = db.connection();
-                let utxo_repo = UtxoRepository::new(conn);
-                match utxo_repo.restore_pending_placeholders() {
+                let output_repo = OutputRepository::new(conn);
+
+                match output_repo.restore_pending_placeholders() {
                     Ok(count) if count > 0 => {
-                        println!("♻️  Restored {} UTXO(s) with stale placeholder reservations", count);
+                        println!("♻️  Restored {} output(s) with stale placeholder reservations", count);
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("   ⚠️  Failed to restore placeholder UTXOs: {}", e);
+                        eprintln!("   ⚠️  Failed to restore placeholder outputs: {}", e);
                     }
                 }
             }

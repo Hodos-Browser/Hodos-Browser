@@ -3,10 +3,13 @@
 //! Periodically syncs UTXOs from the blockchain for all used addresses
 //! and addresses within the gap limit.
 
-use crate::database::{WalletDatabase, WalletRepository, AddressRepository, UtxoRepository};
+use crate::database::{WalletDatabase, WalletRepository, AddressRepository, OutputRepository};
 use crate::utxo_fetcher;
 use crate::json_storage::AddressInfo;
 use log::{info, warn, error};
+
+/// Default user ID for Phase 4C dual-writes (single-user wallet)
+const DEFAULT_USER_ID: i64 = 1;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -110,16 +113,17 @@ async fn sync_utxos(db: &Arc<Mutex<WalletDatabase>>) -> Result<(), String> {
 
     info!("   📦 Fetched {} UTXOs from API", api_utxos.len());
 
-    // Cache UTXOs to database
+    // Cache outputs to database
     let db_guard = db.lock().map_err(|e| format!("Failed to lock database: {}", e))?;
     let address_repo = AddressRepository::new(db_guard.connection());
-    let utxo_repo = UtxoRepository::new(db_guard.connection());
+    let output_repo = OutputRepository::new(db_guard.connection());
 
     let mut updated_count = 0;
     let mut reconciled_count = 0;
     let mut error_count = 0;
+    let mut outputs_synced = 0;
 
-    // Grace period: don't mark UTXOs as externally spent if they were created
+    // Grace period: don't mark outputs as externally spent if they were created
     // less than 10 minutes ago (they may be from a recent wallet transaction
     // that hasn't propagated to WhatsOnChain yet)
     const RECONCILE_GRACE_PERIOD_SECS: i64 = 600; // 10 minutes
@@ -133,33 +137,60 @@ async fn sync_utxos(db: &Arc<Mutex<WalletDatabase>>) -> Result<(), String> {
                     .cloned()
                     .collect();
 
-                // Upsert API UTXOs into database
+                // Upsert API UTXOs into outputs table
                 if !addr_utxos.is_empty() {
-                    match utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                        Ok(_new_count) => {
-                            updated_count += 1;
-                            // Mark address as used if it has UTXOs
-                            let _ = address_repo.mark_used(addr_id);
+                    let mut upserted = 0;
+                    for utxo in &addr_utxos {
+                        // Upsert output (insert if not exists)
+                        match output_repo.upsert_received_utxo(
+                            DEFAULT_USER_ID,
+                            &utxo.txid,
+                            utxo.vout,
+                            utxo.satoshis,
+                            &utxo.script,
+                            addr_info.index,
+                        ) {
+                            Ok(count) if count > 0 => {
+                                upserted += 1;
+                                outputs_synced += 1;
+                            }
+                            Ok(_) => {} // Already exists
+                            Err(e) => {
+                                warn!("   ⚠️  Failed to upsert output for {}:{}: {}",
+                                      &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
+                                error_count += 1;
+                            }
                         }
-                        Err(e) => {
-                            warn!("   ⚠️  Failed to cache UTXOs for {}: {}", addr_info.address, e);
-                            error_count += 1;
-                        }
+                    }
+
+                    if upserted > 0 {
+                        updated_count += 1;
+                        // Mark address as used if it has outputs
+                        let _ = address_repo.mark_used(addr_id);
                     }
                 }
 
-                // Reconcile: mark database UTXOs as externally spent if they're
-                // no longer in the WhatsOnChain API response. This catches UTXOs
+                // Reconcile: mark database outputs as externally spent if they're
+                // no longer in the WhatsOnChain API response. This catches outputs
                 // spent on-chain by transactions the wallet doesn't track.
-                match utxo_repo.reconcile_for_address(addr_id, &addr_utxos, RECONCILE_GRACE_PERIOD_SECS) {
+                let derivation_prefix = "2-receive address";
+                let derivation_suffix = addr_info.index.to_string();
+
+                match output_repo.reconcile_for_derivation(
+                    DEFAULT_USER_ID,
+                    Some(derivation_prefix),
+                    Some(&derivation_suffix),
+                    &addr_utxos,
+                    RECONCILE_GRACE_PERIOD_SECS,
+                ) {
                     Ok(stale) if stale > 0 => {
-                        info!("   🔄 Reconciled {} stale UTXO(s) for {} (marked as externally spent)",
+                        info!("   🔄 Reconciled {} stale output(s) for {} (marked as externally spent)",
                               stale, addr_info.address);
                         reconciled_count += stale;
                     }
-                    Ok(_) => {} // No stale UTXOs
+                    Ok(_) => {} // No stale outputs
                     Err(e) => {
-                        warn!("   ⚠️  Failed to reconcile UTXOs for {}: {}", addr_info.address, e);
+                        warn!("   ⚠️  Failed to reconcile outputs for {}: {}", addr_info.address, e);
                     }
                 }
             }
@@ -168,8 +199,8 @@ async fn sync_utxos(db: &Arc<Mutex<WalletDatabase>>) -> Result<(), String> {
 
     drop(db_guard);
 
-    info!("   ✅ Sync complete: {} addresses updated, {} stale UTXOs reconciled, {} errors",
-          updated_count, reconciled_count, error_count);
+    info!("   ✅ Sync complete: {} addresses updated, {} stale UTXOs reconciled, {} outputs synced, {} errors",
+          updated_count, reconciled_count, outputs_synced, error_count);
     Ok(())
 }
 
@@ -391,17 +422,17 @@ fn cleanup_failed_utxos(db: &Arc<Mutex<WalletDatabase>>) {
         }
     }
 
-    // 5. Clean up old spent UTXOs (older than 30 days) to save space
-    let utxo_repo = UtxoRepository::new(conn);
-    match utxo_repo.cleanup_old_spent(30) {
+    // 5. Clean up old spent outputs (older than 30 days) to save space
+    let output_repo = OutputRepository::new(conn);
+    match output_repo.cleanup_old_spent(30) {
         Ok(count) if count > 0 => {
-            info!("   🧹 Cleaned up {} old spent UTXOs", count);
+            info!("   🧹 Cleaned up {} old spent outputs", count);
         }
-        Ok(_) => {} // No old UTXOs to clean
+        Ok(_) => {} // No old outputs to clean
         Err(e) => {
-            warn!("   ⚠️  Failed to cleanup old spent UTXOs: {}", e);
+            warn!("   ⚠️  Failed to cleanup old spent outputs: {}", e);
         }
     }
 
-    info!("🧹 UTXO cleanup complete");
+    info!("🧹 Output cleanup complete");
 }

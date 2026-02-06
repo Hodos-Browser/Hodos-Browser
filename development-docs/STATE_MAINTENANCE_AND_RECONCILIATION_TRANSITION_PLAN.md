@@ -1,7 +1,7 @@
 # State Maintenance & Reconciliation — Transition Plan
 
 **Created**: 2026-02-03
-**Status**: In Progress — Phase 1 ✅ Complete, Phase 2 ✅ Complete, Phases 3-8 Pending
+**Status**: In Progress — Phases 1-4 ✅ Complete, Phases 5-8 Pending
 **Objective**: Evolve the Hodos Rust wallet database and state management to align with the BSV SDK wallet-toolbox, enabling future multi-user support, cloud sync, and wallet export/import interoperability.
 **See also**: `WALLET_BACKUP_AND_RECOVERY_PLAN.md` — backup file export, on-chain encrypted backup, and cloud sync scaffolding (interleaved with this plan's phases).
 
@@ -770,6 +770,180 @@ cleanup stale:                             cleanup stale:
 - Affects createAction, signAction, balance, UTXO selection — all critical paths
 - Mitigation: keep old `utxos` table during transition, run both old and new code paths with comparison logging, cut over only when confident
 
+#### Phase 4A Implementation (Schema + Data Migration)
+
+**Status: COMPLETE**
+
+| File | Change |
+|---|---|
+| `src/database/models.rs` | Added `Output` struct with all wallet-toolbox columns |
+| `src/database/migrations.rs` | Added `create_schema_v18()`: creates outputs table, migrates data, populates derivation_prefix/suffix, verifies migration |
+| `src/database/connection.rs` | Added V18 migration runner |
+| `src/database/mod.rs` | Exported `Output` model |
+
+**Testing Queries:**
+```sql
+-- Verify row counts match
+SELECT 'utxos' as tbl, COUNT(*) as cnt FROM utxos
+UNION ALL
+SELECT 'outputs', COUNT(*) FROM outputs;
+
+-- Verify spendable counts match
+SELECT 'unspent_utxos' as metric, COUNT(*) as cnt FROM utxos WHERE is_spent = 0
+UNION ALL
+SELECT 'spendable_outputs', COUNT(*) FROM outputs WHERE spendable = 1;
+
+-- Verify balance matches
+SELECT 'utxo_balance' as metric, COALESCE(SUM(satoshis), 0) as sats FROM utxos WHERE is_spent = 0
+UNION ALL
+SELECT 'output_balance', COALESCE(SUM(satoshis), 0) FROM outputs WHERE spendable = 1;
+
+-- Check derivation info populated
+SELECT derivation_prefix, derivation_suffix, COUNT(*) as cnt
+FROM outputs
+GROUP BY derivation_prefix, derivation_suffix;
+
+-- Verify spent_by FK populated for spent outputs
+SELECT COUNT(*) as spent_with_fk FROM outputs WHERE spendable = 0 AND spent_by IS NOT NULL;
+```
+
+#### Phase 4B Implementation (Read Path + Comparison Logging)
+
+**Status: COMPLETE**
+
+| File | Change |
+|---|---|
+| `src/database/output_repo.rs` | Created `OutputRepository` with read methods: `get_by_id()`, `get_by_txid_vout()`, `get_spendable_by_user()`, `get_spendable_by_basket()`, `get_spendable_by_basket_with_tags()`, `calculate_balance()`, `calculate_total_balance()`, `count_spendable()`, `get_locking_script_hex()` |
+| `src/database/mod.rs` | Exported `output_repo`, `OutputRepository` |
+| `src/handlers.rs` | Added comparison logging at all balance calculation and UTXO selection points |
+
+**Comparison Logging Added:**
+- `get_balance` handler (line ~1810): Compares `utxo_repo.calculate_balance()` vs `output_repo.calculate_balance()`
+- `get_balance` updated balance path (line ~2000): Same comparison after API fetch
+- `createAction` UTXO selection (line ~3340): Compares count and balance from both tables
+- `createAction` re-read under lock (line ~3435): Same comparison after re-read
+
+**Log Markers:**
+- `⚠️  Phase 4B DISCREPANCY` — logged at WARN level when values differ
+- `✓ Phase 4B:` — logged at DEBUG level when values match
+
+#### Phase 4C Implementation (Dual-Write to Both Tables)
+
+**Status: COMPLETE**
+
+| File | Change |
+|---|---|
+| `src/database/output_repo.rs` | Added write methods: `insert_output()`, `update_txid()`, `update_txid_batch()`, `mark_spent()`, `mark_multiple_spent()`, `delete_by_txid()`, `restore_by_spending_description()`, `update_spending_description_batch()`, `restore_pending_placeholders()` |
+| `src/handlers.rs` | Added dual-write calls at all UTXO write locations (28 total) |
+
+**Write Locations Updated (createAction):**
+- Line ~3491: Wallet UTXO reservation (`mark_multiple_spent`)
+- Line ~3532: User-provided input reservation (`mark_multiple_spent`)
+- Line ~4155: Change output insert (`insert_output`)
+- Line ~4234: Basket output insert (`insert_output`)
+- Line ~4527: Change output txid update after signing
+- Line ~4542: Basket output txid updates after signing
+- Line ~4556, ~4572: Reserved input spent_txid update (placeholder → real txid)
+- Line ~4632-4662: Broadcast failure cleanup (delete + restore)
+
+**Write Locations Updated (signAction):**
+- Line ~6233: Change UTXO txid update (unsigned → signed)
+- Line ~6284: Reserved UTXO spent_txid update
+- Line ~6302: Fallback mark_multiple_spent
+- Line ~6526: External spend detection
+- Line ~6588: Broadcast failure cleanup
+
+**Write Locations Updated (Other Handlers):**
+- Line ~7715-7723: Send transaction failure cleanup
+- Line ~8925: Internalize action basket insertion
+- Line ~10229: Ghost UTXO cleanup
+
+**Key Mappings:**
+- `utxo_repo.insert_output_with_basket()` → `output_repo.insert_output()`
+- `utxo_repo.mark_spent()` → `output_repo.mark_spent()`
+- `utxo_repo.mark_multiple_spent()` → `output_repo.mark_multiple_spent()`
+- `utxo_repo.update_utxo_txid()` → `output_repo.update_txid()`
+- `utxo_repo.update_txid()` → `output_repo.update_txid_batch()`
+- `utxo_repo.update_spent_txid_batch()` → `output_repo.update_spending_description_batch()`
+- `utxo_repo.delete_by_txid()` → `output_repo.delete_by_txid()`
+- `utxo_repo.restore_spent_by_txid()` → `output_repo.restore_by_spending_description()`
+
+**Testing:** ✅ VERIFIED 2026-02-06
+
+Tested dual-write with transaction create/sign/broadcast cycle:
+- `✅ Phase 4C: Inserted output` - Change output inserted into both tables
+- `✅ Phase 4C: Updated 1 output(s) txid` - Txid reconciliation worked
+- `🗑️ Phase 4C: Deleted 1 output(s)` - Cleanup on broadcast failure worked
+
+Both tables now stay in sync for new transactions. Historical discrepancy exists for pre-Phase 4C data but will resolve as old UTXOs are spent.
+
+**Note:** During testing, discovered 17 stale 'unproven' transactions forming broken chains. These were cleaned up with:
+```sql
+UPDATE transactions
+SET new_status = 'failed', broadcast_status = 'failed', failed_at = strftime('%s', 'now')
+WHERE new_status = 'unproven';
+```
+**TODO (post-Phase 4):** Add staleness detection to auto-mark old unproven transactions as failed.
+
+#### Phase 4D: Cutover to Outputs Table
+
+**Status: IN PROGRESS** (2026-02-05)
+
+**Goal:** Switch read paths from `utxos` to `outputs` as the source of truth.
+
+**Changes Required:**
+
+| Location | Current (utxos) | New (outputs) | Status |
+|----------|-----------------|---------------|--------|
+| `get_balance` handler | `utxo_repo.calculate_balance(address_ids)` | `output_repo.calculate_balance(user_id)` | ✅ Done |
+| `createAction` UTXO selection | `utxo_repo.get_unspent_by_addresses(address_ids)` | `output_repo.get_spendable_by_user(user_id)` | ✅ Done |
+| `createAction` re-read under lock | `utxo_repo.get_unspent_by_addresses(address_ids)` | `output_repo.get_spendable_by_user(user_id)` | ✅ Done |
+| `listOutputs` handler | `utxo_repo.get_unspent_by_basket()` | `output_repo.get_spendable_by_basket()` | ✅ Done |
+| Basket/tag queries | `utxo_repo.get_unspent_by_basket_with_tags()` | `output_repo.get_spendable_by_basket_with_tags()` | ✅ Done |
+| `relinquishOutput` handler | `utxo_repo.get_by_txid_vout()` + `remove_from_basket()` | `output_repo.get_by_txid_vout()` + `remove_from_basket()` | ✅ Done |
+
+**Key Differences:**
+- Uses `user_id` instead of `address_ids[]` for filtering
+- Returns `Output` structs instead of `Utxo` structs
+- Added `output_to_fetcher_utxo()` adapter in `database/helpers.rs` to convert `Output` → `UTXO` format for signing code
+- Added `remove_from_basket()` method to `OutputRepository`
+
+**Verification:**
+- Phase 4D comparison logging: outputs is primary, utxos is secondary
+- Fallback to legacy utxos table if outputs query fails
+- Logs warnings when outputs and utxos counts/balances differ
+
+**Implementation Notes (2026-02-05):**
+1. `output_to_fetcher_utxo()` adapter function handles derivation_prefix/suffix → address_index mapping:
+   - `"2-receive address"` prefix with numeric suffix → positive index
+   - NULL derivation → -1 (master pubkey)
+   - Other prefixes → -2 (BRC-29 custom derivation)
+2. Locking script conversion: `Output.locking_script` (bytes) → hex string via `hex::encode()`
+3. Dual-write maintained: changes to outputs also written to utxos for Phase 4E validation
+
+#### Phase 4E: Cleanup
+
+**Status: COMPLETE** (2026-02-06)
+
+**Goal:** Remove deprecated utxos code after cutover is stable.
+
+**Changes Made:**
+
+| File | Change |
+|------|--------|
+| `src/database/utxo_repo.rs` | **Deleted** - entire file removed |
+| `src/database/models.rs` | Removed `Utxo` struct, updated `Output` documentation |
+| `src/database/mod.rs` | Removed `utxo_repo` module and `Utxo` export (already done in 4D) |
+| `src/database/helpers.rs` | Removed `utxo_to_fetcher_utxo()` function |
+| `src/database/output_repo.rs` | Removed Phase 4C/4D comments, added `get_all_by_user()` for backup |
+| `src/handlers.rs` | Removed all `UtxoRepository` usages (internalizeAction, relinquishOutput, ghost cleanup), removed dead `filter_utxos_by_tags()` function |
+| `src/main.rs` | Removed dual-write cleanup, consolidated to `OutputRepository` only |
+| `src/utxo_sync.rs` | Removed `UtxoRepository`, switched to `OutputRepository` for all sync operations |
+| `src/backup.rs` | Changed from `UtxoRepository` to `OutputRepository` for export |
+| `src/handlers/certificate_handlers.rs` | Removed all `UtxoRepository` usages |
+
+**Result:** The `outputs` table is now the sole source of truth. All deprecated `utxos` table code has been removed. Build passes with only warnings.
+
 ---
 
 ### Phase 5: Labels, Commissions, Supporting Tables
@@ -1100,4 +1274,4 @@ After all 8 phases are complete, the Hodos database will have tables that closel
 
 *End of transition plan. Each phase is reviewed and approved individually before implementation begins.*
 
-*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Next: Phase 3 (Multi-User Foundation).*
+*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Phase 3 completed 2026-02-05. Phase 4 completed 2026-02-06. Next: Phase 5 (Labels, Commissions, Supporting Tables).*

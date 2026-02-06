@@ -40,23 +40,42 @@ pub struct Address {
     pub created_at: i64,  // Unix timestamp
 }
 
-/// UTXO model matching the `utxos` table
+/// Output model matching the `outputs` table (V18).
+/// Wallet-toolbox compatible schema for tracking unspent transaction outputs.
+///
+/// Key fields:
+/// - `spendable` - True if output is available to spend
+/// - `spent_by` - FK to transactions.id when spent
+/// - `derivation_prefix`/`derivation_suffix` - BRC-43 key derivation path
+/// - `transaction_id` - FK to creating transaction
+/// - `user_id` - FK for multi-user support
 #[derive(Debug, Clone)]
-pub struct Utxo {
-    pub id: Option<i64>,  // None for new UTXOs, Some(id) for existing
-    pub address_id: Option<i64>,  // References addresses(id), nullable for basket outputs
+pub struct Output {
+    pub output_id: Option<i64>,  // None for new outputs, Some(id) for existing
+    pub user_id: i64,  // References users(userId), required
+    pub transaction_id: Option<i64>,  // References transactions(id), the tx that created this output
     pub basket_id: Option<i64>,  // References baskets(id), nullable
-    pub txid: String,
-    pub vout: i32,
-    pub satoshis: i64,
-    pub script: String,  // Hex-encoded locking script
-    pub first_seen: i64,  // Unix timestamp
-    pub last_updated: i64,  // Unix timestamp
-    pub is_spent: bool,
-    pub spent_txid: Option<String>,
-    pub spent_at: Option<i64>,  // Unix timestamp
-    pub custom_instructions: Option<String>,  // BRC-29 custom instructions (added in v5)
-    pub output_description: Option<String>,  // BRC-100 output description (added in v14)
+    pub spendable: bool,  // True if available to spend (inverse of is_spent)
+    pub change: bool,  // True if this is a change output
+    pub vout: i32,  // Output index in transaction
+    pub satoshis: i64,  // Output value
+    pub provided_by: String,  // Who provided: "you", "them", "dojo", etc.
+    pub purpose: String,  // Purpose description
+    pub output_type: String,  // Type of output (renamed from 'type' which is reserved)
+    pub output_description: Option<String>,  // BRC-100 output description
+    pub txid: Option<String>,  // Transaction ID (denormalized for queries)
+    pub sender_identity_key: Option<String>,  // For received outputs, sender's identity key
+    pub derivation_prefix: Option<String>,  // BRC-43 invoice prefix (e.g., "2-receive address")
+    pub derivation_suffix: Option<String>,  // BRC-43 invoice suffix (e.g., "0", "1")
+    pub custom_instructions: Option<String>,  // BRC-29 custom instructions JSON
+    pub spent_by: Option<i64>,  // References transactions(id), the tx that spent this output
+    pub sequence_number: Option<i64>,  // For ordering
+    pub spending_description: Option<String>,  // Description of spending transaction
+    pub script_length: Option<i32>,  // Length of locking script
+    pub script_offset: Option<i32>,  // Offset in raw transaction (for BEEF)
+    pub locking_script: Option<Vec<u8>>,  // Raw locking script bytes
+    pub created_at: i64,  // Unix timestamp
+    pub updated_at: i64,  // Unix timestamp
 }
 
 /// Parent transaction model matching the `parent_transactions` table

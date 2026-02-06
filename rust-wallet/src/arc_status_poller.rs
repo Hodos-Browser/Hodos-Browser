@@ -46,12 +46,27 @@ pub fn start_arc_status_poller(db: Arc<Mutex<WalletDatabase>>) {
     });
 }
 
+/// Timeout for transactions WE broadcast (unproven/sending) - 6 hours
+const UNPROVEN_TIMEOUT_SECS: i64 = 6 * 60 * 60;
+
+/// Timeout for transactions the APP broadcasts (nosend) - 48 hours
+/// Longer because we don't control when the app submits to overlay
+const NOSEND_TIMEOUT_SECS: i64 = 48 * 60 * 60;
+
+/// Transaction info for polling - includes status and age for timeout logic
+struct PendingTxInfo {
+    txid: String,
+    new_status: String,
+    age_secs: i64,
+}
+
 /// Poll ARC for pending broadcast transactions
 ///
 /// Returns the number of transactions that were confirmed this cycle.
 async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<usize, String> {
-    // Step 1: Get txids with new_status in ('sending', 'unproven') — these need confirmation checking
-    let pending_txids = {
+    // Step 1: Get txids with new_status in ('sending', 'unproven', 'nosend') — these need confirmation checking
+    // Note: All DB operations must complete before any .await to satisfy Send requirements
+    let pending_txs: Vec<PendingTxInfo> = {
         let db_guard = db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
         let conn = db_guard.connection();
 
@@ -63,7 +78,10 @@ async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<us
         ).unwrap_or(false);
 
         let query = if has_new_status {
-            "SELECT txid FROM transactions WHERE new_status IN ('sending', 'unproven') ORDER BY timestamp DESC LIMIT ?1"
+            "SELECT txid, new_status, (strftime('%s', 'now') - timestamp) as age_secs
+             FROM transactions
+             WHERE new_status IN ('sending', 'unproven', 'nosend')
+             ORDER BY timestamp DESC LIMIT ?1"
         } else {
             // Fallback to broadcast_status for pre-v15 databases
             let column_exists: bool = conn.query_row(
@@ -75,28 +93,36 @@ async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<us
             if !column_exists {
                 return Ok(0);
             }
-            "SELECT txid FROM transactions WHERE broadcast_status = 'broadcast' ORDER BY timestamp DESC LIMIT ?1"
+            "SELECT txid, 'unproven' as new_status, (strftime('%s', 'now') - timestamp) as age_secs
+             FROM transactions
+             WHERE broadcast_status = 'broadcast'
+             ORDER BY timestamp DESC LIMIT ?1"
         };
 
         let mut stmt = conn.prepare(query)
             .map_err(|e| format!("SQL prepare error: {}", e))?;
 
-        let txids: Vec<String> = stmt.query_map(
+        let rows = stmt.query_map(
             rusqlite::params![MAX_POLL_BATCH as i64],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("SQL query error: {}", e))?
-        .filter_map(|r| r.ok())
-        .collect();
+            |row| Ok(PendingTxInfo {
+                txid: row.get(0)?,
+                new_status: row.get(1)?,
+                age_secs: row.get(2)?,
+            }),
+        ).map_err(|e| format!("SQL query error: {}", e))?;
 
-        txids
-    };
+        rows.filter_map(|r| r.ok()).collect()
+    }; // db_guard and stmt dropped here, before any .await
 
-    if pending_txids.is_empty() {
+    poll_pending_transactions_inner(db, pending_txs).await
+}
+
+async fn poll_pending_transactions_inner(db: &Arc<Mutex<WalletDatabase>>, pending_txs: Vec<PendingTxInfo>) -> Result<usize, String> {
+    if pending_txs.is_empty() {
         return Ok(0);
     }
 
-    info!("🔍 ARC poller: checking {} pending transactions...", pending_txids.len());
+    info!("🔍 ARC poller: checking {} pending transactions...", pending_txs.len());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -105,7 +131,12 @@ async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<us
 
     let mut confirmed_count = 0;
 
-    for txid in &pending_txids {
+    for tx_info in &pending_txs {
+        let txid = &tx_info.txid;
+        let is_nosend = tx_info.new_status == "nosend";
+        let timeout_secs = if is_nosend { NOSEND_TIMEOUT_SECS } else { UNPROVEN_TIMEOUT_SECS };
+        let is_timed_out = tx_info.age_secs > timeout_secs;
+
         // Check if cache_sync (or another service) already created a proven_txs record
         // for this transaction. If so, update statuses without querying ARC.
         let already_proven = {
@@ -214,7 +245,69 @@ async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<us
                     "SEEN_ON_NETWORK" | "SEEN_IN_ORPHAN_MEMPOOL" | "ANNOUNCED_TO_NETWORK"
                     | "REQUESTED_BY_NETWORK" | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK"
                     | "STORED" => {
-                        // Still pending - normal, just continue
+                        // ARC says still in mempool, but if it's been more than 30 mins,
+                        // verify with WhatsOnChain since ARC data may be stale
+                        const MEMPOOL_VERIFY_THRESHOLD_SECS: i64 = 30 * 60; // 30 minutes
+
+                        if tx_info.age_secs > MEMPOOL_VERIFY_THRESHOLD_SECS {
+                            let mins = tx_info.age_secs / 60;
+                            info!("   ⏳ {} ARC says: {} but {} mins old - verifying on WhatsOnChain...",
+                                  &txid[..std::cmp::min(16, txid.len())], status, mins);
+
+                            // Verify with WhatsOnChain - ARC might have stale data
+                            match check_whatsonchain_confirmation(&client, txid).await {
+                                Ok(Some((confirmations, block_height))) => {
+                                    if confirmations > 0 {
+                                        info!("   ⛏️  {} is actually CONFIRMED on WhatsOnChain ({} confirmations)!",
+                                              &txid[..std::cmp::min(16, txid.len())], confirmations);
+
+                                        // Fetch merkle proof and create proven_txs record
+                                        match fetch_and_store_woc_proof(db, &client, txid, block_height).await {
+                                            Ok(proven_tx_id) => {
+                                                info!("   ✅ Created proven_txs record {} from WhatsOnChain", proven_tx_id);
+                                            }
+                                            Err(e) => {
+                                                warn!("   ⚠️  Failed to fetch/store WoC proof for {}: {}", txid, e);
+                                            }
+                                        }
+
+                                        // Update transaction status
+                                        let db_guard = match db.lock() {
+                                            Ok(g) => g,
+                                            Err(e) => {
+                                                warn!("   ⚠️  Failed to lock DB: {}", e);
+                                                continue;
+                                            }
+                                        };
+                                        let conn = db_guard.connection();
+                                        let tx_repo = TransactionRepository::new(conn);
+                                        if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
+                                            warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                                        }
+                                        if let Err(e) = tx_repo.update_confirmations(txid, confirmations, block_height) {
+                                            warn!("   ⚠️  Failed to update confirmations: {}", e);
+                                        }
+
+                                        confirmed_count += 1;
+                                    } else {
+                                        // WhatsOnChain also says unconfirmed - ARC is correct
+                                        info!("   ⏳ {} confirmed unconfirmed on both ARC and WhatsOnChain ({} mins)",
+                                              &txid[..std::cmp::min(16, txid.len())], mins);
+                                    }
+                                }
+                                Ok(None) => {
+                                    // Not on WhatsOnChain - strange since ARC has it
+                                    warn!("   ⚠️  {} on ARC but not WhatsOnChain - will retry later",
+                                          &txid[..std::cmp::min(16, txid.len())]);
+                                }
+                                Err(e) => {
+                                    warn!("   ⚠️  WhatsOnChain verification failed for {}: {}", txid, e);
+                                }
+                            }
+                        } else {
+                            // Recent transaction - trust ARC's mempool status
+                            info!("   ⏳ {} status: {} (in mempool)", &txid[..std::cmp::min(16, txid.len())], status);
+                        }
                     }
                     "DOUBLE_SPEND_ATTEMPTED" | "REJECTED" => {
                         warn!("   ⚠️  {} has status: {} - marking as failed", txid, status);
@@ -236,8 +329,86 @@ async fn poll_pending_transactions(db: &Arc<Mutex<WalletDatabase>>) -> Result<us
                 }
             }
             Err(e) => {
-                // Don't spam logs for expected 404s (tx not yet propagated to ARC)
-                if !e.contains("404") {
+                // ARC doesn't know about this transaction - fall back to WhatsOnChain
+                if e.contains("404") {
+                    info!("   ℹ️  {} not found in ARC, checking WhatsOnChain...", &txid[..std::cmp::min(16, txid.len())]);
+
+                    // Fall back to WhatsOnChain for confirmation status
+                    match check_whatsonchain_confirmation(&client, txid).await {
+                        Ok(Some((confirmations, block_height))) => {
+                            if confirmations > 0 {
+                                info!("   ⛏️  {} is CONFIRMED on WhatsOnChain ({} confirmations, block {})",
+                                      &txid[..std::cmp::min(16, txid.len())], confirmations, block_height.unwrap_or(0));
+
+                                // Fetch merkle proof from WhatsOnChain and create proven_txs record
+                                match fetch_and_store_woc_proof(db, &client, txid, block_height).await {
+                                    Ok(proven_tx_id) => {
+                                        info!("   ✅ Created proven_txs record {} from WhatsOnChain", proven_tx_id);
+                                    }
+                                    Err(e) => {
+                                        warn!("   ⚠️  Failed to fetch/store WoC proof for {}: {}", txid, e);
+                                    }
+                                }
+
+                                // Update transaction status
+                                let db_guard = match db.lock() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        warn!("   ⚠️  Failed to lock DB: {}", e);
+                                        continue;
+                                    }
+                                };
+                                let conn = db_guard.connection();
+                                let tx_repo = TransactionRepository::new(conn);
+                                if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
+                                    warn!("   ⚠️  Failed to update broadcast_status for {}: {}", txid, e);
+                                }
+                                if let Err(e) = tx_repo.update_confirmations(txid, confirmations, block_height) {
+                                    warn!("   ⚠️  Failed to update confirmations for {}: {}", txid, e);
+                                }
+
+                                confirmed_count += 1;
+                            }
+                            // else: 0 confirmations means still in mempool - continue waiting
+                        }
+                        Ok(None) => {
+                            // Transaction not found on WhatsOnChain either
+                            // This could mean it was never broadcast or was dropped from mempool
+                            if is_timed_out {
+                                let hours = tx_info.age_secs / 3600;
+                                warn!("   ⏰ {} not found anywhere after {} hours - marking as FAILED",
+                                      &txid[..std::cmp::min(16, txid.len())], hours);
+
+                                // Mark as failed so UTXOs can be reclaimed
+                                let db_guard = match db.lock() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        warn!("   ⚠️  Failed to lock DB: {}", e);
+                                        continue;
+                                    }
+                                };
+                                let conn = db_guard.connection();
+                                let tx_repo = TransactionRepository::new(conn);
+                                if let Err(e) = tx_repo.update_broadcast_status(txid, "failed") {
+                                    warn!("   ⚠️  Failed to update status to failed: {}", e);
+                                } else {
+                                    info!("   ❌ {} marked as failed (timeout: {} was {} hours old)",
+                                          &txid[..std::cmp::min(16, txid.len())],
+                                          if is_nosend { "nosend 48h" } else { "unproven 6h" },
+                                          hours);
+                                }
+                            } else {
+                                let hours = tx_info.age_secs / 3600;
+                                let timeout_hours = timeout_secs / 3600;
+                                info!("   ⚠️  {} not found on WhatsOnChain either ({} hours old, timeout at {}h)",
+                                      &txid[..std::cmp::min(16, txid.len())], hours, timeout_hours);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("   ⚠️  WhatsOnChain fallback failed for {}: {}", txid, e);
+                        }
+                    }
+                } else {
                     warn!("   ⚠️  Failed to query ARC for {}: {}", txid, e);
                 }
             }
@@ -312,6 +483,119 @@ fn create_proven_tx_from_arc(
             req.proven_tx_req_id,
             "completed",
             &format!("Proof acquired from ARC at height {}", height),
+        );
+    }
+
+    Ok(proven_tx_id)
+}
+
+/// Check WhatsOnChain for transaction confirmation status
+///
+/// Returns Ok(Some((confirmations, block_height))) if found, Ok(None) if not found (404)
+async fn check_whatsonchain_confirmation(
+    client: &reqwest::Client,
+    txid: &str,
+) -> Result<Option<(u32, Option<u32>)>, String> {
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+
+    let response = client.get(&url)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    let status = response.status();
+
+    if status.as_u16() == 404 {
+        // Transaction not found
+        return Ok(None);
+    }
+
+    if !status.is_success() {
+        return Err(format!("WhatsOnChain returned status: {}", status));
+    }
+
+    let json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let confirmations = json["confirmations"].as_u64().unwrap_or(0) as u32;
+    let block_height = json["blockheight"].as_u64().map(|h| h as u32);
+
+    Ok(Some((confirmations, block_height)))
+}
+
+/// Fetch merkle proof from WhatsOnChain and store as proven_txs record
+async fn fetch_and_store_woc_proof(
+    db: &Arc<Mutex<WalletDatabase>>,
+    client: &reqwest::Client,
+    txid: &str,
+    block_height: Option<u32>,
+) -> Result<i64, String> {
+    // Fetch TSC merkle proof from WhatsOnChain
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", txid);
+
+    let response = client.get(&url)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error fetching proof: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("WhatsOnChain proof API returned status: {}", response.status()));
+    }
+
+    let tsc_json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    // Extract proof data from TSC format
+    let height = tsc_json["height"].as_u64()
+        .or_else(|| block_height.map(|h| h as u64))
+        .ok_or("Missing height in TSC proof")? as u32;
+    let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
+    let block_hash = tsc_json["target"].as_str().unwrap_or("");
+
+    // Serialize TSC JSON to bytes for storage
+    let merkle_path_bytes = serde_json::to_vec(&tsc_json)
+        .map_err(|e| format!("Failed to serialize TSC JSON: {}", e))?;
+
+    // Get raw_tx from transactions table
+    let db_guard = db.lock().map_err(|e| format!("Failed to lock DB: {}", e))?;
+    let conn = db_guard.connection();
+
+    let raw_tx_bytes: Vec<u8> = {
+        let tx_repo = TransactionRepository::new(conn);
+        match tx_repo.get_by_txid(txid) {
+            Ok(Some(stored)) => {
+                hex::decode(&stored.raw_tx).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // Create immutable proven_txs record
+    let proven_tx_repo = ProvenTxRepository::new(conn);
+    let proven_tx_id = proven_tx_repo.insert_or_get(
+        txid, height, tx_index,
+        &merkle_path_bytes, &raw_tx_bytes,
+        block_hash, "",
+    ).map_err(|e| format!("Failed to insert proven_tx: {}", e))?;
+
+    // Link transaction to proven_txs
+    if let Err(e) = proven_tx_repo.link_transaction(txid, proven_tx_id) {
+        warn!("   ⚠️  Failed to link transaction {} to proven_tx {}: {}", txid, proven_tx_id, e);
+    }
+
+    // Update proven_tx_reqs if one exists for this txid
+    let req_repo = ProvenTxReqRepository::new(conn);
+    if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
+        let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
+        let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
+        let _ = req_repo.add_history_note(
+            req.proven_tx_req_id,
+            "completed",
+            &format!("Proof acquired from WhatsOnChain at height {}", height),
         );
     }
 
