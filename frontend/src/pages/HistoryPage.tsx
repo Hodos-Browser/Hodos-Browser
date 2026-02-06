@@ -5,12 +5,15 @@ import {
   Cookie,
   Storage,
 } from '@mui/icons-material';
+import { useSearchParams } from 'react-router-dom';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { CookiesPanel } from '../components/CookiesPanel';
 import { CachePanel } from '../components/CachePanel';
 
 export function HistoryPage() {
-  const [tabIndex, setTabIndex] = useState(0);
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') === 'cookies' ? 1 : searchParams.get('tab') === 'cache' ? 2 : 0;
+  const [tabIndex, setTabIndex] = useState(initialTab);
 
   return (
     <Box
