@@ -16,15 +16,19 @@ mod beef;  // NEW: BEEF parser module
 mod beef_helpers;  // NEW: BEEF building helpers for listOutputs
 // mod beef_ancestors;  // Disabled: recursive ancestor collection replaced by original single-level BEEF building
 mod database;  // NEW: Database module
-mod utxo_sync;  // NEW: Background UTXO sync service
+#[allow(dead_code)]
+mod utxo_sync;  // DEPRECATED (Phase 6I): Replaced by wallet_sync handler + monitor
 mod cache_errors;  // NEW: Unified error types for caching
 mod cache_helpers;  // NEW: Helper functions for cache operations
-mod cache_sync;  // NEW: Background cache sync service
+#[allow(dead_code)]
+mod cache_sync;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
 mod balance_cache;  // NEW: In-memory balance cache
 mod backup;  // NEW: Database backup and restore utilities
 mod recovery;  // NEW: Wallet recovery from mnemonic
-mod arc_status_poller;  // NEW: ARC transaction status poller
+#[allow(dead_code)]
+mod arc_status_poller;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
 mod fee_rate_cache;  // NEW: Dynamic fee rate from ARC policy
+mod monitor;  // Phase 6: Monitor pattern (background task scheduler)
 mod script;  // NEW: Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // NEW: Certificate management (BRC-52)
 // mod utxo_validation;  // Disabled: on-chain UTXO validation removed (caused false positives)
@@ -252,9 +256,8 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // Clone database for background services (before moving into app_state)
-    let database_for_sync = database.clone();
-    let database_for_arc_poller = database.clone();
+    // NOTE: Old background service clones removed in Phase 6I.
+    // All background work is now handled by the Monitor pattern.
     let current_user_id = default_user_id;
 
     // Initialize balance cache
@@ -300,6 +303,7 @@ async fn main() -> std::io::Result<()> {
     println!("   POST /.well-known/auth");
     println!("   GET  /wallet/status");
     println!("   GET  /wallet/balance");
+    println!("   POST /wallet/sync");
     println!();
     println!("📬 BRC-33 Message Relay endpoints:");
     println!("   POST /sendMessage");
@@ -319,26 +323,11 @@ async fn main() -> std::io::Result<()> {
     println!("✅ Server ready - CEF browser can now connect!");
     println!();
 
-    // Background UTXO sync — disabled for now, will be redesigned in Phase 6 (Monitor pattern)
-    // with manual trigger for the user instead of automatic background polling.
-    // utxo_sync::start_background_sync(database_for_sync);
-    // println!("🔄 Background UTXO sync enabled");
-    let _ = database_for_sync; // suppress unused variable warning
-    println!();
-
-    // Start background cache sync service
-    println!("🔄 Starting background BEEF cache sync service...");
-    let app_state_for_cache = app_state.clone();
-    tokio::spawn(async move {
-        cache_sync::start_cache_sync_service(app_state_for_cache).await;
-    });
-    println!("   ✅ Cache sync will run every 10 minutes");
-    println!();
-
-    // Start ARC status poller (checks broadcast transactions for confirmation)
-    println!("🔄 Starting ARC status poller...");
-    arc_status_poller::start_arc_status_poller(database_for_arc_poller);
-    println!("   ✅ ARC poller will check every {} seconds", arc_status_poller::POLL_INTERVAL_SECONDS);
+    // Start Monitor — the sole background task scheduler (Phase 6 complete)
+    // Replaces: arc_status_poller, cache_sync, utxo_sync background services
+    println!("🔄 Starting Monitor (background task scheduler)...");
+    monitor::Monitor::start(app_state.clone());
+    println!("   ✅ Monitor started with 6 tasks");
     println!();
 
     // Start HTTP server
@@ -424,6 +413,7 @@ async fn main() -> std::io::Result<()> {
             // Custom wallet endpoints
             .route("/wallet/status", web::get().to(handlers::wallet_status))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
+            .route("/wallet/sync", web::post().to(handlers::wallet_sync))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
             .route("/wallet/addresses", web::get().to(handlers::get_all_addresses))
             .route("/wallet/address/current", web::get().to(handlers::get_current_address))

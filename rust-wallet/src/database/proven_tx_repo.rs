@@ -122,20 +122,39 @@ impl<'a> ProvenTxRepository<'a> {
     /// Returns the deserialized merkle_path BLOB as a serde_json::Value containing:
     /// { "index": u64, "target": String, "nodes": [String], "height": u32 }
     ///
-    /// This replaces MerkleProofRepository::get_by_parent_txid() + to_tsc_json().
+    /// If the BLOB JSON is missing the "height" field (legacy data from old code paths
+    /// that stored raw TSC without height), the height is injected from the proven_txs
+    /// `height` column which always has the correct value.
     pub fn get_merkle_proof_as_tsc(&self, txid: &str) -> CacheResult<Option<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT merkle_path FROM proven_txs WHERE txid = ?1"
+            "SELECT merkle_path, height FROM proven_txs WHERE txid = ?1"
         )?;
 
         let result = stmt.query_row(rusqlite::params![txid], |row| {
             let blob: Vec<u8> = row.get(0)?;
-            Ok(blob)
+            let height: i64 = row.get(1)?;
+            Ok((blob, height))
         });
 
         match result {
-            Ok(blob) => {
-                let tsc: serde_json::Value = serde_json::from_slice(&blob)?;
+            Ok((blob, height)) => {
+                let mut tsc: serde_json::Value = serde_json::from_slice(&blob)?;
+                // WoC sometimes returns TSC proofs as JSON arrays — normalize to object
+                if tsc.is_array() {
+                    if let Some(first) = tsc.as_array().and_then(|a| a.first()).cloned() {
+                        log::info!("   ℹ️  Normalized array TSC proof to object for {}", txid);
+                        tsc = first;
+                    }
+                }
+                // Inject height from column if missing from the BLOB JSON.
+                // Standard TSC format (BRC-61) doesn't include height, but BEEF
+                // building requires it for BUMP construction.
+                if tsc.get("height").and_then(|h| h.as_u64()).is_none() {
+                    if let Some(obj) = tsc.as_object_mut() {
+                        obj.insert("height".to_string(), serde_json::json!(height as u64));
+                        log::info!("   ℹ️  Injected height {} into TSC proof for {}", height, txid);
+                    }
+                }
                 Ok(Some(tsc))
             },
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),

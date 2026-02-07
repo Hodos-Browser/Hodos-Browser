@@ -645,7 +645,7 @@ The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity
 
 ---
 
-**Last Updated**: February 4, 2026
+**Last Updated**: February 7, 2026
 
 ---
 
@@ -800,16 +800,70 @@ Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` c
 - 128 transaction-label mappings preserved
 - 2 empty labels skipped
 
+### Phase 6: Monitor Pattern — COMPLETED (2026-02-07)
+
+**Migrations V20-V22** — Replaced ad-hoc background services (arc_status_poller, cache_sync, utxo_sync) with a structured Monitor pattern. Added on-demand UTXO sync endpoint with reconciliation. Added broadcast retry with error classification.
+
+#### Sub-phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 6A | Migration V20 (monitor_events table) + Monitor module skeleton | Done |
+| 6B | TaskCheckForProofs (replaces arc_status_poller + cache_sync) | Done |
+| 6C | TaskFailAbandoned + TaskUnFail + TaskReviewStatus | Done |
+| 6D | TaskSendWaiting (crash recovery for stuck `sending` txs) | Done |
+| 6E | TaskPurge (cleanup old events + completed proof requests) | Done |
+| 6F | Broadcast retry with error classification (3 attempts/broadcaster, exponential backoff) | Done |
+| 6G | POST /wallet/sync endpoint + 10-day pending address expiry (was 24h) | Done |
+| 6H | Balance cache invalidation on all output-modifying operations | Done |
+| 6I | Old services deprecated, Monitor is sole background scheduler | Done |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/monitor/mod.rs` | Monitor scheduler (30s tick loop, 6 tasks, event logging) |
+| `rust-wallet/src/monitor/task_check_for_proofs.rs` | ARC + WoC proof acquisition with orphan mempool handling |
+| `rust-wallet/src/monitor/task_send_waiting.rs` | Crash recovery with output state verification |
+| `rust-wallet/src/monitor/task_fail_abandoned.rs` | Abandoned tx cleanup with ghost output deletion |
+| `rust-wallet/src/monitor/task_unfail.rs` | False failure recovery (30-min window, on-chain check) |
+| `rust-wallet/src/monitor/task_review_status.rs` | Status consistency enforcement |
+| `rust-wallet/src/monitor/task_purge.rs` | Old data cleanup (7d events, 30d proof requests) |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/main.rs` | Start Monitor, register `/wallet/sync` route, deprecate old services |
+| `rust-wallet/src/handlers.rs` | Broadcast retry with error classification, `wallet_sync` endpoint with UTXO reconciliation, ARC txid verification, `is_fatal_broadcast_error()` |
+| `rust-wallet/src/handlers/certificate_handlers.rs` | Added balance cache invalidation |
+| `rust-wallet/src/database/migrations.rs` | V20 (monitor_events), V21 (patch proven_txs height), V22 (fix array BLOBs) |
+| `rust-wallet/src/database/connection.rs` | V20-V22 migration runners |
+| `rust-wallet/src/database/proven_tx_repo.rs` | Array normalization in `get_merkle_proof_as_tsc()`, height injection from column |
+| `rust-wallet/src/database/transaction_repo.rs` | FK constraint fix in `update_txid()` (detach outputs before DELETE) |
+
+#### Bug Fixes During Testing
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| "Missing height in TSC proof" | WoC stores TSC proofs without `height` field | V21 patches BLOBs; runtime injects from column |
+| Array-format BLOBs | WoC returns `[{...}]`, `as_object_mut()` silently fails on arrays | V22 normalizes arrays; runtime handles both formats |
+| FK constraint in update_txid | Step 3 linked outputs to transaction_id, broke DELETE in update_txid | Detach outputs before DELETE, re-link after INSERT |
+| ARC txid mismatch | Broken BEEF (missing BUMPs) caused ARC to return parent txid | Fixed BUMP building; added mismatch warning logging |
+| SEEN_IN_ORPHAN_MEMPOOL | Treated same as normal mempool status | Separate handling: 30-min timeout + WoC verification |
+| Missing UTXO reconciliation | Phase 6I removed utxo_sync but wallet_sync lacked reconciliation | Added `reconcile_for_derivation()` to wallet_sync handler |
+| Inflated balance (ghost outputs) | Outputs spent on-chain but still marked spendable in DB | Reconciliation detects and marks externally-spent outputs |
+
 ### Remaining Phases (Pending)
 
 | Phase | Goal | Migration |
 |-------|------|-----------|
-| 6 | Monitor Pattern (background service restructure) | V20 |
-| 7 | Per-Output Key Derivation | V21 |
-| 8 | Cleanup (deprecated table removal) | V22 |
+| 7 | Per-Output Key Derivation | TBD |
+| 8 | Cleanup (deprecated table removal) | TBD |
 
 ### Known Issues / Future Work
 
-- **UTXO sync disabled**: Background UTXO sync commented out in `main.rs`. Will be redesigned as manual trigger in Phase 6 (Monitor pattern)
-- **Staleness timeout needed**: ARC poller should auto-mark transactions as failed if unproven for >7 days. Deferred to Phase 6
+- **Frontend sync button**: `POST /wallet/sync` endpoint exists but frontend UI trigger not yet implemented
+- **Frontend balance polling**: `useBalance.ts` has polling commented out — re-enable in frontend phase
 - **Old tables preserved**: `merkle_proofs`, `transaction_labels`, `utxos`, and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8
+- **Deprecated modules preserved**: `arc_status_poller.rs`, `cache_sync.rs`, `utxo_sync.rs` marked `#[allow(dead_code)]` — will be deleted in Phase 8

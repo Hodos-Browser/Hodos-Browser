@@ -2387,6 +2387,182 @@ pub fn create_schema_v19(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Create schema version 20 (Monitor Pattern - Phase 6A)
+///
+/// Creates the monitor_events table for background task event logging.
+pub fn create_schema_v20(conn: &Connection) -> Result<()> {
+    info!("=== Migration v20: Monitor Events Table (Phase 6A) ===");
+
+    // Step 1: Create monitor_events table for task event logging
+    info!("   Step 1: Creating monitor_events table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS monitor_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT NOT NULL,
+            details TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_monitor_events_event ON monitor_events(event)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_monitor_events_created ON monitor_events(created_at)",
+        [],
+    )?;
+    info!("   ✅ Created monitor_events table with indexes");
+
+    info!("   ✅ Schema version 20 migration complete");
+    Ok(())
+}
+
+/// Migration v21: Repair proven_txs merkle_path BLOBs
+///
+/// Old code paths (cache_sync, some WoC fetches) stored TSC JSON in the
+/// merkle_path BLOB without the "height" field. The standard TSC format
+/// (BRC-61) doesn't include height, but our BEEF builder requires it for
+/// BUMP construction. The height IS correctly stored in the proven_txs.height
+/// column — this migration injects it into the BLOB JSON where missing.
+pub fn create_schema_v21(conn: &Connection) -> Result<()> {
+    info!("=== Migration v21: Repair proven_txs merkle_path height ===");
+
+    // Read all proven_txs rows
+    let mut stmt = conn.prepare(
+        "SELECT provenTxId, height, merkle_path FROM proven_txs"
+    )?;
+
+    let rows: Vec<(i64, i64, Vec<u8>)> = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?.filter_map(|r| r.ok()).collect();
+
+    let mut patched = 0;
+    for (id, height, blob) in &rows {
+        let tsc: serde_json::Value = match serde_json::from_slice(blob) {
+            Ok(v) => v,
+            Err(_) => continue, // skip corrupt BLOBs
+        };
+
+        // Check if height is missing or not a valid number
+        if tsc.get("height").and_then(|h| h.as_u64()).is_some() {
+            continue; // already has valid height
+        }
+
+        // Inject height from the column
+        let mut patched_tsc = tsc.clone();
+        if let Some(obj) = patched_tsc.as_object_mut() {
+            obj.insert("height".to_string(), serde_json::json!(*height as u64));
+        }
+
+        let new_blob = match serde_json::to_vec(&patched_tsc) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        match conn.execute(
+            "UPDATE proven_txs SET merkle_path = ?1 WHERE provenTxId = ?2",
+            rusqlite::params![new_blob, id],
+        ) {
+            Ok(_) => patched += 1,
+            Err(e) => warn!("   ⚠️  Failed to patch proven_tx {}: {}", id, e),
+        }
+    }
+
+    if patched > 0 {
+        info!("   ✅ Patched {} proven_txs records with missing height", patched);
+    } else {
+        info!("   ✅ All proven_txs records already have height in BLOB");
+    }
+
+    info!("   ✅ Schema version 21 migration complete");
+    Ok(())
+}
+
+pub fn create_schema_v22(conn: &Connection) -> Result<()> {
+    info!("=== Migration v22: Fix array-format proven_txs merkle_path BLOBs ===");
+
+    let mut stmt = conn.prepare(
+        "SELECT provenTxId, height, merkle_path FROM proven_txs"
+    )?;
+
+    let rows: Vec<(i64, i64, Vec<u8>)> = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?.filter_map(|r| r.ok()).collect();
+
+    let mut patched = 0;
+    for (id, height, blob) in &rows {
+        let tsc: serde_json::Value = match serde_json::from_slice(blob) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Normalize array to object (WoC returns [{...}] sometimes)
+        let mut obj_tsc = if tsc.is_array() {
+            match tsc.as_array().and_then(|a| a.first()).cloned() {
+                Some(first) if first.is_object() => first,
+                _ => continue,
+            }
+        } else if tsc.is_object() {
+            tsc.clone()
+        } else {
+            continue;
+        };
+
+        let was_array = tsc.is_array();
+
+        // Inject height if missing
+        let needs_height = obj_tsc.get("height").and_then(|h| h.as_u64()).is_none();
+        if needs_height {
+            if let Some(obj) = obj_tsc.as_object_mut() {
+                obj.insert("height".to_string(), serde_json::json!(*height as u64));
+            }
+        }
+
+        if !was_array && !needs_height {
+            continue; // Already correct
+        }
+
+        let new_blob = match serde_json::to_vec(&obj_tsc) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        match conn.execute(
+            "UPDATE proven_txs SET merkle_path = ?1 WHERE provenTxId = ?2",
+            rusqlite::params![new_blob, id],
+        ) {
+            Ok(_) => {
+                if was_array {
+                    info!("   ✅ Fixed array-format BLOB for proven_tx {} (height={})", id, height);
+                } else {
+                    info!("   ✅ Injected height for proven_tx {} (height={})", id, height);
+                }
+                patched += 1;
+            }
+            Err(e) => warn!("   ⚠️  Failed to patch proven_tx {}: {}", id, e),
+        }
+    }
+
+    if patched > 0 {
+        info!("   ✅ Fixed {} proven_txs records (array format and/or missing height)", patched);
+    } else {
+        info!("   ✅ All proven_txs records already correct");
+    }
+
+    info!("   ✅ Schema version 22 migration complete");
+    Ok(())
+}
+
 /// Migrate data from old transaction_labels table to new tx_labels + tx_labels_map
 ///
 /// The old table has (transaction_id, label) pairs. The new model separates

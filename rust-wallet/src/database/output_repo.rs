@@ -517,6 +517,25 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
+    /// Link outputs to their creating transaction by setting transaction_id.
+    ///
+    /// This is called after the transaction record is saved to the database,
+    /// so that change (and basket) outputs track which transaction created them.
+    /// Without this link, outputs bypass transaction status checks in UTXO selection.
+    pub fn link_outputs_to_transaction(&self, txid: &str, transaction_id: i64) -> Result<usize> {
+        let rows_affected = self.conn.execute(
+            "UPDATE outputs SET transaction_id = ?1 WHERE txid = ?2 AND transaction_id IS NULL",
+            rusqlite::params![transaction_id, txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Linked {} output(s) to transaction_id={} for txid {}",
+                rows_affected, transaction_id, &txid[..std::cmp::min(16, txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Mark an output as spent (Phase 4C dual-write)
     ///
     /// Unlike utxos.spent_txid which stores the txid as text, outputs.spent_by

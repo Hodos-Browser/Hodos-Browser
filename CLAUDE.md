@@ -124,9 +124,10 @@ First-time setup (requires CEF binaries already downloaded):
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | HTTP endpoints: `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, `list_certificates`, `acquire_certificate` |
+| `rust-wallet/src/handlers.rs` | HTTP endpoints: `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, `list_certificates`, `acquire_certificate`, `wallet_sync` |
 | `rust-wallet/src/crypto/` | Modules: `brc42` (`derive_child_private_key`), `brc43` (`InvoiceNumber`), `signing` (`sha256`, `hmac_sha256`), `aesgcm_custom` |
-| `rust-wallet/src/database/` | Repos: `WalletRepository`, `AddressRepository`, `UtxoRepository`, `CertificateRepository`; helpers: `get_master_private_key_from_db` |
+| `rust-wallet/src/database/` | Repos: `WalletRepository`, `AddressRepository`, `OutputRepository`, `CertificateRepository`, `ProvenTxRepository`; helpers: `get_master_private_key_from_db` |
+| `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge` |
 | `cef-native/cef_browser_shell.cpp` | Entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs; class: `Logger` |
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs` |
 | `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing; classes: `DomainVerifier`, `AsyncWalletResourceHandler`; global: `g_pendingAuthRequest` |
@@ -145,10 +146,12 @@ First-time setup (requires CEF binaries already downloaded):
 | BRC-52 | Identity certificate format with selective disclosure |
 | BRC-103/104 | Mutual authentication protocol |
 | BEEF | Background Evaluation Extended Format - atomic transaction format with SPV proofs |
+| BUMP | BRC-74 Binary Merkle Proof format. Used inside BEEF for SPV verification |
 | CEF | Chromium Embedded Framework |
 | ForkID SIGHASH | BSV-specific transaction signing (differs from BTC since 2017 fork) |
 | HD Wallet | Hierarchical Deterministic wallet using BIP39 (mnemonic→seed) and BIP32 (seed→keys). Derivation path: `m/{index}` |
 | UTXO | Unspent Transaction Output |
 | V8 Injection | Adding `window.hodosBrowser` API to JavaScript from C++ |
 | `window.hodosBrowser` | JavaScript API exposed to React for wallet operations |
+| Monitor Pattern | Background task scheduler (`src/monitor/`) with 6 named tasks on configurable intervals. Replaced ad-hoc background services in Phase 6 |
 | Browser Data | History, bookmarks, cookies — stored in C++ layer (`%APPDATA%/HodosBrowser/Default/`), separate from wallet |

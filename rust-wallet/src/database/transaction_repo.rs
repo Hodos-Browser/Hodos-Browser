@@ -297,6 +297,12 @@ impl<'a> TransactionRepository<'a> {
         let mut stmt = self.conn.prepare("SELECT id FROM transactions WHERE txid = ?1")?;
         let old_id: i64 = stmt.query_row(rusqlite::params![&old_txid], |row| row.get(0))?;
 
+        // Detach outputs from old transaction record first (avoids FK constraint on DELETE)
+        self.conn.execute(
+            "UPDATE outputs SET transaction_id = NULL WHERE transaction_id = ?1",
+            rusqlite::params![old_id],
+        )?;
+
         self.conn.execute("DELETE FROM transaction_outputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transaction_inputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transaction_labels WHERE transaction_id = ?1", rusqlite::params![old_id])?;
@@ -306,7 +312,17 @@ impl<'a> TransactionRepository<'a> {
         let mut new_action = old_tx;
         new_action.txid = new_txid.clone();
         new_action.raw_tx = new_raw_tx;
-        self.add_transaction(&new_action)?;
+        let new_id = self.add_transaction(&new_action)?;
+
+        // Re-link detached outputs to the new transaction record.
+        // Match by old txid since output txids haven't been renamed yet.
+        let relinked = self.conn.execute(
+            "UPDATE outputs SET transaction_id = ?1 WHERE transaction_id IS NULL AND txid = ?2",
+            rusqlite::params![new_id, &old_txid],
+        )?;
+        if relinked > 0 {
+            info!("   ✅ Re-linked {} output(s) from transaction {} → {}", relinked, old_id, new_id);
+        }
 
         info!("   ✅ Updated TXID for reference {}: {} → {}", reference_number, old_txid, new_txid);
         Ok(())

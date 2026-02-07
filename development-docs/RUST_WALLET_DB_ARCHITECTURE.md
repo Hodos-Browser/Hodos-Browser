@@ -831,55 +831,42 @@ Based on the [metanet-desktop repository](https://github.com/bsv-blockchain/meta
 
 ---
 
-## ✅ **Implementation Status** (2025-12-02)
+## ✅ **Implementation Status** (2026-02-07)
 
-### **Phase 1: Database Foundation** ✅ COMPLETE
-- ✅ SQLite database initialization
-- ✅ Schema migrations system
-- ✅ 15 tables created (wallets, addresses, baskets, utxos, transactions, etc.)
-- ✅ WAL mode and foreign keys enabled
+### **Database Foundation** ✅ COMPLETE
+- ✅ SQLite database initialization with WAL mode and foreign keys
+- ✅ Schema migrations system (V1-V22)
 - ✅ Database connection management
 
-### **Phase 2: Data Migration** ✅ COMPLETE
-- ✅ JSON to database migration script
-- ✅ wallet.json → wallets + addresses tables
-- ✅ actions.json → transactions + related tables
-- ✅ One-time migration completed successfully
+### **Wallet-Toolbox Alignment** ✅ Phases 1-6 COMPLETE
 
-### **Phase 3: Core Functionality Migration** ✅ COMPLETE
-- ✅ All handlers updated to use database
-- ✅ Removed JSON file dependencies
-- ✅ Wallet creation with mnemonic generation
-- ✅ Address generation and storage
-- ✅ Transaction storage and retrieval
-- ✅ All API endpoints working with database
+| Phase | Migration | Description | Status |
+|-------|-----------|-------------|--------|
+| 1 | V15 | Status consolidation (`new_status` column) | ✅ |
+| 2 | V16 | Proven transaction model (`proven_txs`, `proven_tx_reqs`) | ✅ |
+| 3 | V17 | Multi-user foundation (`users` table, `user_id` FKs) | ✅ |
+| 4 | V18 | Output model transition (`outputs` replaces `utxos`) | ✅ |
+| 5 | V19 | Labels, commissions, supporting tables | ✅ |
+| 6 | V20-V22 | Monitor pattern (background task scheduler) | ✅ |
+| 7 | TBD | Per-output key derivation | Pending |
+| 8 | TBD | Deprecated table removal | Pending |
 
-### **Phase 4: UTXO Management** ✅ COMPLETE
-- ✅ UTXO repository (`utxo_repo.rs`) implemented
-- ✅ UTXO caching in database
-- ✅ Balance calculation from cache
-- ✅ UTXO spending tracking
-- ✅ Change address generation (privacy fix)
-- ⏳ Background sync service (pending)
-- ⏳ Periodic UTXO updates (pending)
+### **Phase 6: Monitor Pattern** ✅ COMPLETE (2026-02-07)
 
-### **Phase 5: BEEF/SPV Caching** ⏳ PENDING
-- ⏳ Parent transaction caching
-- ⏳ Merkle proof caching
-- ⏳ Block header caching
-- ⏳ TSC proof storage
+Replaced ad-hoc background services with a structured Monitor pattern:
+- **V20**: `monitor_events` table for task event logging
+- **V21**: Patch `proven_txs` BLOBs with missing height field
+- **V22**: Fix array-format BLOBs from WhatsOnChain (`[{...}]` → `{...}`)
+- 6 named tasks: TaskCheckForProofs, TaskSendWaiting, TaskFailAbandoned, TaskUnFail, TaskReviewStatus, TaskPurge
+- On-demand UTXO sync via `POST /wallet/sync` with reconciliation
+- Broadcast retry with error classification
+- Balance cache invalidation on all output-modifying operations
 
-### **Current Issues:**
-- 🚨 **CRITICAL**: Transaction error handling - UI shows success when transaction fails
-  - See `CHECKPOINT_TRANSACTION_ERROR_HANDLING.md` for details
-- ⚠️ **Performance**: Wallet is slow - fetching from API on every balance check
-  - Need to discuss optimization strategy (background sync, periodic updates)
+### **Current Table Count**: 22 tables (5 deprecated, kept for rollback safety)
 
 ### **Next Steps:**
-1. **IMMEDIATE**: Fix transaction error handling (see checkpoint doc)
-2. Implement background UTXO sync service
-3. Add periodic UTXO update mechanism
-4. Begin Phase 5: BEEF/SPV caching
+1. Phase 7: Per-output key derivation (eliminate addresses table dependency)
+2. Phase 8: Remove deprecated tables and dead code modules
 
 ---
 
@@ -887,3 +874,4 @@ Based on the [metanet-desktop repository](https://github.com/bsv-blockchain/meta
 - SQLite Documentation: https://www.sqlite.org/docs.html
 - rusqlite Documentation: https://docs.rs/rusqlite/
 - metanet-desktop: https://github.com/bsv-blockchain/metanet-desktop
+- Transition Plan: `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md`

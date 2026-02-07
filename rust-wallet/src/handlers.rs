@@ -1722,10 +1722,13 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
 }
 
 // Wallet balance endpoint
+//
+// Pure DB/cache read — never does API calls. UTXO syncing is the
+// responsibility of POST /wallet/sync (called by frontend or manually).
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
-    // Step 1: Check cache first (fast path)
+    // Check cache first (fast path)
     if let Some(cached_balance) = state.balance_cache.get() {
         log::info!("   ✅ Using cached balance: {} satoshis", cached_balance);
         return HttpResponse::Ok().json(serde_json::json!({
@@ -1735,224 +1738,174 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
 
     log::info!("   🔄 Cache miss - calculating balance from database...");
 
-    // Get all addresses from database
-    let addresses = {
-        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+    // Calculate balance from outputs table (source of truth)
+    let balance = {
+        let db = match state.database.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!("   DB lock failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Database unavailable"
+                }));
+            }
+        };
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(state.current_user_id) {
+            Ok(bal) => bal,
+            Err(e) => {
+                log::error!("   Failed to calculate balance: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        }
+    };
 
-        let db = state.database.lock().unwrap();
+    // Cache the calculated balance
+    state.balance_cache.set(balance);
+    log::info!("   ✅ Balance: {} satoshis", balance);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "balance": balance
+    }))
+}
+
+/// POST /wallet/sync — On-demand UTXO sync for pending addresses
+///
+/// Fetches UTXOs from WhatsOnChain for addresses with pending_utxo_check=1,
+/// inserts new outputs, clears pending flags, and returns a summary.
+///
+/// Query parameters:
+/// - `full=true`: Sync ALL addresses, not just pending ones
+///
+/// Response: { "synced_addresses": N, "new_utxos": M, "balance": S }
+pub async fn wallet_sync(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    log::info!("🔄 POST /wallet/sync called");
+
+    let full_sync = query.get("full").map(|v| v == "true").unwrap_or(false);
+
+    // Get wallet and addresses to sync
+    let (wallet_id, addresses_to_sync) = {
+        use crate::database::{WalletRepository, AddressRepository};
+
+        let db = match state.database.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database lock: {}", e)
+                }));
+            }
+        };
         let wallet_repo = WalletRepository::new(db.connection());
 
-        // Get primary wallet
         let wallet = match wallet_repo.get_primary_wallet() {
             Ok(Some(w)) => w,
             Ok(None) => {
-                log::error!("   No wallet found in database");
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "No wallet found"
                 }));
             }
             Err(e) => {
-                log::error!("   Failed to get wallet: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Database error: {}", e)
                 }));
             }
         };
 
-        // Get all addresses for this wallet
+        let wid = wallet.id.unwrap();
         let address_repo = AddressRepository::new(db.connection());
-        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
-            Ok(db_addresses) => {
-                db_addresses.iter()
-                    .map(|addr| address_to_address_info(addr))
-                    .collect::<Vec<_>>()
-            }
-            Err(e) => {
-                log::error!("   Failed to get addresses: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to get addresses: {}", e)
-                }));
-            }
+
+        // Clear stale pending addresses (older than 10 days)
+        const PENDING_TIMEOUT_HOURS: i64 = 240;
+        if let Err(e) = address_repo.clear_stale_pending_addresses(PENDING_TIMEOUT_HOURS) {
+            log::warn!("   Failed to clear stale pending addresses: {}", e);
         }
-    };
 
-    log::info!("   Checking balance for {} addresses", addresses.len());
-
-    // Calculate balance from outputs table (source of truth)
-    use crate::database::{AddressRepository, OutputRepository};
-    let db = state.database.lock().unwrap();
-    let output_repo = OutputRepository::new(db.connection());
-
-    let cached_balance = match output_repo.calculate_balance(state.current_user_id) {
-        Ok(balance) => balance,
-        Err(e) => {
-            log::error!("   Failed to calculate balance from outputs table: {}", e);
-            drop(db);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
-            }));
-        }
-    };
-
-    // Get address IDs for API fetch logic
-    let address_repo = AddressRepository::new(db.connection());
-    let address_ids: Vec<i64> = addresses.iter()
-        .filter_map(|addr| {
-            match address_repo.get_by_address(&addr.address) {
-                Ok(Some(db_addr)) => db_addr.id,
-                _ => None,
+        let addrs = if full_sync {
+            log::info!("   Full sync requested — syncing ALL addresses");
+            match address_repo.get_all_by_wallet(wid) {
+                Ok(all) => all,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get addresses: {}", e)
+                    }));
+                }
             }
-        })
-        .collect();
-
-    drop(db);
-
-    // Use cached balance from database (Phase 4: primary source)
-    // Only fetch from API if cache is empty (first time setup)
-    // Background sync will update the cache periodically
-    if cached_balance == 0 && address_ids.len() > 0 {
-        // Cache is empty - fetch from API to populate cache
-        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
-
-        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
-            Ok(utxos) => utxos,
-            Err(e) => {
-                log::error!("   Failed to fetch UTXOs from API: {}", e);
-                // Return cached balance (0) if API fails
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": cached_balance
-                }));
+        } else {
+            match address_repo.get_pending_utxo_check(wid) {
+                Ok(pending) => pending,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get pending addresses: {}", e)
+                    }));
+                }
             }
         };
 
-        // Cache UTXOs to outputs table
-        let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let output_repo = OutputRepository::new(db.connection());
+        (wid, addrs)
+    };
 
-        for addr in &addresses {
-            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-                if let Some(addr_id) = db_addr.id {
-                    // Get UTXOs for this address (clone to get owned values)
-                    let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index)
-                        .cloned()
-                        .collect();
-
-                    if !addr_utxos.is_empty() {
-                        for utxo in &addr_utxos {
-                            if let Err(e) = output_repo.upsert_received_utxo(
-                                state.current_user_id,
-                                &utxo.txid,
-                                utxo.vout,
-                                utxo.satoshis,
-                                &utxo.script,
-                                addr.index,
-                            ) {
-                                log::warn!("   Failed to cache UTXO {}:{} for {}: {}", utxo.txid, utxo.vout, addr.address, e);
-                            }
-                        }
-                        // Mark address as used if it has UTXOs
-                        let _ = address_repo.mark_used(addr_id);
-                    }
-                }
-            } else {
-                // Address not in database - this shouldn't happen if generate_address worked
-                log::warn!("   Address {} not found in database (index {})", addr.address, addr.index);
-            }
-        }
-        drop(db);
-
-        // Calculate balance from fetched UTXOs
-        let total_balance: i64 = api_utxos.iter().map(|u| u.satoshis).sum();
-        log::info!("   ✅ Total balance (from API, cache updated): {} satoshis ({} UTXOs)", total_balance, api_utxos.len());
-
-        // Return response in Go wallet format: { "balance": number }
+    if addresses_to_sync.is_empty() {
+        log::info!("   No addresses to sync");
+        // Return current balance
+        let balance = {
+            let db = state.database.lock().unwrap();
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            output_repo.calculate_balance(state.current_user_id).unwrap_or(0)
+        };
         return HttpResponse::Ok().json(serde_json::json!({
-            "balance": total_balance
+            "synced_addresses": 0,
+            "new_utxos": 0,
+            "balance": balance
         }));
     }
 
-    // Check for pending addresses (newly created addresses that need UTXO checking)
-    let db = state.database.lock().unwrap();
-    let wallet_repo = crate::database::WalletRepository::new(db.connection());
-    let wallet = match wallet_repo.get_primary_wallet() {
-        Ok(Some(w)) => w,
-        Ok(None) | Err(_) => {
-            drop(db);
-            // No wallet found, return cached balance
-            return HttpResponse::Ok().json(serde_json::json!({
-                "balance": cached_balance
-            }));
-        }
-    };
+    log::info!("   Syncing {} address(es)...", addresses_to_sync.len());
 
-    let address_repo = AddressRepository::new(db.connection());
+    // Convert to AddressInfo format for the API call
+    let address_infos: Vec<crate::json_storage::AddressInfo> = addresses_to_sync.iter()
+        .map(|addr| crate::json_storage::AddressInfo {
+            address: addr.address.clone(),
+            index: addr.index,
+            public_key: addr.public_key.clone(),
+            used: addr.used,
+            balance: addr.balance,
+        })
+        .collect();
 
-    // Clear stale pending addresses (older than 24 hours)
-    // This prevents addresses from being pending forever if no UTXOs are ever received
-    const PENDING_TIMEOUT_HOURS: i64 = 24;
-    if let Err(e) = address_repo.clear_stale_pending_addresses(PENDING_TIMEOUT_HOURS) {
-        log::warn!("   Failed to clear stale pending addresses: {}", e);
-    }
-
-    let pending_addresses = match address_repo.get_pending_utxo_check(wallet.id.unwrap()) {
-        Ok(addrs) => addrs,
+    // Fetch UTXOs from WhatsOnChain (DB lock NOT held during network call)
+    let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&address_infos).await {
+        Ok(utxos) => utxos,
         Err(e) => {
-            log::warn!("   Failed to get pending addresses: {}", e);
-            drop(db);
-            return HttpResponse::Ok().json(serde_json::json!({
-                "balance": cached_balance
+            log::warn!("   Failed to fetch UTXOs: {}", e);
+            // Don't clear pending flags — retry on next sync call
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": format!("API fetch failed: {}", e)
             }));
         }
     };
-    drop(db);
 
-    // If there are pending addresses, fetch their UTXOs
-    if !pending_addresses.is_empty() {
-        log::info!("   🔍 Found {} pending address(es) to check for new UTXOs", pending_addresses.len());
-
-        // Convert to AddressInfo format for API call
-        let pending_address_infos: Vec<crate::json_storage::AddressInfo> = pending_addresses.iter()
-            .map(|addr| crate::json_storage::AddressInfo {
-                address: addr.address.clone(),
-                index: addr.index,  // Already i32, no conversion needed
-                public_key: addr.public_key.clone(),
-                used: addr.used,
-                balance: addr.balance,
-            })
-            .collect();
-
-        // Fetch UTXOs for pending addresses
-        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&pending_address_infos).await {
-            Ok(utxos) => utxos,
-            Err(e) => {
-                log::warn!("   Failed to fetch UTXOs for pending addresses: {}", e);
-                log::warn!("   ⚠️  Keeping addresses marked as pending - will retry on next balance check");
-                // Return cached balance but DON'T clear pending flags - retry next time
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": cached_balance
-                }));
-            }
-        };
-
-        // Cache UTXOs to outputs table and clear pending flags (only if fetch succeeded)
+    // Process results: insert new outputs, reconcile stale ones, clear pending flags
+    let mut synced_count = 0u32;
+    let mut new_utxo_count = 0u32;
+    let mut reconciled_count = 0u32;
+    // Grace period: don't mark outputs as externally spent if created < 10 min ago
+    const RECONCILE_GRACE_PERIOD_SECS: i64 = 600;
+    {
         let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let output_repo = OutputRepository::new(db.connection());
-        let mut cleared_ids = Vec::new();
-        let mut new_utxo_count = 0;
+        let address_repo = crate::database::AddressRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
 
-        for addr in &pending_addresses {
+        for addr in &addresses_to_sync {
             if let Some(addr_id) = addr.id {
-                // Get UTXOs for this address
                 let addr_utxos: Vec<_> = api_utxos.iter()
                     .filter(|u| u.address_index == addr.index)
-                    .cloned()
                     .collect();
 
                 if !addr_utxos.is_empty() {
-                    // Insert into outputs table
                     for utxo in &addr_utxos {
                         match output_repo.upsert_received_utxo(
                             state.current_user_id,
@@ -1962,62 +1915,80 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
                             &utxo.script,
                             addr.index,
                         ) {
-                            Ok(1) => new_utxo_count += 1,  // Actually inserted
-                            Ok(_) => {}  // Already existed
+                            Ok(1) => new_utxo_count += 1,
+                            Ok(_) => {}
                             Err(e) => log::warn!("   Failed to insert output {}:{}: {}", utxo.txid, utxo.vout, e),
                         }
                     }
-
-                    // Mark address as used if it has UTXOs
+                    // Mark address as used
                     let _ = address_repo.mark_used(addr_id);
                 }
 
-                // Clear pending flag - fetch succeeded, so we've checked this address
-                // (even if no UTXOs were found or caching failed, we at least tried)
-                if let Err(e) = address_repo.clear_pending_utxo_check(addr_id) {
-                    log::warn!("   Failed to clear pending flag for address {}: {}", addr.address, e);
-                } else {
-                    cleared_ids.push(addr_id);
+                // Reconcile: mark DB outputs as externally spent if they no longer
+                // appear in the WoC API response. This catches outputs spent on-chain
+                // by transactions the wallet lost track of (e.g., marked failed but
+                // actually mined). Without this, balance stays inflated and the wallet
+                // tries to double-spend already-spent UTXOs.
+                let derivation_prefix = "2-receive address";
+                let derivation_suffix = addr.index.to_string();
+                let owned_utxos: Vec<crate::utxo_fetcher::UTXO> = addr_utxos.iter()
+                    .map(|u| (*u).clone())
+                    .collect();
+
+                match output_repo.reconcile_for_derivation(
+                    state.current_user_id,
+                    Some(derivation_prefix),
+                    Some(&derivation_suffix),
+                    &owned_utxos,
+                    RECONCILE_GRACE_PERIOD_SECS,
+                ) {
+                    Ok(stale) if stale > 0 => {
+                        log::info!("   🔄 Reconciled {} stale output(s) for address {} (marked as externally spent)",
+                                  stale, addr.address);
+                        reconciled_count += stale as u32;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to reconcile outputs for {}: {}", addr.address, e);
+                    }
                 }
+
+                // Clear pending flag (fetch succeeded, so we've checked this address)
+                if addr.pending_utxo_check {
+                    let _ = address_repo.clear_pending_utxo_check(addr_id);
+                }
+                synced_count += 1;
             }
         }
-        drop(db);
-
-        if new_utxo_count > 0 {
-            log::info!("   💰 Inserted {} new received output(s)", new_utxo_count);
-        }
-
-        if !cleared_ids.is_empty() {
-            log::info!("   ✅ Checked {} pending address(es) and cleared flags", cleared_ids.len());
-        }
-
-        // Recalculate balance including new UTXOs
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-        let updated_balance = output_repo.calculate_balance(state.current_user_id).unwrap_or(0);
-        drop(db);
-
-        log::info!("   ✅ Updated balance after checking pending addresses: {} satoshis", updated_balance);
-
-        // Invalidate cache since new UTXOs were detected
-        state.balance_cache.invalidate();
-        // Update cache with new balance
-        state.balance_cache.set(updated_balance);
-
-        return HttpResponse::Ok().json(serde_json::json!({
-            "balance": updated_balance
-        }));
     }
 
-    // Cache has balance from database - use it and cache it
-    log::info!("   ✅ Using cached balance from database: {} satoshis", cached_balance);
+    // Invalidate and recalculate balance
+    state.balance_cache.invalidate();
+    let balance = {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let bal = output_repo.calculate_balance(state.current_user_id).unwrap_or(0);
+        state.balance_cache.set(bal);
+        bal
+    };
 
-    // Update cache with calculated balance
-    state.balance_cache.set(cached_balance);
+    if new_utxo_count > 0 {
+        log::info!("   💰 Inserted {} new received output(s)", new_utxo_count);
+    }
+    if reconciled_count > 0 {
+        log::info!("   🔄 Reconciled {} stale output(s) (spent on-chain but still in DB)", reconciled_count);
+    }
+    log::info!("✅ Sync complete: {} addresses synced, {} new UTXOs, {} reconciled, balance: {} sats",
+        synced_count, new_utxo_count, reconciled_count, balance);
 
-    // Return response in Go wallet format: { "balance": number }
+    crate::monitor::log_monitor_event(&state, "WalletSync:completed",
+        Some(&format!("{} addrs, {} new utxos, {} reconciled", synced_count, new_utxo_count, reconciled_count)));
+
     HttpResponse::Ok().json(serde_json::json!({
-        "balance": cached_balance
+        "synced_addresses": synced_count,
+        "new_utxos": new_utxo_count,
+        "reconciled": reconciled_count,
+        "balance": balance
     }))
 }
 
@@ -4277,14 +4248,21 @@ pub async fn create_action(
         }).collect(),
     };
 
-    // Store the action in database
+    // Store the action in database and link outputs to the transaction
     {
         use crate::database::TransactionRepository;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
         match tx_repo.add_transaction(&stored_action) {
-            Ok(_) => {
-                log::info!("   💾 Action stored in database with status: created");
+            Ok(transaction_id) => {
+                log::info!("   💾 Action stored in database with status: created (id={})", transaction_id);
+
+                // Link change and basket outputs to this transaction so UTXO selection
+                // can check parent transaction status before spending them
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                if let Err(e) = output_repo.link_outputs_to_transaction(&txid, transaction_id) {
+                    log::warn!("   ⚠️  Failed to link outputs to transaction: {}", e);
+                }
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to store action in database: {}", e);
@@ -6572,6 +6550,41 @@ pub async fn process_action(
 
 // Broadcast transaction to BSV network
 //
+/// Maximum number of attempts per broadcaster before falling through to the next.
+/// Each broadcaster gets up to 3 tries with exponential backoff (2s, 4s).
+/// Permanent errors (invalid tx) bypass retry and either stop immediately or skip to next broadcaster.
+const MAX_BROADCAST_ATTEMPTS: u32 = 3;
+
+/// Classify whether a broadcast error is fatal (tx itself is invalid).
+/// Fatal errors mean no broadcaster will accept this tx — stop everything immediately.
+fn is_fatal_broadcast_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+
+    // Script verification failures
+    if lower.contains("error: 16") || lower.contains("mandatory-script-verify") {
+        return true;
+    }
+    // Double-spend / conflicting transaction
+    if lower.contains("double spend") || lower.contains("double-spend")
+        || lower.contains("txn-mempool-conflict") {
+        return true;
+    }
+    // Missing inputs (UTXOs already consumed)
+    if lower.contains("missing inputs") || lower.contains("missingorspent") {
+        return true;
+    }
+    // Transaction too large or dust outputs
+    if lower.contains("tx-size") || lower.contains("dust") {
+        return true;
+    }
+    // Non-standard / policy rejection
+    if lower.contains("non-mandatory-script-verify") {
+        return true;
+    }
+
+    false
+}
+
 // Strategy:
 // 1. If input is BEEF format → convert to V1, send BEEF directly to ARC (enables tx chaining)
 // 2. If ARC fails or input is raw tx → fall back to extracting raw tx and using WhatsOnChain
@@ -6579,7 +6592,10 @@ pub async fn process_action(
 // ARC is preferred because it accepts BEEF with unconfirmed parent transactions,
 // solving the transaction chaining race condition where the second tx's parent
 // hasn't propagated yet.
-async fn broadcast_transaction(
+//
+// Each broadcaster is tried up to MAX_BROADCAST_ATTEMPTS times with exponential backoff
+// for transient errors. Fatal errors (invalid tx) stop all retries immediately.
+pub(crate) async fn broadcast_transaction(
     beef_or_raw_hex: &str,
     db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
     txid_for_cache: Option<&str>,
@@ -6654,18 +6670,39 @@ async fn broadcast_transaction(
         };
 
         if let Some(hex_to_send) = hex_for_arc {
-            log::info!("   📡 Broadcasting to ARC (GorillaPool)...");
-            match broadcast_to_arc(&client, &hex_to_send).await {
-                Ok(arc_resp) => {
-                    let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
-                    let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
+            let mut arc_backoff_ms = 2000u64;
+            for arc_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+                if arc_attempt > 1 {
+                    log::info!("   📡 ARC retry (attempt {}/{})...", arc_attempt, MAX_BROADCAST_ATTEMPTS);
+                } else {
+                    log::info!("   📡 Broadcasting to ARC (GorillaPool)...");
+                }
+                match broadcast_to_arc(&client, &hex_to_send).await {
+                    Ok(arc_resp) => {
+                        let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
+                        let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
 
-                    // SEEN_IN_ORPHAN_MEMPOOL means ARC can't find parent UTXOs — not a real success
-                    if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
-                        log::warn!("   ⚠️ ARC returned SEEN_IN_ORPHAN_MEMPOOL — parent UTXOs not found");
-                        log::info!("   🔄 Falling back to other broadcasters...");
-                        // Fall through to fallback broadcasters
-                    } else {
+                        // Verify ARC returned the expected txid
+                        if let Some(expected_txid) = txid_for_cache {
+                            if arc_txid != "unknown" && arc_txid != expected_txid {
+                                log::warn!("   ⚠️ ARC txid MISMATCH: expected {} but got {}",
+                                    &expected_txid[..expected_txid.len().min(16)],
+                                    &arc_txid[..arc_txid.len().min(16)]);
+                            }
+                        }
+
+                        // SEEN_IN_ORPHAN_MEMPOOL — transient, retry ARC then fall through
+                        if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
+                            if arc_attempt < MAX_BROADCAST_ATTEMPTS {
+                                log::info!("   🔄 SEEN_IN_ORPHAN_MEMPOOL — retrying in {}ms...", arc_backoff_ms);
+                                tokio::time::sleep(std::time::Duration::from_millis(arc_backoff_ms)).await;
+                                arc_backoff_ms *= 2;
+                                continue;
+                            }
+                            log::warn!("   ⚠️ ARC returned SEEN_IN_ORPHAN_MEMPOOL after {} attempts", MAX_BROADCAST_ATTEMPTS);
+                            break; // Fall through to raw tx broadcasters
+                        }
+
                         let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
                         log::info!("   🎉 ARC broadcast successful: {}", msg);
 
@@ -6694,12 +6731,30 @@ async fn broadcast_transaction(
 
                         return Ok(msg);
                     }
-                }
-                Err(e) => {
-                    log::warn!("   ⚠️ ARC broadcast failed: {}", e);
-                    log::info!("   🔄 Falling back to raw tx broadcasters...");
+                    Err(e) => {
+                        // Fatal error — tx itself is invalid, stop all broadcasters
+                        if is_fatal_broadcast_error(&e) {
+                            log::error!("   ❌ Fatal broadcast error from ARC: {}", e);
+                            return Err(extract_core_error(&e));
+                        }
+                        // BEEF format error — don't retry ARC, fall through to raw tx
+                        if e.to_lowercase().contains("beef error") || e.to_lowercase().contains("beef validation") {
+                            log::warn!("   ⚠️ ARC BEEF validation failed: {}", e);
+                            break; // Fall through to raw tx broadcasters
+                        }
+                        // Transient error — retry with backoff
+                        if arc_attempt < MAX_BROADCAST_ATTEMPTS {
+                            log::info!("   🔄 ARC attempt {}/{} failed (transient), retrying in {}ms...",
+                                arc_attempt, MAX_BROADCAST_ATTEMPTS, arc_backoff_ms);
+                            tokio::time::sleep(std::time::Duration::from_millis(arc_backoff_ms)).await;
+                            arc_backoff_ms *= 2;
+                        } else {
+                            log::warn!("   ⚠️ ARC broadcast failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        }
+                    }
                 }
             }
+            log::info!("   🔄 Falling back to raw tx broadcasters...");
         }
     }
 
@@ -6723,29 +6778,69 @@ async fn broadcast_transaction(
 
     let mut last_error = String::new();
 
-    // Fallback 1: GorillaPool mAPI (legacy)
-    log::info!("   📡 Broadcasting raw tx to GorillaPool (mAPI)...");
-    match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
-        Ok(response) => {
-            log::info!("   🎉 GorillaPool mAPI: {}", response);
-            return Ok(response);
-        }
-        Err(e) => {
-            log::warn!("   ⚠️ GorillaPool mAPI failed: {}", e);
-            last_error = format!("GorillaPool: {}", e);
+    // Fallback 1: GorillaPool mAPI (legacy) with retry
+    {
+        let mut gp_backoff_ms = 2000u64;
+        for gp_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+            if gp_attempt > 1 {
+                log::info!("   📡 GorillaPool retry (attempt {}/{})...", gp_attempt, MAX_BROADCAST_ATTEMPTS);
+            } else {
+                log::info!("   📡 Broadcasting raw tx to GorillaPool (mAPI)...");
+            }
+            match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
+                Ok(response) => {
+                    log::info!("   🎉 GorillaPool mAPI: {}", response);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if is_fatal_broadcast_error(&e) {
+                        log::error!("   ❌ Fatal broadcast error from GorillaPool: {}", e);
+                        return Err(extract_core_error(&e));
+                    }
+                    if gp_attempt < MAX_BROADCAST_ATTEMPTS {
+                        log::info!("   🔄 GorillaPool attempt {}/{} failed, retrying in {}ms...",
+                            gp_attempt, MAX_BROADCAST_ATTEMPTS, gp_backoff_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(gp_backoff_ms)).await;
+                        gp_backoff_ms *= 2;
+                    } else {
+                        log::warn!("   ⚠️ GorillaPool mAPI failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        last_error = format!("GorillaPool: {}", e);
+                    }
+                }
+            }
         }
     }
 
-    // Fallback 2: WhatsOnChain
-    log::info!("   📡 Broadcasting raw tx to WhatsOnChain...");
-    match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
-        Ok(response) => {
-            log::info!("   🎉 WhatsOnChain: {}", response);
-            return Ok(response);
-        }
-        Err(e) => {
-            log::warn!("   ⚠️ WhatsOnChain failed: {}", e);
-            last_error = format!("{}; WhatsOnChain: {}", last_error, e);
+    // Fallback 2: WhatsOnChain with retry
+    {
+        let mut woc_backoff_ms = 2000u64;
+        for woc_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+            if woc_attempt > 1 {
+                log::info!("   📡 WhatsOnChain retry (attempt {}/{})...", woc_attempt, MAX_BROADCAST_ATTEMPTS);
+            } else {
+                log::info!("   📡 Broadcasting raw tx to WhatsOnChain...");
+            }
+            match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
+                Ok(response) => {
+                    log::info!("   🎉 WhatsOnChain: {}", response);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if is_fatal_broadcast_error(&e) {
+                        log::error!("   ❌ Fatal broadcast error from WhatsOnChain: {}", e);
+                        return Err(extract_core_error(&e));
+                    }
+                    if woc_attempt < MAX_BROADCAST_ATTEMPTS {
+                        log::info!("   🔄 WhatsOnChain attempt {}/{} failed, retrying in {}ms...",
+                            woc_attempt, MAX_BROADCAST_ATTEMPTS, woc_backoff_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(woc_backoff_ms)).await;
+                        woc_backoff_ms *= 2;
+                    } else {
+                        log::warn!("   ⚠️ WhatsOnChain failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        last_error = format!("{}; WhatsOnChain: {}", last_error, e);
+                    }
+                }
+            }
         }
     }
 

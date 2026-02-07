@@ -38,7 +38,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | New HTTP endpoint | Add handler fn in `src/handlers.rs`, register route in `src/main.rs` |
 | New BRC protocol | Add module in `src/crypto/`, import in `handlers.rs` |
 | New database table | Add migration in `src/database/migrations.rs`, add repo in `src/database/` |
-| New background service | Add module, spawn in `main.rs` like `utxo_sync::start_background_sync` |
+| New background task | Add task module in `src/monitor/`, register in `monitor/mod.rs` run loop |
 
 ## Key Files
 
@@ -53,13 +53,23 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/database/helpers.rs` | `get_master_private_key_from_db`, `get_master_public_key_from_db` |
 | `src/database/proven_tx_repo.rs` | `ProvenTxRepository`: `insert_or_get`, `get_by_txid`, `get_merkle_proof_as_tsc`, `link_transaction` — immutable proof records |
 | `src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository`: `create`, `get_by_txid`, `update_status`, `link_proven_tx`, `add_history_note` — proof lifecycle tracking |
-| `src/arc_status_poller.rs` | Background ARC polling for MINED status, creates `proven_txs` records, reconciles with `cache_sync` |
-| `src/cache_sync.rs` | Background BEEF cache sync, creates `proven_txs` records from WhatsOnChain TSC proofs |
+| `src/monitor/mod.rs` | `Monitor` struct — background task scheduler (30s tick loop, 6 tasks, event logging) |
+| `src/monitor/task_check_for_proofs.rs` | Proof acquisition from ARC + WhatsOnChain (replaces `arc_status_poller` + `cache_sync`) |
+| `src/monitor/task_send_waiting.rs` | Crash recovery for orphaned `sending` transactions |
+| `src/monitor/task_fail_abandoned.rs` | Fail stuck `unprocessed`/`unsigned` txs with ghost output cleanup |
+| `src/monitor/task_unfail.rs` | Recover false failures by re-checking on-chain (30-min window) |
+| `src/monitor/task_review_status.rs` | Status consistency: proven_tx_reqs → transactions → outputs |
+| `src/monitor/task_purge.rs` | Cleanup old monitor_events (7d) and completed proof requests (30d) |
+| `src/beef.rs` | BEEF parser, `tsc_proof_to_bump`, `parse_bump_hex_to_tsc` — Merkle proof format conversion |
+| `src/beef_helpers.rs` | Recursive BEEF building with ancestry chain and proof fetching |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
+| `src/arc_status_poller.rs` | **Deprecated** (Phase 6I) — replaced by `monitor/task_check_for_proofs` |
+| `src/cache_sync.rs` | **Deprecated** (Phase 6I) — replaced by `monitor/task_check_for_proofs` |
+| `src/utxo_sync.rs` | **Deprecated** (Phase 6I) — replaced by `wallet_sync` handler + monitor |
 
-## Database Schema (V19)
+## Database Schema (V22)
 
-Current migration version: **V19**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+Current migration version: **V22**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
 
 | Table | Purpose | Phase |
 |-------|---------|-------|
@@ -72,7 +82,7 @@ Current migration version: **V19**. Migrations in `src/database/migrations.rs`, 
 | parent_transactions | Raw tx cache for BEEF building | Original |
 | merkle_proofs | **Deprecated** — no longer written to. Replaced by `proven_txs` (V16) | Original |
 | block_headers | Cached block headers | Original |
-| proven_txs | **Immutable** proof records (merkle path + raw tx). Created by ARC poller and cache_sync | V16 |
+| proven_txs | **Immutable** proof records (merkle path + raw tx). Created by Monitor task_check_for_proofs | V16 |
 | proven_tx_reqs | Proof acquisition lifecycle tracking. Created on broadcast, completed when proof acquired | V16 |
 | baskets | Output categorization, `user_id` FK (V17) | V14/V17 |
 | output_tags / output_tag_map | Output tagging, `user_id` FK (V17) | V14/V17 |
@@ -82,7 +92,16 @@ Current migration version: **V19**. Migrations in `src/database/migrations.rs`, 
 | commissions | Fee tracking per transaction | V19 |
 | settings | Persistent wallet configuration (chain, dbtype, limits) | V19 |
 | sync_states | Multi-device synchronization state | V19 |
+| monitor_events | Background task event logging (Monitor pattern) | V20 |
 | transaction_labels | **Deprecated** — reads fallback only. Replaced by `tx_labels`/`tx_labels_map` (V19) | Original |
+
+### Migrations V20-V22 (Phase 6)
+
+| Migration | Purpose |
+|-----------|---------|
+| V20 | Create `monitor_events` table with indexes for event logging |
+| V21 | Patch `proven_txs` merkle_path BLOBs — inject missing `height` field from column |
+| V22 | Fix array-format BLOBs in `proven_txs` — normalize `[{...}]` to `{...}` and inject height |
 
 ### Output Model (V18 - Phase 4 Complete)
 
@@ -133,6 +152,35 @@ Single `new_status` column replaces old dual `status` + `broadcast_status`:
 | completed | Has merkle proof (proven on-chain) |
 | failed | Broadcast failed or rejected |
 
+## Background Services — Monitor Pattern (Phase 6)
+
+The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler, replacing the deprecated `arc_status_poller`, `cache_sync`, and `utxo_sync` services. It runs as a single tokio task with a 30-second tick loop.
+
+| Task | Interval | Purpose |
+|------|----------|---------|
+| TaskCheckForProofs | 60s | Acquire merkle proofs for unproven transactions (ARC → WoC fallback) |
+| TaskSendWaiting | 120s | Crash recovery for transactions stuck in `sending` status |
+| TaskFailAbandoned | 300s | Fail stuck `unprocessed`/`unsigned` txs, clean up ghost outputs |
+| TaskUnFail | 300s | Recover false failures by re-checking on-chain (30-min window) |
+| TaskReviewStatus | 60s | Ensure consistency across proven_tx_reqs → transactions → outputs |
+| TaskPurge | 3600s | Cleanup old monitor_events (7d) and completed proof requests (30d) |
+
+### Ghost Transaction Safety Rules
+
+1. Background tasks never create output records — only sync from API via `/wallet/sync`
+2. Delete ghost outputs BEFORE restoring inputs on failure
+3. TaskUnFail does NOT re-create deleted outputs — relies on `/wallet/sync`
+4. Always invalidate balance cache after output changes
+5. Cleanup order: mark failed → delete ghost outputs → restore inputs → invalidate cache
+
+### UTXO Sync
+
+UTXO synchronization is on-demand via `POST /wallet/sync` (not periodic). The endpoint:
+- Fetches UTXOs from WhatsOnChain for pending (or all with `?full=true`) addresses
+- Inserts new outputs via `upsert_received_utxo()`
+- **Reconciles** stale outputs: marks DB outputs not found in API as externally spent
+- Invalidates balance cache
+
 ## Fee Calculation
 
 Transaction fees are calculated dynamically based on size (not hardcoded):
@@ -160,3 +208,4 @@ Transaction fees are calculated dynamically based on size (not hardcoded):
 | POST | `/listCertificates` | `list_certificates` |
 | GET | `/wallet/status` | `wallet_status` |
 | GET | `/wallet/balance` | `get_balance` |
+| POST | `/wallet/sync` | `wallet_sync` — on-demand UTXO sync with reconciliation |

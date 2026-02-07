@@ -2605,6 +2605,9 @@ async fn create_certificate_transaction(
         }
         drop(db);
 
+        // Invalidate balance cache after upserting outputs
+        state.balance_cache.invalidate();
+
         // Use API UTXOs (they're more up-to-date)
         all_utxos = api_utxos;
     }
@@ -2849,6 +2852,7 @@ async fn create_certificate_transaction(
                     log::info!("      ✅ Marked {}:{} as spent", txid, vout);
                 }
                 drop(db);
+                state.balance_cache.invalidate();
 
                 // Return error - the spent outputs are now marked, so a retry will work
                 return Err(CertificateError::Database(format!(
@@ -2888,6 +2892,7 @@ async fn create_certificate_transaction(
             }
         }
     }
+    state.balance_cache.invalidate();
 
     // Step 9: Return txid and revocation outpoint
     Ok((txid, revocation_outpoint))

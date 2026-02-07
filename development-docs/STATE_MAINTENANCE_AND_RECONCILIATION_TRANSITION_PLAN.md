@@ -1,7 +1,7 @@
 # State Maintenance & Reconciliation — Transition Plan
 
 **Created**: 2026-02-03
-**Status**: In Progress — Phases 1-5 ✅ Complete, Phases 6-8 Pending
+**Status**: In Progress — Phases 1-6 ✅ Complete, Phases 7-8 Pending
 **Objective**: Evolve the Hodos Rust wallet database and state management to align with the BSV SDK wallet-toolbox, enabling future multi-user support, cloud sync, and wallet export/import interoperability.
 **See also**: `WALLET_BACKUP_AND_RECOVERY_PLAN.md` — backup file export, on-chain encrypted backup, and cloud sync scaffolding (interleaved with this plan's phases).
 
@@ -1071,42 +1071,51 @@ CREATE INDEX idx_sync_states_status ON sync_states(status);
 
 ### Phase 6: Monitor Pattern (Background Services)
 
-**Goal**: Restructure background services to match the wallet-toolbox monitor pattern with named tasks, configurable intervals, and event logging.
+**Goal**: Restructure background services to match the wallet-toolbox monitor pattern with named tasks, configurable intervals, and event logging. Add on-demand UTXO sync endpoint. Improve broadcast reliability with transient/permanent error classification and retry logic.
+
+**Status**: ✅ COMPLETE (2026-02-07) | **Migrations**: V20-V22 | **Branch**: wallet-toolbox-alignment
 
 #### Architecture Change
 
 ```
 CURRENT                                    TARGET
 ───────                                    ──────
-utxo_sync.rs (5 min, does everything)     Monitor with individual tasks:
+utxo_sync.rs (DISABLED, was 5 min)        Monitor with individual tasks:
 arc_status_poller.rs (60s)                  TaskCheckForProofs (proof acquisition)
-cache_sync.rs (10 min)                      TaskSendWaiting (broadcast retry)
+cache_sync.rs (10 min)                      TaskSendWaiting (crash recovery)
                                             TaskFailAbandoned (fail stuck txs)
                                             TaskUnFail (recover false failures)
                                             TaskReviewStatus (status → outputs)
                                             TaskPurge (cleanup old data)
+
+utxo_sync.rs (on-demand only)             POST /wallet/sync endpoint
+balance via API polling                    Balance from local outputs + cache invalidation
+broadcast (1 attempt per service)          Retry with transient/permanent error classification
 ```
 
-#### Rust Code Changes
+#### Design Decisions (from planning discussion 2026-02-07)
 
-| File | Change |
-|---|---|
-| `src/monitor/mod.rs` | **New module**: Monitor struct with task registration, run loop, event logging |
-| `src/monitor/task_check_for_proofs.rs` | **New**: Replaces ARC poller. Uses proven_tx_reqs lifecycle |
-| `src/monitor/task_send_waiting.rs` | **New**: Broadcast retry for 'sending' status transactions |
-| `src/monitor/task_fail_abandoned.rs` | **New**: Replaces stale-pending cleanup. Fails unprocessed/unsigned txs >5 min |
-| `src/monitor/task_unfail.rs` | **New**: Replaces the UnFail logic from Phase 1 cleanup. Re-checks failed txs via merkle path query |
-| `src/monitor/task_review_status.rs` | **New**: Propagates proven_tx_req status to transactions, transaction status to outputs |
-| `src/monitor/task_purge.rs` | **New**: Replaces cleanup_old_spent. Configurable retention |
-| `src/utxo_sync.rs` | Simplified: UTXO discovery only (no cleanup, no status management) |
-| `src/arc_status_poller.rs` | **Removed**: replaced by task_check_for_proofs |
-| `src/cache_sync.rs` | **Removed**: merged into task_check_for_proofs |
-| `src/main.rs` | Start Monitor instead of individual services |
+1. **Full Monitor pattern**: All 6 named tasks implemented, not a simplified subset
+2. **On-demand UTXO sync**: New `POST /wallet/sync` endpoint replaces periodic sync. Frontend will call this later (separate phase)
+3. **Balance strategy (Option A)**: Backend tracks sats only with immediate cache invalidation on output changes. Frontend continues to handle exchange rate (CryptoCompare + CoinGecko). Frontend polling enablement deferred to a later phase
+4. **Broadcast retry**: Classify errors as transient vs permanent. Retry transient errors (up to 2 additional attempts per broadcaster with backoff). Never retry permanent errors. TaskSendWaiting handles crash recovery only (orphaned `sending` status txs)
+5. **Pending address expiry**: Changed from 24 hours to 10 days. New addresses remain `pending_utxo_check=1` until a UTXO is found OR 10 days pass
+6. **Frontend changes deferred**: Sync button, balance polling enablement, and price caching are separate phase work
 
-#### Schema Changes (Migration v20)
+#### Ghost Transaction Safety Rules
+
+The Phase 4 ghost output bug taught us that background services must NEVER create or destroy output records without careful state verification. These rules apply to all Phase 6 tasks:
+
+1. **TaskSendWaiting** must verify the transaction's outputs and inputs are still in the expected state before re-broadcasting. If outputs were already cleaned up (ghost outputs deleted, inputs restored), do NOT re-broadcast — the tx would double-spend
+2. **TaskFailAbandoned** must use the same cleanup sequence as the current broadcast failure handler: (a) mark tx `failed`, (b) delete ghost change outputs, (c) restore input UTXOs, (d) invalidate balance cache — in that exact order
+3. **TaskUnFail** must verify a proof exists on-chain BEFORE changing any output state. If proof found: mark `completed`, set outputs spendable. If no proof: leave as `failed`, do NOT touch outputs
+4. **TaskReviewStatus** propagates status changes but must NEVER create or delete outputs — only update `spendable` flags on existing outputs
+5. **All tasks**: Log every output state change at INFO level with txid + outputId for audit trail
+
+#### 6A: Schema Changes (Migration V20)
 
 ```sql
--- Create monitor_events table
+-- Create monitor_events table for task event logging
 CREATE TABLE IF NOT EXISTS monitor_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event TEXT NOT NULL,
@@ -1115,11 +1124,315 @@ CREATE TABLE IF NOT EXISTS monitor_events (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX idx_monitor_events_event ON monitor_events(event);
+CREATE INDEX idx_monitor_events_created ON monitor_events(created_at);
 ```
 
+No other schema changes needed — the existing tables (transactions, outputs, proven_txs, proven_tx_reqs, addresses) already have all required columns from Phases 1-5.
+
+#### 6B: Monitor Module Structure
+
+New `src/monitor/` module with the following structure:
+
+```
+src/monitor/
+├── mod.rs                      # Monitor struct, task registry, run loop
+├── task_check_for_proofs.rs    # Proof acquisition (replaces arc_status_poller + cache_sync)
+├── task_send_waiting.rs        # Crash recovery for orphaned 'sending' txs
+├── task_fail_abandoned.rs      # Fail stuck unprocessed/unsigned txs
+├── task_unfail.rs              # Re-check failed txs for on-chain proof
+├── task_review_status.rs       # Propagate proof status → tx status → output spendable
+└── task_purge.rs               # Cleanup old failed txs and spent outputs
+```
+
+**Monitor struct** (`mod.rs`):
+```rust
+pub struct Monitor {
+    state: web::Data<AppState>,
+    client: reqwest::Client,
+}
+
+impl Monitor {
+    pub fn new(state: web::Data<AppState>) -> Self;
+    pub async fn run(&self);  // Main loop: runs each task on its interval
+    fn log_event(&self, event: &str, details: Option<&str>);  // Write to monitor_events
+}
+```
+
+**Run loop design**: Single tokio task with a 30-second tick. Each tick checks which tasks are due based on their individual intervals. Tasks run sequentially within each tick to avoid concurrent DB access issues.
+
+#### 6C: Task Specifications
+
+##### TaskCheckForProofs (replaces arc_status_poller.rs + cache_sync.rs)
+
+**Interval**: 60 seconds
+**Purpose**: Acquire merkle proofs for unproven transactions
+
+**Logic**:
+1. Query `transactions WHERE new_status IN ('sending', 'unproven')` — these need proofs
+2. For each, check `proven_tx_reqs` status:
+   - If `proven_tx_reqs.proven_tx_id IS NOT NULL` → proof already exists, reconcile (step 5)
+   - If attempts >= 8 → skip (TaskFailAbandoned will handle)
+3. Query ARC API: `GET /v1/tx/{txid}` for status
+   - If MINED: create `proven_txs` record from ARC merklePath, link to `proven_tx_reqs`, increment attempts
+   - If not found on ARC: query WhatsOnChain TSC endpoint as fallback
+   - If found on WoC: create `proven_txs` record from TSC proof
+   - If not found anywhere: increment `proven_tx_reqs.attempts`, add history note
+4. On proof acquisition: update `proven_tx_reqs.status = 'completed'`, link `proven_tx_id`
+5. Reconcile: update `transactions.new_status = 'completed'`, set `transactions.proven_tx_id`
+
+**Migrated from**: `arc_status_poller.rs` (ARC polling + reconciliation) and `cache_sync.rs` (WhatsOnChain TSC fetch)
+
+##### TaskSendWaiting (crash recovery only)
+
+**Interval**: 120 seconds
+**Purpose**: Re-broadcast transactions stuck in `sending` status due to app crash or network drop
+
+**Logic**:
+1. Query `transactions WHERE new_status = 'sending' AND created_at < (now - 120 seconds)`
+   - The 120-second delay ensures we don't interfere with an active broadcast
+2. For each stuck transaction:
+   a. **Verify output state is intact**: Check that ghost change outputs still exist AND input outputs are still reserved (spendable=0, spent_by=this tx). If outputs were already cleaned up → mark tx `failed`, do NOT broadcast
+   b. Get raw tx bytes from `transactions.raw_tx` or `proven_tx_reqs.raw_tx`
+   c. If no raw tx available → mark tx `failed` (nothing to broadcast)
+   d. Attempt broadcast using `broadcast_transaction()` (which now has retry logic — see 6E)
+   e. On success → update status to `unproven`
+   f. On permanent failure → run full failure cleanup (delete ghost outputs, restore inputs, invalidate cache, mark `failed`)
+   g. On transient failure after all retries exhausted → same as permanent failure cleanup
+3. Max 3 crash-recovery attempts per transaction (tracked via `proven_tx_reqs.attempts` or a counter). After 3 failed recovery attempts → mark `failed` permanently
+
+**Ghost safety**: Step 2a is critical. If the app crashed mid-cleanup, outputs may be in an inconsistent state. Always verify before broadcasting.
+
+##### TaskFailAbandoned (fail stuck transactions)
+
+**Interval**: 300 seconds (5 minutes)
+**Purpose**: Fail transactions that were created but never completed signing/broadcasting
+
+**Logic**:
+1. Query `transactions WHERE new_status IN ('unprocessed', 'unsigned') AND created_at < (now - 300 seconds)`
+2. For each:
+   a. Mark `new_status = 'failed'`, set `failed_at = now`
+   b. Delete any ghost change outputs created for this tx: `DELETE FROM outputs WHERE transaction_id = ? AND change = 1`
+   c. Restore input outputs: `UPDATE outputs SET spendable = 1, spent_by = NULL WHERE spent_by = ?`
+   d. Invalidate balance cache
+   e. Log to monitor_events: "TaskFailAbandoned: failed tx {txid}, restored {n} inputs"
+
+**Replaces**: Startup cleanup logic in `main.rs` that marks stale pending txs as failed
+
+##### TaskUnFail (recover false failures)
+
+**Interval**: 300 seconds (5 minutes)
+**Purpose**: Re-check recently failed transactions — they may have actually succeeded on-chain despite broadcast error
+
+**Logic**:
+1. Query `transactions WHERE new_status = 'failed' AND failed_at IS NOT NULL AND failed_at > (now - 1800 seconds)`
+   - Only check txs failed within the last 30 minutes (UnFail window)
+2. For each:
+   a. Check if `proven_txs` record exists for this txid → if so, it was mined
+   b. If no proven_txs: query ARC `GET /v1/tx/{txid}` for status
+   c. If no ARC result: query WhatsOnChain for the txid
+   d. If found on-chain (mined):
+      - Create `proven_txs` record if not exists
+      - Update `new_status = 'completed'`
+      - Re-create change outputs if they were deleted (use raw_tx to parse outputs)
+      - Mark change outputs as `spendable = 1`
+      - Mark input outputs as `spendable = 0` (they were spent on-chain)
+      - Invalidate balance cache
+      - Log: "TaskUnFail: recovered tx {txid} — was marked failed but found on-chain"
+   e. If NOT found on-chain and `failed_at < (now - 1800)`:
+      - Transaction is permanently failed
+      - Ensure cleanup was done (ghost outputs deleted, inputs restored)
+      - Log: "TaskUnFail: confirmed failure for tx {txid} after 30-min window"
+
+**Ghost safety**: Step 2d is the most dangerous operation — re-creating outputs for a tx we thought failed. Must parse raw_tx to get exact output values/scripts. Only do this if we have confirmed on-chain proof (merkle path).
+
+##### TaskReviewStatus (status propagation)
+
+**Interval**: 60 seconds
+**Purpose**: Ensure consistency between proven_tx_reqs → transactions → outputs
+
+**Logic**:
+1. **proven_tx_reqs → transactions**: Find `proven_tx_reqs WHERE status = 'completed' AND notified = 0`. For each, ensure the linked transaction has `new_status = 'completed'` and `proven_tx_id` set. Mark `notified = 1`
+2. **transactions → outputs**: Find `transactions WHERE new_status = 'completed'`. For each, ensure all outputs with `transaction_id = ?` have `spendable = 1` (unless spent by another tx). This catches outputs that weren't updated during proof acquisition
+3. **Failed tx cleanup verification**: Find `transactions WHERE new_status = 'failed' AND failed_at < (now - 1800)`. Verify ghost outputs are deleted and inputs restored. Fix any inconsistencies found
+4. Log summary: "TaskReviewStatus: reconciled {n} proofs, {m} outputs, {k} failed cleanups"
+
+**Ghost safety**: This task ONLY updates `spendable` flags and FKs on existing outputs. It never creates or deletes output rows.
+
+##### TaskPurge (cleanup old data)
+
+**Interval**: 3600 seconds (1 hour)
+**Purpose**: Remove old data that's no longer needed
+
+**Logic**:
+1. Delete `monitor_events WHERE created_at < (now - 7 days)` — keep 1 week of event history
+2. Delete `proven_tx_reqs WHERE status = 'completed' AND notified = 1 AND updated_at < (now - 30 days)` — completed proof requests older than 30 days (the proven_txs record is kept permanently)
+3. Future: configurable retention for old failed transactions, spent outputs, etc. (not implemented in Phase 6 — just the infrastructure)
+
+#### 6D: On-Demand UTXO Sync Endpoint
+
+**New endpoint**: `POST /wallet/sync`
+
+Extracts the UTXO sync logic currently embedded in the balance handler (`handlers.rs` lines 1892-2010) into a dedicated endpoint.
+
+**Request**: `POST /wallet/sync` (no body required)
+**Response**: `{ "synced_addresses": N, "new_utxos": M, "balance": S }`
+
+**Logic**:
+1. Get all addresses with `pending_utxo_check = 1` for current user
+2. Also include master address (`index = -1`) if it has `pending_utxo_check = 1`
+3. For each pending address, fetch UTXOs from WhatsOnChain API
+4. Insert new UTXOs as outputs (with derivation_prefix/suffix from address data)
+5. Clear `pending_utxo_check` flag on addresses where UTXOs were found OR where the scan completed successfully (even with 0 UTXOs)
+6. Invalidate and update balance cache
+7. Return summary
+
+**Optional query parameter**: `?full=true` — syncs ALL addresses, not just pending ones. Useful for recovery or manual full refresh.
+
+**Pending address lifecycle** (updated):
+- New address created → `pending_utxo_check = 1`
+- `/wallet/sync` runs → scans address → clears flag (whether UTXOs found or not)
+- If address scan fails (API error) → flag stays `1`, will retry on next sync call
+- Stale pending expiry: addresses with `pending_utxo_check = 1` AND `created_at < (now - 10 days)` are auto-cleared
+  - Changed from 24 hours to 10 days — 24h was too aggressive for addresses that haven't received funds yet
+  - Rationale: a user might generate an address, share it, and receive payment days later
+
+**Changes to balance handler**: Remove the inline UTXO sync logic from `wallet_balance()`. The balance handler should ONLY read from cache/DB, never trigger API calls. UTXO syncing is now the responsibility of `POST /wallet/sync`.
+
+#### 6E: Broadcast Retry with Error Classification
+
+Improve `broadcast_transaction()` in `handlers.rs` to distinguish transient vs permanent failures and retry appropriately.
+
+**Error classification**:
+
+| Error Type | Examples | Action |
+|---|---|---|
+| **Permanent** (never retry) | `ERROR: 16: mandatory-script-verify-flag-failed`, `Missing inputs`, `txn-mempool-conflict`, `dust`, BEEF validation (ARC 460-469), double-spend (`competingTxs` in ARC response) | Return error immediately, mark `failed` |
+| **Transient** (retry with backoff) | Network timeout, HTTP 500/502/503, connection refused, `SEEN_IN_ORPHAN_MEMPOOL`, DNS failure | Retry up to 2 additional times per broadcaster |
+| **Already known** (treat as success) | HTTP 409, `txn-already-in-mempool`, `txn-already-known`, `duplicate` | Return success |
+
+**Retry strategy within broadcast_transaction()**:
+```
+For each broadcaster (ARC, GorillaPool mAPI, WhatsOnChain):
+    attempt 1 → if transient failure → wait 2s → attempt 2 → if transient failure → wait 4s → attempt 3
+    if permanent failure → skip remaining attempts for this broadcaster, try next broadcaster
+    if all 3 attempts fail with transient errors → try next broadcaster
+
+Total worst case: 3 broadcasters × 3 attempts = 9 attempts (with ~18s of backoff)
+```
+
+**Implementation approach**:
+1. Add `BroadcastError` enum: `Permanent(String)` vs `Transient(String)`
+2. Update `broadcast_to_arc()`, `broadcast_to_gorillapool()`, `broadcast_to_whatsonchain()` to return `Result<String, BroadcastError>` instead of `Result<String, String>`
+3. Add retry loop in `broadcast_transaction()` that respects error classification
+4. On permanent error from ANY broadcaster → stop all retries, return error immediately (the tx is fundamentally broken)
+5. On transient error → retry with backoff, then try next broadcaster
+
+**Ghost safety**: The retry logic is contained within the existing `broadcast_transaction()` call. The caller's failure handler (ghost output cleanup, input restoration) only runs AFTER all retry attempts are exhausted. No change to the cleanup sequence.
+
+#### 6F: Balance Cache Improvements
+
+**Immediate cache invalidation** — invalidate balance cache whenever outputs change:
+
+| Operation | Current Invalidation | Phase 6 Invalidation |
+|---|---|---|
+| `output_repo.insert_output()` | None | `balance_cache.invalidate()` |
+| `output_repo.mark_spent()` | None | `balance_cache.invalidate()` |
+| `output_repo.delete_by_txid()` | Only on broadcast failure | `balance_cache.invalidate()` |
+| `output_repo.restore_spent_by_txid()` | Only on broadcast failure | `balance_cache.invalidate()` |
+| `POST /wallet/sync` | Yes (already does) | Yes |
+| Monitor tasks (any output change) | N/A | `balance_cache.invalidate()` |
+
+**Implementation**: Add `balance_cache` parameter to `OutputRepository` methods that modify output state, or call invalidation at the handler/monitor level after each output-modifying operation.
+
+**Remove inline UTXO sync from balance handler**: The current `wallet_balance()` handler does UTXO API fetching inline (lines 1813-2010). This should be removed — balance should only read from local DB/cache. UTXO discovery is now `POST /wallet/sync` only.
+
+#### Rust Code Changes Summary
+
+| File | Change |
+|---|---|
+| `src/monitor/mod.rs` | **New module**: Monitor struct with task registry, 30s tick loop, event logging to `monitor_events` table |
+| `src/monitor/task_check_for_proofs.rs` | **New**: Merges ARC poller + cache_sync. Uses proven_tx_reqs lifecycle, queries ARC then WoC for proofs |
+| `src/monitor/task_send_waiting.rs` | **New**: Crash recovery for orphaned `sending` txs. Verifies output state before re-broadcast |
+| `src/monitor/task_fail_abandoned.rs` | **New**: Fails `unprocessed`/`unsigned` txs older than 5 min. Full ghost cleanup |
+| `src/monitor/task_unfail.rs` | **New**: Re-checks failed txs (within 30-min window) for on-chain proof. Recovers false failures |
+| `src/monitor/task_review_status.rs` | **New**: Ensures consistency across proven_tx_reqs → transactions → outputs |
+| `src/monitor/task_purge.rs` | **New**: Cleans up old monitor_events (7d) and completed proven_tx_reqs (30d) |
+| `src/handlers.rs` | Add `POST /wallet/sync` endpoint. Remove inline UTXO sync from `wallet_balance()`. Add `BroadcastError` enum and retry logic to `broadcast_transaction()`. Classify errors in each broadcaster function |
+| `src/database/address_repo.rs` | Change `clear_stale_pending_addresses()` from 24h to 10 days (240h) |
+| `src/database/output_repo.rs` | Add balance cache invalidation calls to write methods |
+| `src/database/migrations.rs` | Add `create_schema_v20()` for monitor_events table |
+| `src/database/connection.rs` | Add V20 migration runner |
+| `src/balance_cache.rs` | No structural changes (30s TTL + invalidation already works) |
+| `src/utxo_sync.rs` | Refactor into `sync_pending_addresses()` function callable from sync endpoint. Remove periodic loop |
+| `src/arc_status_poller.rs` | **Removed**: logic moved to `task_check_for_proofs` |
+| `src/cache_sync.rs` | **Removed**: logic moved to `task_check_for_proofs` |
+| `src/main.rs` | Start Monitor instead of individual background services. Register `/wallet/sync` route |
+
+#### Implementation Order
+
+Implement in sub-phases to minimize risk:
+
+1. **6A**: Migration V20 (monitor_events table) + Monitor module skeleton with empty tasks
+2. **6B**: TaskCheckForProofs — migrate arc_status_poller + cache_sync logic. Run in parallel with old services, compare results
+3. **6C**: TaskFailAbandoned + TaskUnFail + TaskReviewStatus — migrate cleanup/reconciliation logic
+4. **6D**: TaskSendWaiting — crash recovery with output state verification
+5. **6E**: TaskPurge — simple cleanup task
+6. **6F**: Broadcast retry with error classification (can be done independently of monitor)
+7. **6G**: POST /wallet/sync endpoint + remove inline UTXO sync from balance handler + update pending expiry to 10 days
+8. **6H**: Balance cache invalidation on output writes
+9. **6I**: Remove old services (arc_status_poller.rs, cache_sync.rs), update main.rs to use Monitor only
+
+Each sub-phase should be tested before proceeding. Sub-phases 6F, 6G, 6H can be done in parallel with 6B-6E since they're independent.
+
+#### Testing Plan
+
+| Test | Verification |
+|---|---|
+| Monitor startup | Monitor starts, logs "Monitor started with 6 tasks", ticks every 30s |
+| TaskCheckForProofs | Unproven tx gets proof → status changes to `completed` |
+| TaskSendWaiting | Simulate crash (kill during broadcast) → tx stuck in `sending` → monitor recovers it |
+| TaskFailAbandoned | Create tx but don't sign → after 5 min, tx marked `failed`, outputs restored |
+| TaskUnFail | Force-fail a tx that was actually mined → within 30 min, monitor recovers it |
+| TaskReviewStatus | Manually desync proven_tx_reqs/transactions → monitor reconciles |
+| TaskPurge | Insert old monitor_events → verify cleanup after 7 days |
+| POST /wallet/sync | Generate new address → call sync → verify UTXO scan runs |
+| Broadcast retry | Simulate network timeout → verify retry with backoff → verify permanent error stops all retries |
+| Balance cache | Insert output → verify cache invalidated → next balance read recalculates |
+| Pending expiry | Create address, don't fund it → verify pending flag stays for 10 days |
+| Ghost safety | Kill app mid-broadcast → verify no ghost outputs after monitor recovery |
+
+#### Deferred to Later Phases
+
+| Item | Reason |
+|---|---|
+| Frontend sync button | Frontend changes are separate phase |
+| Frontend balance polling enablement | `useBalance.ts` has polling commented out — re-enable with appropriate interval in frontend phase |
+| Frontend price caching | Add 5-min TTL cache for exchange rate when polling is enabled |
+| POST /wallet/rebroadcast/{txid} | Not needed — permanent failures should create new txs, transient failures handled by retry logic |
+
 #### Risk: MEDIUM
-- Behavioral change in background processing
-- Mitigation: implement new tasks alongside old services, run both in parallel with logging, cut over when confident
+- Behavioral change in background processing — mitigated by running new tasks alongside old services before cutover
+- Broadcast retry logic touches the critical broadcast path — mitigated by error classification (permanent errors bail immediately, same as today)
+- Ghost transaction risk in TaskUnFail and TaskSendWaiting — mitigated by explicit output state verification before any action
+- Balance cache invalidation adds overhead — mitigated by invalidation being a simple flag set (no computation)
+
+#### Implementation Results (2026-02-07)
+
+All 9 sub-phases (6A-6I) implemented and tested. Additional migrations V21 and V22 were added during testing to fix data issues discovered in production:
+
+**V21**: Patch `proven_txs` merkle_path BLOBs — old code paths stored TSC JSON without the `height` field required for BEEF/BUMP construction. V21 injects height from the `proven_txs.height` column into each BLOB.
+
+**V22**: Fix array-format BLOBs — WhatsOnChain's TSC proof API sometimes returns `[{...}]` (array) instead of `{...}` (object). Old storage code saved the array directly. `serde_json::Value::as_object_mut()` silently fails on arrays, preventing height injection. V22 normalizes arrays to objects and re-injects height.
+
+**Additional fixes applied during testing**:
+- FK constraint in `update_txid()`: Phase 4's output-to-transaction FK broke the DELETE+INSERT pattern. Fixed by detaching outputs before DELETE and re-linking after INSERT.
+- SEEN_IN_ORPHAN_MEMPOOL: Separated from normal mempool handling with 30-min timeout and WoC on-chain verification before failing.
+- UTXO reconciliation: `POST /wallet/sync` was missing the reconciliation step from the old `utxo_sync.rs`. Added `reconcile_for_derivation()` to detect outputs spent on-chain but still marked spendable in the DB.
+- ARC txid verification: Added mismatch warning when ARC returns a different txid than expected (indicates broken BEEF ancestry).
+
+**Deferred items confirmed**:
+- Frontend sync button, balance polling enablement, and price caching remain deferred to a separate frontend phase
+- POST /wallet/rebroadcast endpoint not needed — retry logic integrated into broadcast_transaction()
 
 ---
 
@@ -1239,7 +1552,7 @@ DROP TABLE IF EXISTS merkle_proofs;        -- replaced by proven_txs
 | 3 (Users) | New table + column additions | Full rollback | None | Pending |
 | 4 (Outputs) | New table + data migration | Rollback via old utxos table | **Medium**: UTXO state is critical | Pending |
 | 5 (Labels etc) | New tables + data copy | Full rollback | None | Pending |
-| 6 (Monitor) | Code-only (new background tasks) | Full rollback (revert code) | None | Pending |
+| 6 (Monitor) | New table + code restructure (monitor pattern, broadcast retry, sync endpoint) | Full rollback (revert code, drop monitor_events) | **Low**: background processing change, broadcast retry | Pending |
 | 7 (Derivation) | Data backfill on outputs | Rollback via addresses table | **High**: key derivation is critical | Pending |
 | 8 (Cleanup) | Table/column drops | **Not reversible** — backup required | N/A (dead data) | Pending |
 
@@ -1296,4 +1609,4 @@ After all 8 phases are complete, the Hodos database will have tables that closel
 
 *End of transition plan. Each phase is reviewed and approved individually before implementation begins.*
 
-*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Phase 3 completed 2026-02-05. Phase 4 completed 2026-02-06. Phase 5 completed 2026-02-07. Next: Phase 6 (Monitor Pattern).*
+*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Phase 3 completed 2026-02-05. Phase 4 completed 2026-02-06. Phase 5 completed 2026-02-07. Next: Phase 6 (Monitor Pattern — planned 2026-02-07, 9 sub-phases: 6A-6I).*
