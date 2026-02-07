@@ -127,14 +127,34 @@ impl<'a> TransactionRepository<'a> {
             Err(e) => return Err(e),
         };
 
-        // Get labels
-        let mut label_stmt = self.conn.prepare(
-            "SELECT label FROM transaction_labels WHERE transaction_id = ?1"
-        )?;
-        let labels: Vec<String> = label_stmt.query_map(
-            rusqlite::params![transaction_id],
-            |row| Ok(row.get(0)?),
-        )?.collect::<Result<Vec<_>>>()?;
+        // Get labels (Phase 5: try new tables first, fallback to old)
+        let labels: Vec<String> = {
+            let mut new_stmt = self.conn.prepare(
+                "SELECT tl.label
+                 FROM tx_labels tl
+                 INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+                 WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
+                 ORDER BY tl.label"
+            )?;
+            let new_labels: Vec<String> = new_stmt.query_map(
+                rusqlite::params![transaction_id],
+                |row| Ok(row.get(0)?),
+            )?.filter_map(|r| r.ok()).collect();
+
+            if !new_labels.is_empty() {
+                new_labels
+            } else {
+                // Fallback to old table
+                let mut old_stmt = self.conn.prepare(
+                    "SELECT label FROM transaction_labels WHERE transaction_id = ?1"
+                )?;
+                let old_labels: Vec<String> = old_stmt.query_map(
+                    rusqlite::params![transaction_id],
+                    |row| Ok(row.get(0)?),
+                )?.filter_map(|r| r.ok()).collect();
+                old_labels
+            }
+        };
 
         // Get inputs
         let mut input_stmt = self.conn.prepare(

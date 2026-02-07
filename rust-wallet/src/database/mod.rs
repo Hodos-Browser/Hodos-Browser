@@ -22,9 +22,16 @@ pub mod certificate_repo;
 pub mod message_relay_repo;
 pub mod user_repo;
 pub mod output_repo;
+// Phase 5: Labels, Commissions, Supporting Tables (V19)
+pub mod tx_label_repo;
+pub mod commission_repo;
+pub mod settings_repo;
+pub mod sync_state_repo;
 
 pub use connection::WalletDatabase;
 pub use models::{Wallet, User, Address, Output, ParentTransaction, MerkleProof, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
+// Phase 5 models
+pub use models::{TxLabel, TxLabelMap, Commission, Setting, SyncState};
 pub use wallet_repo::WalletRepository;
 pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;
@@ -41,3 +48,8 @@ pub use certificate_repo::CertificateRepository;
 pub use message_relay_repo::{MessageRelayRepository, RelayMessage, MessageRelayStats};
 pub use user_repo::UserRepository;
 pub use output_repo::OutputRepository;
+// Phase 5 repositories
+pub use tx_label_repo::TxLabelRepository;
+pub use commission_repo::CommissionRepository;
+pub use settings_repo::SettingsRepository;
+pub use sync_state_repo::SyncStateRepository;

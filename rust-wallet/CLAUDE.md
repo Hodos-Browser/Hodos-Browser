@@ -49,7 +49,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/crypto/brc42.rs` | `derive_child_private_key`, `derive_child_public_key` |
 | `src/crypto/brc43.rs` | `InvoiceNumber`, `SecurityLevel`, `normalize_protocol_id` |
 | `src/crypto/signing.rs` | `sha256`, `hmac_sha256`, `verify_hmac_sha256` |
-| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `OutputRepository`, `CertificateRepository`, `ProvenTxRepository`, `ProvenTxReqRepository`, `UserRepository` |
+| `src/database/mod.rs` | `WalletDatabase`, `WalletRepository`, `AddressRepository`, `OutputRepository`, `CertificateRepository`, `ProvenTxRepository`, `ProvenTxReqRepository`, `UserRepository`, `TxLabelRepository`, `CommissionRepository`, `SettingsRepository`, `SyncStateRepository` |
 | `src/database/helpers.rs` | `get_master_private_key_from_db`, `get_master_public_key_from_db` |
 | `src/database/proven_tx_repo.rs` | `ProvenTxRepository`: `insert_or_get`, `get_by_txid`, `get_merkle_proof_as_tsc`, `link_transaction` — immutable proof records |
 | `src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository`: `create`, `get_by_txid`, `update_status`, `link_proven_tx`, `add_history_note` — proof lifecycle tracking |
@@ -57,9 +57,9 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/cache_sync.rs` | Background BEEF cache sync, creates `proven_txs` records from WhatsOnChain TSC proofs |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
 
-## Database Schema (V18)
+## Database Schema (V19)
 
-Current migration version: **V18**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+Current migration version: **V19**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
 
 | Table | Purpose | Phase |
 |-------|---------|-------|
@@ -78,6 +78,11 @@ Current migration version: **V18**. Migrations in `src/database/migrations.rs`, 
 | output_tags / output_tag_map | Output tagging, `user_id` FK (V17) | V14/V17 |
 | certificates / certificate_fields | BRC-52 identity certificates, `user_id` FK (V17) | V7/V17 |
 | domain_whitelist | BRC-100 app permissions | Original |
+| tx_labels / tx_labels_map | Transaction labels (normalized pattern, replaces `transaction_labels`) | V19 |
+| commissions | Fee tracking per transaction | V19 |
+| settings | Persistent wallet configuration (chain, dbtype, limits) | V19 |
+| sync_states | Multi-device synchronization state | V19 |
+| transaction_labels | **Deprecated** — reads fallback only. Replaced by `tx_labels`/`tx_labels_map` (V19) | Original |
 
 ### Output Model (V18 - Phase 4 Complete)
 

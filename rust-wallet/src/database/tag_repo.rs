@@ -183,10 +183,18 @@ impl<'a> TagRepository<'a> {
         Ok(tag_ids)
     }
 
-    /// Get labels for a transaction (from transaction_labels table)
+    /// Get labels for a transaction
+    ///
+    /// Uses the new tx_labels + tx_labels_map tables (Phase 5).
+    /// Falls back to old transaction_labels table if new tables are empty.
     pub fn get_labels_for_transaction(&self, transaction_id: i64) -> Result<Vec<String>> {
+        // Try new tables first (Phase 5)
         let mut stmt = self.conn.prepare(
-            "SELECT label FROM transaction_labels WHERE transaction_id = ?1 ORDER BY label"
+            "SELECT tl.label
+             FROM tx_labels tl
+             INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+             WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
+             ORDER BY tl.label"
         )?;
 
         let rows = stmt.query_map(
@@ -197,6 +205,20 @@ impl<'a> TagRepository<'a> {
         let mut labels = Vec::new();
         for row in rows {
             labels.push(row?);
+        }
+
+        // If no results, fall back to old table (for backward compat)
+        if labels.is_empty() {
+            let mut old_stmt = self.conn.prepare(
+                "SELECT label FROM transaction_labels WHERE transaction_id = ?1 ORDER BY label"
+            )?;
+            let old_rows = old_stmt.query_map(
+                rusqlite::params![transaction_id],
+                |row| row.get(0),
+            )?;
+            for row in old_rows {
+                labels.push(row?);
+            }
         }
 
         Ok(labels)

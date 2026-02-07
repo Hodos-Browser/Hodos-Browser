@@ -2,7 +2,7 @@
 //!
 //! These structs represent the data stored in the database tables.
 
-use serde::{Deserialize, Serialize};
+// Note: serde traits may be needed in the future for JSON serialization
 
 /// Wallet model matching the `wallets` table
 #[derive(Debug, Clone)]
@@ -177,4 +177,80 @@ pub struct OutputTagMap {
     pub created_at: i64,
     pub updated_at: i64,
     pub is_deleted: bool,
+}
+
+// =============================================================================
+// Phase 5: Labels, Commissions, Supporting Tables (V19)
+// =============================================================================
+
+/// Transaction label entity model matching the `tx_labels` table.
+/// Labels are deduplicated per user - each unique label string exists once.
+/// Junction table `tx_labels_map` links labels to transactions.
+#[derive(Debug, Clone)]
+pub struct TxLabel {
+    pub tx_label_id: Option<i64>,  // None for new labels, Some(id) for existing
+    pub user_id: i64,              // References users(userId)
+    pub label: String,             // Normalized label text (trimmed, lowercase)
+    pub is_deleted: bool,          // Soft delete flag
+    pub created_at: i64,           // Unix timestamp
+    pub updated_at: i64,           // Unix timestamp
+}
+
+/// Transaction label mapping model matching the `tx_labels_map` table.
+/// Many-to-many junction between tx_labels and transactions.
+#[derive(Debug, Clone)]
+pub struct TxLabelMap {
+    pub tx_label_id: i64,          // References tx_labels(txLabelId)
+    pub transaction_id: i64,       // References transactions(id)
+    pub is_deleted: bool,          // Soft delete flag
+    pub created_at: i64,           // Unix timestamp
+    pub updated_at: i64,           // Unix timestamp
+}
+
+/// Commission model matching the `commissions` table.
+/// Tracks fee commissions per transaction for wallet-toolbox compatibility.
+#[derive(Debug, Clone)]
+pub struct Commission {
+    pub commission_id: Option<i64>,  // None for new, Some(id) for existing
+    pub user_id: i64,                // References users(userId)
+    pub transaction_id: i64,         // References transactions(id), unique
+    pub satoshis: i64,               // Commission amount in satoshis
+    pub key_offset: String,          // Key derivation offset for commission output
+    pub is_redeemed: bool,           // Whether commission has been claimed
+    pub locking_script: Vec<u8>,     // Locking script for commission output
+    pub created_at: i64,             // Unix timestamp
+    pub updated_at: i64,             // Unix timestamp
+}
+
+/// Settings model matching the `settings` table.
+/// Persistent configuration for wallet operation.
+#[derive(Debug, Clone)]
+pub struct Setting {
+    pub storage_identity_key: String,  // Identity key for cloud storage
+    pub storage_name: String,          // Storage provider name
+    pub chain: String,                 // Network: "main" or "test"
+    pub db_type: String,               // Database type: "sqlite"
+    pub max_output_script: i32,        // Max script size in bytes (default 500000)
+    pub created_at: i64,               // Unix timestamp
+    pub updated_at: i64,               // Unix timestamp
+}
+
+/// Sync state model matching the `sync_states` table.
+/// Tracks multi-device synchronization state per user.
+#[derive(Debug, Clone)]
+pub struct SyncState {
+    pub sync_state_id: Option<i64>,    // None for new, Some(id) for existing
+    pub user_id: i64,                  // References users(userId)
+    pub storage_identity_key: String,  // Remote storage identity
+    pub storage_name: String,          // Remote storage name
+    pub status: String,                // Sync status: "unknown", "syncing", "synced", "error"
+    pub init: bool,                    // Whether initial sync completed
+    pub ref_num: String,               // Unique reference number
+    pub sync_map: String,              // JSON sync state mapping
+    pub sync_when: Option<i64>,        // Last sync timestamp
+    pub satoshis: Option<i64>,         // Balance at sync point
+    pub error_local: Option<String>,   // Local error message
+    pub error_other: Option<String>,   // Remote error message
+    pub created_at: i64,               // Unix timestamp
+    pub updated_at: i64,               // Unix timestamp
 }

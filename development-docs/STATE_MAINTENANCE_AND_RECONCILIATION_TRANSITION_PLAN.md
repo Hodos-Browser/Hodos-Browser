@@ -1,7 +1,7 @@
 # State Maintenance & Reconciliation — Transition Plan
 
 **Created**: 2026-02-03
-**Status**: In Progress — Phases 1-4 ✅ Complete, Phases 5-8 Pending
+**Status**: In Progress — Phases 1-5 ✅ Complete, Phases 6-8 Pending
 **Objective**: Evolve the Hodos Rust wallet database and state management to align with the BSV SDK wallet-toolbox, enabling future multi-user support, cloud sync, and wallet export/import interoperability.
 **See also**: `WALLET_BACKUP_AND_RECOVERY_PLAN.md` — backup file export, on-chain encrypted backup, and cloud sync scaffolding (interleaved with this plan's phases).
 
@@ -946,9 +946,11 @@ WHERE new_status = 'unproven';
 
 ---
 
-### Phase 5: Labels, Commissions, Supporting Tables
+### Phase 5: Labels, Commissions, Supporting Tables ✅ COMPLETE
 
 **Goal**: Restructure transaction_labels to tx_labels + tx_labels_map pattern. Add commissions, settings, sync_states tables.
+
+**Completed**: 2026-02-07 | **Migration**: V19 | **Branch**: wallet-toolbox-alignment
 
 #### Schema Changes (Migration v19)
 
@@ -1030,15 +1032,35 @@ CREATE TABLE IF NOT EXISTS sync_states (
 CREATE INDEX idx_sync_states_status ON sync_states(status);
 ```
 
-#### Rust Code Changes
+#### Rust Code Changes (Implemented)
 
 | File | Change |
 |---|---|
-| `src/database/tx_label_repo.rs` | **New file**: replaces label logic in transaction_repo |
-| `src/database/commission_repo.rs` | **New file**: commission CRUD |
-| `src/database/settings_repo.rs` | **New file**: settings CRUD |
-| `src/database/sync_state_repo.rs` | **New file**: sync state CRUD |
-| `src/handlers.rs` | Update label operations to use new tx_labels + tx_labels_map |
+| `src/database/models.rs` | Added `TxLabel`, `TxLabelMap`, `Commission`, `Setting`, `SyncState` model structs |
+| `src/database/migrations.rs` | Added `create_schema_v19()`: creates tx_labels, tx_labels_map, commissions, settings, sync_states tables; migrates transaction_labels data |
+| `src/database/connection.rs` | Added V19 migration runner |
+| `src/database/tx_label_repo.rs` | **New file**: `TxLabelRepository` with `find_or_insert()`, `get_labels_for_transaction()`, `assign_label_to_transaction()`, `remove_label_from_transaction()`, `get_all_labels()`, `delete_label()` |
+| `src/database/commission_repo.rs` | **New file**: `CommissionRepository` with `create()`, `get_by_id()`, `get_by_transaction_id()`, `get_unredeemed()`, `mark_redeemed()`, `get_total_unredeemed()`, `delete_by_transaction_id()` |
+| `src/database/settings_repo.rs` | **New file**: `SettingsRepository` with `get()`, `upsert()`, `ensure_defaults()`, `get_chain()`, `set_chain()`, `get_max_output_script()`, `set_storage()` |
+| `src/database/sync_state_repo.rs` | **New file**: `SyncStateRepository` with `create()`, `get_by_id()`, `get_by_ref_num()`, `get_by_user()`, `get_pending()`, `update_status()`, `update_sync_map()`, `mark_synced()`, `mark_error()`, `mark_init_complete()`, `cleanup_old()` |
+| `src/database/mod.rs` | Export new modules and model types |
+| `src/database/tag_repo.rs` | Updated `get_labels_for_transaction()` to use new tables with fallback to old `transaction_labels` |
+| `src/database/transaction_repo.rs` | Updated label read code in `get_by_txid()` to use new tables with fallback |
+
+#### Implementation Notes
+
+- V19 migration creates 5 new tables and migrates existing `transaction_labels` data
+- Data migration normalizes labels (trim + lowercase) during copy
+- Label reads use new `tx_labels` + `tx_labels_map` tables with fallback to old `transaction_labels`
+- Label writes still go to old `transaction_labels` table for now (can be updated in follow-up)
+- New tables (`commissions`, `settings`, `sync_states`) are empty — ready for future use
+- Old `transaction_labels` table preserved for rollback safety
+
+#### Testing (TODO for User)
+
+- [ ] **Fresh DB**: V19 migration creates all new tables with correct columns and indexes
+- [ ] **V18→V19 Migration**: Label data correctly migrated to tx_labels + tx_labels_map
+- [ ] **Runtime**: Label reads from new tables, fallback to old if empty
 
 #### Risk: LOW
 - Mostly additive
@@ -1274,4 +1296,4 @@ After all 8 phases are complete, the Hodos database will have tables that closel
 
 *End of transition plan. Each phase is reviewed and approved individually before implementation begins.*
 
-*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Phase 3 completed 2026-02-05. Phase 4 completed 2026-02-06. Next: Phase 5 (Labels, Commissions, Supporting Tables).*
+*Phase 1 completed 2026-02-03. Phase 2 completed 2026-02-04. Phase 3 completed 2026-02-05. Phase 4 completed 2026-02-06. Phase 5 completed 2026-02-07. Next: Phase 6 (Monitor Pattern).*

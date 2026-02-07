@@ -2240,3 +2240,228 @@ fn parse_brc29_derivation(instructions: &str) -> Option<(String, String)> {
         None
     }
 }
+
+/// Migration v19: Labels, Commissions, Supporting Tables (Phase 5)
+///
+/// Phase 5 of wallet-toolbox alignment. Restructures transaction labels to
+/// normalized form (tx_labels + tx_labels_map) and adds supporting tables:
+/// - tx_labels: Deduplicated label entities per user
+/// - tx_labels_map: Many-to-many mapping between labels and transactions
+/// - commissions: Fee tracking per transaction
+/// - settings: Persistent wallet configuration
+/// - sync_states: Multi-device synchronization state
+///
+/// Data migration: Existing transaction_labels data is migrated to the new tables.
+pub fn create_schema_v19(conn: &Connection) -> Result<()> {
+    info!("=== Migration v19: Labels, Commissions, Supporting Tables (Phase 5) ===");
+
+    // Step 1: Create tx_labels table (label entities)
+    info!("   Step 1: Creating tx_labels table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tx_labels (
+            txLabelId INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(userId),
+            label TEXT NOT NULL,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(label, user_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tx_labels_user_id ON tx_labels(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tx_labels_label ON tx_labels(label)",
+        [],
+    )?;
+    info!("   ✅ Created tx_labels table");
+
+    // Step 2: Create tx_labels_map junction table
+    info!("   Step 2: Creating tx_labels_map table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tx_labels_map (
+            txLabelId INTEGER NOT NULL REFERENCES tx_labels(txLabelId),
+            transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(txLabelId, transaction_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tx_labels_map_tx ON tx_labels_map(transaction_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tx_labels_map_label ON tx_labels_map(txLabelId)",
+        [],
+    )?;
+    info!("   ✅ Created tx_labels_map table");
+
+    // Step 3: Migrate existing transaction_labels data
+    info!("   Step 3: Migrating transaction_labels data...");
+    migrate_transaction_labels(conn)?;
+
+    // Step 4: Create commissions table
+    info!("   Step 4: Creating commissions table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS commissions (
+            commissionId INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(userId),
+            transaction_id INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
+            satoshis INTEGER NOT NULL,
+            key_offset TEXT NOT NULL,
+            is_redeemed INTEGER NOT NULL DEFAULT 0,
+            locking_script BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_commissions_user_id ON commissions(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_commissions_tx ON commissions(transaction_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_commissions_unredeemed ON commissions(is_redeemed) WHERE is_redeemed = 0",
+        [],
+    )?;
+    info!("   ✅ Created commissions table");
+
+    // Step 5: Create settings table
+    info!("   Step 5: Creating settings table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            storage_identity_key TEXT NOT NULL,
+            storage_name TEXT NOT NULL,
+            chain TEXT NOT NULL DEFAULT 'main',
+            dbtype TEXT NOT NULL DEFAULT 'sqlite',
+            max_output_script INTEGER NOT NULL DEFAULT 500000,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    info!("   ✅ Created settings table");
+
+    // Step 6: Create sync_states table
+    info!("   Step 6: Creating sync_states table...");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_states (
+            syncStateId INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(userId),
+            storage_identity_key TEXT NOT NULL DEFAULT '',
+            storage_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            init INTEGER NOT NULL DEFAULT 0,
+            ref_num TEXT NOT NULL UNIQUE,
+            sync_map TEXT NOT NULL,
+            sync_when INTEGER,
+            satoshis INTEGER,
+            error_local TEXT,
+            error_other TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sync_states_status ON sync_states(status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sync_states_user ON sync_states(user_id)",
+        [],
+    )?;
+    info!("   ✅ Created sync_states table");
+
+    info!("   ✅ Schema version 19 migration complete");
+    Ok(())
+}
+
+/// Migrate data from old transaction_labels table to new tx_labels + tx_labels_map
+///
+/// The old table has (transaction_id, label) pairs. The new model separates
+/// labels into a deduplicated entity table with a junction table for mappings.
+fn migrate_transaction_labels(conn: &Connection) -> Result<()> {
+    // Check if transaction_labels table exists
+    let has_old_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='transaction_labels'",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? > 0),
+    ).unwrap_or(false);
+
+    if !has_old_table {
+        info!("      ⏭️  No transaction_labels table found, skipping migration");
+        return Ok(());
+    }
+
+    // Get default user ID
+    let default_user_id: i64 = conn.query_row(
+        "SELECT userId FROM users ORDER BY userId ASC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Step 1: Insert unique labels into tx_labels (deduplicate)
+    let labels_inserted = conn.execute(
+        "INSERT OR IGNORE INTO tx_labels (user_id, label, is_deleted, created_at, updated_at)
+         SELECT DISTINCT ?1, LOWER(TRIM(label)), 0, ?2, ?3
+         FROM transaction_labels
+         WHERE TRIM(label) != ''",
+        rusqlite::params![default_user_id, now, now],
+    )?;
+    info!("      ✅ Inserted {} unique labels into tx_labels", labels_inserted);
+
+    // Step 2: Create mappings in tx_labels_map
+    let mappings_inserted = conn.execute(
+        "INSERT OR IGNORE INTO tx_labels_map (txLabelId, transaction_id, is_deleted, created_at, updated_at)
+         SELECT tl.txLabelId, old.transaction_id, 0, ?1, ?2
+         FROM transaction_labels old
+         INNER JOIN tx_labels tl ON tl.label = LOWER(TRIM(old.label)) AND tl.user_id = ?3
+         WHERE TRIM(old.label) != ''",
+        rusqlite::params![now, now, default_user_id],
+    )?;
+    info!("      ✅ Created {} label mappings in tx_labels_map", mappings_inserted);
+
+    // Verify migration
+    let old_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transaction_labels",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let new_map_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tx_labels_map",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if old_count == new_map_count {
+        info!("      ✅ Migration verified: {} mappings", new_map_count);
+    } else {
+        // Some may have been skipped due to empty labels
+        let empty_labels: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM transaction_labels WHERE TRIM(label) = ''",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        info!("      ℹ️  {} original labels, {} migrated, {} empty labels skipped",
+              old_count, new_map_count, empty_labels);
+    }
+
+    Ok(())
+}

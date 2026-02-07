@@ -701,13 +701,109 @@ The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity
 
 Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` created a proof before ARC poller ran, transaction status wasn't updated. Fixed by adding status updates to `cache_sync` and early reconciliation check to ARC poller.
 
+### Phase 3: Multi-User Foundation — COMPLETED (2026-02-05)
+
+**Migration V17** — Added `users` table and `user_id` foreign keys to core tables. Creates default user from wallet's master public key.
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/user_repo.rs` | `UserRepository` — user identity management |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `User` struct |
+| `rust-wallet/src/database/mod.rs` | Export `user_repo`, `User`, `UserRepository` |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v17()` — creates users table, adds user_id to 5 tables |
+| `rust-wallet/src/database/connection.rs` | Added V17 migration runner |
+| `rust-wallet/src/main.rs` | Added `current_user_id` to `AppState` |
+
+### Phase 4: Output Model Transition — COMPLETED (2026-02-06)
+
+**Migration V18** — Created `outputs` table replacing `utxos` with wallet-toolbox compatible schema. Migrated existing UTXO data with derivation info.
+
+#### Sub-phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 4A | Schema + data migration | ✅ |
+| 4B | Read path + comparison logging | ✅ |
+| 4C | Dual-write to both tables | ✅ |
+| 4D | Cutover to outputs table | ✅ |
+| 4E | Cleanup deprecated utxos code | ✅ |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/output_repo.rs` | `OutputRepository` — wallet-toolbox compatible output CRUD |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `Output` struct, removed `Utxo` |
+| `rust-wallet/src/database/mod.rs` | Export `output_repo`, `Output`, `OutputRepository`; removed `utxo_repo` |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v18()` with data migration |
+| `rust-wallet/src/database/connection.rs` | Added V18 migration runner |
+| `rust-wallet/src/database/helpers.rs` | Added `output_to_fetcher_utxo()` adapter |
+| `rust-wallet/src/handlers.rs` | Switched all UTXO operations to `OutputRepository` |
+| `rust-wallet/src/utxo_sync.rs` | Switched to `OutputRepository` |
+| `rust-wallet/src/backup.rs` | Switched to `OutputRepository` |
+
+#### Files Deleted
+
+| File | Reason |
+|------|--------|
+| `rust-wallet/src/database/utxo_repo.rs` | Replaced by `output_repo.rs` |
+
+### Phase 5: Labels, Commissions, Supporting Tables — COMPLETED (2026-02-07)
+
+**Migration V19** — Restructured transaction labels to normalized form (`tx_labels` + `tx_labels_map`). Added supporting tables for future features.
+
+#### Tables Created
+
+| Table | Purpose |
+|-------|---------|
+| `tx_labels` | Deduplicated label entities per user |
+| `tx_labels_map` | Many-to-many junction between labels and transactions |
+| `commissions` | Fee tracking per transaction (future use) |
+| `settings` | Persistent wallet configuration (future use) |
+| `sync_states` | Multi-device sync state (future use) |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/tx_label_repo.rs` | `TxLabelRepository` — label CRUD with normalization |
+| `rust-wallet/src/database/commission_repo.rs` | `CommissionRepository` — commission tracking |
+| `rust-wallet/src/database/settings_repo.rs` | `SettingsRepository` — wallet settings |
+| `rust-wallet/src/database/sync_state_repo.rs` | `SyncStateRepository` — sync state tracking |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `TxLabel`, `TxLabelMap`, `Commission`, `Setting`, `SyncState` |
+| `rust-wallet/src/database/mod.rs` | Export new modules and types |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v19()` with label data migration |
+| `rust-wallet/src/database/connection.rs` | Added V19 migration runner |
+| `rust-wallet/src/database/tag_repo.rs` | Updated label reads to use new tables with fallback |
+| `rust-wallet/src/database/transaction_repo.rs` | Updated label reads to use new tables with fallback |
+
+#### Migration Results
+
+- 130 old labels → 6 unique labels (deduplicated)
+- 128 transaction-label mappings preserved
+- 2 empty labels skipped
+
 ### Remaining Phases (Pending)
 
 | Phase | Goal | Migration |
 |-------|------|-----------|
-| 3 | Multi-User Foundation (users table, userId FKs) | V17 |
-| 4 | Output Model Transition (utxos → outputs) | V18 |
-| 5 | Labels, Commissions, Supporting Tables | V19 |
 | 6 | Monitor Pattern (background service restructure) | V20 |
 | 7 | Per-Output Key Derivation | V21 |
 | 8 | Cleanup (deprecated table removal) | V22 |
@@ -716,4 +812,4 @@ Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` c
 
 - **UTXO sync disabled**: Background UTXO sync commented out in `main.rs`. Will be redesigned as manual trigger in Phase 6 (Monitor pattern)
 - **Staleness timeout needed**: ARC poller should auto-mark transactions as failed if unproven for >7 days. Deferred to Phase 6
-- **Old tables preserved**: `merkle_proofs` and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8
+- **Old tables preserved**: `merkle_proofs`, `transaction_labels`, `utxos`, and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8
