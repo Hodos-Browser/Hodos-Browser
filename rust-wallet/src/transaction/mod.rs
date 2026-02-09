@@ -64,6 +64,73 @@ pub fn encode_varint_signed(n: i64) -> Vec<u8> {
     }
 }
 
+/// Decode a Bitcoin varint from a byte slice.
+/// Returns (value, bytes_consumed).
+pub fn decode_varint(data: &[u8]) -> Result<(u64, usize), TransactionError> {
+    if data.is_empty() {
+        return Err(TransactionError::InvalidFormat("empty varint".into()));
+    }
+    match data[0] {
+        0..=0xFC => Ok((data[0] as u64, 1)),
+        0xFD => {
+            if data.len() < 3 { return Err(TransactionError::InvalidFormat("truncated varint".into())); }
+            Ok((u16::from_le_bytes([data[1], data[2]]) as u64, 3))
+        }
+        0xFE => {
+            if data.len() < 5 { return Err(TransactionError::InvalidFormat("truncated varint".into())); }
+            Ok((u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as u64, 5))
+        }
+        0xFF => {
+            if data.len() < 9 { return Err(TransactionError::InvalidFormat("truncated varint".into())); }
+            Ok((u64::from_le_bytes([data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]]), 9))
+        }
+    }
+}
+
+/// Extract input outpoints (prev_txid, prev_vout) from a raw transaction hex string.
+/// Used by TaskUnFail to re-mark inputs as spent when recovering a false failure.
+pub fn extract_input_outpoints(raw_tx_hex: &str) -> Result<Vec<(String, u32)>, TransactionError> {
+    let bytes = hex::decode(raw_tx_hex)
+        .map_err(|e| TransactionError::InvalidFormat(format!("hex decode: {}", e)))?;
+
+    if bytes.len() < 5 {
+        return Err(TransactionError::InvalidFormat("tx too short".into()));
+    }
+
+    let mut pos = 4; // skip version (4 bytes)
+
+    let (num_inputs, varint_len) = decode_varint(&bytes[pos..])?;
+    pos += varint_len;
+
+    let mut outpoints = Vec::with_capacity(num_inputs as usize);
+
+    for _ in 0..num_inputs {
+        if pos + 36 > bytes.len() {
+            return Err(TransactionError::InvalidFormat("truncated input".into()));
+        }
+
+        // 32 bytes prev_txid in little-endian
+        let txid_bytes: Vec<u8> = bytes[pos..pos + 32].iter().rev().cloned().collect();
+        let txid = hex::encode(&txid_bytes);
+        pos += 32;
+
+        // 4 bytes prev_vout in little-endian
+        let vout = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        pos += 4;
+
+        // Skip script_sig (varint length + data)
+        let (script_len, varint_len) = decode_varint(&bytes[pos..])?;
+        pos += varint_len + script_len as usize;
+
+        // Skip sequence (4 bytes)
+        pos += 4;
+
+        outpoints.push((txid, vout));
+    }
+
+    Ok(outpoints)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,7 +25,7 @@
 
 ### The Problem
 
-HD wallet outputs (m/0, m/1, m/2...) are recoverable from a mnemonic alone by scanning sequential addresses. BRC-42 protocol outputs, PushDrop tokens, and certificates use non-sequential derivation — their derivation parameters cannot be guessed. Without a backup of those parameters, these outputs are lost if the database is lost.
+BRC-42 self-derived receive addresses (`"2-receive address-0"`, `"2-receive address-1"`, ...) are recoverable from a mnemonic alone by scanning sequential indices — the same recovery model as BIP32 HD wallets. However, counterparty-derived BRC-42 protocol outputs (where `senderIdentityKey != self`), PushDrop tokens, and certificates use non-sequential derivation — their derivation parameters (counterparty pubkey, protocol-specific prefix/suffix) cannot be guessed. Without a backup of those parameters, these outputs are lost if the database is lost.
 
 ### The Solution: Three Layers
 
@@ -257,7 +257,7 @@ POST /wallet/import
 
 ### Concept
 
-Store encrypted derivation data for non-HD outputs in a special UTXO on the blockchain. The UTXO lives at a deterministic BIP32 address derived from the mnemonic, so it can be found during recovery by scanning sequential addresses.
+Store encrypted derivation data for **counterparty-derived** outputs in a special UTXO on the blockchain. Self-derived BRC-42 outputs (`"2-receive address-{0..N}"`) are recoverable from the seed alone by sequential scanning and do NOT need on-chain backup. Only counterparty-derived outputs (where `senderIdentityKey != self`), certificates, and baskets need to be stored. The backup UTXO lives at a deterministic BIP32 address derived from the mnemonic, so it can be found during recovery by scanning sequential addresses.
 
 ### Design
 
@@ -279,12 +279,12 @@ Output 1: OP_RETURN
             <encrypted_payload>
 ```
 
-**Encrypted payload contents** (subset of full backup — only what's needed beyond HD recovery):
+**Encrypted payload contents** (subset of full backup — only what's NOT recoverable from seed scanning):
 ```json
 {
   "version": 1,
   "updated_at": "2026-02-03T12:00:00Z",
-  "non_hd_outputs": [
+  "counterparty_outputs": [
     {
       "txid": "abc123...",
       "vout": 0,
@@ -311,7 +311,18 @@ Output 1: OP_RETURN
 }
 ```
 
-**Note**: The on-chain payload is a **subset** — only non-HD derivation data, certificates, and basket definitions. HD outputs are recoverable from the mnemonic via address scanning, so they don't need to be in the on-chain backup. This keeps the payload small.
+**What's included vs excluded from on-chain backup**:
+
+| Output Type | In on-chain backup? | Why |
+|-------------|--------------------|----|
+| BRC-42 self-derived (`"2-receive address-{N}"`, senderIdentityKey=NULL) | NO | Recoverable by sequential scanning from seed |
+| Master key outputs (derivation=NULL) | NO | Derivable directly from seed |
+| Legacy BIP32 outputs (`"bip32-{N}"`) | NO | Recoverable by BIP32 sequential scanning |
+| Counterparty-derived BRC-42 (senderIdentityKey != NULL) | YES | Cannot be guessed — need prefix, suffix, and counterparty pubkey |
+| Certificates | YES | Not derivable from seed |
+| Basket definitions | YES | Metadata not derivable from seed |
+
+**Note**: This selective approach keeps the on-chain payload small. Most wallet outputs are self-derived receive addresses which don't need backup.
 
 **Encryption**:
 ```
@@ -464,19 +475,33 @@ This is eventual consistency with the blockchain as the sync transport. Not real
 User has: mnemonic only (lost device, no backup file)
 
 Step 1: Derive master key from mnemonic
-Step 2: Scan HD addresses m/0, m/1, m/2... up to gap limit
-         → Recovers all simple HD UTXOs
+Step 2: Scan BRC-42 self-derived addresses sequentially:
+         For index 0, 1, 2, ... up to gap limit (20 consecutive empty):
+           invoice_number = "2-receive address-{index}"
+           child_key = BRC-42(master_privkey, master_pubkey, invoice_number)
+           address = P2PKH(child_key)
+           → Query WhatsOnChain for UTXOs at this address
+         → Recovers all BRC-42 self-derived outputs (the standard case)
+Step 2b: (Optional) Also scan legacy BIP32 addresses m/0, m/1, m/2...
+         → Recovers any legacy BIP32 outputs from before BRC-42 migration
 Step 3: Check backup address m/{BACKUP_INDEX}
          → If UTXO found: decrypt OP_RETURN payload
-         → Recover non-HD derivation data, certificates, baskets
-Step 4: For each recovered non-HD output:
-         → Derive key using recovered derivationPrefix/Suffix
+         → Recover non-sequential derivation data (counterparty BRC-42
+           outputs where senderIdentityKey != self), certificates, baskets
+Step 4: For each recovered counterparty-derived output:
+         → Derive key using recovered derivationPrefix/Suffix/senderIdentityKey
          → Verify output exists on-chain (query by txid:vout)
          → If exists and unspent: add to wallet as spendable
 Step 5: Recompute balance from all recovered outputs
 
-Result: Full recovery of HD outputs + non-HD outputs up to last backup
+Result: Full recovery — self-derived outputs from scanning + counterparty
+        outputs from on-chain backup
 ```
+
+**Key insight**: BRC-42 self-derivation with sequential indices (`"2-receive address-{0..N}"`)
+is fully deterministic from the seed phrase — no backup needed for these. The on-chain backup
+(Step 3) only needs to store counterparty-derived outputs and certificates. This keeps the
+on-chain payload small.
 
 ### Flow 2: Mnemonic + Backup File Recovery
 
@@ -507,6 +532,37 @@ Step 2: Check on-chain backup currency
            set dirty flag for background backup task
 Step 3: Resume normal operation
 ```
+
+### Flow 4: External BIP32 Wallet Import (Future)
+
+```
+User has: BIP32 seed phrase or private key from another wallet (not Hodos)
+
+Step 1: User enters external seed phrase/privkey and marks it as "BIP32"
+Step 2: Derive BIP32 master key from seed
+Step 3: Scan BIP32 addresses m/0, m/1, m/2... up to gap limit
+         → Discover all UTXOs at BIP32-derived addresses
+Step 4: For each discovered UTXO:
+         → Create a transaction spending the BIP32 output
+         → Send to a new BRC-42 self-derived address in the Hodos wallet
+         → This effectively "sweeps" BIP32 funds into the BRC-42 system
+Step 5: After sweep transactions confirm:
+         → All funds are now at BRC-42 self-derived addresses
+         → Fully recoverable from the Hodos seed phrase
+         → No ongoing dependency on the external BIP32 seed
+
+Result: External BIP32 wallet funds migrated into Hodos BRC-42 system.
+        User only needs to remember their Hodos seed phrase going forward.
+```
+
+**Note**: This flow is not implemented in the current transition plan phases. It is documented
+here for planning awareness. The BIP32 derivation code is preserved and separated during
+Phase 7 of the transition plan specifically to support this future capability.
+
+**One-time migration for existing Hodos users**: Existing Hodos wallets may have legacy BIP32
+outputs from before the BRC-42 transition. These can use the same sweep mechanism — spend
+BIP32 outputs to BRC-42 self-derived addresses. After migration, the BIP32 fallback in the
+signing path is no longer needed.
 
 ---
 
@@ -658,6 +714,45 @@ These will be answered during implementation:
 6. **Maximum payload size**: BSV supports very large transactions, but at what point should we split the backup across multiple OP_RETURNs? Likely not needed until thousands of BRC-42 interactions.
 
 7. **Backup verification**: Should the wallet periodically verify it can decrypt its own on-chain backup? A self-test could catch encryption issues early.
+
+8. **BIP32 wallet import UX**: When a user imports an external BIP32 wallet, should the sweep (BIP32 → BRC-42) be automatic or require user confirmation for each output? Automatic is simpler but the user may want to review before spending.
+
+---
+
+## 10. Future: External BIP32 Wallet Import
+
+**Status**: Not yet scheduled — documented for planning awareness.
+
+### Concept
+
+Allow users to import funds from any BIP32-compatible wallet (ElectrumSV, HandCash legacy, etc.) into the Hodos BRC-42 system. The user provides a BIP32 seed phrase or extended private key, Hodos scans for UTXOs, and sweeps them to BRC-42 self-derived addresses.
+
+### Why Sweep Instead of Dual-Manage
+
+Maintaining both BIP32 and BRC-42 derivation paths permanently would require:
+- Two scanning strategies during recovery
+- Fallback logic in the signing hot path
+- Two derivation systems to test and maintain
+
+Sweeping to BRC-42 eliminates these costs. After sweep, the user only needs their Hodos seed phrase.
+
+### Recovery Model After Phase 7
+
+```
+Hodos Recovery Scanner (from seed phrase):
+  1. BRC-42 self-derivation scan: "2-receive address-{0..N}" (primary, gap limit 20)
+  2. BIP32 legacy scan: m/{0..N} (secondary, for any un-migrated legacy outputs)
+  3. On-chain backup at m/{BACKUP_INDEX} (counterparty outputs + certificates)
+
+BIP32 code is preserved in a recovery module (separated from signing hot path
+in Transition Plan Phase 7) specifically to support steps 2 and the external
+wallet import flow.
+```
+
+### Dependencies
+
+- Transition Plan Phase 7 (separates BIP32 code into recovery module)
+- Backup Phase B2 (on-chain backup infrastructure for the sweep transactions)
 
 ---
 

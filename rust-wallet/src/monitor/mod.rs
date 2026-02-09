@@ -17,6 +17,7 @@ pub mod task_fail_abandoned;
 pub mod task_unfail;
 pub mod task_review_status;
 pub mod task_purge;
+pub mod task_sync_pending;
 
 use actix_web::web;
 use log::{info, warn, error};
@@ -33,6 +34,7 @@ struct TaskSchedule {
     unfail: u64,
     review_status: u64,
     purge: u64,
+    sync_pending: u64,
 }
 
 impl Default for TaskSchedule {
@@ -44,6 +46,7 @@ impl Default for TaskSchedule {
             unfail: 300,              // 5 minutes
             review_status: 60,        // 1 minute
             purge: 3600,              // 1 hour
+            sync_pending: 30,         // 30 seconds
         }
     }
 }
@@ -79,13 +82,14 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 6 tasks");
+        info!("🔄 Monitor started with 7 tasks");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
         info!("   TaskUnFail: every {}s", self.schedule.unfail);
         info!("   TaskReviewStatus: every {}s", self.schedule.review_status);
         info!("   TaskPurge: every {}s", self.schedule.purge);
+        info!("   TaskSyncPending: every {}s (pending addresses only)", self.schedule.sync_pending);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -94,6 +98,7 @@ impl Monitor {
         let mut last_unfail: u64 = 0;
         let mut last_review_status: u64 = 0;
         let mut last_purge: u64 = 0;
+        let mut last_sync_pending: u64 = 0;
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -152,6 +157,15 @@ impl Monitor {
                 if let Err(e) = task_purge::run(&self.state).await {
                     error!("   ❌ TaskPurge failed: {}", e);
                     self.log_event("TaskPurge:error", Some(&e));
+                }
+            }
+
+            // TaskSyncPending
+            if now - last_sync_pending >= self.schedule.sync_pending {
+                last_sync_pending = now;
+                if let Err(e) = task_sync_pending::run(&self.state).await {
+                    error!("   ❌ TaskSyncPending failed: {}", e);
+                    self.log_event("TaskSyncPending:error", Some(&e));
                 }
             }
 

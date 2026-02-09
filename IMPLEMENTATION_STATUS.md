@@ -850,16 +850,28 @@ Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` c
 | Array-format BLOBs | WoC returns `[{...}]`, `as_object_mut()` silently fails on arrays | V22 normalizes arrays; runtime handles both formats |
 | FK constraint in update_txid | Step 3 linked outputs to transaction_id, broke DELETE in update_txid | Detach outputs before DELETE, re-link after INSERT |
 | ARC txid mismatch | Broken BEEF (missing BUMPs) caused ARC to return parent txid | Fixed BUMP building; added mismatch warning logging |
-| SEEN_IN_ORPHAN_MEMPOOL | Treated same as normal mempool status | Separate handling: 30-min timeout + WoC verification |
+| SEEN_IN_ORPHAN_MEMPOOL | Treated same as normal mempool status | Fail immediately (like wallet-toolbox), TaskUnFail recovers with 6h window |
 | Missing UTXO reconciliation | Phase 6I removed utxo_sync but wallet_sync lacked reconciliation | Added `reconcile_for_derivation()` to wallet_sync handler |
 | Inflated balance (ghost outputs) | Outputs spent on-chain but still marked spendable in DB | Reconciliation detects and marks externally-spent outputs |
+
+### Phase 7: Per-Output Key Derivation — ✅ COMPLETE (2026-02-09)
+
+Simplified signing path to derive keys directly from output fields. Migration V23.
+
+| Sub-phase | Change | Status |
+|-----------|--------|--------|
+| 7A | Migration V23 — re-tag legacy BIP32 outputs with `derivation_prefix = "bip32"` | ✅ |
+| 7B | New `derive_key_for_output()` — direct derivation from prefix/suffix/sender | ✅ |
+| 7C | Cutover `signAction` + `create_certificate_transaction` to `derive_key_for_output()` | ✅ |
+| 7D | Moved BIP32 to `recovery.rs`, deleted ~270 lines dead code from `helpers.rs` | ✅ |
+
+**Additional fixes**: confirmed UTXO selection (NULL `transaction_id`), balance cache stale fallback + startup seed, TaskSyncPending (30s periodic UTXO sync), SEEN_IN_ORPHAN_MEMPOOL handling (fail immediately, TaskUnFail 6h recovery window with raw_tx input re-marking).
 
 ### Remaining Phases (Pending)
 
 | Phase | Goal | Migration |
 |-------|------|-----------|
-| 7 | Per-Output Key Derivation | TBD |
-| 8 | Cleanup (deprecated table removal) | TBD |
+| 8 | Cleanup (deprecated table removal, graceful shutdown, broadcast timeout) | TBD |
 
 ### Known Issues / Future Work
 
@@ -867,3 +879,6 @@ Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` c
 - **Frontend balance polling**: `useBalance.ts` has polling commented out — re-enable in frontend phase
 - **Old tables preserved**: `merkle_proofs`, `transaction_labels`, `utxos`, and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8
 - **Deprecated modules preserved**: `arc_status_poller.rs`, `cache_sync.rs`, `utxo_sync.rs` marked `#[allow(dead_code)]` — will be deleted in Phase 8
+- **Graceful shutdown**: Monitor needs a CancellationToken so Ctrl+C works (currently loops forever)
+- **Broadcast timeout**: Retry logic can block 30+ seconds, needs async timeout or cancellation
+- **Nosend tx cleanup**: 4 orphaned nosend txs may need manual cleanup

@@ -2563,6 +2563,255 @@ pub fn create_schema_v22(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Phase 7A: Re-tag outputs with proper derivation_prefix/derivation_suffix
+///
+/// Classifies outputs that have NULL derivation fields by matching their
+/// locking scripts against the addresses table. Tags them as:
+/// - "2-receive address" + "{index}" for BRC-42 self-derived addresses
+/// - "bip32" + "{index}" for legacy BIP32 addresses
+/// - NULL/NULL for master key outputs (index -1) — left unchanged
+///
+/// For outputs that don't match any known address (e.g. PushDrop tokens,
+/// certificate outputs with custom scripts), derivation remains NULL —
+/// these use custom_instructions for signing, not derivation fields.
+pub fn create_schema_v23(conn: &Connection) -> Result<()> {
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+
+    info!("=== Migration v23: Phase 7A — Re-tag output derivation fields ===");
+
+    // Step 1: Get all outputs with NULL derivation_prefix
+    let mut stmt = conn.prepare(
+        "SELECT outputId, locking_script, txid, vout, satoshis, spendable
+         FROM outputs WHERE derivation_prefix IS NULL"
+    )?;
+    let null_outputs: Vec<(i64, Option<Vec<u8>>, Option<String>, i32, i64, bool)> = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, i32>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, bool>(5)?,
+        ))
+    })?.filter_map(|r| r.ok()).collect();
+
+    info!("   Found {} outputs with NULL derivation_prefix", null_outputs.len());
+    if null_outputs.is_empty() {
+        info!("   ✅ No outputs need re-tagging");
+        info!("   ✅ Schema version 23 migration complete");
+        return Ok(());
+    }
+
+    // Step 2: Build a lookup map of pubkey_hash → (address_index, address_string)
+    // from the addresses table
+    let mut addr_stmt = conn.prepare(
+        "SELECT \"index\", address, public_key FROM addresses"
+    )?;
+    let addresses: Vec<(i32, String, String)> = addr_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i32>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?.filter_map(|r| r.ok()).collect();
+    info!("   Loaded {} addresses for matching", addresses.len());
+
+    // Build pubkey_hash → index lookup
+    // P2PKH locking script format: OP_DUP OP_HASH160 <20-byte hash> OP_EQUALVERIFY OP_CHECKSIG
+    // Bytes: 76 a9 14 <20 bytes> 88 ac
+    let mut hash_to_index: std::collections::HashMap<Vec<u8>, i32> = std::collections::HashMap::new();
+    for (index, _address, pubkey_hex) in &addresses {
+        if let Ok(pubkey_bytes) = hex::decode(pubkey_hex) {
+            let sha_hash = Sha256::digest(&pubkey_bytes);
+            let pubkey_hash = Ripemd160::digest(&sha_hash);
+            hash_to_index.insert(pubkey_hash.to_vec(), *index);
+        }
+    }
+
+    // Step 3: Get master keys for BIP32 vs BRC-42 verification
+    let has_wallet: bool = conn.query_row(
+        "SELECT COUNT(*) FROM wallets", [], |row| Ok(row.get::<_, i64>(0)? > 0)
+    ).unwrap_or(false);
+
+    // We need master keys to verify BIP32 vs BRC-42 for each matched address
+    let master_keys: Option<(Vec<u8>, Vec<u8>)> = if has_wallet {
+        match conn.query_row(
+            "SELECT mnemonic FROM wallets ORDER BY id ASC LIMIT 1", [], |row| row.get::<_, String>(0)
+        ) {
+            Ok(mnemonic_str) => {
+                match bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_str) {
+                    Ok(mnemonic) => {
+                        let seed = mnemonic.to_seed("");
+                        match bip32::XPrv::new(&seed) {
+                            Ok(master_key) => {
+                                let privkey = master_key.private_key().to_bytes().to_vec();
+                                let secp = secp256k1::Secp256k1::new();
+                                match secp256k1::SecretKey::from_slice(&privkey) {
+                                    Ok(sk) => {
+                                        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize().to_vec();
+                                        Some((privkey, pubkey))
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Step 4: Classify and tag each NULL-derivation output
+    let mut master_count = 0u32;
+    let mut brc42_count = 0u32;
+    let mut bip32_count = 0u32;
+    let mut no_match_count = 0u32;
+    let mut no_script_count = 0u32;
+
+    for (output_id, locking_script, txid, vout, satoshis, spendable) in &null_outputs {
+        let script = match locking_script {
+            Some(s) if s.len() >= 25 => s,
+            _ => {
+                // No locking script or too short for P2PKH — skip
+                no_script_count += 1;
+                log::debug!("   Output {} ({}:{}) — no/short locking script, skipping", output_id, txid.as_deref().unwrap_or("?"), vout);
+                continue;
+            }
+        };
+
+        // Extract pubkey hash from P2PKH script (bytes 3..23)
+        // Expected format: 76 a9 14 <20 bytes> 88 ac
+        if script.len() < 25 || script[0] != 0x76 || script[1] != 0xa9 || script[2] != 0x14 {
+            // Not a standard P2PKH script (could be PushDrop, multisig, etc.)
+            no_match_count += 1;
+            log::info!("   Output {} ({}:{}, {} sats, spendable={}) — non-P2PKH script, derivation stays NULL",
+                output_id, txid.as_deref().unwrap_or("?"), vout, satoshis, spendable);
+            continue;
+        }
+
+        let pubkey_hash = &script[3..23];
+
+        // Look up in address index map
+        match hash_to_index.get(pubkey_hash) {
+            Some(&addr_index) if addr_index == -1 => {
+                // Master key output — leave NULL (correct behavior)
+                master_count += 1;
+                log::info!("   Output {} ({}:{}, {} sats) — master key (index -1), derivation stays NULL",
+                    output_id, txid.as_deref().unwrap_or("?"), vout, satoshis);
+            }
+            Some(&addr_index) if addr_index >= 0 => {
+                // Matched a positive-index address. Determine BIP32 vs BRC-42.
+                let (prefix, suffix) = determine_derivation_method(
+                    &master_keys, addr_index as u32, pubkey_hash,
+                );
+
+                conn.execute(
+                    "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2 WHERE outputId = ?3",
+                    rusqlite::params![prefix, suffix, output_id],
+                )?;
+
+                if prefix == "bip32" {
+                    bip32_count += 1;
+                    log::info!("   Output {} ({}:{}, {} sats) — tagged BIP32 index {}",
+                        output_id, txid.as_deref().unwrap_or("?"), vout, satoshis, addr_index);
+                } else {
+                    brc42_count += 1;
+                    log::info!("   Output {} ({}:{}, {} sats) — tagged BRC-42 index {}",
+                        output_id, txid.as_deref().unwrap_or("?"), vout, satoshis, addr_index);
+                }
+            }
+            Some(&addr_index) => {
+                // Negative index other than -1 (BRC-29) — these should use custom_instructions
+                no_match_count += 1;
+                log::info!("   Output {} ({}:{}, {} sats) — BRC-29 address (index {}), derivation stays NULL (uses custom_instructions)",
+                    output_id, txid.as_deref().unwrap_or("?"), vout, satoshis, addr_index);
+            }
+            None => {
+                // No address match — script doesn't correspond to any known address
+                no_match_count += 1;
+                log::info!("   Output {} ({}:{}, {} sats, spendable={}) — no address match, derivation stays NULL",
+                    output_id, txid.as_deref().unwrap_or("?"), vout, satoshis, spendable);
+            }
+        }
+    }
+
+    info!("   === Migration v23 Summary ===");
+    info!("   Total NULL-derivation outputs: {}", null_outputs.len());
+    info!("   Tagged BRC-42 self-derived:    {}", brc42_count);
+    info!("   Tagged BIP32 legacy:           {}", bip32_count);
+    info!("   Master key (stays NULL):       {}", master_count);
+    info!("   Non-P2PKH/no match (stays NULL): {}", no_match_count);
+    info!("   No/short script (skipped):     {}", no_script_count);
+
+    // Step 5: Verification — count remaining NULL derivation on spendable P2PKH outputs
+    let remaining_null_spendable: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM outputs
+         WHERE derivation_prefix IS NULL
+         AND spendable = 1
+         AND LENGTH(locking_script) >= 25",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if remaining_null_spendable > 0 {
+        warn!("   ⚠️  {} spendable outputs still have NULL derivation — these are master key or custom script outputs", remaining_null_spendable);
+    } else {
+        info!("   ✅ All spendable P2PKH outputs now have derivation fields populated");
+    }
+
+    info!("   ✅ Schema version 23 migration complete");
+    Ok(())
+}
+
+/// Determine whether a positive-index address was derived via BIP32 or BRC-42
+///
+/// Tries BRC-42 self-derivation for the given index. If the resulting pubkey hash
+/// matches the actual locking script hash, it's BRC-42. If not, it must be BIP32.
+///
+/// This avoids needing the BIP32 chain code (which requires the seed, not just
+/// the master private key).
+fn determine_derivation_method(
+    master_keys: &Option<(Vec<u8>, Vec<u8>)>,
+    index: u32,
+    actual_pubkey_hash: &[u8],
+) -> (String, String) {
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+    use crate::crypto::brc42::derive_child_public_key;
+
+    let suffix = index.to_string();
+
+    let (privkey, pubkey) = match master_keys {
+        Some((priv_k, pub_k)) => (priv_k, pub_k),
+        None => {
+            // Can't verify — default to BRC-42 (current standard)
+            return ("2-receive address".to_string(), suffix);
+        }
+    };
+
+    // Try BRC-42 self-derivation: invoice = "2-receive address-{index}"
+    // If the resulting pubkey hash matches → it's BRC-42
+    // If not → must be BIP32
+    let brc42_invoice = format!("2-receive address-{}", index);
+    if let Ok(brc42_pubkey) = derive_child_public_key(privkey, pubkey, &brc42_invoice) {
+        let sha_hash = Sha256::digest(&brc42_pubkey);
+        let brc42_hash = Ripemd160::digest(&sha_hash);
+
+        if brc42_hash.as_slice() == actual_pubkey_hash {
+            return ("2-receive address".to_string(), suffix);
+        }
+    }
+
+    // BRC-42 doesn't match — must be BIP32
+    ("bip32".to_string(), suffix)
+}
+
 /// Migrate data from old transaction_labels table to new tx_labels + tx_labels_map
 ///
 /// The old table has (transaction_id, label) pairs. The new model separates

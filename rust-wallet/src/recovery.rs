@@ -1,9 +1,21 @@
-//! Wallet recovery from mnemonic
+//! Wallet recovery and legacy BIP32 key derivation
 //!
-//! This module provides functionality to recover a wallet from a mnemonic phrase.
-//! It re-derives addresses deterministically and re-discovers UTXOs from the blockchain.
+//! This module provides:
+//! - Wallet recovery from mnemonic (re-derive addresses, re-discover UTXOs)
+//! - BIP32 HD key derivation for spending legacy outputs (pre-BRC-42 addresses)
+//! - BIP32 address derivation for recovery scanning
+//!
+//! BIP32 derivation lives here because it's only needed for:
+//! 1. Spending legacy outputs tagged with `derivation_prefix = "bip32"` (via derive_key_for_output)
+//! 2. Recovery scanning (check both BIP32 and BRC-42 addresses for UTXOs)
+//! 3. Future: importing external BIP32 wallets
+//!
+//! New outputs use BRC-42 self-derivation exclusively. See `derive_key_for_output` in
+//! `database/helpers.rs` for the active signing path.
+//!
+//! TODO (Recovery Sprint): Full recovery endpoint, database import, gap limit scanning
 
-use crate::database::WalletDatabase;
+use crate::database::{WalletDatabase, WalletRepository};
 use rusqlite::Result;
 use log::info;
 use bip39::{Mnemonic, Language};
@@ -14,6 +26,53 @@ use ripemd::Ripemd160;
 use bs58;
 use crate::crypto::brc42::derive_child_public_key;
 use crate::utxo_fetcher::fetch_utxos_for_address;
+
+// ============================================================================
+// BIP32 Key Derivation (Legacy)
+// ============================================================================
+
+/// Derive a BIP32 private key at `m/{index}` from the wallet's mnemonic.
+///
+/// Used for spending legacy outputs tagged with `derivation_prefix = "bip32"`.
+/// Called by `derive_key_for_output()` in the signing path.
+///
+/// New outputs use BRC-42 self-derivation instead. This function is preserved
+/// for backward compatibility with pre-BRC-42 addresses.
+pub fn derive_private_key_bip32(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
+    let wallet_repo = WalletRepository::new(db.connection());
+    let wallet = wallet_repo.get_primary_wallet()?
+        .ok_or_else(|| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+            Some("No wallet found in database".to_string())
+        ))?;
+
+    let mnemonic = Mnemonic::parse_in(Language::English, &wallet.mnemonic)
+        .map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(format!("Invalid mnemonic: {}", e))
+        ))?;
+
+    let seed = mnemonic.to_seed("");
+
+    let master_key = XPrv::new(&seed)
+        .map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(format!("Failed to create master key: {}", e))
+        ))?;
+
+    let child_key = master_key
+        .derive_child(bip32::ChildNumber::new(index, false).unwrap())
+        .map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(format!("Failed to derive child key: {}", e))
+        ))?;
+
+    Ok(child_key.private_key().to_bytes().to_vec())
+}
+
+// ============================================================================
+// Recovery
+// ============================================================================
 
 /// Options for wallet recovery
 #[derive(Debug, Clone)]

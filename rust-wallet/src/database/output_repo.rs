@@ -121,7 +121,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND t.new_status = 'completed'
+               AND (t.new_status = 'completed' OR o.transaction_id IS NULL)
              ORDER BY o.satoshis DESC"
         )?;
 

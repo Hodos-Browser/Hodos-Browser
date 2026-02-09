@@ -32,7 +32,7 @@
 
 | Category | Hodos Current | wallet-toolbox Target | Notes |
 |----------|:---:|:---:|-------|
-| Core wallet | 2 (wallets, addresses) | 1 (users) | Address table eliminated; per-output derivation |
+| Core wallet | 2 (wallets, addresses) | 1 (users) + addresses (kept for sync) | Address table kept for UTXO sync; signing uses per-output derivation |
 | Transactions | 4 (transactions, tx_inputs, tx_outputs, tx_labels) | 3 (transactions, tx_labels, tx_labels_map) | Inputs/outputs implicit in rawTx |
 | Outputs/UTXOs | 1 (utxos) | 1 (outputs) | Major restructure |
 | Proofs | 3 (parent_txs, merkle_proofs, block_headers) | 2 (proven_txs, proven_tx_reqs) | Merge + add request tracking |
@@ -46,8 +46,9 @@
 ```
 CURRENT                                    TARGET
 ─────────────────────                      ─────────────────────
-HD Address Table                           Per-Output Key Derivation
+HD Address Table (signing + sync)           Per-Output Key Derivation (signing)
   address index → key                       derivationPrefix/Suffix → key
+                                           Address table kept for sync only
 
 Dual Status System                         Single TransactionStatus
   ActionStatus (7 values)                    9 values: completed, unprocessed,
@@ -89,15 +90,15 @@ Ad-hoc background services                 Monitor pattern with named tasks
 
 **Notes**: The wallets table stores mnemonic directly. The wallet-toolbox users table stores an identityKey (public key) and delegates private key storage to the application layer. We need to decide where mnemonic goes — likely an encrypted separate table or OS keychain.
 
-### 2.2 addresses → (eliminated in Phase 7)
+### 2.2 addresses → (kept for sync, no longer used for signing)
 
 | Hodos Column | Disposition |
 |---|---|
-| id, wallet_id, index, address, public_key | Replaced by per-output derivationPrefix/derivationSuffix on outputs table |
-| used, balance | Computed from outputs (spendable, satoshis) |
-| pending_utxo_check | Eliminated (no address-based UTXO scanning) |
+| id, wallet_id, index, address, public_key | **Kept** — used for UTXO sync scanning (query API by address string) and address generation. No longer used for key derivation during signing (Phase 7 reads derivation_prefix/suffix from outputs table instead) |
+| used, balance | `used` kept for gap limit calculation during sync. `balance` computed from outputs (spendable, satoshis) |
+| pending_utxo_check | **Kept** — still used for sync scanning lifecycle (which addresses to check) |
 
-**Notes**: This is the most disruptive change. It affects key derivation for signing, UTXO sync, balance calculation, and address generation. Deferred to Phase 7.
+**Notes**: Phase 7 decouples signing from the addresses table but keeps the table for UTXO sync and address generation. The addresses table stores the P2PKH address strings needed to query WhatsOnChain for incoming UTXOs — this cannot be eliminated while using address-based API scanning.
 
 ### 2.3 utxos → outputs
 
@@ -1436,77 +1437,130 @@ All 9 sub-phases (6A-6I) implemented and tested. Additional migrations V21 and V
 
 ---
 
-### Phase 7: Per-Output Key Derivation
+### Phase 7: Per-Output Key Derivation — ✅ COMPLETE (2026-02-09)
 
-**Goal**: Eliminate the `addresses` table. Move to per-output key derivation using `derivationPrefix`/`derivationSuffix` on the outputs table. Replace address-based UTXO sync with local output tracking.
+**Goal**: Simplify the signing path to derive keys directly from `derivationPrefix`/`derivationSuffix` on the outputs table, eliminating the address-table-based key derivation fallback. Keep the `addresses` table for UTXO sync scanning purposes. Standardize on BRC-42 sequential self-derivation as the primary key derivation model.
 
-**Why last**: This is the most structurally disruptive change. It affects how keys are derived for signing, how UTXOs are discovered, and how balance is calculated. All other phases should be stable before this.
+**Completed**: All 4 sub-phases (7A-7D) implemented and tested.
+
+#### Key Decisions (Established During Planning)
+
+1. **Keep addresses table** — still required for UTXO sync (querying WhatsOnChain by address string). Not eliminated in this phase.
+2. **BRC-42 sequential self-derivation is the standard** — all new receive addresses use `"2-receive address-{index}"` with self-derivation (sender = recipient = master pubkey). This is fully deterministic and recoverable from seed phrase alone by scanning indices 0..N.
+3. **BIP32 fallback removed from signing path** — the current `derive_private_key_for_utxo()` tries BIP32 first, then BRC-42, verifying against stored address. Phase 7 replaces this with direct derivation from `derivation_prefix`/`derivation_suffix` — no guessing, no fallback.
+4. **BIP32 code preserved for recovery/import** — moved to a recovery module. Future plan: allow users to import external BIP32 wallets (enter seed phrase, scan BIP32 addresses, sweep funds to BRC-42 self-derived addresses). Not implemented in Phase 7, but code is preserved and separated for this purpose.
+5. **Existing BIP32 UTXOs** — users with legacy BIP32 outputs will need a one-time migration (spend BIP32 → BRC-42). This is a future task, not Phase 7 scope. Until migrated, legacy outputs retain their derivation info and can still be spent via the recovery code path.
 
 #### Architecture Change
 
 ```
 CURRENT                                    TARGET
 ───────                                    ──────
-HD wallet: m/{index}                       Per-output derivation:
-addresses table tracks indices               derivationPrefix + derivationSuffix
-UTXO sync: scan addresses via API            → derive unique key per output
-Balance: sum UTXOs by address IDs            Output tracking: wallet creates outputs
-                                             locally during createAction/signAction
-                                             Balance: sum spendable outputs locally
-                                             External sync: only for recovery/import
+Signing: try BIP32, verify address,        Signing: read derivation_prefix/suffix
+  fallback to BRC-42, verify again           from output → derive key directly
+  (requires address table lookup)            (no address table needed for signing)
+
+addresses table: used for signing +        addresses table: used ONLY for UTXO
+  UTXO sync + address generation             sync scanning + address generation
+
+derive_private_key_for_utxo(db, index):    derive_key_for_output(db, prefix, suffix,
+  guesses derivation method                    sender_identity_key):
+  verifies against stored address              direct derivation, no guessing
+
+BIP32 + BRC-42 fallback in hot path        BRC-42 only in hot path
+                                           BIP32 separated to recovery module
 ```
 
-#### Schema Changes (Migration v21)
+#### Derivation Categories
+
+| Category | derivationPrefix | derivationSuffix | senderIdentityKey | Key Derivation | Recoverable from seed? |
+|----------|-----------------|------------------|-------------------|----------------|----------------------|
+| **Self-derivation** (receive addresses) | `"2-receive address"` | `"{index}"` (sequential) | NULL (self) | `BRC-42(master_privkey, master_pubkey, "2-receive address-{index}")` | YES — scan 0..N |
+| **Counterparty derivation** (protocol outputs) | `"{securityLevel}-{protocolID}"` | `"{keyID}"` | `"03fed...cba"` | `BRC-42(master_privkey, counterparty_pubkey, "{prefix}-{suffix}")` | NO — needs on-chain backup |
+| **Master key** (index -1) | NULL | NULL | NULL | Master private key directly | YES — derived from seed |
+| **Legacy BIP32** (pre-Phase 7) | `"bip32"` | `"{index}"` | NULL | `BIP32(master_key, m/{index})` | YES — scan m/0..N |
+
+**Note**: Existing BRC-42 self-derivation outputs already have `derivation_prefix = "2-receive address"` and `derivation_suffix = "{index}"` (populated during Phase 4 migration). Legacy BIP32 outputs will be re-tagged with `derivation_prefix = "bip32"` during migration so the signing path can distinguish them without the fallback guessing.
+
+#### Schema Changes (Migration v23)
 
 ```sql
--- Backfill derivation data on outputs from addresses table
--- (done in Rust code: for each output, look up address_id → address.index,
---  compute derivationPrefix/Suffix from the index)
+-- Re-tag legacy BIP32 outputs with explicit prefix
+-- (done in Rust: for each output where derivation_prefix = "2-receive address",
+--  verify if the address was originally BIP32 or BRC-42 by checking the
+--  addresses table. If BIP32, update prefix to "bip32")
 
--- After backfill is verified complete:
--- addresses table is no longer read by new code
--- Keep for rollback safety; remove in Phase 8
+-- Ensure all outputs have derivation_prefix/suffix populated
+-- Outputs with NULL derivation fields = master key outputs (index -1)
+
+-- No structural table changes needed — derivation_prefix/suffix already exist
+-- from Phase 4
 ```
 
 #### Rust Code Changes
 
 | File | Change |
 |---|---|
-| `src/database/helpers.rs` | `derive_private_key_for_output()`: new function that takes derivationPrefix/Suffix instead of address index |
-| `src/handlers.rs` | createAction: store derivationPrefix/Suffix on each output created. signAction: derive signing key from output's derivation fields instead of address index |
-| `src/utxo_sync.rs` | Convert to recovery-only: scan addresses only during wallet import/recovery, not periodic sync. Normal balance comes from local outputs |
-| `src/database/address_repo.rs` | Deprecated — only used for recovery flow |
-| `src/balance_cache.rs` | Simplify: balance = SUM(satoshis) FROM outputs WHERE spendable=1 AND user_id=? |
+| `src/database/helpers.rs` | **New function**: `derive_key_for_output(db, prefix, suffix, sender_identity_key)` — direct derivation from output fields. No address lookup, no fallback guessing. Dispatches to BRC-42 self-derivation, BRC-42 counterparty derivation, BIP32 (for tagged legacy), or master key based on prefix value |
+| `src/database/helpers.rs` | **Remove**: the "try BIP32, verify, try BRC-42, verify" logic from `derive_private_key_for_utxo()`. Replace callers with `derive_key_for_output()` |
+| `src/database/helpers.rs` | **Keep**: `derive_private_key_bip32()` — moved/separated for use by recovery/import module only |
+| `src/handlers.rs` | `createAction`: already stores `derivation_prefix`/`derivation_suffix` on outputs (from Phase 4). Verify these are always populated. `signAction`: call `derive_key_for_output()` instead of `derive_private_key_for_utxo()` |
+| `src/handlers.rs` | `generate_address`: no change — already uses BRC-42 self-derivation and stores address in addresses table for sync |
+| `src/database/helpers.rs` | **Remove**: `output_to_fetcher_utxo()` reverse-mapping of prefix/suffix → address_index. Replace with direct prefix/suffix usage in signing |
+| `src/utxo_sync.rs` | No change in Phase 7 — continues using addresses table for sync scanning |
+| `src/database/address_repo.rs` | No change in Phase 7 — still used for sync and address generation |
+| `src/balance_cache.rs` | No change needed — already reads from outputs table (Phase 4) |
 
-#### Derivation Mapping
+#### Future Work (NOT Phase 7 — documented for planning awareness)
 
-For existing HD wallet outputs:
-```
-address.index = N
-→ derivationPrefix = "m/{N}" (or BRC-42 equivalent)
-→ derivationSuffix = "" (simple HD) or specific key ID
-```
+These items depend on Phase 7's derivation model being stable:
 
-For BRC-42 derived outputs:
-```
-→ derivationPrefix = "{securityLevel}-{protocolID}"
-→ derivationSuffix = "{keyID}"
-→ Key derived via BRC-42 ECDH with counterparty
-```
+1. **BIP32 wallet import**: Allow users to enter an external BIP32 seed phrase, scan sequential `m/{index}` addresses, discover UTXOs, and sweep them to BRC-42 self-derived addresses in the Hodos wallet. Requires the BIP32 derivation code preserved in Phase 7.
 
-#### Risk: HIGH
-- Changes key derivation path for signing
-- Changes how balance is computed
-- Changes UTXO discovery model
-- Mitigation: extensive testing with known test vectors. Keep addresses table and old derivation code as fallback. Run old and new derivation in parallel, assert they produce the same keys
+2. **One-time BIP32 → BRC-42 migration**: For existing Hodos users with legacy BIP32 outputs — spend all BIP32 UTXOs to new BRC-42 self-derived addresses. Can be a manual "Migrate Wallet" button or automatic background task.
+
+3. **On-chain encrypted backup** (Phase B2 from backup plan): Stores counterparty-derived output data at well-known address `m/2147483647`. Self-derived outputs (sequential) do NOT need on-chain backup — they're recoverable by scanning. Phase 7's `senderIdentityKey` field (NULL = self, non-NULL = counterparty) tells the backup system which outputs to include.
+
+4. **Recovery scanner**: Scan both BRC-42 self-derivation (`"2-receive address-{0..N}"`) and optionally BIP32 (`m/{0..N}`) during wallet recovery. The invoice number format `"2-receive address-{index}"` is a **permanent contract** — must never change.
+
+#### Implementation Order
+
+1. **7A**: Migration v23 — re-tag legacy BIP32 outputs, verify all outputs have derivation fields
+2. **7B**: New `derive_key_for_output()` function — direct derivation from prefix/suffix/sender. Run in parallel with old function, assert identical keys
+3. **7C**: Cutover signing path — replace `derive_private_key_for_utxo()` calls with `derive_key_for_output()`. Remove `output_to_fetcher_utxo()` adapter
+4. **7D**: Separate BIP32 code — move `derive_private_key_bip32()` to a recovery module, remove from signing hot path
+
+#### Risk: MEDIUM (reduced from HIGH)
+- Signing path change is the main risk, but the derivation math is unchanged — same BRC-42 ECDH, same keys produced
+- Migration re-tagging is low risk (additive metadata, doesn't change key derivation)
+- Parallel run (7B) catches any mismatches before cutover
+- Addresses table preserved — rollback is straightforward (revert to old signing function)
+- BIP32 code preserved — legacy outputs can still be spent via recovery path if needed
+
+#### Implementation Results
+
+**7A (Migration V23)**: Re-tagged legacy BIP32 outputs with `derivation_prefix = "bip32"`. Compares BIP32-derived address vs stored address for each output to determine derivation method.
+
+**7B (`derive_key_for_output`)**: New function in `src/database/helpers.rs`. Dispatches to BRC-42 self/counterparty, BIP32 legacy, or master key based on `derivation_prefix`/`derivation_suffix`/`sender_identity_key`. Ran in parallel with old function during testing — all keys matched.
+
+**7C (Signing cutover)**: Replaced `derive_private_key_for_utxo()` calls in both `signAction` and `create_certificate_transaction` handlers with `derive_key_for_output()`. Transaction successfully signed and broadcast.
+
+**7D (BIP32 separation)**: Moved `derive_private_key_bip32()` to `src/recovery.rs`. Deleted ~270 lines of dead code from `helpers.rs`: `derive_private_key_for_utxo`, `derive_private_key_from_db_positive`, `try_both_derivation_methods`, `derive_private_key_brc42`.
+
+**Additional fixes during Phase 7 testing**:
+- **Confirmed UTXO selection**: `get_spendable_confirmed_by_user()` excluded received UTXOs (NULL `transaction_id`). Fixed with `OR o.transaction_id IS NULL`.
+- **Balance cache**: Added stale fallback (`get_or_stale()`) and `try_lock()` in balance endpoint to prevent UI freezing. Seeded cache at startup before Monitor starts.
+- **TaskSyncPending**: New Monitor task (30s) for periodic UTXO sync of pending addresses. Fills gap where newly generated addresses were never checked automatically.
+- **SEEN_IN_ORPHAN_MEMPOOL**: Fail immediately (like wallet-toolbox), let TaskUnFail recover. Extended TaskUnFail window from 30 min to 6 hours. TaskUnFail now parses `raw_tx` to re-mark inputs as spent on recovery, preventing phantom spendable UTXOs.
+- **`extract_input_outpoints()`**: New utility in `src/transaction/mod.rs` — parses raw tx hex to extract input prevouts. Used by TaskUnFail recovery.
 
 ---
 
 ### Phase 8: Cleanup & Deprecated Table Removal
 
-**Goal**: Remove deprecated tables and old columns that were preserved for rollback safety.
+**Goal**: Remove deprecated tables and old columns that were preserved for rollback safety. The `addresses` table is **kept** — it remains required for UTXO sync scanning and address generation.
 
-#### Schema Changes (Migration v22)
+#### Schema Changes (Migration v24)
 
 ```sql
 -- Remove old status columns from transactions
@@ -1519,8 +1573,11 @@ DROP TABLE IF EXISTS transaction_labels;  -- replaced by tx_labels + tx_labels_m
 DROP TABLE IF EXISTS parent_transactions;  -- replaced by proven_txs
 DROP TABLE IF EXISTS merkle_proofs;        -- replaced by proven_txs
 
--- Remove addresses table (if Phase 7 is confirmed stable)
--- DROP TABLE IF EXISTS addresses;  -- CAUTION: only after Phase 7 is proven in production
+-- KEEP addresses table — still required for:
+--   1. UTXO sync scanning (query WhatsOnChain by address string)
+--   2. Address generation (track current_index, store address strings)
+--   3. Future BIP32 wallet import (scan external BIP32 addresses)
+-- The addresses table is NO LONGER used for key derivation (Phase 7)
 
 -- Remove old columns (via table recreation if SQLite version requires)
 -- transactions: drop old 'status', 'broadcast_status', 'block_height', 'confirmations'
@@ -1549,11 +1606,11 @@ DROP TABLE IF EXISTS merkle_proofs;        -- replaced by proven_txs
 |---|---|---|---|---|
 | 1 (Status) | Column addition + data transform | Full rollback (old columns kept) | None | ✅ Complete |
 | 2 (Proven Txs) | New tables + data copy | Full rollback (old tables kept) | None | ✅ Complete |
-| 3 (Users) | New table + column additions | Full rollback | None | Pending |
-| 4 (Outputs) | New table + data migration | Rollback via old utxos table | **Medium**: UTXO state is critical | Pending |
-| 5 (Labels etc) | New tables + data copy | Full rollback | None | Pending |
-| 6 (Monitor) | New table + code restructure (monitor pattern, broadcast retry, sync endpoint) | Full rollback (revert code, drop monitor_events) | **Low**: background processing change, broadcast retry | Pending |
-| 7 (Derivation) | Data backfill on outputs | Rollback via addresses table | **High**: key derivation is critical | Pending |
+| 3 (Users) | New table + column additions | Full rollback | None | ✅ Complete |
+| 4 (Outputs) | New table + data migration | Rollback via old utxos table | **Medium**: UTXO state is critical | ✅ Complete |
+| 5 (Labels etc) | New tables + data copy | Full rollback | None | ✅ Complete |
+| 6 (Monitor) | New table + code restructure (monitor pattern, broadcast retry, sync endpoint) | Full rollback (revert code, drop monitor_events) | **Low**: background processing change, broadcast retry | ✅ Complete |
+| 7 (Derivation) | Re-tag legacy outputs (V23) + signing path simplification | Rollback via old signing function | **Medium**: signing path change, math unchanged | ✅ Complete |
 | 8 (Cleanup) | Table/column drops | **Not reversible** — backup required | N/A (dead data) | Pending |
 
 ### Backup Requirements

@@ -2739,10 +2739,27 @@ async fn create_certificate_transaction(
     let secp = Secp256k1::new();
 
     for (i, utxo) in selected_utxos.iter().enumerate() {
-        // Get private key for this address index (same as signAction)
+        // Phase 7C: Derive private key directly from output's derivation fields
         let db = state.database.lock().unwrap();
-        let private_key_bytes = crate::database::derive_private_key_for_utxo(&db, utxo.address_index, utxo.custom_instructions.as_deref())
-            .map_err(|e| CertificateError::Database(format!("Failed to derive private key for address {}: {}", utxo.address_index, e)))?;
+        let private_key_bytes = {
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
+                Ok(Some(output)) => {
+                    crate::database::derive_key_for_output(
+                        &db,
+                        output.derivation_prefix.as_deref(),
+                        output.derivation_suffix.as_deref(),
+                        output.sender_identity_key.as_deref(),
+                    ).map_err(|e| CertificateError::Database(format!("Failed to derive key for output {}:{}: {}", utxo.txid, utxo.vout, e)))?
+                }
+                Ok(None) => {
+                    return Err(CertificateError::Database(format!("Output not found: {}:{}", utxo.txid, utxo.vout)));
+                }
+                Err(e) => {
+                    return Err(CertificateError::Database(format!("Failed to look up output {}:{}: {}", utxo.txid, utxo.vout, e)));
+                }
+            }
+        };
         drop(db);
 
         // Decode prev script

@@ -1739,23 +1739,31 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("   🔄 Cache miss - calculating balance from database...");
 
     // Calculate balance from outputs table (source of truth)
-    let balance = {
-        let db = match state.database.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                log::error!("   DB lock failed: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Database unavailable"
-                }));
+    // Use try_lock to avoid blocking the UI if another task holds the DB lock
+    let balance = match state.database.try_lock() {
+        Ok(db) => {
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.calculate_balance(state.current_user_id) {
+                Ok(bal) => bal,
+                Err(e) => {
+                    log::error!("   Failed to calculate balance: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Database error: {}", e)
+                    }));
+                }
             }
-        };
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-        match output_repo.calculate_balance(state.current_user_id) {
-            Ok(bal) => bal,
-            Err(e) => {
-                log::error!("   Failed to calculate balance: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Database error: {}", e)
+        }
+        Err(_) => {
+            // DB is busy (background task holding lock) — return stale balance
+            if let Some(stale) = state.balance_cache.get_or_stale() {
+                log::info!("   ⏳ DB busy, returning last known balance: {} satoshis", stale);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": stale
+                }));
+            } else {
+                log::warn!("   ⏳ DB busy, no cached balance available");
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": 0
                 }));
             }
         }
@@ -1953,8 +1961,9 @@ pub async fn wallet_sync(
                     }
                 }
 
-                // Clear pending flag (fetch succeeded, so we've checked this address)
-                if addr.pending_utxo_check {
+                // Only clear pending flag if UTXOs were found for this address.
+                // If no UTXOs found, keep checking until 10-day stale timeout.
+                if addr.pending_utxo_check && !addr_utxos.is_empty() {
                     let _ = address_repo.clear_pending_utxo_check(addr_id);
                 }
                 synced_count += 1;
@@ -5467,15 +5476,39 @@ pub async fn sign_action(
         log::info!("   Signing input {} (wallet): {}:{} (address index {})",
             i, input_utxo.txid, input_utxo.vout, input_utxo.address_index);
 
-        // Get the private key for THIS specific address (not always index 0!)
+        // Phase 7C: Derive private key directly from output's derivation fields
         let db = state.database.lock().unwrap();
-        let private_key_bytes = match crate::database::derive_private_key_for_utxo(&db, input_utxo.address_index, input_utxo.custom_instructions.as_deref()) {
-            Ok(key) => key,
-            Err(e) => {
-                log::error!("   Failed to derive private key for address index {}: {}", input_utxo.address_index, e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to derive private key for address {}: {}", input_utxo.address_index, e)
-                }));
+        let private_key_bytes = {
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&input_utxo.txid, input_utxo.vout) {
+                Ok(Some(output)) => {
+                    match crate::database::derive_key_for_output(
+                        &db,
+                        output.derivation_prefix.as_deref(),
+                        output.derivation_suffix.as_deref(),
+                        output.sender_identity_key.as_deref(),
+                    ) {
+                        Ok(key) => key,
+                        Err(e) => {
+                            log::error!("   Failed to derive key for output {}:{}: {}", input_utxo.txid, input_utxo.vout, e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": format!("Failed to derive key for output {}:{}: {}", input_utxo.txid, input_utxo.vout, e)
+                            }));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::error!("   Output not found in DB: {}:{}", input_utxo.txid, input_utxo.vout);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Output not found: {}:{}", input_utxo.txid, input_utxo.vout)
+                    }));
+                }
+                Err(e) => {
+                    log::error!("   Failed to look up output {}:{}: {}", input_utxo.txid, input_utxo.vout, e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to look up output {}:{}: {}", input_utxo.txid, input_utxo.vout, e)
+                    }));
+                }
             }
         };
         drop(db);

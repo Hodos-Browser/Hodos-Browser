@@ -11,6 +11,7 @@ struct CachedBalance {
     balance: i64,
     cached_at: u64,  // Unix timestamp
     version: u64,    // Increment on invalidation
+    stale: bool,     // True if invalidated but not yet recalculated
 }
 
 /// Thread-safe in-memory balance cache
@@ -32,24 +33,21 @@ impl BalanceCache {
         }
     }
 
-    /// Get cached balance if valid, None if expired or missing
+    /// Get cached balance if fresh, None if expired/missing/stale
     ///
-    /// Returns the cached balance if:
-    /// - Cache exists
-    /// - Cache hasn't expired (within TTL)
-    ///
-    /// Returns None if:
-    /// - Cache doesn't exist
-    /// - Cache has expired
+    /// Returns the cached balance only if it's fresh (not invalidated, within TTL).
+    /// Use `get_or_stale()` when you need a fallback value even if stale.
     pub fn get(&self) -> Option<i64> {
         let cache = self.cache.read().unwrap();
         if let Some(cached) = cache.as_ref() {
+            if cached.stale {
+                return None;
+            }
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
 
-            // Check TTL (safety net)
             if now.saturating_sub(cached.cached_at) < self.ttl_seconds {
                 Some(cached.balance)
             } else {
@@ -58,6 +56,16 @@ impl BalanceCache {
         } else {
             None
         }
+    }
+
+    /// Get cached balance, returning stale value as fallback
+    ///
+    /// Returns the balance even if invalidated (stale). Only returns None
+    /// if no balance has ever been cached. Use this when blocking on the
+    /// DB lock is unacceptable (e.g. the balance endpoint).
+    pub fn get_or_stale(&self) -> Option<i64> {
+        let cache = self.cache.read().unwrap();
+        cache.as_ref().map(|c| c.balance)
     }
 
     /// Set cached balance
@@ -76,12 +84,16 @@ impl BalanceCache {
             version: cache.as_ref()
                 .map(|c| c.version + 1)
                 .unwrap_or(0),
+            stale: false,
         });
     }
 
     /// Invalidate cache (force refresh on next request)
     ///
-    /// Clears the cache so the next balance request will recalculate from database.
+    /// Marks the cache as stale so the next balance request will recalculate
+    /// from database. The old value is kept as a fallback via `get_or_stale()`
+    /// so the balance endpoint never blocks waiting for the DB lock.
+    ///
     /// Call this whenever balance might have changed:
     /// - Transaction created (outgoing)
     /// - UTXO sync completed
@@ -89,7 +101,9 @@ impl BalanceCache {
     /// - UTXO marked as spent
     pub fn invalidate(&self) {
         let mut cache = self.cache.write().unwrap();
-        *cache = None;
+        if let Some(ref mut cached) = *cache {
+            cached.stale = true;
+        }
     }
 
     /// Invalidate and update with new balance (atomic)
@@ -132,7 +146,8 @@ mod tests {
         assert_eq!(cache.get(), Some(100000));
 
         cache.invalidate();
-        assert_eq!(cache.get(), None);
+        assert_eq!(cache.get(), None);  // Fresh get returns None
+        assert_eq!(cache.get_or_stale(), Some(100000));  // Stale fallback still works
     }
 
     #[test]

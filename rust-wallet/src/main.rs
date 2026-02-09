@@ -24,7 +24,7 @@ mod cache_helpers;  // NEW: Helper functions for cache operations
 mod cache_sync;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
 mod balance_cache;  // NEW: In-memory balance cache
 mod backup;  // NEW: Database backup and restore utilities
-mod recovery;  // NEW: Wallet recovery from mnemonic
+mod recovery;  // Wallet recovery + BIP32 legacy derivation (also in lib.rs for tests)
 #[allow(dead_code)]
 mod arc_status_poller;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
 mod fee_rate_cache;  // NEW: Dynamic fee rate from ARC policy
@@ -260,9 +260,21 @@ async fn main() -> std::io::Result<()> {
     // All background work is now handled by the Monitor pattern.
     let current_user_id = default_user_id;
 
-    // Initialize balance cache
+    // Initialize balance cache and seed with current balance
     let balance_cache = Arc::new(balance_cache::BalanceCache::new());
-    println!("✅ Balance cache initialized");
+    {
+        let db = database.lock().unwrap();
+        let output_repo = database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(current_user_id) {
+            Ok(bal) => {
+                balance_cache.set(bal);
+                println!("✅ Balance cache initialized (seeded: {} satoshis)", bal);
+            }
+            Err(e) => {
+                eprintln!("⚠️  Balance cache initialized (seed failed: {})", e);
+            }
+        }
+    }
 
     // Initialize fee rate cache (fetches from ARC /v1/policy)
     let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());

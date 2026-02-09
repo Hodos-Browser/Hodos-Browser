@@ -17,10 +17,13 @@ use log::{info, warn};
 use std::time::Duration;
 
 use crate::AppState;
-use crate::database::{TransactionRepository, ProvenTxRepository, ProvenTxReqRepository};
+use crate::database::{TransactionRepository, OutputRepository, ProvenTxRepository, ProvenTxReqRepository};
 
 /// Only check transactions failed within this window (seconds)
-const UNFAIL_WINDOW_SECS: i64 = 1800; // 30 minutes
+/// Must be long enough for orphan mempool txs to get mined.
+/// BSV node orphan pool expires after 20 min, but miners may have the tx
+/// from other broadcasters. 6 hours matches UNPROVEN_TIMEOUT_SECS.
+const UNFAIL_WINDOW_SECS: i64 = 6 * 60 * 60; // 6 hours
 
 /// Run the TaskUnFail task
 pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Result<(), String> {
@@ -193,12 +196,37 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
             );
         }
 
-        // NOTE: We do NOT re-create deleted ghost outputs here.
-        // The outputs from this recovered tx will be discovered by the next
-        // UTXO sync (POST /wallet/sync). This is safer than trying to
-        // reconstruct outputs from raw_tx which could create inconsistencies.
+        // Re-mark inputs as spent by this transaction.
+        // When mark_failed ran, it restored inputs as "spendable" and NULLed
+        // spending_description. Now that the tx is confirmed on-chain, those
+        // inputs are actually spent. Parse raw_tx to find which inputs to re-mark.
+        let output_repo = OutputRepository::new(conn);
+        let tx_repo_inner = TransactionRepository::new(conn);
+        if let Ok(Some(stored_tx)) = tx_repo_inner.get_by_txid(txid) {
+            match crate::transaction::extract_input_outpoints(&stored_tx.raw_tx) {
+                Ok(input_outpoints) => {
+                    let mut re_spent_count = 0;
+                    for (prev_txid, prev_vout) in &input_outpoints {
+                        match output_repo.mark_spent(prev_txid, *prev_vout, txid) {
+                            Ok(n) if n > 0 => re_spent_count += n,
+                            _ => {}
+                        }
+                    }
+                    if re_spent_count > 0 {
+                        info!("   🔒 Re-marked {} input(s) as spent by recovered tx {}", re_spent_count, short_txid);
+                    }
+                }
+                Err(e) => {
+                    warn!("   ⚠️ Failed to parse raw_tx inputs for {}: {} — run /wallet/sync to reconcile", short_txid, e);
+                }
+            }
+        }
+
+        // NOTE: We do NOT re-create deleted change outputs here.
+        // The change outputs from this recovered tx will be discovered by the
+        // next UTXO sync (POST /wallet/sync or TaskSyncPending).
         info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height);
-        info!("   ℹ️ Run /wallet/sync to discover outputs from this recovered transaction");
+        info!("   ℹ️ Run /wallet/sync to discover change outputs from this recovered transaction");
     }
 
     // Invalidate balance cache since status changed

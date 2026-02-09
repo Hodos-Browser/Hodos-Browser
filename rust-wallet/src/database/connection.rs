@@ -1014,6 +1014,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 23 (Phase 7A: Re-tag output derivation fields)
+        if current_version < 23 {
+            info!("   Applying migration to version 23...");
+            match migrations::create_schema_v23(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 23...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (23)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 23 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 23 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 

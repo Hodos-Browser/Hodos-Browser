@@ -25,8 +25,11 @@ const NOSEND_TIMEOUT_SECS: i64 = 48 * 60 * 60;
 /// After this many seconds in mempool, cross-verify with WhatsOnChain
 const MEMPOOL_VERIFY_THRESHOLD_SECS: i64 = 30 * 60;
 
-/// Timeout for transactions stuck in orphan mempool - 30 minutes
-const ORPHAN_TIMEOUT_SECS: i64 = 30 * 60;
+/// Timeout for transactions stuck in orphan mempool - 2 hours
+/// Even though we fail immediately on orphan (like wallet-toolbox),
+/// TaskUnFail recovers false failures. This timeout is used as a
+/// secondary check for non-orphan cases.
+const ORPHAN_TIMEOUT_SECS: i64 = 2 * 60 * 60;
 
 struct PendingTxInfo {
     txid: String,
@@ -136,23 +139,27 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                         }
                     }
                     "SEEN_IN_ORPHAN_MEMPOOL" => {
-                        // Orphan mempool means inputs can't be validated (broken ancestor chain).
-                        // Check WoC in case it confirmed despite ARC reporting orphan.
-                        // If stuck for too long, fail with full cleanup.
+                        // Orphan mempool = ARC's node doesn't have the parent tx.
+                        // The tx may still be valid on other nodes/miners.
+                        //
+                        // Strategy (matches wallet-toolbox): fail immediately with cleanup,
+                        // then let TaskUnFail recover if the tx actually gets mined.
+                        // This is safe because TaskUnFail re-marks inputs as spent
+                        // and /wallet/sync reconciles the UTXO set.
                         warn!("   ⚠️ {} in orphan mempool ({}m old)", &txid[..txid.len().min(16)], tx_info.age_secs / 60);
-                        if tx_info.age_secs > ORPHAN_TIMEOUT_SECS {
-                            // Last chance — check WoC before failing
-                            match try_whatsonchain_confirmation(state, client, txid).await {
-                                Some(count) => { confirmed_count += count; }
-                                None => {
-                                    warn!("   ⏰ {} orphaned for {}m — marking FAILED with cleanup",
-                                          &txid[..txid.len().min(16)], tx_info.age_secs / 60);
-                                    mark_failed(state, txid);
-                                }
-                            }
-                        } else {
-                            if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+
+                        // Quick check: is it already confirmed despite ARC's orphan status?
+                        match try_whatsonchain_confirmation(state, client, txid).await {
+                            Some(count) => {
+                                // Already mined — no need to fail
                                 confirmed_count += count;
+                            }
+                            None => {
+                                // Not confirmed yet — fail with cleanup.
+                                // TaskUnFail will recover if it gets mined later.
+                                warn!("   ⏰ {} SEEN_IN_ORPHAN_MEMPOOL, not confirmed — marking FAILED with cleanup",
+                                      &txid[..txid.len().min(16)]);
+                                mark_failed(state, txid);
                             }
                         }
                     }
