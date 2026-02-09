@@ -17,7 +17,9 @@ impl<'a> TransactionRepository<'a> {
     }
 
     /// Add a new transaction (action) to the database
-    pub fn add_transaction(&self, action: &StoredAction) -> Result<i64> {
+    ///
+    /// `user_id` is needed for the tx_labels table (label deduplication is per-user).
+    pub fn add_transaction(&self, action: &StoredAction, user_id: i64) -> Result<i64> {
         // Compute the consolidated new_status from legacy ActionStatus
         let new_status = TransactionStatus::from_legacy(&action.status, None);
 
@@ -46,11 +48,37 @@ impl<'a> TransactionRepository<'a> {
 
         let transaction_id = self.conn.last_insert_rowid();
 
-        // Insert transaction labels
+        // Insert transaction labels into tx_labels/tx_labels_map (Phase 5 normalized tables)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
         for label in &action.labels {
+            let normalized = label.trim().to_lowercase();
+            if normalized.is_empty() { continue; }
+
+            // Find or insert the deduplicated label entity
+            let label_id: i64 = match self.conn.query_row(
+                "SELECT txLabelId FROM tx_labels WHERE label = ?1 AND user_id = ?2 AND is_deleted = 0",
+                rusqlite::params![&normalized, user_id],
+                |row| row.get(0),
+            ) {
+                Ok(id) => id,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    self.conn.execute(
+                        "INSERT INTO tx_labels (user_id, label, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
+                        rusqlite::params![user_id, &normalized, now, now],
+                    )?;
+                    self.conn.last_insert_rowid()
+                }
+                Err(e) => return Err(e),
+            };
+
+            // Create the label→transaction mapping
             self.conn.execute(
-                "INSERT INTO transaction_labels (transaction_id, label) VALUES (?1, ?2)",
-                rusqlite::params![transaction_id, label],
+                "INSERT OR IGNORE INTO tx_labels_map (txLabelId, transaction_id, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
+                rusqlite::params![label_id, transaction_id, now, now],
             )?;
         }
 
@@ -127,34 +155,18 @@ impl<'a> TransactionRepository<'a> {
             Err(e) => return Err(e),
         };
 
-        // Get labels (Phase 5: try new tables first, fallback to old)
-        let labels: Vec<String> = {
-            let mut new_stmt = self.conn.prepare(
-                "SELECT tl.label
-                 FROM tx_labels tl
-                 INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
-                 WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
-                 ORDER BY tl.label"
-            )?;
-            let new_labels: Vec<String> = new_stmt.query_map(
-                rusqlite::params![transaction_id],
-                |row| Ok(row.get(0)?),
-            )?.filter_map(|r| r.ok()).collect();
-
-            if !new_labels.is_empty() {
-                new_labels
-            } else {
-                // Fallback to old table
-                let mut old_stmt = self.conn.prepare(
-                    "SELECT label FROM transaction_labels WHERE transaction_id = ?1"
-                )?;
-                let old_labels: Vec<String> = old_stmt.query_map(
-                    rusqlite::params![transaction_id],
-                    |row| Ok(row.get(0)?),
-                )?.filter_map(|r| r.ok()).collect();
-                old_labels
-            }
-        };
+        // Get labels from tx_labels/tx_labels_map (Phase 5 normalized tables)
+        let mut label_stmt = self.conn.prepare(
+            "SELECT tl.label
+             FROM tx_labels tl
+             INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+             WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
+             ORDER BY tl.label"
+        )?;
+        let labels: Vec<String> = label_stmt.query_map(
+            rusqlite::params![transaction_id],
+            |row| Ok(row.get(0)?),
+        )?.filter_map(|r| r.ok()).collect();
 
         // Get inputs
         let mut input_stmt = self.conn.prepare(
@@ -284,7 +296,9 @@ impl<'a> TransactionRepository<'a> {
     }
 
     /// Update transaction TXID (after signing)
-    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String) -> Result<()> {
+    ///
+    /// `user_id` is forwarded to `add_transaction` for label deduplication.
+    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String, user_id: i64) -> Result<()> {
         // Get old transaction
         let old_tx = self.get_by_reference(reference_number)?
             .ok_or_else(|| rusqlite::Error::SqliteFailure(
@@ -305,14 +319,14 @@ impl<'a> TransactionRepository<'a> {
 
         self.conn.execute("DELETE FROM transaction_outputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transaction_inputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM transaction_labels WHERE transaction_id = ?1", rusqlite::params![old_id])?;
+        self.conn.execute("DELETE FROM tx_labels_map WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transactions WHERE id = ?1", rusqlite::params![old_id])?;
 
         // Create new transaction with new TXID
         let mut new_action = old_tx;
         new_action.txid = new_txid.clone();
         new_action.raw_tx = new_raw_tx;
-        let new_id = self.add_transaction(&new_action)?;
+        let new_id = self.add_transaction(&new_action, user_id)?;
 
         // Re-link detached outputs to the new transaction record.
         // Match by old txid since output txids haven't been renamed yet.

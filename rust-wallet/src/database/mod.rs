@@ -12,7 +12,6 @@ pub mod transaction_repo;
 pub mod migration;
 pub mod helpers;
 pub mod parent_transaction_repo;
-pub mod merkle_proof_repo;
 pub mod block_header_repo;
 pub mod proven_tx_repo;
 pub mod proven_tx_req_repo;
@@ -29,7 +28,7 @@ pub mod settings_repo;
 pub mod sync_state_repo;
 
 pub use connection::WalletDatabase;
-pub use models::{Wallet, User, Address, Output, ParentTransaction, MerkleProof, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
+pub use models::{Wallet, User, Address, Output, ParentTransaction, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
 // Phase 5 models
 pub use models::{TxLabel, TxLabelMap, Commission, Setting, SyncState};
 pub use wallet_repo::WalletRepository;
@@ -38,7 +37,6 @@ pub use transaction_repo::TransactionRepository;
 pub use migration::migrate_json_to_database;
 pub use helpers::{get_master_private_key_from_db, get_master_public_key_from_db, derive_key_for_output, address_to_address_info, output_to_fetcher_utxo};
 pub use parent_transaction_repo::ParentTransactionRepository;
-pub use merkle_proof_repo::MerkleProofRepository;
 pub use block_header_repo::BlockHeaderRepository;
 pub use proven_tx_repo::ProvenTxRepository;
 pub use proven_tx_req_repo::ProvenTxReqRepository;

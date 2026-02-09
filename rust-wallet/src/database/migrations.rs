@@ -2890,3 +2890,138 @@ fn migrate_transaction_labels(conn: &Connection) -> Result<()> {
 
     Ok(())
 }
+
+/// Migration V24: Phase 8C — Schema Cleanup
+///
+/// 1. Drop `merkle_proofs` table (replaced by `proven_txs` in V16)
+/// 2. Drop `domain_whitelist` DB table (JSON file used instead)
+/// 3. Drop `transaction_labels` table (replaced by `tx_labels`/`tx_labels_map` in V19, data migrated)
+/// 4. Recreate `output_tag_map` with correct FK (was `utxos(id)`, now `outputs(outputId)`)
+/// 5. Clean up orphaned nosend transactions older than 48 hours
+pub fn create_schema_v24(conn: &Connection) -> Result<()> {
+    info!("=== Migration V24: Phase 8C — Schema Cleanup ===");
+
+    // Step 1: Drop merkle_proofs (replaced by proven_txs in V16)
+    info!("   Step 1: Dropping merkle_proofs table...");
+    conn.execute("DROP TABLE IF EXISTS merkle_proofs", [])?;
+    info!("   ✅ Dropped merkle_proofs table");
+
+    // Step 2: Drop domain_whitelist DB table (JSON file used instead)
+    info!("   Step 2: Dropping domain_whitelist DB table...");
+    conn.execute("DROP TABLE IF EXISTS domain_whitelist", [])?;
+    info!("   ✅ Dropped domain_whitelist table");
+
+    // Step 3: Drop transaction_labels (replaced by tx_labels/tx_labels_map, data migrated in V19)
+    info!("   Step 3: Dropping transaction_labels table...");
+    conn.execute("DROP TABLE IF EXISTS transaction_labels", [])?;
+    info!("   ✅ Dropped transaction_labels table");
+
+    // Step 4: Recreate output_tag_map with correct FK
+    // The old table had FOREIGN KEY (output_id) REFERENCES utxos(id) — wrong table.
+    // The new table references outputs(outputId) with ON DELETE CASCADE.
+    info!("   Step 4: Rebuilding output_tag_map with correct FK...");
+
+    let old_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM output_tag_map",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    // 4a. Create new table with correct FK
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_tag_map_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            output_id INTEGER NOT NULL,
+            output_tag_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (output_id) REFERENCES outputs(outputId) ON DELETE CASCADE,
+            FOREIGN KEY (output_tag_id) REFERENCES output_tags(id) ON DELETE CASCADE,
+            UNIQUE(output_id, output_tag_id)
+        )",
+        [],
+    )?;
+
+    // 4b. Copy only valid rows (output_id must exist in outputs table)
+    let copied = conn.execute(
+        "INSERT INTO output_tag_map_new (id, output_id, output_tag_id, created_at, updated_at, is_deleted)
+         SELECT otm.id, otm.output_id, otm.output_tag_id, otm.created_at, otm.updated_at, otm.is_deleted
+         FROM output_tag_map otm
+         WHERE EXISTS (SELECT 1 FROM outputs WHERE outputId = otm.output_id)",
+        [],
+    )?;
+
+    let orphaned = old_count - copied as i64;
+    if orphaned > 0 {
+        info!("   ℹ️  Pruned {} orphaned output_tag_map rows (referenced deleted outputs)", orphaned);
+    }
+
+    // 4c. Drop old, rename new
+    conn.execute("DROP TABLE output_tag_map", [])?;
+    conn.execute("ALTER TABLE output_tag_map_new RENAME TO output_tag_map", [])?;
+
+    // 4d. Recreate indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_output_id ON output_tag_map(output_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_tag_id ON output_tag_map(output_tag_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_output_tag_map_deleted ON output_tag_map(is_deleted) WHERE is_deleted = 0", [])?;
+
+    info!("   ✅ Rebuilt output_tag_map with FK → outputs(outputId) ({} rows kept)", copied);
+
+    // Step 5: Clean up orphaned nosend transactions
+    // These are signed-but-never-broadcast transactions older than 48 hours.
+    // Their basket outputs may still show up as spendable in listOutputs.
+    info!("   Step 5: Cleaning up orphaned nosend transactions...");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let cutoff = now - (48 * 3600); // 48 hours ago
+
+    // Find old nosend transaction IDs
+    let mut nosend_stmt = conn.prepare(
+        "SELECT id, txid FROM transactions WHERE new_status = 'nosend' AND timestamp < ?1"
+    )?;
+    let nosend_txs: Vec<(i64, String)> = nosend_stmt.query_map(
+        rusqlite::params![cutoff],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?.filter_map(|r| r.ok()).collect();
+
+    if nosend_txs.is_empty() {
+        info!("   ✅ No orphaned nosend transactions to clean up");
+    } else {
+        let mut ghost_outputs_deleted = 0usize;
+
+        for (tx_id, txid) in &nosend_txs {
+            // Delete ghost outputs created by this nosend transaction
+            let deleted = conn.execute(
+                "DELETE FROM outputs WHERE transaction_id = ?1 AND spendable = 1",
+                rusqlite::params![tx_id],
+            )?;
+            ghost_outputs_deleted += deleted;
+
+            // Restore any inputs that were marked as spent by this transaction
+            conn.execute(
+                "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL, updated_at = ?1
+                 WHERE spent_by = ?2 AND spendable = 0",
+                rusqlite::params![now, tx_id],
+            )?;
+
+            // Mark the transaction as failed
+            conn.execute(
+                "UPDATE transactions SET new_status = 'failed', status = 'failed', failed_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, tx_id],
+            )?;
+
+            let short = &txid[..std::cmp::min(16, txid.len())];
+            info!("   🗑️  Cleaned up nosend tx {} (deleted {} ghost outputs)", short, deleted);
+        }
+
+        info!("   ✅ Cleaned up {} nosend transactions, deleted {} ghost outputs",
+              nosend_txs.len(), ghost_outputs_deleted);
+    }
+
+    info!("=== Migration V24 complete ===");
+    Ok(())
+}

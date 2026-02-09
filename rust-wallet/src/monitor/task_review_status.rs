@@ -67,14 +67,17 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     // 2. transactions → outputs: Ensure completed tx outputs are spendable
     {
         // Find outputs that belong to completed transactions but aren't spendable
-        // (and aren't already spent by another transaction)
+        // (and aren't already spent by another transaction).
+        // IMPORTANT: Exclude outputs marked 'external-spend' by wallet sync reconciliation —
+        // those were confirmed spent on-chain by a tx the wallet doesn't know about.
         let mut stmt = conn.prepare(
             "SELECT o.outputId, o.txid, t.id
              FROM outputs o
              INNER JOIN transactions t ON o.transaction_id = t.id
              WHERE t.new_status = 'completed'
              AND o.spendable = 0
-             AND o.spent_by IS NULL"
+             AND o.spent_by IS NULL
+             AND (o.spending_description IS NULL OR o.spending_description != 'external-spend')"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let needs_fix: Vec<(i64, String, i64)> = stmt.query_map(

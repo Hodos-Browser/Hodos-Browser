@@ -1041,6 +1041,33 @@ impl WalletDatabase {
             }
         }
 
+        // Apply migration to version 24 (Phase 8C: Schema cleanup)
+        if current_version < 24 {
+            info!("   Applying migration to version 24...");
+            match migrations::create_schema_v24(&self.conn) {
+                Ok(()) => {
+                    info!("   Inserting schema version 24...");
+                    match self.conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (24)",
+                        [],
+                    ) {
+                        Ok(_) => {
+                            info!("   ✅ Migration to version 24 complete");
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to insert schema version: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Migration to version 24 failed: {}", e);
+                    error!("   Error details: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 

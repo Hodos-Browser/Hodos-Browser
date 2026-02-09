@@ -28,7 +28,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | `main()`, initializes `AppState` (database, whitelist, message_store, auth_sessions, balance_cache), starts Actix-web on port 3301 |
+| `src/main.rs` | `main()`, initializes `AppState` (database, balance_cache, auth_sessions, shutdown token), starts Actix-web on port 3301 |
 | `src/handlers.rs` | All HTTP endpoint handlers: `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, etc. |
 
 ## Extension Points
@@ -54,7 +54,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/recovery.rs` | `derive_private_key_bip32` (legacy BIP32 `m/{index}`), `recover_wallet_from_mnemonic` (TODO: recovery sprint) |
 | `src/database/proven_tx_repo.rs` | `ProvenTxRepository`: `insert_or_get`, `get_by_txid`, `get_merkle_proof_as_tsc`, `link_transaction` — immutable proof records |
 | `src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository`: `create`, `get_by_txid`, `update_status`, `link_proven_tx`, `add_history_note` — proof lifecycle tracking |
-| `src/monitor/mod.rs` | `Monitor` struct — background task scheduler (30s tick loop, 7 tasks, event logging) |
+| `src/monitor/mod.rs` | `Monitor` struct — background task scheduler (30s tick loop, 7 tasks, graceful shutdown, DB lock contention avoidance) |
 | `src/monitor/task_check_for_proofs.rs` | Proof acquisition from ARC + WhatsOnChain (replaces `arc_status_poller` + `cache_sync`) |
 | `src/monitor/task_send_waiting.rs` | Crash recovery for orphaned `sending` transactions |
 | `src/monitor/task_fail_abandoned.rs` | Fail stuck `unprocessed`/`unsigned` txs with ghost output cleanup |
@@ -65,13 +65,11 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 | `src/beef.rs` | BEEF parser, `tsc_proof_to_bump`, `parse_bump_hex_to_tsc` — Merkle proof format conversion |
 | `src/beef_helpers.rs` | Recursive BEEF building with ancestry chain and proof fetching |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
-| `src/arc_status_poller.rs` | **Deprecated** (Phase 6I) — replaced by `monitor/task_check_for_proofs` |
-| `src/cache_sync.rs` | **Deprecated** (Phase 6I) — replaced by `monitor/task_check_for_proofs` |
-| `src/utxo_sync.rs` | **Deprecated** (Phase 6I) — replaced by `wallet_sync` handler + monitor |
+| `src/balance_cache.rs` | `BalanceCache` — in-memory balance with instant invalidation |
 
-## Database Schema (V23)
+## Database Schema (V24)
 
-Current migration version: **V23**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+Current migration version: **V24**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
 
 | Table | Purpose | Phase |
 |-------|---------|-------|
@@ -82,22 +80,22 @@ Current migration version: **V23**. Migrations in `src/database/migrations.rs`, 
 | outputs | **Primary** — wallet-toolbox compatible output tracking with `spendable`/`spent_by` | V18 |
 | utxos | **Deprecated** — no longer used. Code removed in Phase 4E. Table kept for rollback safety | Original |
 | parent_transactions | Raw tx cache for BEEF building | Original |
-| merkle_proofs | **Deprecated** — no longer written to. Replaced by `proven_txs` (V16) | Original |
+| merkle_proofs | **Dropped in V24** — replaced by `proven_txs` (V16) | Original |
 | block_headers | Cached block headers | Original |
 | proven_txs | **Immutable** proof records (merkle path + raw tx). Created by Monitor task_check_for_proofs | V16 |
 | proven_tx_reqs | Proof acquisition lifecycle tracking. Created on broadcast, completed when proof acquired | V16 |
 | baskets | Output categorization, `user_id` FK (V17) | V14/V17 |
 | output_tags / output_tag_map | Output tagging, `user_id` FK (V17) | V14/V17 |
 | certificates / certificate_fields | BRC-52 identity certificates, `user_id` FK (V17) | V7/V17 |
-| domain_whitelist | BRC-100 app permissions | Original |
+| domain_whitelist | **Dropped in V24** — JSON file used instead | Original |
 | tx_labels / tx_labels_map | Transaction labels (normalized pattern, replaces `transaction_labels`) | V19 |
 | commissions | Fee tracking per transaction | V19 |
 | settings | Persistent wallet configuration (chain, dbtype, limits) | V19 |
 | sync_states | Multi-device synchronization state | V19 |
 | monitor_events | Background task event logging (Monitor pattern) | V20 |
-| transaction_labels | **Deprecated** — reads fallback only. Replaced by `tx_labels`/`tx_labels_map` (V19) | Original |
+| transaction_labels | **Dropped in V24** — replaced by `tx_labels`/`tx_labels_map` (V19) | Original |
 
-### Migrations V20-V23 (Phases 6-7)
+### Migrations V20-V24 (Phases 6-8)
 
 | Migration | Purpose |
 |-----------|---------|
@@ -105,6 +103,7 @@ Current migration version: **V23**. Migrations in `src/database/migrations.rs`, 
 | V21 | Patch `proven_txs` merkle_path BLOBs — inject missing `height` field from column |
 | V22 | Fix array-format BLOBs in `proven_txs` — normalize `[{...}]` to `{...}` and inject height |
 | V23 | Re-tag legacy BIP32 outputs: `derivation_prefix = "bip32"` so signing path can distinguish from BRC-42 |
+| V24 | Drop deprecated tables (`merkle_proofs`, `domain_whitelist`, `transaction_labels`); rebuild `output_tag_map` with correct FK to `outputs(outputId)`; clean up nosend txs >48h |
 
 ### Output Model (V18 - Phase 4 Complete)
 
@@ -171,7 +170,6 @@ The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler, replac
 | TaskReviewStatus | 60s | Ensure consistency across proven_tx_reqs → transactions → outputs |
 | TaskPurge | 3600s | Cleanup old monitor_events (7d) and completed proof requests (30d) |
 | TaskSyncPending | 30s | UTXO sync for addresses with `pending_utxo_check=1` (WoC API) |
-| TaskSyncPending | 60s | UTXO sync for addresses with `pending_utxo_check=1` (WoC API) |
 
 ### Ghost Transaction Safety Rules
 
@@ -183,14 +181,14 @@ The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler, replac
 
 ### UTXO Sync
 
-UTXO synchronization uses two mechanisms:
-1. **Periodic (TaskSyncPending)**: Monitor task checks addresses with `pending_utxo_check=1` every 30s
-2. **On-demand (`POST /wallet/sync`)**: Frontend or manual trigger for full/pending sync
+Two mechanisms:
+1. **Periodic (TaskSyncPending)**: Monitor checks addresses with `pending_utxo_check=1` every 30s
+2. **On-demand (`POST /wallet/sync`)**: Frontend or manual trigger, `?full=true` for all addresses
 
-The endpoint:
-- Fetches UTXOs from WhatsOnChain for pending (or all with `?full=true`) addresses
+The sync endpoint:
+- Fetches UTXOs from WhatsOnChain for target addresses
 - Inserts new outputs via `upsert_received_utxo()`
-- **Reconciles** stale outputs: marks DB outputs not found in API as externally spent
+- **Reconciles** stale outputs: marks DB outputs not found in API as `external-spend` (`spending_description = 'external-spend'`, `spendable = 0`)
 - Invalidates balance cache
 
 ## Fee Calculation

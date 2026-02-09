@@ -1,7 +1,12 @@
-//! Monitor Pattern — Background Task Scheduler (Phase 6)
+//! Monitor Pattern — Background Task Scheduler (Phase 6, updated Phase 8D)
 //!
 //! Replaces the ad-hoc background services (arc_status_poller, cache_sync, utxo_sync)
 //! with a structured set of named tasks running on configurable intervals.
+//!
+//! Phase 8D additions:
+//! - Graceful shutdown via CancellationToken (Ctrl+C stops the loop cleanly)
+//! - DB lock contention avoidance: try_lock() before each task — if the DB is
+//!   currently held by a user HTTP request, the task is skipped for this tick
 //!
 //! Tasks:
 //! - TaskCheckForProofs: Acquire merkle proofs for unproven transactions
@@ -10,6 +15,7 @@
 //! - TaskUnFail: Recover false failures by re-checking on-chain
 //! - TaskReviewStatus: Ensure consistency across proven_tx_reqs → transactions → outputs
 //! - TaskPurge: Cleanup old monitor_events and completed proof requests
+//! - TaskSyncPending: Periodic UTXO sync for pending addresses
 
 pub mod task_check_for_proofs;
 pub mod task_send_waiting;
@@ -20,8 +26,7 @@ pub mod task_purge;
 pub mod task_sync_pending;
 
 use actix_web::web;
-use log::{info, warn, error};
-use std::sync::Arc;
+use log::{info, error, debug};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
@@ -80,9 +85,29 @@ impl Monitor {
         });
     }
 
+    /// Check if the database is currently available (not held by a user request).
+    /// Returns true if we can proceed with background tasks.
+    fn db_available(&self) -> bool {
+        match self.state.database.try_lock() {
+            Ok(_guard) => {
+                // Lock acquired and immediately dropped — DB is free
+                true
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // DB is held by a user request — skip this tick
+                debug!("Monitor: DB locked by user request, skipping tick");
+                false
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                error!("Monitor: DB mutex poisoned!");
+                false
+            }
+        }
+    }
+
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 7 tasks");
+        info!("🔄 Monitor started with 7 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -104,6 +129,24 @@ impl Monitor {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         loop {
+            // Check for shutdown signal (Phase 8D)
+            tokio::select! {
+                _ = self.state.shutdown.cancelled() => {
+                    info!("🛑 Monitor shutting down gracefully");
+                    break;
+                }
+                _ = tokio::time::sleep(tick_interval) => {
+                    // Continue to task scheduling
+                }
+            }
+
+            // Check if DB is available before running any tasks.
+            // If a user HTTP request currently holds the lock, skip this entire tick
+            // to avoid blocking the user. Tasks will run on the next tick instead.
+            if !self.db_available() {
+                continue;
+            }
+
             let now = Self::now_secs();
 
             // TaskCheckForProofs
@@ -168,20 +211,21 @@ impl Monitor {
                     self.log_event("TaskSyncPending:error", Some(&e));
                 }
             }
-
-            tokio::time::sleep(tick_interval).await;
         }
+
+        info!("🛑 Monitor stopped");
     }
 
     /// Log an event to the monitor_events table
     fn log_event(&self, event: &str, details: Option<&str>) {
         let now = Self::now_secs() as i64;
-        if let Ok(db) = self.state.database.lock() {
+        if let Ok(db) = self.state.database.try_lock() {
             let _ = db.connection().execute(
                 "INSERT INTO monitor_events (event, details, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![event, details, now, now],
             );
         }
+        // If lock is busy, silently skip logging — not critical
     }
 
     fn now_secs() -> u64 {
@@ -198,10 +242,11 @@ pub fn log_monitor_event(state: &web::Data<AppState>, event: &str, details: Opti
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if let Ok(db) = state.database.lock() {
+    if let Ok(db) = state.database.try_lock() {
         let _ = db.connection().execute(
             "INSERT INTO monitor_events (event, details, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![event, details, now, now],
         );
     }
+    // If lock is busy, silently skip logging — not critical
 }

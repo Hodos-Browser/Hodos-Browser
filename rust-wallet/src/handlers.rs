@@ -4262,7 +4262,7 @@ pub async fn create_action(
         use crate::database::TransactionRepository;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
-        match tx_repo.add_transaction(&stored_action) {
+        match tx_repo.add_transaction(&stored_action, state.current_user_id) {
             Ok(transaction_id) => {
                 log::info!("   💾 Action stored in database with status: created (id={})", transaction_id);
 
@@ -6184,7 +6184,7 @@ pub async fn sign_action(
         };
 
         // Update TXID in transactions table (signing changes the transaction, so TXID changes)
-        if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone()) {
+        if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone(), state.current_user_id) {
             log::warn!("   ⚠️  Failed to update TXID: {}", e);
         } else {
             log::info!("   💾 Transaction TXID updated: unsigned → signed");
@@ -9080,7 +9080,7 @@ pub async fn internalize_action(
             }
             Ok(None) => {
                 // Transaction doesn't exist, insert it
-                match tx_repo.add_transaction(&stored_action) {
+                match tx_repo.add_transaction(&stored_action, state.current_user_id) {
                     Ok(_) => {
                         log::info!("   💾 Action stored in database with status: unconfirmed");
                     }

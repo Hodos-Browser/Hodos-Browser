@@ -756,4 +756,65 @@ wallet import flow.
 
 ---
 
-*End of backup and recovery outline. Implementation begins after transition plan Phase 1 is complete.*
+---
+
+## 11. Notes from State Maintenance Sprint (Phases 6-8, Feb 2026)
+
+These notes capture things learned during the wallet-toolbox alignment sprint that are relevant to backup/recovery implementation. Review when starting Phase B1.
+
+### All Transition Plan Dependencies Resolved
+
+All 8 phases of the transition plan are complete (schema V24). The dependency map in Section 8 is fully satisfied — Phases B1, B2, and B3 can all be started without waiting on anything.
+
+### Per-Output Key Derivation is Live (Phase 7)
+
+`derive_key_for_output()` in `src/database/helpers.rs` is now the single signing entry point. It reads derivation fields directly from the output record:
+
+| `derivation_prefix` | `derivation_suffix` | `sender_identity_key` | Path |
+|---|---|---|---|
+| `"2-receive address"` | `"{index}"` | NULL | BRC-42 self-derived (recoverable from seed scan) |
+| `"bip32"` | `"{index}"` | NULL | Legacy BIP32 (recoverable from m/{index} scan) |
+| NULL | NULL | NULL | Master key directly |
+| any | any | Some(pubkey) | BRC-42 counterparty (NEEDS on-chain backup) |
+
+**V23 migration** re-tagged all legacy BIP32 outputs with `derivation_prefix = "bip32"`, so the backup code can cleanly filter which outputs need on-chain backup vs which are seed-recoverable.
+
+### BIP32 Code Separated into Recovery Module
+
+Phase 7D moved `derive_private_key_bip32()` to `src/recovery.rs` (out of the signing hot path). This is exactly where the recovery scanner will live. However, `recover_wallet_from_mnemonic()` in that file still uses old patterns and needs updating for the outputs-based model before it's production-ready.
+
+### Monitor Has Room for Backup Task
+
+The Monitor now runs 7 tasks with graceful shutdown (CancellationToken) and DB lock contention avoidance (try_lock() canary). Adding `task_onchain_backup.rs` as task #8 is straightforward — just add the module and register it in the run loop. The backup task will automatically get clean shutdown and won't block user HTTP requests.
+
+### Dropped Tables
+
+These tables referenced in the plan no longer exist:
+- `domain_whitelist` — dropped in V24 (was already excluded from backup in Section 2)
+- `transaction_labels` — dropped in V24. Labels are now in `tx_labels` / `tx_labels_map` only
+- `merkle_proofs` — dropped in V24. Proof data is in `proven_txs` only
+
+The backup entity format in Section 2 should serialize from `tx_labels`/`tx_labels_map` (not `transaction_labels`).
+
+### NoSend Transaction Semantics — Important for Recovery
+
+`noSend=true` means the wallet doesn't broadcast, but the APP does via overlay network. Inputs from nosend txs ARE genuinely spent on-chain. During recovery:
+- Do NOT treat nosend txs as "never broadcast" — their inputs are gone
+- Externally-spent outputs are marked `spending_description = 'external-spend'`, `spent_by = NULL`, `spendable = 0`
+- Recovery should preserve these markers rather than re-scanning all outputs as spendable
+
+### Balance Cache
+
+`state.balance_cache.invalidate()` must be called after any import/merge operation that modifies outputs. The balance cache has startup seeding and stale fallback, so recovery just needs to invalidate after import and the next balance read will recompute.
+
+### Output Tag Map FK Fixed
+
+V24 rebuilt `output_tag_map` with correct FK to `outputs(outputId)` instead of `utxos(id)`. The backup entity format for output tags should reference `outputId` (not the old utxo id).
+
+### Existing backup.rs
+
+There is already a `src/backup.rs` file with basic DB file copy logic. Phase B1 will likely replace or significantly expand this into the `src/backup/` module structure described in Section 3.
+
+---
+
+*End of backup and recovery outline. All transition plan dependencies are resolved — implementation can begin at any time.*

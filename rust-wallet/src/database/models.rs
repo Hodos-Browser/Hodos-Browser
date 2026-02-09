@@ -88,18 +88,6 @@ pub struct ParentTransaction {
     pub cached_at: i64,  // Unix timestamp
 }
 
-/// Merkle proof model matching the `merkle_proofs` table
-#[derive(Debug, Clone)]
-pub struct MerkleProof {
-    pub id: i64,
-    pub parent_txn_id: i64,
-    pub block_height: u32,
-    pub tx_index: u64,
-    pub target_hash: String,
-    pub nodes: Vec<String>, // Parsed from JSON
-    pub cached_at: i64,  // Unix timestamp
-}
-
 /// Block header model matching the `block_headers` table
 #[derive(Debug, Clone)]
 pub struct BlockHeader {

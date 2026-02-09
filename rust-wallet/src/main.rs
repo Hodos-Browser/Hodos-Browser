@@ -13,25 +13,17 @@ mod domain_whitelist;
 mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
-mod beef_helpers;  // NEW: BEEF building helpers for listOutputs
-// mod beef_ancestors;  // Disabled: recursive ancestor collection replaced by original single-level BEEF building
-mod database;  // NEW: Database module
-#[allow(dead_code)]
-mod utxo_sync;  // DEPRECATED (Phase 6I): Replaced by wallet_sync handler + monitor
-mod cache_errors;  // NEW: Unified error types for caching
-mod cache_helpers;  // NEW: Helper functions for cache operations
-#[allow(dead_code)]
-mod cache_sync;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
-mod balance_cache;  // NEW: In-memory balance cache
-mod backup;  // NEW: Database backup and restore utilities
+mod beef_helpers;  // BEEF building helpers for listOutputs
+mod database;  // Database module
+mod cache_errors;  // Unified error types for caching
+mod cache_helpers;  // Helper functions for cache operations
+mod balance_cache;  // In-memory balance cache
+mod backup;  // Database backup and restore utilities
 mod recovery;  // Wallet recovery + BIP32 legacy derivation (also in lib.rs for tests)
-#[allow(dead_code)]
-mod arc_status_poller;  // DEPRECATED (Phase 6I): Replaced by monitor::task_check_for_proofs
-mod fee_rate_cache;  // NEW: Dynamic fee rate from ARC policy
+mod fee_rate_cache;  // Dynamic fee rate from ARC policy
 mod monitor;  // Phase 6: Monitor pattern (background task scheduler)
-mod script;  // NEW: Bitcoin script parsing and PushDrop (BRC-48)
-mod certificate;  // NEW: Certificate management (BRC-52)
-// mod utxo_validation;  // Disabled: on-chain UTXO validation removed (caused false positives)
+mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
+mod certificate;  // Certificate management (BRC-52)
 
 // JSON storage no longer used - all handlers use database
 use domain_whitelist::DomainWhitelistManager;
@@ -61,6 +53,7 @@ pub struct AppState {
     pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
     pub current_user_id: i64,  // Default user ID for all operations (multi-user foundation, Phase 3)
+    pub shutdown: tokio_util::sync::CancellationToken,  // Graceful shutdown signal (Phase 8D)
 }
 
 #[actix_web::main]
@@ -280,6 +273,9 @@ async fn main() -> std::io::Result<()> {
     let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());
     println!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
 
+    // Create shutdown token for graceful shutdown (Phase 8D)
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
@@ -292,6 +288,7 @@ async fn main() -> std::io::Result<()> {
         create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
         current_user_id,  // Multi-user foundation (Phase 3)
+        shutdown: shutdown_token.clone(),  // Graceful shutdown signal (Phase 8D)
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");
@@ -335,15 +332,24 @@ async fn main() -> std::io::Result<()> {
     println!("✅ Server ready - CEF browser can now connect!");
     println!();
 
+    // Wire up Ctrl+C signal handler for graceful shutdown (Phase 8D)
+    let signal_token = shutdown_token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        println!();
+        println!("🛑 Ctrl+C received, shutting down gracefully...");
+        signal_token.cancel();
+    });
+
     // Start Monitor — the sole background task scheduler (Phase 6 complete)
     // Replaces: arc_status_poller, cache_sync, utxo_sync background services
     println!("🔄 Starting Monitor (background task scheduler)...");
     monitor::Monitor::start(app_state.clone());
-    println!("   ✅ Monitor started with 6 tasks");
+    println!("   ✅ Monitor started with 7 tasks");
     println!();
 
-    // Start HTTP server
-    HttpServer::new(move || {
+    // Start HTTP server with graceful shutdown support (Phase 8D)
+    let server = HttpServer::new(move || {
         // Configure CORS (allow all for development)
         let cors = Cors::default()
             .allow_any_origin()
@@ -447,6 +453,15 @@ async fn main() -> std::io::Result<()> {
             .route("/acknowledgeMessage", web::post().to(handlers::acknowledge_message))
     })
     .bind(("127.0.0.1", 3301))?
-    .run()
-    .await
+    .run();
+
+    // Spawn shutdown watcher that stops the HTTP server when Ctrl+C fires (Phase 8D)
+    let server_handle = server.handle();
+    tokio::spawn(async move {
+        shutdown_token.cancelled().await;
+        println!("🛑 Stopping HTTP server...");
+        server_handle.stop(true).await; // graceful: finish in-flight requests
+    });
+
+    server.await
 }

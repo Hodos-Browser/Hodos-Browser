@@ -645,7 +645,7 @@ The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity
 
 ---
 
-**Last Updated**: February 7, 2026
+**Last Updated**: February 9, 2026
 
 ---
 
@@ -854,31 +854,70 @@ Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` c
 | Missing UTXO reconciliation | Phase 6I removed utxo_sync but wallet_sync lacked reconciliation | Added `reconcile_for_derivation()` to wallet_sync handler |
 | Inflated balance (ghost outputs) | Outputs spent on-chain but still marked spendable in DB | Reconciliation detects and marks externally-spent outputs |
 
-### Phase 7: Per-Output Key Derivation — ✅ COMPLETE (2026-02-09)
+### Phase 7: Per-Output Key Derivation — COMPLETED (2026-02-09)
 
 Simplified signing path to derive keys directly from output fields. Migration V23.
 
 | Sub-phase | Change | Status |
 |-----------|--------|--------|
-| 7A | Migration V23 — re-tag legacy BIP32 outputs with `derivation_prefix = "bip32"` | ✅ |
-| 7B | New `derive_key_for_output()` — direct derivation from prefix/suffix/sender | ✅ |
-| 7C | Cutover `signAction` + `create_certificate_transaction` to `derive_key_for_output()` | ✅ |
-| 7D | Moved BIP32 to `recovery.rs`, deleted ~270 lines dead code from `helpers.rs` | ✅ |
+| 7A | Migration V23 — re-tag legacy BIP32 outputs with `derivation_prefix = "bip32"` | Done |
+| 7B | New `derive_key_for_output()` — direct derivation from prefix/suffix/sender | Done |
+| 7C | Cutover `signAction` + `create_certificate_transaction` to `derive_key_for_output()` | Done |
+| 7D | Moved BIP32 to `recovery.rs`, deleted ~270 lines dead code from `helpers.rs` | Done |
 
 **Additional fixes**: confirmed UTXO selection (NULL `transaction_id`), balance cache stale fallback + startup seed, TaskSyncPending (30s periodic UTXO sync), SEEN_IN_ORPHAN_MEMPOOL handling (fail immediately, TaskUnFail 6h recovery window with raw_tx input re-marking).
 
-### Remaining Phases (Pending)
+### Phase 8: Cleanup — COMPLETED (2026-02-09)
 
-| Phase | Goal | Migration |
-|-------|------|-----------|
-| 8 | Cleanup (deprecated table removal, graceful shutdown, broadcast timeout) | TBD |
+Removed deprecated code and tables, fixed schema issues, added graceful shutdown.
+
+| Sub-phase | Description | Status |
+|-----------|-------------|--------|
+| 8A | Deleted 6 deprecated modules (~2500 lines): `arc_status_poller`, `cache_sync`, `utxo_sync`, `beef_ancestors`, `utxo_validation`, `merkle_proof_repo` | Done |
+| 8B | Removed `transaction_labels` fallback reads from `get_by_txid()` and `tag_repo` | Done |
+| 8C | Migration V24 — dropped `merkle_proofs`, `domain_whitelist`, `transaction_labels`; rebuilt `output_tag_map` with correct FK to `outputs(outputId)`; cleaned up nosend txs >48h | Done |
+| 8D | Graceful shutdown (`CancellationToken` + `tokio::select!`) + DB lock contention fix (Monitor uses `try_lock()` canary before each tick, skips if DB busy) | Done |
+
+#### Files Deleted (8A)
+
+| File | Lines | Replaced By |
+|------|-------|-------------|
+| `src/arc_status_poller.rs` | ~800 | `monitor/task_check_for_proofs.rs` |
+| `src/cache_sync.rs` | ~700 | `monitor/task_check_for_proofs.rs` |
+| `src/utxo_sync.rs` | ~1000 | `wallet_sync` handler + `monitor/task_sync_pending.rs` |
+| `src/beef_ancestors.rs` | ~50 | Was already commented out |
+| `src/utxo_validation.rs` | ~50 | Was already commented out |
+| `src/database/merkle_proof_repo.rs` | ~80 | `proven_tx_repo.rs` |
+
+#### Migration V24 (8C)
+
+- `DROP TABLE merkle_proofs` — replaced by `proven_txs` in V16
+- `DROP TABLE domain_whitelist` — JSON file used instead
+- `DROP TABLE transaction_labels` — data migrated to `tx_labels`/`tx_labels_map` in V19
+- Rebuilt `output_tag_map` with correct FK referencing `outputs(outputId)` instead of `utxos(id)`
+- Cleaned up orphaned nosend transactions older than 48 hours
+
+#### Phase 8D Details
+
+- Added `tokio-util` dependency for `CancellationToken`
+- Added `shutdown` field to `AppState`
+- Ctrl+C signal handler cancels token → Monitor loop exits cleanly → HTTP server stops gracefully
+- Monitor `try_lock()` canary: checks DB availability before each tick — if user HTTP request holds lock, entire tick is skipped
+- `log_event()` / `log_monitor_event()` changed from `.lock()` to `.try_lock()` — silently skip if DB busy
+
+#### Bug Fix: TaskReviewStatus external-spend conflict
+
+TaskReviewStatus Section 2 was re-enabling outputs that `/wallet/sync` correctly marked as externally spent. Root cause: externally-spent outputs have `spent_by = NULL` (unknown spending tx), which matched the "fix to spendable" condition. Fixed by excluding `spending_description = 'external-spend'` from the query.
+
+### State Maintenance & Reconciliation — COMPLETE
+
+All 8 phases of the wallet-toolbox alignment transition plan are complete. The plan document at `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` can be archived.
 
 ### Known Issues / Future Work
 
 - **Frontend sync button**: `POST /wallet/sync` endpoint exists but frontend UI trigger not yet implemented
 - **Frontend balance polling**: `useBalance.ts` has polling commented out — re-enable in frontend phase
-- **Old tables preserved**: `merkle_proofs`, `transaction_labels`, `utxos`, and old `status`/`broadcast_status` columns kept for rollback safety. Will be removed in Phase 8
-- **Deprecated modules preserved**: `arc_status_poller.rs`, `cache_sync.rs`, `utxo_sync.rs` marked `#[allow(dead_code)]` — will be deleted in Phase 8
-- **Graceful shutdown**: Monitor needs a CancellationToken so Ctrl+C works (currently loops forever)
-- **Broadcast timeout**: Retry logic can block 30+ seconds, needs async timeout or cancellation
-- **Nosend tx cleanup**: 4 orphaned nosend txs may need manual cleanup
+- **Broadcast timeout wrapping**: Retry logic can block 30+ seconds, needs async timeout or cancellation
+- **utxos table migration**: ~10 live code references remain in handlers.rs, cache_helpers.rs — deferred
+- **Recovery sprint**: `recover_wallet_from_mnemonic` needs update for outputs-based model
+- **Key linkage methods**: `revealCounterpartyKeyLinkage` and `revealSpecificKeyLinkage` not yet implemented (low priority)

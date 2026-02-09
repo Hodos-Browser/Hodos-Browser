@@ -250,16 +250,22 @@ React UI → C++ Bridge → Rust Wallet → Blockchain
 
 ```
 Monitor (src/monitor/mod.rs) — single tokio task, 30s tick loop
+    │  Graceful shutdown via CancellationToken (Ctrl+C)
+    │  DB lock contention avoidance (try_lock() before each tick)
     │
     ├── TaskCheckForProofs (60s)    — ARC + WoC proof acquisition
     ├── TaskSendWaiting (120s)      — crash recovery for stuck 'sending' txs
     ├── TaskFailAbandoned (300s)    — fail stuck unsigned/unprocessed txs
-    ├── TaskUnFail (300s)           — recover false failures (30-min window)
+    ├── TaskUnFail (300s)           — recover false failures (6-hour window)
     ├── TaskReviewStatus (60s)      — proven_tx_reqs → transactions → outputs
-    └── TaskPurge (3600s)           — cleanup old events + proof requests
+    ├── TaskPurge (3600s)           — cleanup old events + proof requests
+    └── TaskSyncPending (30s)       — periodic UTXO sync for pending addresses
 ```
 
-UTXO synchronization is on-demand via `POST /wallet/sync` (not periodic).
+UTXO synchronization uses two mechanisms:
+1. **Periodic (TaskSyncPending)**: Checks addresses with `pending_utxo_check=1` every 30s
+2. **On-demand (`POST /wallet/sync`)**: Frontend or manual trigger for full/pending sync
+
 Balance is cached in-memory with immediate invalidation on output changes.
 
 ### Process Isolation Architecture
@@ -369,7 +375,7 @@ flowchart TD
     C3a --> C3a3["Settings Panel Layout (SettingsPanelLayout.tsx)"]
     C3a --> C3a4["Backup Modal (BackupModal.tsx)"]
 
-### ✅ Completed Components
+### Completed Components
 - **React UI Layer**: Complete with transaction forms, balance display, address management
 - **C++ Bridge Layer**: Full message handling and API injection
 - **Rust Wallet**: Production-ready with BRC-100 Groups A & B complete
@@ -379,14 +385,12 @@ flowchart TD
 - **BRC-33 Message Relay**: Peer-to-peer messaging support
 - **Process Isolation**: Each overlay runs in dedicated CEF subprocess
 - **Blockchain Integration**: Working with real Bitcoin SV mainnet
-- **Monitor Pattern (Phase 6)**: Structured background task scheduler with 6 named tasks, broadcast retry, UTXO reconciliation
-- **Wallet-Toolbox Alignment**: Database schema aligned through Phase 6 (V22) — status system, proven transactions, multi-user, output model, labels, monitor
+- **Monitor Pattern (Phase 6)**: Structured background task scheduler with 7 named tasks, broadcast retry, UTXO reconciliation, graceful shutdown
+- **Wallet-Toolbox Alignment**: Database schema aligned through V24 — status system, proven transactions, multi-user, output model, labels, monitor, per-output key derivation
+- **Per-Output Key Derivation (Phase 7)**: Signing derives keys directly from output fields — no address table dependency
+- **Cleanup (Phase 8)**: Deprecated modules deleted (~2500 lines), deprecated tables dropped (merkle_proofs, domain_whitelist, transaction_labels), output_tag_map FK fixed, graceful shutdown via CancellationToken
 
-### 🚧 In Development
+### In Development
 - **Window Management**: Keyboard commands and overlay HWND movement
 - **Frontend Sync Integration**: Sync button and balance polling for `/wallet/sync` endpoint
 - **Frontend BRC-100 Integration**: React authentication modals and approval flows
-
-### 📋 Future Components
-- **Per-Output Key Derivation**: Phase 7 — eliminate address table dependency
-- **Deprecated Table Cleanup**: Phase 8 — remove old tables and dead code
