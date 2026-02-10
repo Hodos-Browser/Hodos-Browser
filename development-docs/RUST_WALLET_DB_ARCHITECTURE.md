@@ -1,7 +1,8 @@
 # Rust Wallet Database Architecture
 
-> **Status**: ✅ **Phase 1-9 Complete** | ⏳ Phase 8 (Browser DB) Deferred
-> **Last Updated**: December 6, 2025
+> **Status**: All wallet-toolbox alignment phases (1-8) complete
+> **Last Updated**: February 9, 2026
+> **Current Schema Version**: V24
 > **Target**: SQLite database for HodosBrowser wallet data
 
 ## Executive Summary
@@ -831,55 +832,60 @@ Based on the [metanet-desktop repository](https://github.com/bsv-blockchain/meta
 
 ---
 
-## ✅ **Implementation Status** (2025-12-02)
+## Implementation Status (2026-02-09)
 
-### **Phase 1: Database Foundation** ✅ COMPLETE
-- ✅ SQLite database initialization
-- ✅ Schema migrations system
-- ✅ 15 tables created (wallets, addresses, baskets, utxos, transactions, etc.)
-- ✅ WAL mode and foreign keys enabled
-- ✅ Database connection management
+### Database Foundation — COMPLETE
+- SQLite database initialization with WAL mode and foreign keys
+- Schema migrations system (V1-V24)
+- Database connection management
+- Graceful shutdown via CancellationToken (Phase 8D)
 
-### **Phase 2: Data Migration** ✅ COMPLETE
-- ✅ JSON to database migration script
-- ✅ wallet.json → wallets + addresses tables
-- ✅ actions.json → transactions + related tables
-- ✅ One-time migration completed successfully
+### Wallet-Toolbox Alignment — All 8 Phases COMPLETE
 
-### **Phase 3: Core Functionality Migration** ✅ COMPLETE
-- ✅ All handlers updated to use database
-- ✅ Removed JSON file dependencies
-- ✅ Wallet creation with mnemonic generation
-- ✅ Address generation and storage
-- ✅ Transaction storage and retrieval
-- ✅ All API endpoints working with database
+| Phase | Migration | Description | Status |
+|-------|-----------|-------------|--------|
+| 1 | V15 | Status consolidation (`new_status` column) | Done |
+| 2 | V16 | Proven transaction model (`proven_txs`, `proven_tx_reqs`) | Done |
+| 3 | V17 | Multi-user foundation (`users` table, `user_id` FKs) | Done |
+| 4 | V18 | Output model transition (`outputs` replaces `utxos`) | Done |
+| 5 | V19 | Labels, commissions, supporting tables | Done |
+| 6 | V20-V22 | Monitor pattern (background task scheduler) | Done |
+| 7 | V23 | Per-output key derivation (`derive_key_for_output()`) | Done |
+| 8 | V24 | Deprecated table/module cleanup, graceful shutdown | Done |
 
-### **Phase 4: UTXO Management** ✅ COMPLETE
-- ✅ UTXO repository (`utxo_repo.rs`) implemented
-- ✅ UTXO caching in database
-- ✅ Balance calculation from cache
-- ✅ UTXO spending tracking
-- ✅ Change address generation (privacy fix)
-- ⏳ Background sync service (pending)
-- ⏳ Periodic UTXO updates (pending)
+### Phase 6: Monitor Pattern — COMPLETE (2026-02-07)
 
-### **Phase 5: BEEF/SPV Caching** ⏳ PENDING
-- ⏳ Parent transaction caching
-- ⏳ Merkle proof caching
-- ⏳ Block header caching
-- ⏳ TSC proof storage
+Replaced ad-hoc background services with a structured Monitor pattern:
+- **V20**: `monitor_events` table for task event logging
+- **V21**: Patch `proven_txs` BLOBs with missing height field
+- **V22**: Fix array-format BLOBs from WhatsOnChain (`[{...}]` → `{...}`)
+- 7 named tasks: TaskCheckForProofs, TaskSendWaiting, TaskFailAbandoned, TaskUnFail, TaskReviewStatus, TaskPurge, TaskSyncPending
+- On-demand UTXO sync via `POST /wallet/sync` with reconciliation
+- Broadcast retry with error classification
+- Balance cache invalidation on all output-modifying operations
 
-### **Current Issues:**
-- 🚨 **CRITICAL**: Transaction error handling - UI shows success when transaction fails
-  - See `CHECKPOINT_TRANSACTION_ERROR_HANDLING.md` for details
-- ⚠️ **Performance**: Wallet is slow - fetching from API on every balance check
-  - Need to discuss optimization strategy (background sync, periodic updates)
+### Phase 7: Per-Output Key Derivation — COMPLETE (2026-02-09)
 
-### **Next Steps:**
-1. **IMMEDIATE**: Fix transaction error handling (see checkpoint doc)
-2. Implement background UTXO sync service
-3. Add periodic UTXO update mechanism
-4. Begin Phase 5: BEEF/SPV caching
+- **V23**: Re-tag legacy BIP32 outputs with `derivation_prefix = "bip32"`
+- `derive_key_for_output()` derives signing keys directly from output fields
+- No address table lookup needed for signing
+
+### Phase 8: Cleanup — COMPLETE (2026-02-09)
+
+- **8A**: Deleted 6 deprecated modules (~2500 lines of dead code)
+- **8B**: Removed `transaction_labels` fallback reads
+- **8C/V24**: Dropped `merkle_proofs`, `domain_whitelist`, `transaction_labels` tables; rebuilt `output_tag_map` with correct FK; cleaned nosend txs
+- **8D**: Graceful shutdown (CancellationToken + tokio::select!) + DB lock contention fix (Monitor try_lock() canary)
+
+### Current Active Table Count: 22 tables
+
+3 deprecated tables dropped in V24 (`merkle_proofs`, `domain_whitelist`, `transaction_labels`).
+`utxos` table kept — still has ~10 live code references to migrate.
+
+### Future Work
+- `utxos` table migration (move remaining refs to outputs)
+- Recovery sprint (`recover_wallet_from_mnemonic`)
+- Broadcast timeout wrapping
 
 ---
 

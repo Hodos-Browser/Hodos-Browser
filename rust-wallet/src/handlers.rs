@@ -1722,10 +1722,13 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
 }
 
 // Wallet balance endpoint
+//
+// Pure DB/cache read — never does API calls. UTXO syncing is the
+// responsibility of POST /wallet/sync (called by frontend or manually).
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
-    // Step 1: Check cache first (fast path)
+    // Check cache first (fast path)
     if let Some(cached_balance) = state.balance_cache.get() {
         log::info!("   ✅ Using cached balance: {} satoshis", cached_balance);
         return HttpResponse::Ok().json(serde_json::json!({
@@ -1735,273 +1738,266 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
 
     log::info!("   🔄 Cache miss - calculating balance from database...");
 
-    // Get all addresses from database
-    let addresses = {
-        use crate::database::{WalletRepository, AddressRepository, address_to_address_info};
+    // Calculate balance from outputs table (source of truth)
+    // Use try_lock to avoid blocking the UI if another task holds the DB lock
+    let balance = match state.database.try_lock() {
+        Ok(db) => {
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.calculate_balance(state.current_user_id) {
+                Ok(bal) => bal,
+                Err(e) => {
+                    log::error!("   Failed to calculate balance: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Database error: {}", e)
+                    }));
+                }
+            }
+        }
+        Err(_) => {
+            // DB is busy (background task holding lock) — return stale balance
+            if let Some(stale) = state.balance_cache.get_or_stale() {
+                log::info!("   ⏳ DB busy, returning last known balance: {} satoshis", stale);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": stale
+                }));
+            } else {
+                log::warn!("   ⏳ DB busy, no cached balance available");
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "balance": 0
+                }));
+            }
+        }
+    };
 
-        let db = state.database.lock().unwrap();
+    // Cache the calculated balance
+    state.balance_cache.set(balance);
+    log::info!("   ✅ Balance: {} satoshis", balance);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "balance": balance
+    }))
+}
+
+/// POST /wallet/sync — On-demand UTXO sync for pending addresses
+///
+/// Fetches UTXOs from WhatsOnChain for addresses with pending_utxo_check=1,
+/// inserts new outputs, clears pending flags, and returns a summary.
+///
+/// Query parameters:
+/// - `full=true`: Sync ALL addresses, not just pending ones
+///
+/// Response: { "synced_addresses": N, "new_utxos": M, "balance": S }
+pub async fn wallet_sync(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    log::info!("🔄 POST /wallet/sync called");
+
+    let full_sync = query.get("full").map(|v| v == "true").unwrap_or(false);
+
+    // Get wallet and addresses to sync
+    let (wallet_id, addresses_to_sync) = {
+        use crate::database::{WalletRepository, AddressRepository};
+
+        let db = match state.database.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database lock: {}", e)
+                }));
+            }
+        };
         let wallet_repo = WalletRepository::new(db.connection());
 
-        // Get primary wallet
         let wallet = match wallet_repo.get_primary_wallet() {
             Ok(Some(w)) => w,
             Ok(None) => {
-                log::error!("   No wallet found in database");
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "No wallet found"
                 }));
             }
             Err(e) => {
-                log::error!("   Failed to get wallet: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Database error: {}", e)
                 }));
             }
         };
 
-        // Get all addresses for this wallet
+        let wid = wallet.id.unwrap();
         let address_repo = AddressRepository::new(db.connection());
-        match address_repo.get_all_by_wallet(wallet.id.unwrap()) {
-            Ok(db_addresses) => {
-                db_addresses.iter()
-                    .map(|addr| address_to_address_info(addr))
-                    .collect::<Vec<_>>()
-            }
-            Err(e) => {
-                log::error!("   Failed to get addresses: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to get addresses: {}", e)
-                }));
-            }
+
+        // Clear stale pending addresses (older than 10 days)
+        const PENDING_TIMEOUT_HOURS: i64 = 240;
+        if let Err(e) = address_repo.clear_stale_pending_addresses(PENDING_TIMEOUT_HOURS) {
+            log::warn!("   Failed to clear stale pending addresses: {}", e);
         }
-    };
 
-    log::info!("   Checking balance for {} addresses", addresses.len());
-
-    // Calculate balance from database cache
-    use crate::database::{UtxoRepository, AddressRepository};
-    let db = state.database.lock().unwrap();
-    let address_repo = AddressRepository::new(db.connection());
-
-    // Get address IDs
-    let address_ids: Vec<i64> = addresses.iter()
-        .filter_map(|addr| {
-            // Find address ID by address string
-            match address_repo.get_by_address(&addr.address) {
-                Ok(Some(db_addr)) => db_addr.id,
-                _ => None,
-            }
-        })
-        .collect();
-
-    let utxo_repo = UtxoRepository::new(db.connection());
-    let cached_balance = match utxo_repo.calculate_balance(&address_ids) {
-        Ok(balance) => balance,
-        Err(e) => {
-            log::error!("   Failed to calculate balance from database: {}", e);
-            drop(db);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
-            }));
-        }
-    };
-    drop(db);
-
-    // Use cached balance from database (Phase 4: primary source)
-    // Only fetch from API if cache is empty (first time setup)
-    // Background sync will update the cache periodically
-    if cached_balance == 0 && address_ids.len() > 0 {
-        // Cache is empty - fetch from API to populate cache
-        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
-
-        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&addresses).await {
-            Ok(utxos) => utxos,
-            Err(e) => {
-                log::error!("   Failed to fetch UTXOs from API: {}", e);
-                // Return cached balance (0) if API fails
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": cached_balance
-                }));
-            }
-        };
-
-        // Cache UTXOs to database
-        let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let utxo_repo = UtxoRepository::new(db.connection());
-
-        for addr in &addresses {
-            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-                if let Some(addr_id) = db_addr.id {
-                    // Get UTXOs for this address (clone to get owned values)
-                    let addr_utxos: Vec<_> = api_utxos.iter()
-                        .filter(|u| u.address_index == addr.index)
-                        .cloned()
-                        .collect();
-
-                    if !addr_utxos.is_empty() {
-                        if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                            log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
-                        } else {
-                            // Mark address as used if it has UTXOs
-                        let _ = address_repo.mark_used(addr_id);
-                    }
+        let addrs = if full_sync {
+            log::info!("   Full sync requested — syncing ALL addresses");
+            match address_repo.get_all_by_wallet(wid) {
+                Ok(all) => all,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get addresses: {}", e)
+                    }));
                 }
             }
         } else {
-            // Address not in database - this shouldn't happen if generate_address worked
-            log::warn!("   Address {} not found in database (index {})", addr.address, addr.index);
-        }
-    }
-    drop(db);
-
-        // Calculate balance from fetched UTXOs
-        let total_balance: i64 = api_utxos.iter().map(|u| u.satoshis).sum();
-        log::info!("   ✅ Total balance (from API, cache updated): {} satoshis ({} UTXOs)", total_balance, api_utxos.len());
-
-        // Return response in Go wallet format: { "balance": number }
-        return HttpResponse::Ok().json(serde_json::json!({
-            "balance": total_balance
-        }));
-    }
-
-    // Check for pending addresses (newly created addresses that need UTXO checking)
-    let db = state.database.lock().unwrap();
-    let wallet_repo = crate::database::WalletRepository::new(db.connection());
-    let wallet = match wallet_repo.get_primary_wallet() {
-        Ok(Some(w)) => w,
-        Ok(None) | Err(_) => {
-            drop(db);
-            // No wallet found, return cached balance
-            return HttpResponse::Ok().json(serde_json::json!({
-                "balance": cached_balance
-            }));
-        }
-    };
-
-    let address_repo = AddressRepository::new(db.connection());
-    let pending_addresses = match address_repo.get_pending_utxo_check(wallet.id.unwrap()) {
-        Ok(addrs) => addrs,
-        Err(e) => {
-            log::warn!("   Failed to get pending addresses: {}", e);
-            drop(db);
-            return HttpResponse::Ok().json(serde_json::json!({
-                "balance": cached_balance
-            }));
-        }
-    };
-    drop(db);
-
-    // If there are pending addresses, fetch their UTXOs
-    if !pending_addresses.is_empty() {
-        log::info!("   🔍 Found {} pending address(es) to check for new UTXOs", pending_addresses.len());
-
-        // Convert to AddressInfo format for API call
-        let pending_address_infos: Vec<crate::json_storage::AddressInfo> = pending_addresses.iter()
-            .map(|addr| crate::json_storage::AddressInfo {
-                address: addr.address.clone(),
-                index: addr.index,  // Already i32, no conversion needed
-                public_key: addr.public_key.clone(),
-                used: addr.used,
-                balance: addr.balance,
-            })
-            .collect();
-
-        // Fetch UTXOs for pending addresses
-        let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&pending_address_infos).await {
-            Ok(utxos) => utxos,
-            Err(e) => {
-                log::warn!("   Failed to fetch UTXOs for pending addresses: {}", e);
-                log::warn!("   ⚠️  Keeping addresses marked as pending - will retry on next balance check");
-                // Return cached balance but DON'T clear pending flags - retry next time
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": cached_balance
-                }));
+            match address_repo.get_pending_utxo_check(wid) {
+                Ok(pending) => pending,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get pending addresses: {}", e)
+                    }));
+                }
             }
         };
 
-        // Cache UTXOs to database and clear pending flags (only if fetch succeeded)
-        let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let utxo_repo = UtxoRepository::new(db.connection());
-        let mut cleared_ids = Vec::new();
+        (wid, addrs)
+    };
 
-        for addr in &pending_addresses {
+    if addresses_to_sync.is_empty() {
+        log::info!("   No addresses to sync");
+        // Return current balance
+        let balance = {
+            let db = state.database.lock().unwrap();
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            output_repo.calculate_balance(state.current_user_id).unwrap_or(0)
+        };
+        return HttpResponse::Ok().json(serde_json::json!({
+            "synced_addresses": 0,
+            "new_utxos": 0,
+            "balance": balance
+        }));
+    }
+
+    log::info!("   Syncing {} address(es)...", addresses_to_sync.len());
+
+    // Convert to AddressInfo format for the API call
+    let address_infos: Vec<crate::json_storage::AddressInfo> = addresses_to_sync.iter()
+        .map(|addr| crate::json_storage::AddressInfo {
+            address: addr.address.clone(),
+            index: addr.index,
+            public_key: addr.public_key.clone(),
+            used: addr.used,
+            balance: addr.balance,
+        })
+        .collect();
+
+    // Fetch UTXOs from WhatsOnChain (DB lock NOT held during network call)
+    let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&address_infos).await {
+        Ok(utxos) => utxos,
+        Err(e) => {
+            log::warn!("   Failed to fetch UTXOs: {}", e);
+            // Don't clear pending flags — retry on next sync call
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": format!("API fetch failed: {}", e)
+            }));
+        }
+    };
+
+    // Process results: insert new outputs, reconcile stale ones, clear pending flags
+    let mut synced_count = 0u32;
+    let mut new_utxo_count = 0u32;
+    let mut reconciled_count = 0u32;
+    // Grace period: don't mark outputs as externally spent if created < 10 min ago
+    const RECONCILE_GRACE_PERIOD_SECS: i64 = 600;
+    {
+        let db = state.database.lock().unwrap();
+        let address_repo = crate::database::AddressRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        for addr in &addresses_to_sync {
             if let Some(addr_id) = addr.id {
-                // Get UTXOs for this address
                 let addr_utxos: Vec<_> = api_utxos.iter()
                     .filter(|u| u.address_index == addr.index)
-                    .cloned()
                     .collect();
 
                 if !addr_utxos.is_empty() {
-                    if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                        log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
-                        // Continue to clear pending flag even if caching failed - we successfully checked the address
-                    } else {
-                        // Mark address as used if it has UTXOs
-                        let _ = address_repo.mark_used(addr_id);
+                    for utxo in &addr_utxos {
+                        match output_repo.upsert_received_utxo(
+                            state.current_user_id,
+                            &utxo.txid,
+                            utxo.vout,
+                            utxo.satoshis,
+                            &utxo.script,
+                            addr.index,
+                        ) {
+                            Ok(1) => new_utxo_count += 1,
+                            Ok(_) => {}
+                            Err(e) => log::warn!("   Failed to insert output {}:{}: {}", utxo.txid, utxo.vout, e),
+                        }
+                    }
+                    // Mark address as used
+                    let _ = address_repo.mark_used(addr_id);
+                }
+
+                // Reconcile: mark DB outputs as externally spent if they no longer
+                // appear in the WoC API response. This catches outputs spent on-chain
+                // by transactions the wallet lost track of (e.g., marked failed but
+                // actually mined). Without this, balance stays inflated and the wallet
+                // tries to double-spend already-spent UTXOs.
+                let derivation_prefix = "2-receive address";
+                let derivation_suffix = addr.index.to_string();
+                let owned_utxos: Vec<crate::utxo_fetcher::UTXO> = addr_utxos.iter()
+                    .map(|u| (*u).clone())
+                    .collect();
+
+                match output_repo.reconcile_for_derivation(
+                    state.current_user_id,
+                    Some(derivation_prefix),
+                    Some(&derivation_suffix),
+                    &owned_utxos,
+                    RECONCILE_GRACE_PERIOD_SECS,
+                ) {
+                    Ok(stale) if stale > 0 => {
+                        log::info!("   🔄 Reconciled {} stale output(s) for address {} (marked as externally spent)",
+                                  stale, addr.address);
+                        reconciled_count += stale as u32;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to reconcile outputs for {}: {}", addr.address, e);
                     }
                 }
 
-                // Clear pending flag - fetch succeeded, so we've checked this address
-                // (even if no UTXOs were found or caching failed, we at least tried)
-                if let Err(e) = address_repo.clear_pending_utxo_check(addr_id) {
-                    log::warn!("   Failed to clear pending flag for address {}: {}", addr.address, e);
-                } else {
-                    cleared_ids.push(addr_id);
+                // Only clear pending flag if UTXOs were found for this address.
+                // If no UTXOs found, keep checking until 10-day stale timeout.
+                if addr.pending_utxo_check && !addr_utxos.is_empty() {
+                    let _ = address_repo.clear_pending_utxo_check(addr_id);
                 }
+                synced_count += 1;
             }
         }
-        drop(db);
-
-        if !cleared_ids.is_empty() {
-            log::info!("   ✅ Checked {} pending address(es) and cleared flags", cleared_ids.len());
-        }
-
-        // Recalculate balance including new UTXOs
-        let db = state.database.lock().unwrap();
-        let address_repo = AddressRepository::new(db.connection());
-        let address_ids: Vec<i64> = addresses.iter()
-            .filter_map(|addr| {
-                match address_repo.get_by_address(&addr.address) {
-                    Ok(Some(db_addr)) => db_addr.id,
-                    _ => None,
-                }
-            })
-            .collect();
-
-        let utxo_repo = UtxoRepository::new(db.connection());
-        let updated_balance = match utxo_repo.calculate_balance(&address_ids) {
-            Ok(balance) => balance,
-            Err(e) => {
-                log::warn!("   Failed to recalculate balance: {}, using cached", e);
-                cached_balance
-            }
-        };
-        drop(db);
-
-        log::info!("   ✅ Updated balance after checking pending addresses: {} satoshis", updated_balance);
-
-        // Invalidate cache since new UTXOs were detected
-        state.balance_cache.invalidate();
-        // Update cache with new balance
-        state.balance_cache.set(updated_balance);
-
-        return HttpResponse::Ok().json(serde_json::json!({
-            "balance": updated_balance
-        }));
     }
 
-    // Cache has balance from database - use it and cache it
-    log::info!("   ✅ Using cached balance from database: {} satoshis", cached_balance);
+    // Invalidate and recalculate balance
+    state.balance_cache.invalidate();
+    let balance = {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let bal = output_repo.calculate_balance(state.current_user_id).unwrap_or(0);
+        state.balance_cache.set(bal);
+        bal
+    };
 
-    // Update cache with calculated balance
-    state.balance_cache.set(cached_balance);
+    if new_utxo_count > 0 {
+        log::info!("   💰 Inserted {} new received output(s)", new_utxo_count);
+    }
+    if reconciled_count > 0 {
+        log::info!("   🔄 Reconciled {} stale output(s) (spent on-chain but still in DB)", reconciled_count);
+    }
+    log::info!("✅ Sync complete: {} addresses synced, {} new UTXOs, {} reconciled, balance: {} sats",
+        synced_count, new_utxo_count, reconciled_count, balance);
 
-    // Return response in Go wallet format: { "balance": number }
+    crate::monitor::log_monitor_event(&state, "WalletSync:completed",
+        Some(&format!("{} addrs, {} new utxos, {} reconciled", synced_count, new_utxo_count, reconciled_count)));
+
     HttpResponse::Ok().json(serde_json::json!({
-        "balance": cached_balance
+        "synced_addresses": synced_count,
+        "new_utxos": new_utxo_count,
+        "reconciled": reconciled_count,
+        "balance": balance
     }))
 }
 
@@ -3280,40 +3276,50 @@ pub async fn create_action(
 
         log::info!("   Checking {} addresses for UTXOs...", addresses.len());
 
-        // Try to get UTXOs from database cache first
-        use crate::database::{UtxoRepository, AddressRepository, utxo_to_fetcher_utxo};
+        // Get outputs from database (source of truth)
+        use crate::database::{AddressRepository, OutputRepository, output_to_fetcher_utxo};
         let db = state.database.lock().unwrap();
         let address_repo = AddressRepository::new(db.connection());
-        let utxo_repo = UtxoRepository::new(db.connection());
+        let output_repo = OutputRepository::new(db.connection());
 
-        // Get address IDs and create address index map
-        let mut address_id_map: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
-        let mut address_ids = Vec::new();
-
-        for addr in &addresses {
-            if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-                if let Some(addr_id) = db_addr.id {
-                    address_ids.push(addr_id);
-                    address_id_map.insert(addr_id, addr.index);
-                }
-            }
-        }
-
-        // Get UTXOs from database
-        let mut all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
-            Ok(db_utxos) => {
-                // Convert database UTXOs to fetcher format
-                db_utxos.iter()
-                    .filter_map(|db_utxo| {
-                        db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
-                            .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
-                    })
+        // Get UTXOs from outputs table
+        let mut all_utxos = match output_repo.get_spendable_by_user(state.current_user_id) {
+            Ok(db_outputs) => {
+                // Convert outputs to fetcher UTXO format using adapter
+                db_outputs.iter()
+                    .map(|output| output_to_fetcher_utxo(output))
                     .collect::<Vec<_>>()
             }
             Err(e) => {
-                log::warn!("   Failed to get UTXOs from database: {}, falling back to API", e);
+                log::error!("   Failed to get outputs from database: {}", e);
                 Vec::new()
             }
+        };
+
+        // Confirmed output preference: Get UTXOs from confirmed transactions only
+        // This reduces the risk of building long chains of unconfirmed transactions
+        // Only used when we're doing automatic UTXO selection (no explicit inputs)
+        let prefer_confirmed = user_inputs.is_empty();
+        let confirmed_utxos: Option<Vec<crate::utxo_fetcher::UTXO>> = if prefer_confirmed {
+            match output_repo.get_spendable_confirmed_by_user(state.current_user_id) {
+                Ok(db_outputs) => {
+                    let confirmed: Vec<_> = db_outputs.iter()
+                        .map(|output| output_to_fetcher_utxo(output))
+                        .collect();
+                    let confirmed_balance: i64 = confirmed.iter().map(|u| u.satoshis).sum();
+                    log::info!("   📊 Confirmed UTXOs: {} ({} sats) vs All: {} ({} sats)",
+                        confirmed.len(), confirmed_balance,
+                        all_utxos.len(), all_utxos.iter().map(|u| u.satoshis).sum::<i64>());
+                    Some(confirmed)
+                }
+                Err(e) => {
+                    log::warn!("   Failed to get confirmed outputs: {}, will use all UTXOs", e);
+                    None
+                }
+            }
+        } else {
+            log::info!("   ℹ️  Skipping confirmed preference (explicit inputs provided)");
+            None
         };
 
         drop(db);
@@ -3321,7 +3327,7 @@ pub async fn create_action(
         // Amount needed from wallet (considering what user inputs provide)
         let wallet_amount_needed = if shortfall > 0 { shortfall } else { total_needed };
 
-        // Phase 4: Use cached UTXOs from database (primary source)
+        // Use cached UTXOs from database (source of truth)
         // Only fetch from API if cache is empty OR if we don't have enough balance
         let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
         if all_utxos.is_empty() {
@@ -3345,32 +3351,37 @@ pub async fn create_action(
                 }
             };
 
-            // Cache UTXOs to database
+            // Cache UTXOs to outputs table
             let db = state.database.lock().unwrap();
             let address_repo = AddressRepository::new(db.connection());
-            let utxo_repo = UtxoRepository::new(db.connection());
+            let output_repo = OutputRepository::new(db.connection());
 
             for addr in &addresses {
                 if let Ok(Some(db_addr)) = address_repo.get_by_address(&addr.address) {
-                    if let Some(addr_id) = db_addr.id {
-                        // Get UTXOs for this address (clone to get owned values)
-                        let addr_utxos: Vec<_> = api_utxos.iter()
-                            .filter(|u| u.address_index == addr.index)
-                            .cloned()
-                            .collect();
+                    // Get UTXOs for this address (clone to get owned values)
+                    let addr_utxos: Vec<_> = api_utxos.iter()
+                        .filter(|u| u.address_index == addr.index)
+                        .cloned()
+                        .collect();
 
-                        if !addr_utxos.is_empty() {
-                            if let Err(e) = utxo_repo.upsert_utxos(addr_id, &addr_utxos) {
-                                log::warn!("   Failed to cache UTXOs for {}: {}", addr.address, e);
-                            }
+                    for utxo in &addr_utxos {
+                        if let Err(e) = output_repo.upsert_received_utxo(
+                            state.current_user_id,
+                            &utxo.txid,
+                            utxo.vout,
+                            utxo.satoshis,
+                            &utxo.script,
+                            addr.index,
+                        ) {
+                            log::warn!("   Failed to cache UTXO {}:{} for {}: {}", utxo.txid, utxo.vout, addr.address, e);
                         }
                     }
                 }
             }
             drop(db);
 
-            // Note: We don't use api_utxos directly because they don't reflect our local is_spent status.
-            // The API UTXOs are now cached in the database - we'll re-read with is_spent filter below.
+            // Note: We don't use api_utxos directly because they don't reflect our local spendable status.
+            // The API UTXOs are now cached in the database - we'll re-read with spendable filter below.
             log::info!("   ✅ API UTXOs cached to database");
         }
 
@@ -3379,28 +3390,43 @@ pub async fn create_action(
         // in case other endpoints also select UTXOs in the future.
         let _utxo_lock = state.utxo_selection_lock.lock().await;
 
-        // Re-read UTXOs from database (with correct is_spent status) under the lock
-        {
+        // Re-read outputs from database under the lock (respects spendable status)
+        // Also re-read confirmed UTXOs for preference
+        let confirmed_utxos: Option<Vec<crate::utxo_fetcher::UTXO>> = {
             let db = state.database.lock().unwrap();
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            let output_repo = crate::database::OutputRepository::new(db.connection());
 
-            // Re-query to get fresh unspent UTXOs (respects is_spent flag)
-            all_utxos = match utxo_repo.get_unspent_by_addresses(&address_ids) {
-                Ok(db_utxos) => {
-                    db_utxos.iter()
-                        .filter_map(|db_utxo| {
-                            db_utxo.address_id.and_then(|aid| address_id_map.get(&aid))
-                                .map(|&idx| utxo_to_fetcher_utxo(db_utxo, idx))
-                        })
+            // Re-query from outputs table - respects spendable flag
+            all_utxos = match output_repo.get_spendable_by_user(state.current_user_id) {
+                Ok(db_outputs) => {
+                    db_outputs.iter()
+                        .map(|output| crate::database::output_to_fetcher_utxo(output))
                         .collect::<Vec<_>>()
                 }
                 Err(e) => {
-                    log::warn!("   Failed to re-read UTXOs from database: {}", e);
+                    log::error!("   Failed to re-read outputs from database: {}", e);
                     Vec::new()
                 }
             };
+
+            // Re-query confirmed UTXOs for preference (only if no explicit inputs)
+            let confirmed = if prefer_confirmed {
+                match output_repo.get_spendable_confirmed_by_user(state.current_user_id) {
+                    Ok(db_outputs) => {
+                        let confirmed: Vec<_> = db_outputs.iter()
+                            .map(|output| crate::database::output_to_fetcher_utxo(output))
+                            .collect();
+                        Some(confirmed)
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             drop(db);
-        }
+            confirmed
+        };
 
         if all_utxos.is_empty() && user_inputs.is_empty() {
             log::error!("   No UTXOs available and no user inputs");
@@ -3410,8 +3436,13 @@ pub async fn create_action(
         }
 
         // Select UTXOs to cover the amount needed from wallet
+        // Uses confirmed preference when no explicit inputs are provided
         if !all_utxos.is_empty() {
-            selected_utxos = select_utxos(&all_utxos, wallet_amount_needed);
+            selected_utxos = select_utxos_with_preference(
+                confirmed_utxos.as_deref(),
+                &all_utxos,
+                wallet_amount_needed,
+            );
 
             if selected_utxos.is_empty() && user_inputs.is_empty() {
                 log::error!("   Insufficient funds");
@@ -3429,7 +3460,7 @@ pub async fn create_action(
             // Mark selected UTXOs as "in use" immediately (still under the lock)
             if !selected_utxos.is_empty() {
                 let db = state.database.lock().unwrap();
-                let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+                let output_repo = crate::database::OutputRepository::new(db.connection());
 
                 // Mark as spent with a placeholder txid (will be updated with real txid after signing)
                 // Using "pending-{timestamp}" to indicate these are reserved but not yet broadcast
@@ -3438,7 +3469,7 @@ pub async fn create_action(
                     .map(|u| (u.txid.clone(), u.vout))
                     .collect();
 
-                match utxo_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid) {
+                match output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid) {
                     Ok(count) => {
                         log::info!("   🔒 Reserved {} UTXOs (preventing concurrent selection)", count);
                         reservation_placeholder = Some(placeholder_txid);
@@ -3473,9 +3504,9 @@ pub async fn create_action(
             .collect();
 
         let db = state.database.lock().unwrap();
-        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
 
-        match utxo_repo.mark_multiple_spent(&user_outpoints, placeholder) {
+        match output_repo.mark_multiple_spent(&user_outpoints, placeholder) {
             Ok(count) => {
                 if count > 0 {
                     log::info!("   🔒 Reserved {} user-provided input(s) (basket outputs)", count);
@@ -4061,12 +4092,12 @@ pub async fn create_action(
     // Insert pending change UTXO into database (balance accuracy fix)
     // This ensures the change output is immediately reflected in balance calculations
     // BRC-100: Change outputs go to the "default" basket
-    if let Some((addr_id, _addr_index, satoshis, ref script_hex)) = pending_change_utxo {
+    if let Some((_addr_id, addr_index, satoshis, ref script_hex)) = pending_change_utxo {
         let change_vout = req.outputs.len() as u32; // Change is always the last output
-        log::info!("   💾 Inserting pending change UTXO: txid={}, vout={}, satoshis={}", txid, change_vout, satoshis);
+        log::info!("   💾 Inserting pending change output: txid={}, vout={}, satoshis={}", txid, change_vout, satoshis);
 
         let db = state.database.lock().unwrap();
-        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
         let basket_repo = crate::database::BasketRepository::new(db.connection());
 
         // Get or create the "default" basket for change outputs (BRC-99)
@@ -4078,24 +4109,33 @@ pub async fn create_action(
             }
         };
 
-        // Insert change UTXO with default basket and 'completed' status
+        // Derive prefix/suffix from address index
+        let (deriv_prefix, deriv_suffix): (Option<&str>, Option<String>) = if addr_index >= 0 {
+            (Some("2-receive address"), Some(addr_index.to_string()))
+        } else {
+            (None, None)  // Master pubkey or unknown
+        };
+
+        // Insert change output with default basket
         // (change outputs are part of our own transaction, so they're immediately valid)
-        match utxo_repo.insert_output_with_basket(
-            Some(addr_id),
+        match output_repo.insert_output(
+            state.current_user_id,
             &txid,
             change_vout,
             satoshis,
             &script_hex,
             default_basket_id,
+            deriv_prefix,
+            deriv_suffix.as_deref(),
             None,  // No custom instructions for change
-            "completed",  // Status - change outputs are immediately valid
             None,  // No output description for change
+            true,  // is_change = true
         ) {
-            Ok(_utxo_id) => {
-                log::info!("   ✅ Change UTXO inserted with 'default' basket - balance will be accurate immediately");
+            Ok(_output_id) => {
+                log::info!("   ✅ Change output inserted with 'default' basket - balance will be accurate immediately");
             }
             Err(e) => {
-                log::warn!("   ⚠️  Failed to insert change UTXO: {} (balance may be temporarily inaccurate)", e);
+                log::warn!("   ⚠️  Failed to insert change output: {} (balance may be temporarily inaccurate)", e);
             }
         }
         drop(db);
@@ -4104,13 +4144,13 @@ pub async fn create_action(
     // ═══════════════════════════════════════════════════════════════
     // BRC-100 BASKET OUTPUT TRACKING
     // Insert outputs that have a basket property into the database.
-    // These are tracked as wallet-owned UTXOs queryable via listOutputs.
+    // These are tracked as wallet-owned outputs queryable via listOutputs.
     // Uses pre-signing txid (reconciled after signing in Step 7).
     // ═══════════════════════════════════════════════════════════════
     if !pending_basket_outputs.is_empty() {
         log::info!("   💾 Inserting {} basket output(s)...", pending_basket_outputs.len());
         let db = state.database.lock().unwrap();
-        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let tag_repo = crate::database::TagRepository::new(db.connection());
 
@@ -4124,25 +4164,27 @@ pub async fn create_action(
                 }
             };
 
-            // Insert UTXO with basket (address_id = None for basket outputs)
-            match utxo_repo.insert_output_with_basket(
-                None,       // No address_id — basket outputs may not map to an HD wallet address
+            // Insert output with basket
+            match output_repo.insert_output(
+                state.current_user_id,
                 &txid,      // Pre-signing txid (will be reconciled after signing)
                 bo.vout,
                 bo.satoshis,
                 &bo.script_hex,
                 Some(basket_id),
+                None,  // No derivation prefix for basket outputs
+                None,  // No derivation suffix for basket outputs
                 bo.custom_instructions.as_deref(),
-                "completed",
                 bo.output_description.as_deref(),
+                false,  // is_change = false
             ) {
-                Ok(utxo_id) => {
-                    log::info!("   ✅ Basket output vout={} → basket='{}' (utxo_id={})",
-                        bo.vout, bo.basket_name, utxo_id);
+                Ok(output_id) => {
+                    log::info!("   ✅ Basket output vout={} → basket='{}' (output_id={})",
+                        bo.vout, bo.basket_name, output_id);
 
                     // Assign tags to the output
                     for tag in &bo.tags {
-                        match tag_repo.assign_tag_to_output(utxo_id, tag) {
+                        match tag_repo.assign_tag_to_output(output_id, tag) {
                             Ok(_) => {
                                 log::info!("      Tagged with '{}'", tag);
                             }
@@ -4215,14 +4257,21 @@ pub async fn create_action(
         }).collect(),
     };
 
-    // Store the action in database
+    // Store the action in database and link outputs to the transaction
     {
         use crate::database::TransactionRepository;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
-        match tx_repo.add_transaction(&stored_action) {
-            Ok(_) => {
-                log::info!("   💾 Action stored in database with status: created");
+        match tx_repo.add_transaction(&stored_action, state.current_user_id) {
+            Ok(transaction_id) => {
+                log::info!("   💾 Action stored in database with status: created (id={})", transaction_id);
+
+                // Link change and basket outputs to this transaction so UTXO selection
+                // can check parent transaction status before spending them
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                if let Err(e) = output_repo.link_outputs_to_transaction(&txid, transaction_id) {
+                    log::warn!("   ⚠️  Failed to link outputs to transaction: {}", e);
+                }
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to store action in database: {}", e);
@@ -4420,42 +4469,42 @@ pub async fn create_action(
             }
         }
 
-        // 2. Update change UTXO txid (change is always the last output)
+        // 2. Update change output txid (change is always the last output)
         if pending_change_utxo.is_some() {
             let change_vout = req.outputs.len() as u32;
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
-            if let Err(e) = utxo_repo.update_utxo_txid(&pre_signing_txid, change_vout, &final_txid) {
-                log::warn!("   ⚠️  Failed to update change UTXO txid: {}", e);
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            if let Err(e) = output_repo.update_txid(&pre_signing_txid, change_vout, &final_txid) {
+                log::warn!("   ⚠️  Failed to update change output txid: {}", e);
             }
         }
 
         // 2b. Update basket output txids (pre-signing → signed)
         if !pending_basket_outputs.is_empty() {
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+            let output_repo = crate::database::OutputRepository::new(db.connection());
             for bo in &pending_basket_outputs {
-                if let Err(e) = utxo_repo.update_utxo_txid(&pre_signing_txid, bo.vout, &final_txid) {
+                if let Err(e) = output_repo.update_txid(&pre_signing_txid, bo.vout, &final_txid) {
                     log::warn!("   ⚠️  Failed to update basket output vout={} txid: {}", bo.vout, e);
                 }
             }
             log::info!("   ✅ Updated {} basket output txid(s)", pending_basket_outputs.len());
         }
 
-        // 3. Update spent_txid on reserved inputs (placeholder → signed txid)
+        // 3. Update spending_description on reserved inputs (placeholder → signed txid)
         if let Some(ref placeholder) = reservation_placeholder {
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
-            if let Err(e) = utxo_repo.update_spent_txid_batch(placeholder, &final_txid) {
-                log::warn!("   ⚠️  Failed to update spent_txid on inputs: {}", e);
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
+                log::warn!("   ⚠️  Failed to update spending_description on inputs: {}", e);
             }
         }
 
         drop(db);
     } else if !final_txid.is_empty() {
-        // Txid didn't change (unsigned or same) — still update spent_txid from placeholder
+        // Txid didn't change (unsigned or same) — still update spending_description from placeholder
         if let Some(ref placeholder) = reservation_placeholder {
             let db = state.database.lock().unwrap();
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
-            if let Err(e) = utxo_repo.update_spent_txid_batch(placeholder, &final_txid) {
-                log::warn!("   ⚠️  Failed to update spent_txid on inputs: {}", e);
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
+                log::warn!("   ⚠️  Failed to update spending_description on inputs: {}", e);
             }
             drop(db);
         }
@@ -4493,55 +4542,55 @@ pub async fn create_action(
                     // Update broadcast_status to 'failed' in database
                     {
                         use crate::database::TransactionRepository;
-                        use crate::database::UtxoRepository;
                         let db = state.database.lock().unwrap();
                         let tx_repo = TransactionRepository::new(db.connection());
                         if let Err(e) = tx_repo.update_broadcast_status(&final_txid, "failed") {
                             log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
                         }
 
-                        // CRITICAL: Remove ghost change UTXO since broadcast failed.
+                        // CRITICAL: Remove ghost change output since broadcast failed.
                         // Try signed txid first, then pre-signing txid as fallback
-                        // (signAction may not have updated the UTXO txid if it failed)
-                        let utxo_repo = UtxoRepository::new(db.connection());
+                        // (signAction may not have updated the output txid if it failed)
+                        let output_repo = crate::database::OutputRepository::new(db.connection());
                         let mut deleted_count = 0usize;
-                        match utxo_repo.delete_by_txid(&final_txid) {
+                        match output_repo.delete_by_txid(&final_txid) {
                             Ok(count) => { deleted_count += count; }
                             Err(e) => {
-                                log::warn!("   ⚠️  Failed to remove ghost UTXO by signed txid: {}", e);
+                                log::warn!("   ⚠️  Failed to remove ghost output by signed txid: {}", e);
                             }
                         }
+
                         // Fallback: also try pre-signing txid in case signAction didn't update it
                         if final_txid != pre_signing_txid {
-                            match utxo_repo.delete_by_txid(&pre_signing_txid) {
+                            match output_repo.delete_by_txid(&pre_signing_txid) {
                                 Ok(count) => { deleted_count += count; }
                                 Err(e) => {
-                                    log::warn!("   ⚠️  Failed to remove ghost UTXO by pre-signing txid: {}", e);
+                                    log::warn!("   ⚠️  Failed to remove ghost output by pre-signing txid: {}", e);
                                 }
                             }
                         }
                         if deleted_count > 0 {
-                            log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", deleted_count);
+                            log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", deleted_count);
                         }
 
-                        // CRITICAL: Restore input UTXOs that were reserved for this transaction.
+                        // CRITICAL: Restore input outputs that were reserved for this transaction.
                         // Since broadcast failed, these coins were never spent on-chain.
-                        match utxo_repo.restore_spent_by_txid(&final_txid) {
+                        match output_repo.restore_spent_by_txid(&final_txid) {
                             Ok(count) if count > 0 => {
-                                log::info!("   ♻️  Restored {} input UTXO(s) from failed broadcast", count);
+                                log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
                             }
                             Ok(_) => {
-                                // spent_txid might still be placeholder if signing failed to update
+                                // spending_description might still be placeholder if signing failed to update
                                 if let Some(ref placeholder) = reservation_placeholder {
-                                    let _ = utxo_repo.restore_spent_by_txid(placeholder);
+                                    let _ = output_repo.restore_by_spending_description(placeholder);
                                 }
                             }
                             Err(e) => {
-                                log::warn!("   ⚠️  Failed to restore input UTXOs: {}", e);
+                                log::warn!("   ⚠️  Failed to restore input outputs: {}", e);
                             }
                         }
 
-                        // Invalidate balance cache since we restored UTXOs
+                        // Invalidate balance cache since we restored outputs
                         state.balance_cache.invalidate();
                     }
 
@@ -5233,8 +5282,32 @@ fn store_derived_utxo(
     Ok(())
 }
 
-// Select UTXOs to cover required amount (simple greedy algorithm)
-fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
+/// Select UTXOs to cover required amount (simple greedy algorithm)
+///
+/// If `confirmed_utxos` is provided, tries to select from confirmed UTXOs first.
+/// Falls back to `all_utxos` if confirmed outputs are insufficient.
+/// This prevents building long chains of unconfirmed transactions.
+fn select_utxos_with_preference(
+    confirmed_utxos: Option<&[UTXO]>,
+    all_utxos: &[UTXO],
+    amount_needed: i64,
+) -> Vec<UTXO> {
+    // Try confirmed-only first if available
+    if let Some(confirmed) = confirmed_utxos {
+        let selection = select_utxos_greedy(confirmed, amount_needed);
+        if !selection.is_empty() {
+            log::info!("   ✅ Selected {} UTXOs from CONFIRMED transactions only", selection.len());
+            return selection;
+        }
+        log::info!("   ℹ️  Insufficient confirmed UTXOs, including unconfirmed in selection");
+    }
+
+    // Fallback to all UTXOs
+    select_utxos_greedy(all_utxos, amount_needed)
+}
+
+/// Simple greedy UTXO selection (largest first)
+fn select_utxos_greedy(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
     let mut selected = Vec::new();
     let mut total: i64 = 0;
 
@@ -5257,6 +5330,11 @@ fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
     }
 
     selected
+}
+
+// Backwards-compatible wrapper for existing callers
+fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
+    select_utxos_greedy(available, amount_needed)
 }
 
 // Request structure for /signAction
@@ -5398,15 +5476,39 @@ pub async fn sign_action(
         log::info!("   Signing input {} (wallet): {}:{} (address index {})",
             i, input_utxo.txid, input_utxo.vout, input_utxo.address_index);
 
-        // Get the private key for THIS specific address (not always index 0!)
+        // Phase 7C: Derive private key directly from output's derivation fields
         let db = state.database.lock().unwrap();
-        let private_key_bytes = match crate::database::derive_private_key_for_utxo(&db, input_utxo.address_index, input_utxo.custom_instructions.as_deref()) {
-            Ok(key) => key,
-            Err(e) => {
-                log::error!("   Failed to derive private key for address index {}: {}", input_utxo.address_index, e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to derive private key for address {}: {}", input_utxo.address_index, e)
-                }));
+        let private_key_bytes = {
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&input_utxo.txid, input_utxo.vout) {
+                Ok(Some(output)) => {
+                    match crate::database::derive_key_for_output(
+                        &db,
+                        output.derivation_prefix.as_deref(),
+                        output.derivation_suffix.as_deref(),
+                        output.sender_identity_key.as_deref(),
+                    ) {
+                        Ok(key) => key,
+                        Err(e) => {
+                            log::error!("   Failed to derive key for output {}:{}: {}", input_utxo.txid, input_utxo.vout, e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": format!("Failed to derive key for output {}:{}: {}", input_utxo.txid, input_utxo.vout, e)
+                            }));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::error!("   Output not found in DB: {}:{}", input_utxo.txid, input_utxo.vout);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Output not found: {}:{}", input_utxo.txid, input_utxo.vout)
+                    }));
+                }
+                Err(e) => {
+                    log::error!("   Failed to look up output {}:{}: {}", input_utxo.txid, input_utxo.vout, e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to look up output {}:{}: {}", input_utxo.txid, input_utxo.vout, e)
+                    }));
+                }
             }
         };
         drop(db);
@@ -5593,23 +5695,16 @@ pub async fn sign_action(
             log::info!("   ⏭️  Parent tx {} already in BEEF (index {}), skipping duplicate fetch", &utxo.txid[..16], existing_idx);
             // Still try to attach a Merkle proof if not already present
             if existing_idx < beef.tx_to_bump.len() && beef.tx_to_bump[existing_idx].is_none() {
-                // No BUMP yet — try to fetch one
-                let cached_proof_result = {
+                // No BUMP yet — try to fetch one from proven_txs
+                let cached_tsc = {
                     let db = state.database.lock().unwrap();
-                    let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                    merkle_proof_repo.get_by_parent_txid(&utxo.txid)
+                    let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                    proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
                 };
-                if let Ok(Some(cached_proof)) = cached_proof_result {
-                    log::info!("   ✅ Attaching cached Merkle proof to existing BEEF entry (height: {})", cached_proof.block_height);
-                    let enhanced_tsc = {
-                        let db = state.database.lock().unwrap();
-                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                        merkle_proof_repo.to_tsc_json(&cached_proof)
-                    };
-                    if !enhanced_tsc.is_null() {
-                        if let Err(e) = beef.add_tsc_merkle_proof(&utxo.txid, existing_idx, &enhanced_tsc) {
-                            log::warn!("   ⚠️  Failed to attach Merkle proof: {}", e);
-                        }
+                if let Some(tsc) = cached_tsc {
+                    log::info!("   ✅ Attaching proven_txs Merkle proof to existing BEEF entry");
+                    if let Err(e) = beef.add_tsc_merkle_proof(&utxo.txid, existing_idx, &tsc) {
+                        log::warn!("   ⚠️  Failed to attach Merkle proof: {}", e);
                     }
                 }
             }
@@ -5850,65 +5945,71 @@ pub async fn sign_action(
 
         let tx_index = beef.add_parent_transaction(parent_tx_bytes);
 
-        // STEP 2: Try to get Merkle proof from cache
+        // STEP 2: Try to get Merkle proof from proven_txs
         let enhanced_tsc = {
-            let cached_proof_result = {
+            // Check proven_txs for cached proof
+            let cached_tsc = {
                 let db = state.database.lock().unwrap();
-                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                merkle_proof_repo.get_by_parent_txid(&utxo.txid)
-            }; // db is dropped here when merkle_proof_repo goes out of scope
+                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
+            };
 
-            match cached_proof_result {
-                Ok(Some(cached_proof)) => {
-                    log::info!("   ✅ Using cached Merkle proof for {} (height: {})", utxo.txid, cached_proof.block_height);
-                    // Create a new repo just for conversion (doesn't need to persist)
-                    {
-                        let db = state.database.lock().unwrap();
-                        let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                        merkle_proof_repo.to_tsc_json(&cached_proof)
-                    } // db is dropped here
+            match cached_tsc {
+                Some(tsc) => {
+                    log::info!("   ✅ Using proven_txs Merkle proof for {}", utxo.txid);
+                    tsc
                 }
-                Ok(None) => {
-                    // Release lock before API call
-                    log::info!("   🌐 Cache miss - fetching TSC proof from API...");
+                None => {
+                    // No proven_txs record — fetch from API
+                    log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
 
-                    // Fetch TSC proof from API (with retry logic)
                     match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
                         Ok(Some(tsc_json)) => {
-                            // Get block height from block header (cache or API)
-                            let db = state.database.lock().unwrap();
-                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                            match crate::cache_helpers::enhance_tsc_with_height(
-                                &client,
-                                &block_header_repo,
-                                &tsc_json,
-                            ).await {
-                                Ok(enhanced_tsc) => {
-                                    // Cache the proof
-                                    if let Some(parent_txn_id) = {
-                                        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
-                                        parent_tx_repo.get_id_by_txid(&utxo.txid).unwrap_or(None)
-                                    } {
-                                        let target_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-                                        match serde_json::to_string(&enhanced_tsc["nodes"]) {
-                                            Ok(nodes_json) => {
-                                                let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                                let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                            // Enhance with block height
+                            let enhanced_result = {
+                                let db = state.database.lock().unwrap();
+                                let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                                crate::cache_helpers::enhance_tsc_with_height(
+                                    &client,
+                                    &block_header_repo,
+                                    &tsc_json,
+                                ).await
+                            };
 
-                                                let merkle_proof_repo = crate::database::MerkleProofRepository::new(db.connection());
-                                                match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, target_hash, &nodes_json) {
-                                                    Ok(_) => {
-                                                        log::info!("   💾 Cached Merkle proof for {}", utxo.txid);
-                                                    }
-                                                    Err(e) => {
-                                                        log::warn!("   ⚠️  Failed to cache Merkle proof for {}: {}", utxo.txid, e);
-                                                        // Continue - caching failure shouldn't block transaction
-                                                    }
-                                                }
+                            match enhanced_result {
+                                Ok(enhanced_tsc) => {
+                                    // Cache as proven_txs record
+                                    {
+                                        let db = state.database.lock().unwrap();
+                                        let conn = db.connection();
+
+                                        let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
+                                        let tx_index_val = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                                        let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
+
+                                        let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc).unwrap_or_default();
+
+                                        // Get raw_tx from parent_transactions cache
+                                        let raw_tx_bytes = {
+                                            let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
+                                            match parent_tx_repo.get_by_txid(&utxo.txid) {
+                                                Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
+                                                _ => Vec::new(),
+                                            }
+                                        };
+
+                                        let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
+                                        match proven_tx_repo.insert_or_get(
+                                            &utxo.txid, block_height, tx_index_val,
+                                            &merkle_path_bytes, &raw_tx_bytes,
+                                            block_hash, "",
+                                        ) {
+                                            Ok(proven_tx_id) => {
+                                                let _ = proven_tx_repo.link_transaction(&utxo.txid, proven_tx_id);
+                                                log::info!("   💾 Created proven_txs record for {}", utxo.txid);
                                             }
                                             Err(e) => {
-                                                log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", utxo.txid, e);
-                                                // Continue - can still use the proof
+                                                log::warn!("   ⚠️  Failed to cache proven_tx for {}: {}", utxo.txid, e);
                                             }
                                         }
                                     }
@@ -5917,23 +6018,19 @@ pub async fn sign_action(
                                 }
                                 Err(e) => {
                                     log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", utxo.txid, e);
-                                    serde_json::Value::Null  // Return null to skip proof
+                                    serde_json::Value::Null
                                 }
                             }
                         }
                         Ok(None) => {
                             log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
-                            serde_json::Value::Null  // Return null to skip proof
+                            serde_json::Value::Null
                         }
                         Err(e) => {
                             log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
-                            serde_json::Value::Null  // Return null to skip proof
+                            serde_json::Value::Null
                         }
                     }
-                }
-                Err(e) => {
-                    log::warn!("   ⚠️  Database error checking cache: {}, skipping proof", e);
-                    serde_json::Value::Null  // Return null to skip proof
                 }
             }
         };
@@ -6064,14 +6161,13 @@ pub async fn sign_action(
     // Update action with new TXID and status
     {
         use crate::database::TransactionRepository;
-        use crate::database::UtxoRepository;
         use crate::action_storage::ActionStatus;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
-        let utxo_repo = UtxoRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
 
         // First, get the old (unsigned) txid before updating
-        // We need this to update any UTXOs that were created with the unsigned txid
+        // We need this to update any outputs that were created with the unsigned txid
         let old_txid = match tx_repo.get_by_reference(&req.reference) {
             Ok(Some(action)) => {
                 log::info!("   📝 Old (unsigned) txid: {}", action.txid);
@@ -6088,24 +6184,24 @@ pub async fn sign_action(
         };
 
         // Update TXID in transactions table (signing changes the transaction, so TXID changes)
-        if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone()) {
+        if let Err(e) = tx_repo.update_txid(&req.reference, txid.clone(), signed_tx_hex.clone(), state.current_user_id) {
             log::warn!("   ⚠️  Failed to update TXID: {}", e);
         } else {
             log::info!("   💾 Transaction TXID updated: unsigned → signed");
         }
 
-        // Update any UTXOs that were created with the unsigned txid (e.g., change outputs)
+        // Update any outputs that were created with the unsigned txid (e.g., change outputs)
         // This is critical for transaction chaining!
         if let Some(ref old_tx) = old_txid {
             if old_tx != &txid {
-                match utxo_repo.update_txid(old_tx, &txid) {
+                match output_repo.update_txid_batch(old_tx, &txid) {
                     Ok(count) => {
                         if count > 0 {
-                            log::info!("   💾 Updated {} change UTXO(s) to use signed txid", count);
+                            log::info!("   💾 Updated {} change output(s) to use signed txid", count);
                         }
                     }
                     Err(e) => {
-                        log::warn!("   ⚠️  Failed to update UTXO txids: {}", e);
+                        log::warn!("   ⚠️  Failed to update output txids: {}", e);
                     }
                 }
             }
@@ -6118,44 +6214,66 @@ pub async fn sign_action(
             log::info!("   💾 Action status updated: created → signed");
         }
 
-        // Update broadcast_status to "broadcast" — signAction returns a fully-signed
-        // Atomic BEEF to the SDK which will submit it to the overlay network.
-        // Without this, the status stays "pending" and startup cleanup deletes the UTXOs.
-        if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
-            log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+        // Update to "nosend" status — signAction returns a fully-signed Atomic BEEF
+        // to the app which will submit it to the overlay network. We don't broadcast
+        // ourselves, so the correct status is "nosend" (not "broadcast").
+        // The ARC poller will periodically check old nosend transactions on WhatsOnChain
+        // to see if they were broadcast by the app and update status accordingly.
+        if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Nosend) {
+            log::warn!("   ⚠️  Failed to update new_status: {}", e);
         } else {
-            log::info!("   💾 Broadcast status updated: pending → broadcast");
+            log::info!("   💾 Transaction status: nosend (app will broadcast to overlay)");
         }
 
-        // Update reserved UTXOs: placeholder spent_txid → final signed txid.
-        // Covers BOTH wallet UTXOs and user-provided basket outputs that were
+        // Create proven_tx_req to track proof acquisition lifecycle
+        // Status is "nosend" since we're not broadcasting - the app will
+        {
+            let conn = db.connection();
+            let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
+                Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(conn);
+            match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "nosend") {
+                Ok(req_id) => {
+                    log::info!("   📋 Created proven_tx_req {} for {} (status: nosend)", req_id, txid);
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to create proven_tx_req for {}: {}", txid, e);
+                    // Non-fatal: proof tracking is advisory, doesn't block the transaction
+                }
+            }
+        }
+
+        // Update reserved outputs: placeholder spending_description → final signed txid.
+        // Covers BOTH wallet outputs and user-provided basket outputs that were
         // reserved during createAction with the same placeholder.
         if let Some(ref placeholder) = reservation_placeholder {
-            match utxo_repo.update_spent_txid_batch(placeholder, &txid) {
+            match output_repo.update_spending_description_batch(placeholder, &txid) {
                 Ok(count) => {
-                    log::info!("   ✅ Updated spent_txid on {} reserved UTXO(s): {} → {}",
+                    log::info!("   ✅ Updated spending_description on {} reserved output(s): {} → {}",
                         count,
                         &placeholder[..std::cmp::min(20, placeholder.len())],
                         &txid[..std::cmp::min(16, txid.len())]);
                     state.balance_cache.invalidate();
                 }
                 Err(e) => {
-                    log::warn!("   ⚠️  Failed to update spent_txid from placeholder: {}", e);
+                    log::warn!("   ⚠️  Failed to update spending_description from placeholder: {}", e);
                 }
             }
         } else {
             // Fallback: no placeholder (shouldn't happen in normal flow).
-            // Mark wallet UTXOs as spent directly with the final txid.
-            let utxos_to_mark: Vec<_> = input_utxos.iter()
+            // Mark wallet outputs as spent directly with the final txid.
+            let outputs_to_mark: Vec<_> = input_utxos.iter()
                 .map(|u| (u.txid.clone(), u.vout))
                 .collect();
-            match utxo_repo.mark_multiple_spent(&utxos_to_mark, &txid) {
+            match output_repo.mark_multiple_spent(&outputs_to_mark, &txid) {
                 Ok(count) => {
-                    log::info!("   ✅ Marked {} wallet UTXOs as spent (no placeholder fallback)", count);
+                    log::info!("   ✅ Marked {} wallet outputs as spent (no placeholder fallback)", count);
                     state.balance_cache.invalidate();
                 }
                 Err(e) => {
-                    log::warn!("   ⚠️  Failed to mark wallet UTXOs as spent: {}", e);
+                    log::warn!("   ⚠️  Failed to mark wallet outputs as spent: {}", e);
                 }
             }
         }
@@ -6364,14 +6482,13 @@ pub async fn process_action(
                     }
                 }
 
-                // Mark spent UTXOs in database
+                // Mark spent outputs in database
                 if !spent_utxos.is_empty() {
-                    log::info!("   🔄 Marking {} UTXO(s) as spent in database...", spent_utxos.len());
+                    log::info!("   🔄 Marking {} output(s) as spent in database...", spent_utxos.len());
                     let db = state.database.lock().unwrap();
-                    use crate::database::UtxoRepository;
-                    let utxo_repo = UtxoRepository::new(db.connection());
+                    let output_repo = crate::database::OutputRepository::new(db.connection());
                     for (txid, vout) in &spent_utxos {
-                        let _ = utxo_repo.mark_spent(txid, *vout, "unknown");
+                        let _ = output_repo.mark_spent(txid, *vout, "unknown");
                         log::info!("      ✅ Marked {}:{} as spent", txid, vout);
                     }
                     drop(db);
@@ -6407,7 +6524,6 @@ pub async fn process_action(
                 // Update action status to "failed" and broadcast_status to "failed"
                 {
                     use crate::database::TransactionRepository;
-                    use crate::database::UtxoRepository;
                     use crate::action_storage::ActionStatus;
                     let db = state.database.lock().unwrap();
                     let tx_repo = TransactionRepository::new(db.connection());
@@ -6420,17 +6536,32 @@ pub async fn process_action(
                         log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
                     }
 
-                    // CRITICAL: Remove ghost change UTXO since broadcast failed
-                    let utxo_repo = UtxoRepository::new(db.connection());
-                    match utxo_repo.delete_by_txid(&txid) {
+                    // CRITICAL: Remove ghost change output since broadcast failed
+                    let output_repo = crate::database::OutputRepository::new(db.connection());
+                    match output_repo.delete_by_txid(&txid) {
                         Ok(count) if count > 0 => {
-                            log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", count);
+                            log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", count);
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
+                            log::warn!("   ⚠️  Failed to remove ghost output: {}", e);
                         }
                     }
+
+                    // CRITICAL: Restore input outputs that were reserved for this transaction.
+                    // Since broadcast failed, these coins were never spent on-chain.
+                    match output_repo.restore_spent_by_txid(&txid) {
+                        Ok(count) if count > 0 => {
+                            log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("   ⚠️  Failed to restore input outputs: {}", e);
+                        }
+                    }
+
+                    // Invalidate balance cache since we restored outputs
+                    state.balance_cache.invalidate();
                 }
 
                 "failed"
@@ -6452,6 +6583,41 @@ pub async fn process_action(
 
 // Broadcast transaction to BSV network
 //
+/// Maximum number of attempts per broadcaster before falling through to the next.
+/// Each broadcaster gets up to 3 tries with exponential backoff (2s, 4s).
+/// Permanent errors (invalid tx) bypass retry and either stop immediately or skip to next broadcaster.
+const MAX_BROADCAST_ATTEMPTS: u32 = 3;
+
+/// Classify whether a broadcast error is fatal (tx itself is invalid).
+/// Fatal errors mean no broadcaster will accept this tx — stop everything immediately.
+fn is_fatal_broadcast_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+
+    // Script verification failures
+    if lower.contains("error: 16") || lower.contains("mandatory-script-verify") {
+        return true;
+    }
+    // Double-spend / conflicting transaction
+    if lower.contains("double spend") || lower.contains("double-spend")
+        || lower.contains("txn-mempool-conflict") {
+        return true;
+    }
+    // Missing inputs (UTXOs already consumed)
+    if lower.contains("missing inputs") || lower.contains("missingorspent") {
+        return true;
+    }
+    // Transaction too large or dust outputs
+    if lower.contains("tx-size") || lower.contains("dust") {
+        return true;
+    }
+    // Non-standard / policy rejection
+    if lower.contains("non-mandatory-script-verify") {
+        return true;
+    }
+
+    false
+}
+
 // Strategy:
 // 1. If input is BEEF format → convert to V1, send BEEF directly to ARC (enables tx chaining)
 // 2. If ARC fails or input is raw tx → fall back to extracting raw tx and using WhatsOnChain
@@ -6459,7 +6625,10 @@ pub async fn process_action(
 // ARC is preferred because it accepts BEEF with unconfirmed parent transactions,
 // solving the transaction chaining race condition where the second tx's parent
 // hasn't propagated yet.
-async fn broadcast_transaction(
+//
+// Each broadcaster is tried up to MAX_BROADCAST_ATTEMPTS times with exponential backoff
+// for transient errors. Fatal errors (invalid tx) stop all retries immediately.
+pub(crate) async fn broadcast_transaction(
     beef_or_raw_hex: &str,
     db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
     txid_for_cache: Option<&str>,
@@ -6473,82 +6642,152 @@ async fn broadcast_transaction(
         || beef_or_raw_hex.starts_with("0200beef")
         || beef_or_raw_hex.starts_with("01010101");
 
-    // Strategy 1: If BEEF, try ARC first (supports tx chaining via BEEF)
-    if is_beef {
-        log::info!("   📦 Input is BEEF format, attempting ARC broadcast with BEEF V1...");
-
-        // Parse BEEF and convert to V1 format for ARC
-        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-            Ok(beef) => {
-                match beef.to_v1_hex() {
-                    Ok(v1_hex) => {
-                        log::info!("   ✅ Converted BEEF to V1 format ({} hex chars)", v1_hex.len());
-
-                        // Try ARC with BEEF V1
-                        log::info!("   📡 Broadcasting BEEF V1 to ARC (GorillaPool)...");
-                        match broadcast_to_arc(&client, &v1_hex).await {
-                            Ok(arc_resp) => {
-                                let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
-                                let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
-                                let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
-                                log::info!("   🎉 ARC broadcast successful: {}", msg);
-
-                                // Detect ARC txid mismatch (expected for multi-tx BEEF submissions).
-                                // When submitting BEEF containing parent + child transactions, ARC may
-                                // return the parent's txid instead of the child's. We always use our
-                                // locally-computed txid for database operations, not ARC's response.
-                                // See: wallet-toolbox ARC provider does the same ("txid altered from...")
-                                if let Some(our_txid) = txid_for_cache {
-                                    if arc_txid != "unknown" && arc_txid != our_txid {
-                                        log::warn!("   ⚠️  ARC txid mismatch: ARC returned '{}', our computed txid is '{}'",
-                                            &arc_txid[..arc_txid.len().min(16)],
-                                            &our_txid[..our_txid.len().min(16)]);
-                                        log::info!("   ℹ️  Using locally-computed txid (expected for multi-tx BEEF)");
-                                    }
-                                }
-
-                                // Cache merkle proof from ARC if available
-                                if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
-                                    (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
-                                {
-                                    if !merkle_path.is_empty() {
-                                        log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
-                                        cache_arc_merkle_proof(db, cache_txid, merkle_path);
-                                    }
-                                }
-
-                                // Update broadcast_status and block_height if MINED
-                                if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
-                                    if status_str == "MINED" {
-                                        if let Some(height) = arc_resp.block_height {
-                                            log::info!("   📦 ARC reports MINED at height {}", height);
-                                            if let Ok(db_guard) = db.lock() {
-                                                let tx_repo = crate::database::TransactionRepository::new(db_guard.connection());
-                                                let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
-                                            }
-                                        }
-                                    }
-                                }
-
-                                return Ok(msg);
+    // Strategy 1: Send BEEF V1 directly to ARC (enables transaction chaining)
+    // ARC accepts BEEF with unconfirmed parent transactions included, solving the
+    // race condition where a second tx spends change from the first before it confirms.
+    // ARC auto-detects format (BEEF V1, EF, or raw tx) from the hex content.
+    // NOTE: ARC only accepts BEEF V1, not V2 - we must convert if needed.
+    {
+        let hex_for_arc = if is_beef {
+            // Check if it's Atomic BEEF (01010101) - need to strip header and convert to V1
+            if beef_or_raw_hex.starts_with("01010101") {
+                log::info!("   📦 Input is Atomic BEEF, converting to BEEF V1 for ARC...");
+                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                    Ok(beef) => {
+                        match beef.to_v1_hex() {
+                            Ok(v1_hex) => {
+                                log::info!("   ✅ Converted to BEEF V1 ({} hex chars)", v1_hex.len());
+                                Some(v1_hex)
                             }
                             Err(e) => {
-                                log::warn!("   ⚠️ ARC broadcast failed: {}", e);
-                                log::info!("   🔄 Falling back to raw tx broadcasters...");
-                                // Fall through to raw tx broadcast
+                                log::warn!("   ⚠️ Failed to convert to BEEF V1: {}", e);
+                                None
                             }
                         }
                     }
                     Err(e) => {
-                        log::warn!("   ⚠️ Failed to convert BEEF to V1: {}", e);
-                        log::info!("   🔄 Falling back to raw tx broadcasters...");
+                        log::warn!("   ⚠️ Failed to parse Atomic BEEF: {}", e);
+                        None
+                    }
+                }
+            } else if beef_or_raw_hex.starts_with("0200beef") {
+                // BEEF V2 - convert to V1 for ARC
+                log::info!("   📦 Input is BEEF V2, converting to V1 for ARC...");
+                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                    Ok(beef) => {
+                        match beef.to_v1_hex() {
+                            Ok(v1_hex) => {
+                                log::info!("   ✅ Converted to BEEF V1 ({} hex chars)", v1_hex.len());
+                                Some(v1_hex)
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️ Failed to convert to BEEF V1: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️ Failed to parse BEEF V2: {}", e);
+                        None
+                    }
+                }
+            } else {
+                // Already BEEF V1
+                log::info!("   📦 Input is BEEF V1, sending directly to ARC...");
+                Some(beef_or_raw_hex.to_string())
+            }
+        } else {
+            // Raw transaction hex - send as-is
+            log::info!("   📦 Input is raw transaction, sending to ARC...");
+            Some(beef_or_raw_hex.to_string())
+        };
+
+        if let Some(hex_to_send) = hex_for_arc {
+            let mut arc_backoff_ms = 2000u64;
+            for arc_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+                if arc_attempt > 1 {
+                    log::info!("   📡 ARC retry (attempt {}/{})...", arc_attempt, MAX_BROADCAST_ATTEMPTS);
+                } else {
+                    log::info!("   📡 Broadcasting to ARC (GorillaPool)...");
+                }
+                match broadcast_to_arc(&client, &hex_to_send).await {
+                    Ok(arc_resp) => {
+                        let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
+                        let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
+
+                        // Verify ARC returned the expected txid
+                        if let Some(expected_txid) = txid_for_cache {
+                            if arc_txid != "unknown" && arc_txid != expected_txid {
+                                log::warn!("   ⚠️ ARC txid MISMATCH: expected {} but got {}",
+                                    &expected_txid[..expected_txid.len().min(16)],
+                                    &arc_txid[..arc_txid.len().min(16)]);
+                            }
+                        }
+
+                        // SEEN_IN_ORPHAN_MEMPOOL — transient, retry ARC then fall through
+                        if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
+                            if arc_attempt < MAX_BROADCAST_ATTEMPTS {
+                                log::info!("   🔄 SEEN_IN_ORPHAN_MEMPOOL — retrying in {}ms...", arc_backoff_ms);
+                                tokio::time::sleep(std::time::Duration::from_millis(arc_backoff_ms)).await;
+                                arc_backoff_ms *= 2;
+                                continue;
+                            }
+                            log::warn!("   ⚠️ ARC returned SEEN_IN_ORPHAN_MEMPOOL after {} attempts", MAX_BROADCAST_ATTEMPTS);
+                            break; // Fall through to raw tx broadcasters
+                        }
+
+                        let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
+                        log::info!("   🎉 ARC broadcast successful: {}", msg);
+
+                        // Cache merkle proof from ARC if available
+                        if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
+                            (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
+                        {
+                            if !merkle_path.is_empty() {
+                                log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
+                                cache_arc_merkle_proof(db, cache_txid, merkle_path);
+                            }
+                        }
+
+                        // Update broadcast_status and block_height if MINED
+                        if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
+                            if status_str == "MINED" {
+                                if let Some(height) = arc_resp.block_height {
+                                    log::info!("   📦 ARC reports MINED at height {}", height);
+                                    if let Ok(db_guard) = db.lock() {
+                                        let tx_repo = crate::database::TransactionRepository::new(db_guard.connection());
+                                        let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(msg);
+                    }
+                    Err(e) => {
+                        // Fatal error — tx itself is invalid, stop all broadcasters
+                        if is_fatal_broadcast_error(&e) {
+                            log::error!("   ❌ Fatal broadcast error from ARC: {}", e);
+                            return Err(extract_core_error(&e));
+                        }
+                        // BEEF format error — don't retry ARC, fall through to raw tx
+                        if e.to_lowercase().contains("beef error") || e.to_lowercase().contains("beef validation") {
+                            log::warn!("   ⚠️ ARC BEEF validation failed: {}", e);
+                            break; // Fall through to raw tx broadcasters
+                        }
+                        // Transient error — retry with backoff
+                        if arc_attempt < MAX_BROADCAST_ATTEMPTS {
+                            log::info!("   🔄 ARC attempt {}/{} failed (transient), retrying in {}ms...",
+                                arc_attempt, MAX_BROADCAST_ATTEMPTS, arc_backoff_ms);
+                            tokio::time::sleep(std::time::Duration::from_millis(arc_backoff_ms)).await;
+                            arc_backoff_ms *= 2;
+                        } else {
+                            log::warn!("   ⚠️ ARC broadcast failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        }
                     }
                 }
             }
-            Err(e) => {
-                log::warn!("   ⚠️ Failed to parse BEEF: {}", e);
-                log::info!("   🔄 Falling back to raw tx broadcasters...");
-            }
+            log::info!("   🔄 Falling back to raw tx broadcasters...");
         }
     }
 
@@ -6572,29 +6811,69 @@ async fn broadcast_transaction(
 
     let mut last_error = String::new();
 
-    // Fallback 1: GorillaPool mAPI (legacy)
-    log::info!("   📡 Broadcasting raw tx to GorillaPool (mAPI)...");
-    match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
-        Ok(response) => {
-            log::info!("   🎉 GorillaPool mAPI: {}", response);
-            return Ok(response);
-        }
-        Err(e) => {
-            log::warn!("   ⚠️ GorillaPool mAPI failed: {}", e);
-            last_error = format!("GorillaPool: {}", e);
+    // Fallback 1: GorillaPool mAPI (legacy) with retry
+    {
+        let mut gp_backoff_ms = 2000u64;
+        for gp_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+            if gp_attempt > 1 {
+                log::info!("   📡 GorillaPool retry (attempt {}/{})...", gp_attempt, MAX_BROADCAST_ATTEMPTS);
+            } else {
+                log::info!("   📡 Broadcasting raw tx to GorillaPool (mAPI)...");
+            }
+            match broadcast_to_gorillapool(&client, &raw_tx_hex).await {
+                Ok(response) => {
+                    log::info!("   🎉 GorillaPool mAPI: {}", response);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if is_fatal_broadcast_error(&e) {
+                        log::error!("   ❌ Fatal broadcast error from GorillaPool: {}", e);
+                        return Err(extract_core_error(&e));
+                    }
+                    if gp_attempt < MAX_BROADCAST_ATTEMPTS {
+                        log::info!("   🔄 GorillaPool attempt {}/{} failed, retrying in {}ms...",
+                            gp_attempt, MAX_BROADCAST_ATTEMPTS, gp_backoff_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(gp_backoff_ms)).await;
+                        gp_backoff_ms *= 2;
+                    } else {
+                        log::warn!("   ⚠️ GorillaPool mAPI failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        last_error = format!("GorillaPool: {}", e);
+                    }
+                }
+            }
         }
     }
 
-    // Fallback 2: WhatsOnChain
-    log::info!("   📡 Broadcasting raw tx to WhatsOnChain...");
-    match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
-        Ok(response) => {
-            log::info!("   🎉 WhatsOnChain: {}", response);
-            return Ok(response);
-        }
-        Err(e) => {
-            log::warn!("   ⚠️ WhatsOnChain failed: {}", e);
-            last_error = format!("{}; WhatsOnChain: {}", last_error, e);
+    // Fallback 2: WhatsOnChain with retry
+    {
+        let mut woc_backoff_ms = 2000u64;
+        for woc_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
+            if woc_attempt > 1 {
+                log::info!("   📡 WhatsOnChain retry (attempt {}/{})...", woc_attempt, MAX_BROADCAST_ATTEMPTS);
+            } else {
+                log::info!("   📡 Broadcasting raw tx to WhatsOnChain...");
+            }
+            match broadcast_to_whatsonchain(&client, &raw_tx_hex).await {
+                Ok(response) => {
+                    log::info!("   🎉 WhatsOnChain: {}", response);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if is_fatal_broadcast_error(&e) {
+                        log::error!("   ❌ Fatal broadcast error from WhatsOnChain: {}", e);
+                        return Err(extract_core_error(&e));
+                    }
+                    if woc_attempt < MAX_BROADCAST_ATTEMPTS {
+                        log::info!("   🔄 WhatsOnChain attempt {}/{} failed, retrying in {}ms...",
+                            woc_attempt, MAX_BROADCAST_ATTEMPTS, woc_backoff_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(woc_backoff_ms)).await;
+                        woc_backoff_ms *= 2;
+                    } else {
+                        log::warn!("   ⚠️ WhatsOnChain failed after {} attempts: {}", MAX_BROADCAST_ATTEMPTS, e);
+                        last_error = format!("{}; WhatsOnChain: {}", last_error, e);
+                    }
+                }
+            }
         }
     }
 
@@ -6794,14 +7073,17 @@ pub struct ArcResponse {
 /// - 409: Already known (treat as success)
 /// - 460-469: BEEF-specific validation errors
 /// - 400/422/500: Other errors
-async fn broadcast_to_arc(client: &reqwest::Client, beef_v1_hex: &str) -> Result<ArcResponse, String> {
+async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Result<ArcResponse, String> {
     let url = "https://arc.gorillapool.io/v1/tx";
 
+    // ARC accepts BEEF V1, EF, or raw tx hex in JSON body: { "rawTx": "<hex>" }
+    // ARC auto-detects the format from the hex content.
+    // Per ARC docs: Content-Type must be application/json
     let body = serde_json::json!({
-        "rawTx": beef_v1_hex
+        "rawTx": beef_or_raw_hex
     });
 
-    log::info!("   📡 ARC: Sending BEEF V1 ({} hex chars) to {}", beef_v1_hex.len(), url);
+    log::info!("   📡 ARC: Sending transaction ({} hex chars) to {}", beef_or_raw_hex.len(), url);
 
     let response = client.post(url)
         .header("Content-Type", "application/json")
@@ -6881,6 +7163,11 @@ pub async fn query_arc_tx_status(client: &reqwest::Client, txid: &str) -> Result
 ///
 /// Parses the BUMP hex from ARC's merklePath, converts to TSC format,
 /// and stores in the merkle_proofs table for future BEEF building.
+/// Cache an ARC merkle proof as a proven_txs record.
+///
+/// Parses the BUMP hex merkle path from ARC, creates an immutable proven_txs record,
+/// and links it to the transaction. This replaces the old approach of writing to
+/// parent_transactions + merkle_proofs tables.
 pub fn cache_arc_merkle_proof(
     db: &std::sync::Mutex<crate::database::WalletDatabase>,
     txid: &str,
@@ -6895,12 +7182,14 @@ pub fn cache_arc_merkle_proof(
         }
     };
 
-    let block_height = tsc["height"].as_u64().unwrap_or(0) as u32;
+    let height = tsc["height"].as_u64().unwrap_or(0) as u32;
     let tx_index = tsc["index"].as_u64().unwrap_or(0);
-    let nodes_json = match serde_json::to_string(&tsc["nodes"]) {
-        Ok(j) => j,
+
+    // Serialize TSC JSON to bytes for proven_txs.merkle_path BLOB
+    let merkle_path_bytes = match serde_json::to_vec(&tsc) {
+        Ok(bytes) => bytes,
         Err(e) => {
-            log::warn!("   ⚠️  Failed to serialize nodes for {}: {}", txid, e);
+            log::warn!("   ⚠️  Failed to serialize TSC JSON for {}: {}", txid, e);
             return;
         }
     };
@@ -6915,36 +7204,39 @@ pub fn cache_arc_merkle_proof(
 
     let conn = db_guard.connection();
 
-    // Ensure the transaction exists in parent_transactions table
-    let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
-    let parent_txn_id = match parent_tx_repo.get_id_by_txid(txid) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            // Transaction not in parent_transactions - try to insert a minimal record
-            // This can happen if ARC returns merklePath for a tx we haven't cached as a parent yet
-            log::info!("   📋 Transaction {} not in parent_transactions, creating placeholder", txid);
-            match parent_tx_repo.upsert(None, txid, "") {
-                Ok(id) => id,
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to create parent_transactions entry for {}: {}", txid, e);
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("   ⚠️  DB error looking up parent_transactions for {}: {}", txid, e);
-            return;
+    // Get raw_tx from transactions table
+    let raw_tx_bytes = {
+        let tx_repo = crate::database::TransactionRepository::new(conn);
+        match tx_repo.get_by_txid(txid) {
+            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+            _ => Vec::new(),
         }
     };
 
-    // Store the merkle proof
-    let merkle_proof_repo = crate::database::MerkleProofRepository::new(conn);
-    match merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, "", &nodes_json) {
-        Ok(_) => {
-            log::info!("   💾 Cached ARC merkle proof for {} (height: {}, index: {})", txid, block_height, tx_index);
+    // Create immutable proven_txs record
+    let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
+    match proven_tx_repo.insert_or_get(
+        txid, height, tx_index,
+        &merkle_path_bytes, &raw_tx_bytes,
+        "", "",
+    ) {
+        Ok(proven_tx_id) => {
+            log::info!("   💾 Created proven_txs record {} for {} (height: {}, index: {})", proven_tx_id, txid, height, tx_index);
+
+            // Link transaction to proven_txs
+            if let Err(e) = proven_tx_repo.link_transaction(txid, proven_tx_id) {
+                log::warn!("   ⚠️  Failed to link transaction {} to proven_tx: {}", txid, e);
+            }
+
+            // Update proven_tx_reqs if one exists
+            let req_repo = crate::database::ProvenTxReqRepository::new(conn);
+            if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
+                let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
+                let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
+            }
         }
         Err(e) => {
-            log::warn!("   ⚠️  Failed to cache ARC merkle proof for {}: {}", txid, e);
+            log::warn!("   ⚠️  Failed to create proven_txs record for {}: {}", txid, e);
         }
     }
 }
@@ -7479,29 +7771,28 @@ pub async fn send_transaction(
         }
     };
 
-    log::info!("   📦 Extracting raw transaction from Atomic BEEF...");
+    log::info!("   📡 Broadcasting Atomic BEEF to ARC...");
 
-    // Extract raw transaction hex from Atomic BEEF
-    let raw_tx_hex = match extract_raw_tx_from_atomic_beef(&atomic_beef_hex) {
-        Ok(hex) => {
-            log::info!("   ✅ Raw transaction extracted: {} bytes", hex.len() / 2);
-            hex
-        },
-        Err(e) => {
-            log::error!("   Failed to extract raw transaction from BEEF: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to extract transaction: {}", e)
-            }));
-        }
-    };
-
-    log::info!("   📡 Broadcasting transaction...");
-
-    // Broadcast the raw transaction
-    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
+    // Broadcast the full Atomic BEEF (includes ancestry chain for ARC SPV validation)
+    // broadcast_transaction detects the 01010101 Atomic BEEF prefix, strips the header,
+    // converts to BEEF V1, and submits to ARC. This allows ARC to validate unconfirmed
+    // parent transactions that would be rejected as "missing inputs" in raw tx broadcast.
+    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
+
+            // Update broadcast status to "broadcast" (maps to new_status "unproven" in Phase 1)
+            // so ARC poller tracks this transaction for confirmation
+            {
+                use crate::database::TransactionRepository;
+                let db = state.database.lock().unwrap();
+                let tx_repo = TransactionRepository::new(db.connection());
+                if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
+                    log::warn!("   ⚠️  Failed to update broadcast status: {}", e);
+                } else {
+                    log::info!("   💾 Transaction broadcast status updated to 'broadcast'");
+                }
+            }
 
             let whats_on_chain_url = format!("https://whatsonchain.com/tx/{}", txid);
 
@@ -7515,10 +7806,9 @@ pub async fn send_transaction(
         Err(e) => {
             log::error!("   ❌ Transaction broadcast failed: {}", e);
 
-            // Update transaction status to "failed" in database and clean up ghost UTXOs
+            // Update transaction status to "failed" in database and clean up ghost outputs
             {
                 use crate::database::TransactionRepository;
-                use crate::database::UtxoRepository;
                 use crate::action_storage::ActionStatus;
                 let db = state.database.lock().unwrap();
                 let tx_repo = TransactionRepository::new(db.connection());
@@ -7528,17 +7818,32 @@ pub async fn send_transaction(
                     log::info!("   💾 Transaction status updated to 'failed' in database");
                 }
 
-                // CRITICAL: Remove ghost change UTXO since broadcast failed
-                let utxo_repo = UtxoRepository::new(db.connection());
-                match utxo_repo.delete_by_txid(&txid) {
+                // CRITICAL: Remove ghost change output since broadcast failed
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                match output_repo.delete_by_txid(&txid) {
                     Ok(count) if count > 0 => {
-                        log::info!("   🗑️  Removed {} ghost change UTXO(s) from failed broadcast", count);
+                        log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", count);
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        log::warn!("   ⚠️  Failed to remove ghost UTXO: {}", e);
+                        log::warn!("   ⚠️  Failed to remove ghost output: {}", e);
                     }
                 }
+
+                // CRITICAL: Restore input outputs that were reserved for this transaction.
+                // Since broadcast failed, these coins were never spent on-chain.
+                match output_repo.restore_spent_by_txid(&txid) {
+                    Ok(count) if count > 0 => {
+                        log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to restore input outputs: {}", e);
+                    }
+                }
+
+                // Invalidate balance cache since we restored outputs
+                state.balance_cache.invalidate();
             }
 
             // Extract a clean, user-friendly error message
@@ -8646,17 +8951,9 @@ pub async fn internalize_action(
         log::info!("   🧺 Processing {} basket insertion outputs...", insertion_map.len());
 
         let db = state.database.lock().unwrap();
-        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let tag_repo = crate::database::TagRepository::new(db.connection());
-        let address_repo = crate::database::AddressRepository::new(db.connection());
-        let wallet_repo = crate::database::WalletRepository::new(db.connection());
-
-        // Get wallet ID for external address creation
-        let wallet_id = match wallet_repo.get_primary_wallet() {
-            Ok(Some(w)) => w.id.unwrap_or(1),
-            _ => 1,
-        };
+        let output_repo = crate::database::OutputRepository::new(db.connection());
 
         for (output_index, insertion) in &insertion_map {
             let output_index_usize = *output_index as usize;
@@ -8678,16 +8975,6 @@ pub async fn internalize_action(
                 }
             };
 
-            // Get or create external address for this output
-            // (basket insertion outputs typically have custom scripts we can't derive)
-            let address_id = match address_repo.get_or_create_external_address(wallet_id) {
-                Ok(id) => id,
-                Err(e) => {
-                    log::error!("   ❌ Failed to get external address: {}", e);
-                    continue;
-                }
-            };
-
             // Build custom instructions JSON
             let custom_json = if let Some(ref ci) = insertion.custom_instructions {
                 serde_json::json!({
@@ -8702,28 +8989,29 @@ pub async fn internalize_action(
                 }).to_string()
             };
 
-            // Insert UTXO with basket assignment
-            // Status is 'completed' because we've verified the BEEF/transaction
-            match utxo_repo.insert_output_with_basket(
-                Some(address_id),
+            // Insert output with basket assignment
+            match output_repo.insert_output(
+                state.current_user_id,
                 &txid,
                 *output_index,
                 satoshis,
                 &script_hex,
                 Some(basket_id),
+                None,  // No derivation prefix for internalized outputs
+                None,  // No derivation suffix for internalized outputs
                 Some(&custom_json),
-                "completed",
                 None,  // No output description for internalized outputs
+                false,  // is_change = false
             ) {
-                Ok(utxo_id) => {
-                    log::info!("   💾 Stored basket insertion UTXO {}:{} in basket '{}' ({} sats)",
+                Ok(output_id) => {
+                    log::info!("   💾 Stored basket insertion output {}:{} in basket '{}' ({} sats)",
                               txid, output_index, insertion.basket, satoshis);
 
                     // Assign tags if provided
                     if let Some(ref tags) = insertion.tags {
                         for tag in tags {
-                            if let Err(e) = tag_repo.assign_tag_to_output(utxo_id, tag) {
-                                log::warn!("   ⚠️  Failed to assign tag '{}' to UTXO: {}", tag, e);
+                            if let Err(e) = tag_repo.assign_tag_to_output(output_id, tag) {
+                                log::warn!("   ⚠️  Failed to assign tag '{}' to output: {}", tag, e);
                             } else {
                                 log::info!("      🏷️  Tagged with '{}'", tag);
                             }
@@ -8735,7 +9023,7 @@ pub async fn internalize_action(
                     our_output_indices.push(*output_index);
                 }
                 Err(e) => {
-                    log::error!("   ❌ Failed to store basket insertion UTXO {}:{}: {}", txid, output_index, e);
+                    log::error!("   ❌ Failed to store basket insertion output {}:{}: {}", txid, output_index, e);
                 }
             }
         }
@@ -8792,7 +9080,7 @@ pub async fn internalize_action(
             }
             Ok(None) => {
                 // Transaction doesn't exist, insert it
-                match tx_repo.add_transaction(&stored_action) {
+                match tx_repo.add_transaction(&stored_action, state.current_user_id) {
                     Ok(_) => {
                         log::info!("   💾 Action stored in database with status: unconfirmed");
                     }
@@ -9359,12 +9647,12 @@ pub async fn list_outputs(
         }));
     }
 
-    // Get database - scoped to drop lock before BEEF building (which re-locks internally)
-    let (basket_id, filtered_utxos) = {
+    // Phase 4D: Get database - scoped to drop lock before BEEF building (which re-locks internally)
+    let (basket_id, filtered_outputs) = {
         let db = state.database.lock().unwrap();
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let tag_repo = crate::database::TagRepository::new(db.connection());
-        let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
 
         // Resolve basket (find or create)
         let basket_id = match basket_repo.find_or_insert(&req.basket) {
@@ -9396,14 +9684,14 @@ pub async fn list_outputs(
             Vec::new()
         };
 
-        // Query outputs with SQL-based tag filtering (efficient single query)
+        // Phase 4D: Query from outputs table (PRIMARY SOURCE) with SQL-based tag filtering
         let tag_query_mode = req.tag_query_mode.as_deref().unwrap_or("any");
         let require_all_tags = tag_query_mode == "all";
 
-        let filtered_utxos = if !tag_ids.is_empty() {
+        let filtered_outputs = if !tag_ids.is_empty() {
             // Use efficient SQL-based tag filtering
-            match utxo_repo.get_unspent_by_basket_with_tags(basket_id, Some(&tag_ids), require_all_tags) {
-                Ok(utxos) => utxos,
+            match output_repo.get_spendable_by_basket_with_tags(basket_id, Some(&tag_ids), require_all_tags) {
+                Ok(outputs) => outputs,
                 Err(e) => {
                     log::error!("   Failed to query outputs with tags: {}", e);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -9413,8 +9701,8 @@ pub async fn list_outputs(
             }
         } else {
             // No tags - just query by basket
-            match utxo_repo.get_unspent_by_basket(basket_id) {
-                Ok(utxos) => utxos,
+            match output_repo.get_spendable_by_basket(basket_id) {
+                Ok(outputs) => outputs,
                 Err(e) => {
                     log::error!("   Failed to query outputs: {}", e);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -9424,19 +9712,19 @@ pub async fn list_outputs(
             }
         };
 
-        (basket_id, filtered_utxos)
+        (basket_id, filtered_outputs)
     }; // db lock dropped here - safe for BEEF building to re-lock
 
     // Apply pagination
     let offset = req.offset.unwrap_or(0) as usize;
     let limit = req.limit.unwrap_or(10).min(10000) as usize;
-    let total_outputs = filtered_utxos.len();
-    let paginated_utxos: Vec<_> = filtered_utxos.into_iter()
+    let total_outputs = filtered_outputs.len();
+    let paginated_outputs: Vec<_> = filtered_outputs.into_iter()
         .skip(offset)
         .take(limit)
         .collect();
 
-    log::info!("   Found {} outputs (total: {})", paginated_utxos.len(), total_outputs);
+    log::info!("   Found {} outputs (total: {})", paginated_outputs.len(), total_outputs);
 
     // Build response outputs
     let include_locking_scripts = req.include.as_deref() == Some("locking scripts");
@@ -9459,8 +9747,10 @@ pub async fn list_outputs(
         None
     };
 
-    for utxo in &paginated_utxos {
-        let outpoint = format!("{}.{}", utxo.txid, utxo.vout);
+    for db_output in &paginated_outputs {
+        // Phase 4D: Output uses Option<String> for txid
+        let txid = db_output.txid.as_deref().unwrap_or("");
+        let outpoint = format!("{}.{}", txid, db_output.vout);
 
         // Get tags and labels if requested (brief lock, released before BEEF building)
         let (tags, labels) = if include_tags || include_labels {
@@ -9468,7 +9758,7 @@ pub async fn list_outputs(
             let tag_repo = crate::database::TagRepository::new(db.connection());
 
             let tags = if include_tags {
-                if let Some(output_id) = utxo.id {
+                if let Some(output_id) = db_output.output_id {
                     tag_repo.get_tags_for_output(output_id).ok()
                         .filter(|t| !t.is_empty())
                 } else {
@@ -9479,7 +9769,7 @@ pub async fn list_outputs(
             };
 
             let labels = if include_labels {
-                tag_repo.get_labels_for_txid(&utxo.txid).ok()
+                tag_repo.get_labels_for_txid(txid).ok()
                     .filter(|l| !l.is_empty())
             } else {
                 None
@@ -9492,22 +9782,23 @@ pub async fn list_outputs(
 
         let output = WalletOutput {
             outpoint,
-            satoshis: utxo.satoshis,
-            spendable: true,  // All returned outputs are spendable
+            satoshis: db_output.satoshis,
+            spendable: true,  // All returned outputs are spendable (filtered by get_spendable_*)
             locking_script: if include_locking_scripts {
-                Some(utxo.script.clone())
+                // Phase 4D: Convert locking_script bytes to hex string
+                db_output.locking_script.as_ref().map(|bytes| hex::encode(bytes))
             } else {
                 None
             },
             custom_instructions: if include_custom_instructions {
-                utxo.custom_instructions.clone()
+                db_output.custom_instructions.clone()
             } else {
                 None
             },
             tags,
             labels,
             output_description: if include_output_description {
-                utxo.output_description.clone()
+                db_output.output_description.clone()
             } else {
                 None
             },
@@ -9516,21 +9807,21 @@ pub async fn list_outputs(
         // Build BEEF if requested
         if include_transactions {
             // Check if transaction already in BEEF (deduplication)
-            if beef.find_txid(&utxo.txid).is_none() {
+            if beef.find_txid(txid).is_none() {
                 if let Some(ref client_ref) = client {
                     // Build BEEF for this output's transaction and its parents
                     if let Err(e) = crate::beef_helpers::build_beef_for_txid(
-                        &utxo.txid,
+                        txid,
                         &mut beef,
                         &state.database,
                         client_ref,
                     ).await {
-                        log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", utxo.txid, e);
+                        log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", txid, e);
                         // Continue processing other outputs even if one fails
                     }
                 }
             } else {
-                log::info!("   ⏭️  Transaction {} already in BEEF, skipping", utxo.txid);
+                log::info!("   ⏭️  Transaction {} already in BEEF, skipping", txid);
             }
         }
 
@@ -9555,40 +9846,6 @@ pub async fn list_outputs(
         outputs,
         BEEF: beef_bytes,
     })
-}
-
-/// Helper function to filter UTXOs by tags
-fn filter_utxos_by_tags(
-    db: &crate::database::WalletDatabase,
-    utxos: &[crate::database::Utxo],
-    tag_ids: &[i64],
-    require_all: bool,
-) -> Vec<crate::database::Utxo> {
-    use crate::database::TagRepository;
-    let tag_repo = TagRepository::new(db.connection());
-
-    utxos.iter()
-        .filter(|utxo| {
-            if let Some(output_id) = utxo.id {
-                // Get tag IDs for this output
-                match tag_repo.get_tag_ids_for_output(output_id) {
-                    Ok(output_tag_ids) => {
-                        if require_all {
-                            // All requested tags must be in output's tags
-                            tag_ids.iter().all(|tag_id| output_tag_ids.contains(tag_id))
-                        } else {
-                            // Any requested tag matches
-                            tag_ids.iter().any(|tag_id| output_tag_ids.contains(tag_id))
-                        }
-                    }
-                    Err(_) => false,
-                }
-            } else {
-                false
-            }
-        })
-        .cloned()
-        .collect()
 }
 
 /// Request structure for /relinquishOutput endpoint
@@ -9626,10 +9883,9 @@ pub async fn relinquish_output(
         }
     };
 
-    // Get database
     let db = state.database.lock().unwrap();
     let basket_repo = crate::database::BasketRepository::new(db.connection());
-    let utxo_repo = crate::database::UtxoRepository::new(db.connection());
+    let output_repo = crate::database::OutputRepository::new(db.connection());
 
     // Resolve basket
     let basket_id = match basket_repo.find_by_name(&req.basket) {
@@ -9647,45 +9903,43 @@ pub async fn relinquish_output(
         }
     };
 
-    // Find UTXO
-    let utxo = match utxo_repo.get_by_txid_vout(txid, vout as u32) {
-        Ok(Some(u)) => u,
+    // Phase 4D: Find output from outputs table (PRIMARY SOURCE)
+    let db_output = match output_repo.get_by_txid_vout(txid, vout as u32) {
+        Ok(Some(o)) => o,
         Ok(None) => {
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": format!("Output {} not found", req.output)
             }));
         }
         Err(e) => {
-            log::error!("   Failed to find UTXO: {}", e);
+            log::error!("   Failed to find output: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to find UTXO: {}", e)
+                "error": format!("Failed to find output: {}", e)
             }));
         }
     };
 
-    // Verify UTXO is in the specified basket
-    if utxo.basket_id != Some(basket_id) {
+    // Verify output is in the specified basket
+    if db_output.basket_id != Some(basket_id) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": format!("Output {} is not in basket '{}'", req.output, req.basket)
         }));
     }
 
-    // Remove from basket (set basket_id to NULL)
-    match utxo_repo.remove_from_basket(utxo.id.unwrap()) {
-        Ok(_) => {
-            log::info!("   ✅ Output {} removed from basket '{}'", req.output, req.basket);
-            drop(db);
-            HttpResponse::Ok().json(serde_json::json!({
-                "relinquished": true
-            }))
-        }
-        Err(e) => {
-            log::error!("   Failed to remove output from basket: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to remove output from basket: {}", e)
-            }))
-        }
+    // Remove output from basket
+    let output_id = db_output.output_id.unwrap();
+    if let Err(e) = output_repo.remove_from_basket(output_id) {
+        log::error!("   Failed to remove output from basket: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to remove output from basket: {}", e)
+        }));
     }
+
+    log::info!("   ✅ Output {} removed from basket '{}'", req.output, req.basket);
+    drop(db);
+    HttpResponse::Ok().json(serde_json::json!({
+        "relinquished": true
+    }))
 }
 
 /// Request structure for /getHeaderForHeight endpoint
@@ -10014,8 +10268,8 @@ pub async fn wallet_cleanup(state: web::Data<AppState>) -> HttpResponse {
 
             // Mark as spent
             let db = state.database.lock().unwrap();
-            let utxo_repo = crate::database::UtxoRepository::new(db.connection());
-            let _ = utxo_repo.mark_spent(txid, *vout, "ghost-cleanup");
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            let _ = output_repo.mark_spent(txid, *vout, "ghost-cleanup");
         }
     }
 

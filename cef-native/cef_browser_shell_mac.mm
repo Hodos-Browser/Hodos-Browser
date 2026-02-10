@@ -90,6 +90,10 @@ NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
 
+// Stored icon right offsets for repositioning overlays on move/resize (physical pixels)
+static int g_mac_settings_icon_right_offset = 0;
+static int g_mac_wallet_icon_right_offset = 0;
+
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO(msg) Logger::Log(msg, 1, 0)
@@ -107,8 +111,8 @@ void DebugLog(const std::string& message) {
 
 void ToggleWalletPanel();  // C++ callable function
 void CreateMainWindow();
-void CreateSettingsOverlayWithSeparateProcess();
-void CreateWalletOverlayWithSeparateProcess();
+void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset = 0);
+void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
 void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateSettingsMenuOverlay();
@@ -738,28 +742,27 @@ ViewDimensions GetViewDimensions(void* nsview) {
 @implementation MainWindowDelegate
 
 - (void)windowDidMove:(NSNotification *)notification {
-    LOG_DEBUG("🔄 Main window moved - synchronizing overlays");
     NSRect mainFrame = [g_main_window frame];
 
-    // Move all visible overlays to match main window position
+    // Settings overlay: 450x450 right-side popup, right edge under icon
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        [g_settings_overlay_window setFrame:mainFrame display:YES];
-        LOG_DEBUG("🔄 Settings overlay position synchronized");
+        CGFloat pw = 450, ph = 450;
+        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
+        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
+        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
     }
 
+    // Wallet overlay: full-window
     if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
         [g_wallet_overlay_window setFrame:mainFrame display:YES];
-        LOG_DEBUG("🔄 Wallet overlay position synchronized");
     }
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
-        LOG_DEBUG("🔄 Backup overlay position synchronized");
     }
 
     if (g_brc100_auth_overlay_window && [g_brc100_auth_overlay_window isVisible]) {
         [g_brc100_auth_overlay_window setFrame:mainFrame display:YES];
-        LOG_DEBUG("🔄 BRC-100 auth overlay position synchronized");
     }
 }
 
@@ -797,32 +800,33 @@ ViewDimensions GetViewDimensions(void* nsview) {
     // Resize and notify overlay windows
     NSRect mainFrame = [g_main_window frame];
 
+    // Settings overlay: 450x450 right-side popup, right edge under icon
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        [g_settings_overlay_window setFrame:mainFrame display:YES];
+        CGFloat pw = 450, ph = 450;
+        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
+        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
+        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
         CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
         if (settings) settings->GetHost()->WasResized();
-        LOG_DEBUG("🔄 Settings overlay resized and notified");
     }
 
+    // Wallet overlay: full-window
     if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
         [g_wallet_overlay_window setFrame:mainFrame display:YES];
         CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
         if (wallet) wallet->GetHost()->WasResized();
-        LOG_DEBUG("🔄 Wallet overlay resized and notified");
     }
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
         CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
         if (backup) backup->GetHost()->WasResized();
-        LOG_DEBUG("🔄 Backup overlay resized and notified");
     }
 
     if (g_brc100_auth_overlay_window && [g_brc100_auth_overlay_window isVisible]) {
         [g_brc100_auth_overlay_window setFrame:mainFrame display:YES];
         CefRefPtr<CefBrowser> auth = SimpleHandler::GetBRC100AuthBrowser();
         if (auth) auth->GetHost()->WasResized();
-        LOG_DEBUG("🔄 BRC-100 auth overlay resized and notified");
     }
 
 }
@@ -976,12 +980,23 @@ void CreateMainWindow() {
 // Overlay Window Creation Functions
 // ============================================================================
 
-void CreateSettingsOverlayWithSeparateProcess() {
-    LOG_INFO("🎨 Creating settings overlay with separate process (macOS)");
+void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
+    LOG_INFO("Creating settings overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_settings_icon_right_offset = iconRightOffset;
 
     // Get main window frame for overlay alignment
     NSRect mainFrame = [g_main_window frame];
-    LOG_INFO("📐 Overlay dimensions: " + std::to_string((int)mainFrame.size.width) + " x " + std::to_string((int)mainFrame.size.height));
+
+    // Right-side popup panel, right edge aligned under icon
+    CGFloat panelWidth = 450;
+    CGFloat panelHeight = 450;
+    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
+    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+    LOG_INFO("📐 Settings panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+             + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
 
     // Destroy existing overlay if present
     if (g_settings_overlay_window) {
@@ -992,7 +1007,7 @@ void CreateSettingsOverlayWithSeparateProcess() {
 
     // Create borderless, transparent, floating window
     g_settings_overlay_window = [[NSWindow alloc]
-        initWithContentRect:mainFrame
+        initWithContentRect:panelFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -1004,7 +1019,7 @@ void CreateSettingsOverlayWithSeparateProcess() {
 
     [g_settings_overlay_window setOpaque:NO];
     [g_settings_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_settings_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel
+    [g_settings_overlay_window setLevel:NSNormalWindowLevel];
     [g_settings_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_overlay_window setReleasedWhenClosed:NO];
     [g_settings_overlay_window setHasShadow:NO];
@@ -1014,7 +1029,7 @@ void CreateSettingsOverlayWithSeparateProcess() {
 
     // Create custom view for event handling and rendering
     SettingsOverlayView* contentView = [[SettingsOverlayView alloc]
-        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
     [g_settings_overlay_window setContentView:contentView];
 
     // Create CEF browser with windowless rendering
@@ -1023,7 +1038,7 @@ void CreateSettingsOverlayWithSeparateProcess() {
 
     CefBrowserSettings settings;
     settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // Fully transparent
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     settings.javascript = STATE_ENABLED;
     settings.javascript_access_clipboard = STATE_ENABLED;
     settings.javascript_dom_paste = STATE_ENABLED;
@@ -1031,8 +1046,8 @@ void CreateSettingsOverlayWithSeparateProcess() {
     CefRefPtr<SimpleHandler> handler(new SimpleHandler("settings"));
     CefRefPtr<MyOverlayRenderHandler> render_handler =
         new MyOverlayRenderHandler((__bridge void*)contentView,
-                                   (int)mainFrame.size.width,
-                                   (int)mainFrame.size.height);
+                                   (int)panelWidth,
+                                   (int)panelHeight);
     handler->SetRenderHandler(render_handler);
 
     bool result = CefBrowserHost::CreateBrowser(
@@ -1053,8 +1068,9 @@ void CreateSettingsOverlayWithSeparateProcess() {
     LOG_INFO("✅ Settings overlay created successfully");
 }
 
-void CreateWalletOverlayWithSeparateProcess() {
-    LOG_INFO("🎨 Creating wallet overlay with separate process (macOS)");
+void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
+    LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_wallet_icon_right_offset = iconRightOffset;
 
     NSRect mainFrame = [g_main_window frame];
     LOG_INFO("📐 Overlay dimensions: " + std::to_string((int)mainFrame.size.width) + " x " + std::to_string((int)mainFrame.size.height));
@@ -1109,17 +1125,18 @@ void CreateWalletOverlayWithSeparateProcess() {
                                    (int)mainFrame.size.height);
     handler->SetRenderHandler(render_handler);
 
+    std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         handler,
-        "http://127.0.0.1:5137/wallet-panel",
+        walletUrl,
         settings,
         nullptr,
         CefRequestContext::GetGlobalContext()
     );
 
     if (!result) {
-        LOG_ERROR("❌ Failed to create wallet overlay CEF browser");
+        LOG_ERROR("Failed to create wallet overlay CEF browser");
         return;
     }
 

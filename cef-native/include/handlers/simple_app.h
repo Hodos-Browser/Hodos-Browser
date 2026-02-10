@@ -35,7 +35,7 @@
     extern HINSTANCE g_hInstance;
 
     // Windows overlay creation functions
-    void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance);
+    void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0);
     void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
     void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true);
@@ -54,8 +54,8 @@
     extern NSWindow* g_settings_menu_overlay_window;
 
     // macOS overlay creation functions
-    void CreateSettingsOverlayWithSeparateProcess();
-    void CreateWalletOverlayWithSeparateProcess();
+    void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset = 0);
+    void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
     void CreateBackupOverlayWithSeparateProcess();
     void CreateBRC100AuthOverlayWithSeparateProcess();
     void CreateSettingsMenuOverlay();

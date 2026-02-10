@@ -9,6 +9,7 @@ export const BalanceDisplay: React.FC<BalanceDisplayProps> = ({
   balance,
   usdValue,
   isLoading,
+  isRefreshing,
   onRefresh
 }) => {
   const formatBalance = (satoshis: number): string => {
@@ -28,10 +29,10 @@ export const BalanceDisplay: React.FC<BalanceDisplayProps> = ({
           <button
             className="refresh-button"
             onClick={onRefresh}
-            disabled={isLoading}
+            disabled={isLoading || isRefreshing}
             title="Refresh balance"
           >
-            {isLoading ? '⟳' : '↻'}
+            {isRefreshing ? '⟳' : '↻'}
           </button>
         )}
       </div>

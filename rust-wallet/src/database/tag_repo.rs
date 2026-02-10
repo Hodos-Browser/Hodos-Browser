@@ -183,10 +183,14 @@ impl<'a> TagRepository<'a> {
         Ok(tag_ids)
     }
 
-    /// Get labels for a transaction (from transaction_labels table)
+    /// Get labels for a transaction from tx_labels/tx_labels_map (Phase 5 normalized tables)
     pub fn get_labels_for_transaction(&self, transaction_id: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT label FROM transaction_labels WHERE transaction_id = ?1 ORDER BY label"
+            "SELECT tl.label
+             FROM tx_labels tl
+             INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+             WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
+             ORDER BY tl.label"
         )?;
 
         let rows = stmt.query_map(

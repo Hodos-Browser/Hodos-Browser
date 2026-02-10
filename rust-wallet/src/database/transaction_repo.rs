@@ -5,7 +5,7 @@
 use rusqlite::{Connection, Result};
 use log::{info, error};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::action_storage::{StoredAction, ActionStatus, ActionInput, ActionOutput};
+use crate::action_storage::{StoredAction, ActionStatus, ActionInput, ActionOutput, TransactionStatus};
 
 pub struct TransactionRepository<'a> {
     conn: &'a Connection,
@@ -17,13 +17,18 @@ impl<'a> TransactionRepository<'a> {
     }
 
     /// Add a new transaction (action) to the database
-    pub fn add_transaction(&self, action: &StoredAction) -> Result<i64> {
-        // Insert into transactions table
+    ///
+    /// `user_id` is needed for the tx_labels table (label deduplication is per-user).
+    pub fn add_transaction(&self, action: &StoredAction, user_id: i64) -> Result<i64> {
+        // Compute the consolidated new_status from legacy ActionStatus
+        let new_status = TransactionStatus::from_legacy(&action.status, None);
+
+        // Insert into transactions table (writes both legacy status and new_status)
         self.conn.execute(
             "INSERT INTO transactions (
                 txid, reference_number, raw_tx, description, status, is_outgoing,
-                satoshis, timestamp, block_height, confirmations, version, lock_time
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                satoshis, timestamp, block_height, confirmations, version, lock_time, new_status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 action.txid,
                 action.reference_number,
@@ -37,16 +42,43 @@ impl<'a> TransactionRepository<'a> {
                 action.confirmations as i32,
                 action.version as i32,
                 action.lock_time as i32,
+                new_status.as_str(),
             ],
         )?;
 
         let transaction_id = self.conn.last_insert_rowid();
 
-        // Insert transaction labels
+        // Insert transaction labels into tx_labels/tx_labels_map (Phase 5 normalized tables)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
         for label in &action.labels {
+            let normalized = label.trim().to_lowercase();
+            if normalized.is_empty() { continue; }
+
+            // Find or insert the deduplicated label entity
+            let label_id: i64 = match self.conn.query_row(
+                "SELECT txLabelId FROM tx_labels WHERE label = ?1 AND user_id = ?2 AND is_deleted = 0",
+                rusqlite::params![&normalized, user_id],
+                |row| row.get(0),
+            ) {
+                Ok(id) => id,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    self.conn.execute(
+                        "INSERT INTO tx_labels (user_id, label, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
+                        rusqlite::params![user_id, &normalized, now, now],
+                    )?;
+                    self.conn.last_insert_rowid()
+                }
+                Err(e) => return Err(e),
+            };
+
+            // Create the label→transaction mapping
             self.conn.execute(
-                "INSERT INTO transaction_labels (transaction_id, label) VALUES (?1, ?2)",
-                rusqlite::params![transaction_id, label],
+                "INSERT OR IGNORE INTO tx_labels_map (txLabelId, transaction_id, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
+                rusqlite::params![label_id, transaction_id, now, now],
             )?;
         }
 
@@ -123,14 +155,18 @@ impl<'a> TransactionRepository<'a> {
             Err(e) => return Err(e),
         };
 
-        // Get labels
+        // Get labels from tx_labels/tx_labels_map (Phase 5 normalized tables)
         let mut label_stmt = self.conn.prepare(
-            "SELECT label FROM transaction_labels WHERE transaction_id = ?1"
+            "SELECT tl.label
+             FROM tx_labels tl
+             INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+             WHERE tlm.transaction_id = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0
+             ORDER BY tl.label"
         )?;
         let labels: Vec<String> = label_stmt.query_map(
             rusqlite::params![transaction_id],
             |row| Ok(row.get(0)?),
-        )?.collect::<Result<Vec<_>>>()?;
+        )?.filter_map(|r| r.ok()).collect();
 
         // Get inputs
         let mut input_stmt = self.conn.prepare(
@@ -216,17 +252,53 @@ impl<'a> TransactionRepository<'a> {
         }
     }
 
-    /// Update transaction status
+    /// Update transaction status (legacy ActionStatus)
+    ///
+    /// Prefer `set_transaction_status()` for new code. This method also updates
+    /// the new_status column to keep both in sync during the transition period.
     pub fn update_status(&self, txid: &str, status: ActionStatus) -> Result<()> {
+        // Also derive and write new_status
+        let new_status = TransactionStatus::from_legacy(&status, None);
         self.conn.execute(
-            "UPDATE transactions SET status = ?1 WHERE txid = ?2",
-            rusqlite::params![status.to_string(), txid],
+            "UPDATE transactions SET status = ?1, new_status = ?2 WHERE txid = ?3",
+            rusqlite::params![status.to_string(), new_status.as_str(), txid],
         )?;
         Ok(())
     }
 
+    /// Set the consolidated transaction status (wallet-toolbox aligned)
+    ///
+    /// This is the primary status update method for Phase 1+. Writes to `new_status`
+    /// and also keeps the legacy `status` column in sync for backward compatibility.
+    /// If setting to Failed, also records `failed_at` timestamp for UnFail mechanism.
+    pub fn set_transaction_status(&self, txid: &str, status: TransactionStatus) -> Result<()> {
+        let legacy_status = status.to_action_status();
+
+        if status == TransactionStatus::Failed {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            self.conn.execute(
+                "UPDATE transactions SET new_status = ?1, status = ?2, failed_at = ?3 WHERE txid = ?4",
+                rusqlite::params![status.as_str(), legacy_status.to_string(), now, txid],
+            )?;
+        } else {
+            // Clear failed_at if transitioning away from failed (UnFail success)
+            self.conn.execute(
+                "UPDATE transactions SET new_status = ?1, status = ?2, failed_at = NULL WHERE txid = ?3",
+                rusqlite::params![status.as_str(), legacy_status.to_string(), txid],
+            )?;
+        }
+
+        info!("   ✅ Set transaction status to '{}' for txid {}", status.as_str(), txid);
+        Ok(())
+    }
+
     /// Update transaction TXID (after signing)
-    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String) -> Result<()> {
+    ///
+    /// `user_id` is forwarded to `add_transaction` for label deduplication.
+    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String, user_id: i64) -> Result<()> {
         // Get old transaction
         let old_tx = self.get_by_reference(reference_number)?
             .ok_or_else(|| rusqlite::Error::SqliteFailure(
@@ -239,16 +311,32 @@ impl<'a> TransactionRepository<'a> {
         let mut stmt = self.conn.prepare("SELECT id FROM transactions WHERE txid = ?1")?;
         let old_id: i64 = stmt.query_row(rusqlite::params![&old_txid], |row| row.get(0))?;
 
+        // Detach outputs from old transaction record first (avoids FK constraint on DELETE)
+        self.conn.execute(
+            "UPDATE outputs SET transaction_id = NULL WHERE transaction_id = ?1",
+            rusqlite::params![old_id],
+        )?;
+
         self.conn.execute("DELETE FROM transaction_outputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transaction_inputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM transaction_labels WHERE transaction_id = ?1", rusqlite::params![old_id])?;
+        self.conn.execute("DELETE FROM tx_labels_map WHERE transaction_id = ?1", rusqlite::params![old_id])?;
         self.conn.execute("DELETE FROM transactions WHERE id = ?1", rusqlite::params![old_id])?;
 
         // Create new transaction with new TXID
         let mut new_action = old_tx;
         new_action.txid = new_txid.clone();
         new_action.raw_tx = new_raw_tx;
-        self.add_transaction(&new_action)?;
+        let new_id = self.add_transaction(&new_action, user_id)?;
+
+        // Re-link detached outputs to the new transaction record.
+        // Match by old txid since output txids haven't been renamed yet.
+        let relinked = self.conn.execute(
+            "UPDATE outputs SET transaction_id = ?1 WHERE transaction_id IS NULL AND txid = ?2",
+            rusqlite::params![new_id, &old_txid],
+        )?;
+        if relinked > 0 {
+            info!("   ✅ Re-linked {} output(s) from transaction {} → {}", relinked, old_id, new_id);
+        }
 
         info!("   ✅ Updated TXID for reference {}: {} → {}", reference_number, old_txid, new_txid);
         Ok(())
@@ -288,18 +376,16 @@ impl<'a> TransactionRepository<'a> {
     ///
     /// Used for BEEF building when a child transaction spends outputs from
     /// a parent transaction that hasn't been confirmed yet.
-    /// Returns the raw_tx if found and broadcast_status is not 'confirmed'.
+    /// Returns the raw_tx if found and status is not 'completed' (confirmed).
     pub fn get_local_parent_tx(&self, txid: &str) -> Result<Option<String>> {
         info!("   🔍 Looking for local parent tx {} in transactions table...", txid);
 
-        // Check if broadcast_status column exists (migration v10 might not have run)
-        let column_exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+        // Check if new_status column exists (migration v15)
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
             [],
             |row| Ok(row.get::<_, i64>(0)? > 0),
         ).unwrap_or(false);
-
-        info!("   📊 broadcast_status column exists: {}", column_exists);
 
         // First, check if ANY transaction with this txid exists (for debugging)
         let any_exists: bool = self.conn.query_row(
@@ -311,15 +397,16 @@ impl<'a> TransactionRepository<'a> {
         info!("   📊 Transaction with txid {} exists in table: {}", txid, any_exists);
 
         if any_exists {
-            // Log the broadcast_status for debugging
-            if let Ok(status) = self.conn.query_row::<String, _, _>(
-                "SELECT COALESCE(broadcast_status, 'NULL') FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get(0),
-            ) {
-                info!("   📊 Transaction {} has broadcast_status: '{}'", txid, status);
+            // Log the new_status for debugging
+            if has_new_status {
+                if let Ok(status) = self.conn.query_row::<String, _, _>(
+                    "SELECT COALESCE(new_status, 'NULL') FROM transactions WHERE txid = ?1",
+                    rusqlite::params![txid],
+                    |row| row.get(0),
+                ) {
+                    info!("   📊 Transaction {} has new_status: '{}'", txid, status);
+                }
             }
-            // Also check if raw_tx is populated
             if let Ok(raw_tx_len) = self.conn.query_row::<i64, _, _>(
                 "SELECT LENGTH(raw_tx) FROM transactions WHERE txid = ?1",
                 rusqlite::params![txid],
@@ -329,21 +416,35 @@ impl<'a> TransactionRepository<'a> {
             }
         }
 
-        let result: std::result::Result<String, rusqlite::Error> = if column_exists {
-            // Only return raw_tx if transaction is not confirmed
-            // (confirmed transactions should be fetched from API to get merkle proof)
+        let result: std::result::Result<String, rusqlite::Error> = if has_new_status {
+            // Only return raw_tx if transaction is not completed
+            // (completed transactions should be fetched from API to get merkle proof)
             self.conn.query_row(
-                "SELECT raw_tx FROM transactions WHERE txid = ?1 AND broadcast_status != 'confirmed'",
+                "SELECT raw_tx FROM transactions WHERE txid = ?1 AND new_status != 'completed'",
                 rusqlite::params![txid],
                 |row| row.get(0),
             )
         } else {
-            // Migration hasn't run yet - return any matching transaction
-            self.conn.query_row(
-                "SELECT raw_tx FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get(0),
-            )
+            // Pre-v15 fallback: check broadcast_status if available
+            let has_broadcast_status: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+                [],
+                |row| Ok(row.get::<_, i64>(0)? > 0),
+            ).unwrap_or(false);
+
+            if has_broadcast_status {
+                self.conn.query_row(
+                    "SELECT raw_tx FROM transactions WHERE txid = ?1 AND broadcast_status != 'confirmed'",
+                    rusqlite::params![txid],
+                    |row| row.get(0),
+                )
+            } else {
+                self.conn.query_row(
+                    "SELECT raw_tx FROM transactions WHERE txid = ?1",
+                    rusqlite::params![txid],
+                    |row| row.get(0),
+                )
+            }
         };
 
         match result {
@@ -362,7 +463,10 @@ impl<'a> TransactionRepository<'a> {
         }
     }
 
-    /// Update broadcast status
+    /// Update broadcast status (legacy method)
+    ///
+    /// Prefer `set_transaction_status()` for new code. This method also updates
+    /// the new_status column to keep both in sync during the transition period.
     pub fn update_broadcast_status(&self, txid: &str, status: &str) -> Result<()> {
         // Check if broadcast_status column exists
         let column_exists: bool = self.conn.query_row(
@@ -372,11 +476,31 @@ impl<'a> TransactionRepository<'a> {
         ).unwrap_or(false);
 
         if column_exists {
-            self.conn.execute(
-                "UPDATE transactions SET broadcast_status = ?1 WHERE txid = ?2",
-                rusqlite::params![status, txid],
-            )?;
-            info!("   ✅ Updated broadcast_status to '{}' for txid {}", status, txid);
+            // Map broadcast_status string to TransactionStatus
+            let new_status = match status {
+                "confirmed" => "completed",
+                "broadcast" => "unproven",
+                "failed" => "failed",
+                "pending" => "unsigned",
+                _ => "unprocessed",
+            };
+
+            if status == "failed" {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                self.conn.execute(
+                    "UPDATE transactions SET broadcast_status = ?1, new_status = ?2, failed_at = ?3 WHERE txid = ?4",
+                    rusqlite::params![status, new_status, now, txid],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE transactions SET broadcast_status = ?1, new_status = ?2 WHERE txid = ?3",
+                    rusqlite::params![status, new_status, txid],
+                )?;
+            }
+            info!("   ✅ Updated broadcast_status to '{}' (new_status='{}') for txid {}", status, new_status, txid);
         }
         Ok(())
     }
@@ -421,14 +545,35 @@ impl<'a> TransactionRepository<'a> {
         Ok(())
     }
 
-    /// Get the broadcast_status of a transaction by txid.
+    /// Get the transaction status (new consolidated status) by txid.
+    ///
+    /// Returns the new_status value if available, falls back to broadcast_status for pre-v15 DBs.
     ///
     /// Returns:
-    /// - `Ok(Some(status))` if the transaction exists and has a broadcast_status
+    /// - `Ok(Some(status))` if the transaction exists and has a status
     /// - `Ok(None)` if the transaction doesn't exist or the column doesn't exist
     /// - `Err` on database errors
     pub fn get_broadcast_status(&self, txid: &str) -> Result<Option<String>> {
-        // Check if broadcast_status column exists
+        // Prefer new_status column (v15+)
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if has_new_status {
+            return match self.conn.query_row(
+                "SELECT new_status FROM transactions WHERE txid = ?1",
+                rusqlite::params![txid],
+                |row| row.get::<_, Option<String>>(0),
+            ) {
+                Ok(status) => Ok(status),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e),
+            };
+        }
+
+        // Fallback to broadcast_status for pre-v15 databases
         let column_exists: bool = self.conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
             [],
@@ -450,7 +595,33 @@ impl<'a> TransactionRepository<'a> {
         }
     }
 
-    /// Get all transactions with broadcast_status = 'pending' that are older than the given age in seconds.
+    /// Get the TransactionStatus enum value for a transaction.
+    ///
+    /// Reads from new_status column (v15+). Returns None if tx doesn't exist.
+    pub fn get_transaction_status(&self, txid: &str) -> Result<Option<TransactionStatus>> {
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        if !has_new_status {
+            return Ok(None);
+        }
+
+        match self.conn.query_row(
+            "SELECT new_status FROM transactions WHERE txid = ?1",
+            rusqlite::params![txid],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(Some(status_str)) => Ok(Some(TransactionStatus::from_str(&status_str))),
+            Ok(None) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get all transactions with unsigned status that are older than the given age in seconds.
     ///
     /// These are transactions that were created but never broadcast (e.g., process crashed
     /// between creating the transaction and broadcasting it). Their UTXOs are ghost outputs
@@ -458,26 +629,35 @@ impl<'a> TransactionRepository<'a> {
     ///
     /// Returns a list of (txid, list of input txid:vout pairs) for cleanup.
     pub fn get_stale_pending_transactions(&self, max_age_secs: i64) -> Result<Vec<(String, Vec<(String, u32)>)>> {
-        // Check if broadcast_status column exists
-        let column_exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
-            [],
-            |row| Ok(row.get::<_, i64>(0)? > 0),
-        ).unwrap_or(false);
-
-        if !column_exists {
-            return Ok(Vec::new());
-        }
-
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64 - max_age_secs;
 
-        // Get stale pending transaction IDs and their DB IDs
-        let mut stmt = self.conn.prepare(
+        // Prefer new_status column (v15+)
+        let has_new_status: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'new_status'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        ).unwrap_or(false);
+
+        let query = if has_new_status {
+            "SELECT id, txid FROM transactions WHERE new_status = 'unsigned' AND timestamp < ?1"
+        } else {
+            // Fallback to broadcast_status for pre-v15 databases
+            let column_exists: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = 'broadcast_status'",
+                [],
+                |row| Ok(row.get::<_, i64>(0)? > 0),
+            ).unwrap_or(false);
+
+            if !column_exists {
+                return Ok(Vec::new());
+            }
             "SELECT id, txid FROM transactions WHERE broadcast_status = 'pending' AND timestamp < ?1"
-        )?;
+        };
+
+        let mut stmt = self.conn.prepare(query)?;
 
         let rows: Vec<(i64, String)> = stmt.query_map(
             rusqlite::params![cutoff],

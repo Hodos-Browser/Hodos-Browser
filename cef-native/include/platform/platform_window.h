@@ -67,3 +67,4 @@ WorkArea GetWorkArea();
 
 } // namespace Platform
 
+

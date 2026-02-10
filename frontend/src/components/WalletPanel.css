@@ -1002,43 +1002,39 @@
   margin-bottom: 8px;
 }
 
-.send-form-container-light {
+/* Transaction form inside light wallet panel — no double-box */
+.dynamic-content-area-light .transaction-form {
   background: #f9f9f9;
   border: 1px solid #e0e0e0;
   border-radius: 8px;
-  padding: 12px;
-}
-
-.send-form-container-light .transaction-form {
-  background: transparent;
-  padding: 0;
+  padding: 14px;
   margin: 0;
   box-shadow: none;
 }
 
-.send-form-container-light .form-header {
+.dynamic-content-area-light .form-header {
   padding-bottom: 10px;
   margin-bottom: 14px;
 }
 
-.send-form-container-light .form-header h3 {
+.dynamic-content-area-light .form-header h3 {
   font-size: 16px;
 }
 
-.send-form-container-light .form-group {
+.dynamic-content-area-light .form-group {
   margin-bottom: 14px;
 }
 
-.send-form-container-light .form-group label {
+.dynamic-content-area-light .form-group label {
   font-size: 12px;
 }
 
-.send-form-container-light .form-group input {
+.dynamic-content-area-light .form-group input {
   padding: 10px 12px;
   font-size: 14px;
 }
 
-.send-form-container-light .submit-button {
+.dynamic-content-area-light .submit-button {
   padding: 12px 20px;
   font-size: 14px;
 }

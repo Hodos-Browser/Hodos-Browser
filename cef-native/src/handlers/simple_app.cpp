@@ -357,139 +357,86 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
 }
 
 #ifdef _WIN32
-void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance) {
-    std::cout << "🪟 Creating settings overlay with separate process" << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🪟 Creating settings overlay with separate process" << std::endl;
-    debugLog.close();
+void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
+    LOG_INFO_APP("Creating settings overlay with iconRightOffset=" + std::to_string(iconRightOffset));
 
-    // Get main window dimensions for positioning
+    // Store offset globally for WM_SIZE/WM_MOVE repositioning
+    extern int g_settings_icon_right_offset;
+    g_settings_icon_right_offset = iconRightOffset;
+
+    // Get main window and header dimensions for positioning
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
-    int width = mainRect.right - mainRect.left;
-    int height = mainRect.bottom - mainRect.top;
+    extern HWND g_header_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
 
-    // DEBUG: Log the position we're using
-    std::ofstream posLog("debug_output.log", std::ios::app);
-    posLog << "🪟 [DEBUG] Main window g_hwnd position: (" << mainRect.left << ", " << mainRect.top
-           << ") size: " << width << "x" << height << std::endl;
-    posLog << "🪟 [DEBUG] Creating settings overlay at these coordinates" << std::endl;
-    posLog.close();
+    // Right-side popup panel, right edge aligned under the icon
+    int panelWidth = 450;
+    int panelHeight = 450;
+    int overlayX = headerRect.right - iconRightOffset - panelWidth;
+    int overlayY = headerRect.top + 104;
 
-    // Check if overlay already exists
+    // Clamp so panel doesn't extend below or outside main window
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200; // minimum usable height
+    }
+
+    LOG_DEBUG_APP("⚙️ Settings panel position: (" + std::to_string(overlayX) + ", " + std::to_string(overlayY)
+                  + ") size: " + std::to_string(panelWidth) + "x" + std::to_string(panelHeight));
+
+    // Remove existing mouse hook if present
+    extern HHOOK g_settings_mouse_hook;
+    if (g_settings_mouse_hook) {
+        UnhookWindowsHookEx(g_settings_mouse_hook);
+        g_settings_mouse_hook = nullptr;
+    }
+
+    // Check if overlay already exists - destroy old one first
     if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd)) {
-        std::ofstream warnLog("debug_output.log", std::ios::app);
-        warnLog << "🪟 [WARNING] Settings overlay already exists! Destroying old one first." << std::endl;
-        warnLog.close();
+        LOG_DEBUG_APP("⚙️ Settings overlay already exists, destroying old one");
         DestroyWindow(g_settings_overlay_hwnd);
         g_settings_overlay_hwnd = nullptr;
     }
 
     // Create new HWND for settings overlay
-    std::ofstream createLog("debug_output.log", std::ios::app);
-    createLog << "🪟 [DEBUG] About to CreateWindowEx at position: (" << mainRect.left << ", " << mainRect.top << ")" << std::endl;
-    createLog.close();
-
-    // NOTE: CreateWindowEx may ignore position due to Windows caching
-    // We'll force position with SetWindowPos after creation
     HWND settings_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFSettingsOverlayWindow",
         L"Settings Overlay",
-        WS_POPUP,  // Don't use WS_VISIBLE yet
-        mainRect.left, mainRect.top, width, height,
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
         g_hwnd, nullptr, hInstance, nullptr);
 
     if (!settings_hwnd) {
-        std::cout << "❌ Failed to create settings overlay HWND. Error: " << GetLastError() << std::endl;
         LOG_ERROR_APP("❌ Failed to create settings overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
-    // Verify the created window position (may be cached by Windows)
-    RECT createdRect;
-    GetWindowRect(settings_hwnd, &createdRect);
-    std::ofstream verifyLog("debug_output.log", std::ios::app);
-    verifyLog << "✅ Settings overlay HWND created at Windows' position: (" << createdRect.left << ", " << createdRect.top
-              << ") size: " << (createdRect.right - createdRect.left) << "x" << (createdRect.bottom - createdRect.top) << std::endl;
-    verifyLog.close();
-
-    // ALWAYS force position to bypass Windows position caching
-    std::ofstream forceLog("debug_output.log", std::ios::app);
-    forceLog << "🔧 Forcing overlay to correct position: (" << mainRect.left << ", " << mainRect.top << ")" << std::endl;
-    if (createdRect.left != mainRect.left || createdRect.top != mainRect.top) {
-        forceLog << "🔧 Position WAS cached by Windows! Expected: (" << mainRect.left << ", " << mainRect.top
-                 << ") but got: (" << createdRect.left << ", " << createdRect.top << ")" << std::endl;
-    }
-    forceLog.close();
-
-    // Force to correct position and make visible
-    BOOL setResult = SetWindowPos(settings_hwnd, HWND_TOPMOST,
-        mainRect.left, mainRect.top, width, height,
+    // Force position and make visible
+    SetWindowPos(settings_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-    std::ofstream setPosLog("debug_output.log", std::ios::app);
-    setPosLog << "🔧 SetWindowPos returned: " << (setResult ? "SUCCESS" : "FAILED") << std::endl;
-    if (!setResult) {
-        setPosLog << "🔧 SetWindowPos ERROR: " << GetLastError() << std::endl;
-    }
-    setPosLog.close();
-
-    // Force a repaint to ensure it's visible
-    InvalidateRect(settings_hwnd, nullptr, TRUE);
-    UpdateWindow(settings_hwnd);
-
-    // Verify final position AFTER SetWindowPos
-    GetWindowRect(settings_hwnd, &createdRect);
-    std::ofstream finalLog("debug_output.log", std::ios::app);
-    finalLog << "🔧 Final overlay position after SetWindowPos: (" << createdRect.left << ", " << createdRect.top << ")" << std::endl;
-
-    // CRITICAL: Check if SetWindowPos actually worked
-    if (createdRect.left != mainRect.left || createdRect.top != mainRect.top) {
-        finalLog << "❌ CRITICAL: SetWindowPos FAILED! Window is still at wrong position!" << std::endl;
-        finalLog << "❌ We asked for: (" << mainRect.left << ", " << mainRect.top << ")" << std::endl;
-        finalLog << "❌ Window is actually at: (" << createdRect.left << ", " << createdRect.top << ")" << std::endl;
-
-        // Try one more time with different flags
-        SetWindowPos(settings_hwnd, nullptr,
-            mainRect.left, mainRect.top, width, height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-
-        GetWindowRect(settings_hwnd, &createdRect);
-        finalLog << "🔧 After second attempt: (" << createdRect.left << ", " << createdRect.top << ")" << std::endl;
-    } else {
-        finalLog << "✅ SetWindowPos SUCCESS! Window is at correct position." << std::endl;
-    }
-    finalLog.close();
-
-    // Store HWND for shutdown cleanup
     g_settings_overlay_hwnd = settings_hwnd;
-    std::ofstream debugLog3("debug_output.log", std::ios::app);
-    debugLog3 << "✅ Settings overlay HWND created: " << settings_hwnd << std::endl;
-    debugLog3.close();
 
-    // Create new CEF browser with subprocess
+    // Create CEF browser with windowless rendering
     CefWindowInfo window_info;
     window_info.windowless_rendering_enabled = true;
     window_info.SetAsPopup(settings_hwnd, "SettingsOverlay");
 
     CefBrowserSettings settings;
     settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0); // fully transparent
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     settings.javascript = STATE_ENABLED;
     settings.javascript_access_clipboard = STATE_ENABLED;
     settings.javascript_dom_paste = STATE_ENABLED;
 
-    // Note: DevTools is enabled through context menu handler, not browser settings
-
-    // Create new handler for settings overlay
     CefRefPtr<SimpleHandler> settings_handler(new SimpleHandler("settings"));
-
-    // Set render handler for settings overlay (same as wallet overlay)
-    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(settings_hwnd, width, height);
+    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(settings_hwnd, panelWidth, panelHeight);
     settings_handler->SetRenderHandler(render_handler);
 
-    // Create new browser with subprocess
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         settings_handler,
@@ -500,32 +447,32 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance) {
     );
 
     if (result) {
-        std::cout << "✅ Settings overlay browser created with subprocess" << std::endl;
-        std::ofstream debugLog4("debug_output.log", std::ios::app);
-        debugLog4 << "✅ Settings overlay browser created with subprocess" << std::endl;
-        debugLog4.close();
-
-        // Enable mouse input for settings overlay
+        LOG_INFO_APP("✅ Settings overlay browser created");
+        // Enable mouse input
         LONG exStyle = GetWindowLong(settings_hwnd, GWL_EXSTYLE);
         SetWindowLong(settings_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-        std::ofstream debugLog6("debug_output.log", std::ios::app);
-        debugLog6 << "🪟 Mouse input ENABLED for settings overlay HWND: " << settings_hwnd << std::endl;
-        debugLog6.close();
+
+        // Install global mouse hook for click-outside detection
+        extern LRESULT CALLBACK SettingsPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+        g_settings_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, SettingsPanelMouseHookProc, nullptr, 0);
+        if (g_settings_mouse_hook) {
+            LOG_INFO_APP("✅ Settings panel mouse hook installed for click-outside detection");
+        } else {
+            LOG_WARNING_APP("⚠️ Failed to install settings panel mouse hook. Error: " + std::to_string(GetLastError()));
+        }
     } else {
-        std::cout << "❌ Failed to create settings overlay browser" << std::endl;
-        std::ofstream debugLog5("debug_output.log", std::ios::app);
-        debugLog5 << "❌ Failed to create settings overlay browser" << std::endl;
-        debugLog5.close();
+        LOG_ERROR_APP("❌ Failed to create settings overlay browser");
     }
 }
 #endif // _WIN32
 
 #ifdef _WIN32
-void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance) {
-    std::cout << "💰 Creating wallet overlay with separate process" << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "💰 Creating wallet overlay with separate process" << std::endl;
-    debugLog.close();
+void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
+    LOG_INFO_APP("Creating wallet overlay with iconRightOffset=" + std::to_string(iconRightOffset));
+
+    // Store offset globally for repositioning
+    extern int g_wallet_icon_right_offset;
+    g_wallet_icon_right_offset = iconRightOffset;
 
     // Get main window dimensions for positioning
     RECT mainRect;
@@ -615,11 +562,12 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance) {
     CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(wallet_hwnd, width, height);
     wallet_handler->SetRenderHandler(render_handler);
 
-    // Create new browser with subprocess
+    // Create new browser with subprocess (pass icon offset as URL param for CSS positioning)
+    std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         wallet_handler,
-        "http://127.0.0.1:5137/wallet-panel",
+        walletUrl,
         settings,
         nullptr,
         CefRequestContext::GetGlobalContext()
@@ -1100,18 +1048,25 @@ void HideOmniboxOverlay() {
 }
 
 // Forward declarations for cookie panel overlay functions
-void ShowCookiePanelOverlay();
+void ShowCookiePanelOverlay(int iconRightOffset = 0);
 void HideCookiePanelOverlay();
 
-void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
-    LOG_INFO_APP("🍪 Creating cookie panel overlay with keep-alive pattern (showImmediately=" +
-                 std::string(showImmediately ? "true" : "false") + ")");
+void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO_APP("Creating cookie panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconRightOffset=" +
+                 std::to_string(iconRightOffset) + ")");
+
+    // Store offset globally for WM_SIZE/WM_MOVE repositioning
+    extern int g_cookie_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_cookie_icon_right_offset = iconRightOffset;
+    }
 
     // Keep-alive check: if HWND already exists, conditionally show it
     if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd)) {
-        LOG_INFO_APP("🍪 Cookie panel overlay already exists");
+        LOG_INFO_APP("Cookie panel overlay already exists");
         if (showImmediately) {
-            ShowCookiePanelOverlay();
+            ShowCookiePanelOverlay(iconRightOffset);
         }
         return;
     }
@@ -1122,10 +1077,10 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
-    // Calculate position - right side panel (similar to wallet overlay positioning)
-    int panelWidth = 450;  // Wide enough for cookie list and controls
-    int panelHeight = 450;  // Full height
-    int overlayX = mainRect.right - panelWidth;  // Right edge of window
+    // Calculate position - right side panel, right edge aligned under icon
+    int panelWidth = 450;
+    int panelHeight = 450;
+    int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + 104;
 
     LOG_INFO_APP("🍪 Creating cookie panel overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -1211,14 +1166,20 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
     }
 }
 
-void ShowCookiePanelOverlay() {
+void ShowCookiePanelOverlay(int iconRightOffset) {
     // Guard: verify HWND exists
     if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
-        LOG_WARNING_APP("⚠️ Cannot show cookie panel overlay - HWND does not exist");
+        LOG_WARNING_APP("Cannot show cookie panel overlay - HWND does not exist");
         return;
     }
 
-    LOG_INFO_APP("🍪 Showing cookie panel overlay");
+    // Update stored offset if provided
+    extern int g_cookie_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_cookie_icon_right_offset = iconRightOffset;
+    }
+
+    LOG_INFO_APP("Showing cookie panel overlay with iconRightOffset=" + std::to_string(g_cookie_icon_right_offset));
 
     // Install global mouse hook for click-outside detection
     extern HHOOK g_cookie_panel_mouse_hook;
@@ -1226,21 +1187,19 @@ void ShowCookiePanelOverlay() {
     if (!g_cookie_panel_mouse_hook) {
         g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
         if (g_cookie_panel_mouse_hook) {
-            LOG_INFO_APP("✅ Cookie panel mouse hook installed for click-outside detection");
+            LOG_INFO_APP("Cookie panel mouse hook installed");
         } else {
-            LOG_WARNING_APP("⚠️ Failed to install cookie panel mouse hook. Error: " + std::to_string(GetLastError()));
+            LOG_WARNING_APP("Failed to install cookie panel mouse hook. Error: " + std::to_string(GetLastError()));
         }
     }
 
-    RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
-    // Calculate position - right side panel (similar to wallet overlay positioning)
-    int panelWidth = 450;  // Wide enough for cookie list and controls
-    int panelHeight = 450;  // Full height
-    int overlayX = mainRect.right - panelWidth;  // Right edge of window
+    // Calculate position - right edge aligned under icon
+    int panelWidth = 450;
+    int panelHeight = 450;
+    int overlayX = headerRect.right - g_cookie_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
 
     // Force position and show with SWP_NOACTIVATE

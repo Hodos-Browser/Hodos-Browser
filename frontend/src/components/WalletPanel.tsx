@@ -13,7 +13,7 @@ interface WalletPanelProps {
 }
 
 export default function WalletPanel({ onClose }: WalletPanelProps) {
-  const { balance, usdValue, isLoading: balanceLoading, refreshBalance } = useBalance();
+  const { balance, usdValue, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -128,22 +128,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           <button
             className="refresh-button-light"
             onClick={refreshBalance}
-            disabled={balanceLoading}
+            disabled={isRefreshing}
             title="Refresh balance"
           >
-            {balanceLoading ? '...' : 'Refresh'}
+            {isRefreshing ? 'Refreshing...' : 'Refresh'}
           </button>
         </div>
         <div className="balance-content-light">
           <div className="balance-primary-light">
             <span className="balance-amount-light">
-              ${balanceLoading ? '...' : usdValue.toFixed(2)}
+              {isLoading ? '...' : `$${usdValue.toFixed(2)}`}
             </span>
             <span className="balance-currency-light">USD</span>
           </div>
           <div className="balance-secondary-light">
             <span className="balance-usd-light">
-              {balanceLoading ? '...' : (balance / 100000000).toFixed(8)} BSV
+              {isLoading ? '...' : (balance / 100000000).toFixed(8)} BSV
             </span>
           </div>
         </div>
@@ -169,12 +169,10 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       {/* Dynamic Content Area */}
       <div className="dynamic-content-area-light">
         {showSendForm && (
-          <div className="send-form-container-light">
-            <TransactionForm
-              onTransactionCreated={handleSendSubmit}
-              balance={balance}
-            />
-          </div>
+          <TransactionForm
+            onTransactionCreated={handleSendSubmit}
+            balance={balance}
+          />
         )}
 
         {showReceiveAddress && (

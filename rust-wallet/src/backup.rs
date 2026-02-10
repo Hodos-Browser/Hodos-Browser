@@ -212,7 +212,7 @@ pub fn verify_backup(backup_path: &Path) -> Result<bool> {
 /// * `Ok(())` if export succeeded
 /// * `Err` if export failed
 pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
-    use crate::database::{AddressRepository, TransactionRepository, UtxoRepository, Address};
+    use crate::database::{AddressRepository, TransactionRepository, OutputRepository, Address};
     use serde_json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -234,7 +234,7 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
     let wallet_repo = WalletRepository::new(conn);
     let address_repo = AddressRepository::new(conn);
     let transaction_repo = TransactionRepository::new(conn);
-    let utxo_repo = UtxoRepository::new(conn);
+    let output_repo = OutputRepository::new(conn);
 
     // Get wallet ID first
     let wallet = wallet_repo.get_primary_wallet()
@@ -318,36 +318,35 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
         })
         .collect();
 
-    // Get all UTXOs for all addresses in the wallet
-    let address_ids: Vec<i64> = addresses.iter()
-        .filter_map(|addr| addr.id)
+    // Get all outputs for the user (user_id = 1 for single-user wallet)
+    const DEFAULT_USER_ID: i64 = 1;
+    let outputs = output_repo.get_all_by_user(DEFAULT_USER_ID)
+        .map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!("Failed to get outputs: {}", e))
+        ))?;
+
+    // Create a map of derivation_suffix -> address for quick lookup
+    // Derivation suffix corresponds to address index for regular addresses
+    let address_map: std::collections::HashMap<String, &Address> = addresses.iter()
+        .map(|addr| (addr.index.to_string(), addr))
         .collect();
 
-    let utxos = if address_ids.is_empty() {
-        Vec::new()
-    } else {
-        utxo_repo.get_unspent_by_addresses(&address_ids)
-            .map_err(|e| rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
-                Some(format!("Failed to get UTXOs: {}", e))
-            ))?
-    };
-
-    // Create a map of address_id -> address for quick lookup
-    let address_map: std::collections::HashMap<i64, &Address> = addresses.iter()
-        .filter_map(|addr| addr.id.map(|id| (id, addr)))
-        .collect();
-
-    // Get addresses for UTXO export
-    let utxo_exports: Vec<UtxoExport> = utxos.iter()
-        .filter_map(|utxo| {
-            // Get address for this UTXO
-            utxo.address_id.and_then(|aid| address_map.get(&aid)).map(|addr| UtxoExport {
-                txid: utxo.txid.clone(),
-                vout: utxo.vout,
-                address: addr.address.clone(),
-                amount: utxo.satoshis,
-                is_spent: utxo.is_spent,
+    // Get addresses for output export
+    let utxo_exports: Vec<UtxoExport> = outputs.iter()
+        .filter_map(|output| {
+            let txid = output.txid.as_ref()?;
+            // Get address from derivation suffix
+            let address_str = output.derivation_suffix.as_ref()
+                .and_then(|suffix| address_map.get(suffix))
+                .map(|addr| addr.address.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(UtxoExport {
+                txid: txid.clone(),
+                vout: output.vout,
+                address: address_str,
+                amount: output.satoshis,
+                is_spent: !output.spendable, // spendable=true means not spent
             })
         })
         .collect();

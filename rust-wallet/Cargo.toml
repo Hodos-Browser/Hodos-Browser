@@ -55,3 +55,6 @@ regex = "1"
 
 # Database (SQLite)
 rusqlite = { version = "0.30", features = ["bundled"] }
+
+# Async utilities (CancellationToken for graceful shutdown)
+tokio-util = "0.7"

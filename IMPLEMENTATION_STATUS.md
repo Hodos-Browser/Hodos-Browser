@@ -645,4 +645,279 @@ The `/.well-known/auth` endpoint (BRC-103/104) now returns **app-scoped identity
 
 ---
 
-**Last Updated**: January 5, 2025
+**Last Updated**: February 9, 2026
+
+---
+
+## State Maintenance & Reconciliation — Wallet-Toolbox Alignment
+
+**Branch**: wallet-toolbox-alignment
+**Plan**: `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md`
+**Goal**: Align wallet database schema with BSV SDK wallet-toolbox for future interoperability
+
+### Phase 1: Status Consolidation — COMPLETED (2026-02-03)
+
+**Migration V15** — Replaced dual status system (`status` + `broadcast_status`) with single `new_status` column matching SDK `TransactionStatus` values.
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/action_storage.rs` | Added `TransactionStatus` enum |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v15()` |
+| `rust-wallet/src/database/connection.rs` | Added V15 migration runner |
+| `rust-wallet/src/database/transaction_repo.rs` | Read/write `new_status`, `update_broadcast_status()` maps to new values |
+| `rust-wallet/src/database/utxo_repo.rs` | Updated balance/UTXO queries to filter on `new_status` |
+| `rust-wallet/src/handlers.rs` | Status transitions use `new_status` |
+| `rust-wallet/src/arc_status_poller.rs` | Query `WHERE new_status IN ('sending', 'unproven')` |
+| `rust-wallet/src/main.rs` | Startup cleanup uses `new_status` |
+
+### Phase 2: Proven Transaction Model — COMPLETED (2026-02-04)
+
+**Migration V16** — Added `proven_txs` (immutable proof records) and `proven_tx_reqs` (proof lifecycle tracking). Migrated existing `merkle_proofs` data. All proof reads/writes now use `proven_txs`.
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/proven_tx_repo.rs` | `ProvenTxRepository` — immutable proof record CRUD |
+| `rust-wallet/src/database/proven_tx_req_repo.rs` | `ProvenTxReqRepository` — proof lifecycle tracking |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `ProvenTx`, `ProvenTxReq` structs |
+| `rust-wallet/src/database/mod.rs` | Export new modules |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v16()` with data migration |
+| `rust-wallet/src/database/connection.rs` | Added V16 migration runner |
+| `rust-wallet/src/action_storage.rs` | Added `ProvenTxReqStatus` enum |
+| `rust-wallet/src/arc_status_poller.rs` | Create `proven_txs` on MINED, early reconciliation check |
+| `rust-wallet/src/cache_sync.rs` | Write to `proven_txs`, update tx/req status |
+| `rust-wallet/src/beef_helpers.rs` | Read proofs from `proven_txs` |
+| `rust-wallet/src/handlers.rs` | Rewrite `cache_arc_merkle_proof()`, create `proven_tx_req` on broadcast |
+
+#### Bug Fixed
+
+Race condition between `cache_sync` and `arc_status_poller`: when `cache_sync` created a proof before ARC poller ran, transaction status wasn't updated. Fixed by adding status updates to `cache_sync` and early reconciliation check to ARC poller.
+
+### Phase 3: Multi-User Foundation — COMPLETED (2026-02-05)
+
+**Migration V17** — Added `users` table and `user_id` foreign keys to core tables. Creates default user from wallet's master public key.
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/user_repo.rs` | `UserRepository` — user identity management |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `User` struct |
+| `rust-wallet/src/database/mod.rs` | Export `user_repo`, `User`, `UserRepository` |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v17()` — creates users table, adds user_id to 5 tables |
+| `rust-wallet/src/database/connection.rs` | Added V17 migration runner |
+| `rust-wallet/src/main.rs` | Added `current_user_id` to `AppState` |
+
+### Phase 4: Output Model Transition — COMPLETED (2026-02-06)
+
+**Migration V18** — Created `outputs` table replacing `utxos` with wallet-toolbox compatible schema. Migrated existing UTXO data with derivation info.
+
+#### Sub-phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 4A | Schema + data migration | ✅ |
+| 4B | Read path + comparison logging | ✅ |
+| 4C | Dual-write to both tables | ✅ |
+| 4D | Cutover to outputs table | ✅ |
+| 4E | Cleanup deprecated utxos code | ✅ |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/output_repo.rs` | `OutputRepository` — wallet-toolbox compatible output CRUD |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `Output` struct, removed `Utxo` |
+| `rust-wallet/src/database/mod.rs` | Export `output_repo`, `Output`, `OutputRepository`; removed `utxo_repo` |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v18()` with data migration |
+| `rust-wallet/src/database/connection.rs` | Added V18 migration runner |
+| `rust-wallet/src/database/helpers.rs` | Added `output_to_fetcher_utxo()` adapter |
+| `rust-wallet/src/handlers.rs` | Switched all UTXO operations to `OutputRepository` |
+| `rust-wallet/src/utxo_sync.rs` | Switched to `OutputRepository` |
+| `rust-wallet/src/backup.rs` | Switched to `OutputRepository` |
+
+#### Files Deleted
+
+| File | Reason |
+|------|--------|
+| `rust-wallet/src/database/utxo_repo.rs` | Replaced by `output_repo.rs` |
+
+### Phase 5: Labels, Commissions, Supporting Tables — COMPLETED (2026-02-07)
+
+**Migration V19** — Restructured transaction labels to normalized form (`tx_labels` + `tx_labels_map`). Added supporting tables for future features.
+
+#### Tables Created
+
+| Table | Purpose |
+|-------|---------|
+| `tx_labels` | Deduplicated label entities per user |
+| `tx_labels_map` | Many-to-many junction between labels and transactions |
+| `commissions` | Fee tracking per transaction (future use) |
+| `settings` | Persistent wallet configuration (future use) |
+| `sync_states` | Multi-device sync state (future use) |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/database/tx_label_repo.rs` | `TxLabelRepository` — label CRUD with normalization |
+| `rust-wallet/src/database/commission_repo.rs` | `CommissionRepository` — commission tracking |
+| `rust-wallet/src/database/settings_repo.rs` | `SettingsRepository` — wallet settings |
+| `rust-wallet/src/database/sync_state_repo.rs` | `SyncStateRepository` — sync state tracking |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/database/models.rs` | Added `TxLabel`, `TxLabelMap`, `Commission`, `Setting`, `SyncState` |
+| `rust-wallet/src/database/mod.rs` | Export new modules and types |
+| `rust-wallet/src/database/migrations.rs` | Added `create_schema_v19()` with label data migration |
+| `rust-wallet/src/database/connection.rs` | Added V19 migration runner |
+| `rust-wallet/src/database/tag_repo.rs` | Updated label reads to use new tables with fallback |
+| `rust-wallet/src/database/transaction_repo.rs` | Updated label reads to use new tables with fallback |
+
+#### Migration Results
+
+- 130 old labels → 6 unique labels (deduplicated)
+- 128 transaction-label mappings preserved
+- 2 empty labels skipped
+
+### Phase 6: Monitor Pattern — COMPLETED (2026-02-07)
+
+**Migrations V20-V22** — Replaced ad-hoc background services (arc_status_poller, cache_sync, utxo_sync) with a structured Monitor pattern. Added on-demand UTXO sync endpoint with reconciliation. Added broadcast retry with error classification.
+
+#### Sub-phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 6A | Migration V20 (monitor_events table) + Monitor module skeleton | Done |
+| 6B | TaskCheckForProofs (replaces arc_status_poller + cache_sync) | Done |
+| 6C | TaskFailAbandoned + TaskUnFail + TaskReviewStatus | Done |
+| 6D | TaskSendWaiting (crash recovery for stuck `sending` txs) | Done |
+| 6E | TaskPurge (cleanup old events + completed proof requests) | Done |
+| 6F | Broadcast retry with error classification (3 attempts/broadcaster, exponential backoff) | Done |
+| 6G | POST /wallet/sync endpoint + 10-day pending address expiry (was 24h) | Done |
+| 6H | Balance cache invalidation on all output-modifying operations | Done |
+| 6I | Old services deprecated, Monitor is sole background scheduler | Done |
+
+#### Files Created
+
+| File | Purpose |
+|------|---------|
+| `rust-wallet/src/monitor/mod.rs` | Monitor scheduler (30s tick loop, 6 tasks, event logging) |
+| `rust-wallet/src/monitor/task_check_for_proofs.rs` | ARC + WoC proof acquisition with orphan mempool handling |
+| `rust-wallet/src/monitor/task_send_waiting.rs` | Crash recovery with output state verification |
+| `rust-wallet/src/monitor/task_fail_abandoned.rs` | Abandoned tx cleanup with ghost output deletion |
+| `rust-wallet/src/monitor/task_unfail.rs` | False failure recovery (30-min window, on-chain check) |
+| `rust-wallet/src/monitor/task_review_status.rs` | Status consistency enforcement |
+| `rust-wallet/src/monitor/task_purge.rs` | Old data cleanup (7d events, 30d proof requests) |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/main.rs` | Start Monitor, register `/wallet/sync` route, deprecate old services |
+| `rust-wallet/src/handlers.rs` | Broadcast retry with error classification, `wallet_sync` endpoint with UTXO reconciliation, ARC txid verification, `is_fatal_broadcast_error()` |
+| `rust-wallet/src/handlers/certificate_handlers.rs` | Added balance cache invalidation |
+| `rust-wallet/src/database/migrations.rs` | V20 (monitor_events), V21 (patch proven_txs height), V22 (fix array BLOBs) |
+| `rust-wallet/src/database/connection.rs` | V20-V22 migration runners |
+| `rust-wallet/src/database/proven_tx_repo.rs` | Array normalization in `get_merkle_proof_as_tsc()`, height injection from column |
+| `rust-wallet/src/database/transaction_repo.rs` | FK constraint fix in `update_txid()` (detach outputs before DELETE) |
+
+#### Bug Fixes During Testing
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| "Missing height in TSC proof" | WoC stores TSC proofs without `height` field | V21 patches BLOBs; runtime injects from column |
+| Array-format BLOBs | WoC returns `[{...}]`, `as_object_mut()` silently fails on arrays | V22 normalizes arrays; runtime handles both formats |
+| FK constraint in update_txid | Step 3 linked outputs to transaction_id, broke DELETE in update_txid | Detach outputs before DELETE, re-link after INSERT |
+| ARC txid mismatch | Broken BEEF (missing BUMPs) caused ARC to return parent txid | Fixed BUMP building; added mismatch warning logging |
+| SEEN_IN_ORPHAN_MEMPOOL | Treated same as normal mempool status | Fail immediately (like wallet-toolbox), TaskUnFail recovers with 6h window |
+| Missing UTXO reconciliation | Phase 6I removed utxo_sync but wallet_sync lacked reconciliation | Added `reconcile_for_derivation()` to wallet_sync handler |
+| Inflated balance (ghost outputs) | Outputs spent on-chain but still marked spendable in DB | Reconciliation detects and marks externally-spent outputs |
+
+### Phase 7: Per-Output Key Derivation — COMPLETED (2026-02-09)
+
+Simplified signing path to derive keys directly from output fields. Migration V23.
+
+| Sub-phase | Change | Status |
+|-----------|--------|--------|
+| 7A | Migration V23 — re-tag legacy BIP32 outputs with `derivation_prefix = "bip32"` | Done |
+| 7B | New `derive_key_for_output()` — direct derivation from prefix/suffix/sender | Done |
+| 7C | Cutover `signAction` + `create_certificate_transaction` to `derive_key_for_output()` | Done |
+| 7D | Moved BIP32 to `recovery.rs`, deleted ~270 lines dead code from `helpers.rs` | Done |
+
+**Additional fixes**: confirmed UTXO selection (NULL `transaction_id`), balance cache stale fallback + startup seed, TaskSyncPending (30s periodic UTXO sync), SEEN_IN_ORPHAN_MEMPOOL handling (fail immediately, TaskUnFail 6h recovery window with raw_tx input re-marking).
+
+### Phase 8: Cleanup — COMPLETED (2026-02-09)
+
+Removed deprecated code and tables, fixed schema issues, added graceful shutdown.
+
+| Sub-phase | Description | Status |
+|-----------|-------------|--------|
+| 8A | Deleted 6 deprecated modules (~2500 lines): `arc_status_poller`, `cache_sync`, `utxo_sync`, `beef_ancestors`, `utxo_validation`, `merkle_proof_repo` | Done |
+| 8B | Removed `transaction_labels` fallback reads from `get_by_txid()` and `tag_repo` | Done |
+| 8C | Migration V24 — dropped `merkle_proofs`, `domain_whitelist`, `transaction_labels`; rebuilt `output_tag_map` with correct FK to `outputs(outputId)`; cleaned up nosend txs >48h | Done |
+| 8D | Graceful shutdown (`CancellationToken` + `tokio::select!`) + DB lock contention fix (Monitor uses `try_lock()` canary before each tick, skips if DB busy) | Done |
+
+#### Files Deleted (8A)
+
+| File | Lines | Replaced By |
+|------|-------|-------------|
+| `src/arc_status_poller.rs` | ~800 | `monitor/task_check_for_proofs.rs` |
+| `src/cache_sync.rs` | ~700 | `monitor/task_check_for_proofs.rs` |
+| `src/utxo_sync.rs` | ~1000 | `wallet_sync` handler + `monitor/task_sync_pending.rs` |
+| `src/beef_ancestors.rs` | ~50 | Was already commented out |
+| `src/utxo_validation.rs` | ~50 | Was already commented out |
+| `src/database/merkle_proof_repo.rs` | ~80 | `proven_tx_repo.rs` |
+
+#### Migration V24 (8C)
+
+- `DROP TABLE merkle_proofs` — replaced by `proven_txs` in V16
+- `DROP TABLE domain_whitelist` — JSON file used instead
+- `DROP TABLE transaction_labels` — data migrated to `tx_labels`/`tx_labels_map` in V19
+- Rebuilt `output_tag_map` with correct FK referencing `outputs(outputId)` instead of `utxos(id)`
+- Cleaned up orphaned nosend transactions older than 48 hours
+
+#### Phase 8D Details
+
+- Added `tokio-util` dependency for `CancellationToken`
+- Added `shutdown` field to `AppState`
+- Ctrl+C signal handler cancels token → Monitor loop exits cleanly → HTTP server stops gracefully
+- Monitor `try_lock()` canary: checks DB availability before each tick — if user HTTP request holds lock, entire tick is skipped
+- `log_event()` / `log_monitor_event()` changed from `.lock()` to `.try_lock()` — silently skip if DB busy
+
+#### Bug Fix: TaskReviewStatus external-spend conflict
+
+TaskReviewStatus Section 2 was re-enabling outputs that `/wallet/sync` correctly marked as externally spent. Root cause: externally-spent outputs have `spent_by = NULL` (unknown spending tx), which matched the "fix to spendable" condition. Fixed by excluding `spending_description = 'external-spend'` from the query.
+
+### State Maintenance & Reconciliation — COMPLETE
+
+All 8 phases of the wallet-toolbox alignment transition plan are complete. The plan document at `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` can be archived.
+
+### Known Issues / Future Work
+
+- **Frontend sync button**: `POST /wallet/sync` endpoint exists but frontend UI trigger not yet implemented
+- **Frontend balance polling**: `useBalance.ts` has polling commented out — re-enable in frontend phase
+- **Broadcast timeout wrapping**: Retry logic can block 30+ seconds, needs async timeout or cancellation
+- **utxos table migration**: ~10 live code references remain in handlers.rs, cache_helpers.rs — deferred
+- **Recovery sprint**: `recover_wallet_from_mnemonic` needs update for outputs-based model
+- **Key linkage methods**: `revealCounterpartyKeyLinkage` and `revealSpecificKeyLinkage` not yet implemented (low priority)

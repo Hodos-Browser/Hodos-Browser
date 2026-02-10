@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod certificate;
 pub mod database;
 pub mod transaction;
+pub mod recovery;
 pub mod action_storage;
 pub mod json_storage;
 pub mod cache_errors;

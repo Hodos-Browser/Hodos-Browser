@@ -59,6 +59,16 @@ HWND g_cookie_panel_overlay_hwnd = nullptr;
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
+HHOOK g_settings_mouse_hook = nullptr;
+
+// Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
+// (physical pixel distance from icon's right edge to header's right edge)
+int g_settings_icon_right_offset = 0;
+int g_cookie_icon_right_offset = 0;
+int g_wallet_icon_right_offset = 0;
+
+// Fullscreen state tracking
+bool g_is_fullscreen = false;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -79,6 +89,81 @@ HHOOK g_cookie_panel_mouse_hook = nullptr;
 // Legacy DebugLog function for backward compatibility
 void DebugLog(const std::string& message) {
     LOG_INFO(message);
+}
+
+// Handle fullscreen mode transitions (called from SimpleHandler::OnFullscreenModeChange)
+void HandleFullscreenChange(bool fullscreen) {
+    g_is_fullscreen = fullscreen;
+
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+
+    RECT rect;
+    GetClientRect(g_hwnd, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+
+    if (fullscreen) {
+        LOG_DEBUG("🖥️ Entering fullscreen — hiding header, expanding tabs");
+        // Hide header
+        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
+            ShowWindow(g_header_hwnd, SW_HIDE);
+        }
+        // Expand all tab windows to fill entire client area
+        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+        for (Tab* tab : tabs) {
+            if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                SetWindowPos(tab->hwnd, nullptr, 0, 0, width, height,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                if (tab->browser) {
+                    HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
+                    if (cef_hwnd && IsWindow(cef_hwnd)) {
+                        SetWindowPos(cef_hwnd, nullptr, 0, 0, width, height,
+                                    SWP_NOZORDER | SWP_NOACTIVATE);
+                        tab->browser->GetHost()->WasResized();
+                    }
+                }
+            }
+        }
+    } else {
+        LOG_DEBUG("🖥️ Exiting fullscreen — restoring header and tab layout");
+        // Show header
+        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
+            ShowWindow(g_header_hwnd, SW_SHOW);
+        }
+        // Restore normal layout (same as WM_SIZE)
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+        int webviewHeight = height - shellHeight;
+
+        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
+            SetWindowPos(g_header_hwnd, nullptr, 0, 0, width, shellHeight,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+            CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+            if (header_browser) {
+                HWND header_cef_hwnd = header_browser->GetHost()->GetWindowHandle();
+                if (header_cef_hwnd && IsWindow(header_cef_hwnd)) {
+                    SetWindowPos(header_cef_hwnd, nullptr, 0, 0, width, shellHeight,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+                    header_browser->GetHost()->WasResized();
+                }
+            }
+        }
+        // Restore all tab windows below header
+        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+        for (Tab* tab : tabs) {
+            if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                if (tab->browser) {
+                    HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
+                    if (cef_hwnd && IsWindow(cef_hwnd)) {
+                        SetWindowPos(cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                                    SWP_NOZORDER | SWP_NOACTIVATE);
+                        tab->browser->GetHost()->WasResized();
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Graceful shutdown function
@@ -131,6 +216,11 @@ void ShutdownApplication() {
 
     // Step 2: Destroy overlay windows
     LOG_INFO("🔄 Destroying overlay windows...");
+    if (g_settings_mouse_hook) {
+        UnhookWindowsHookEx(g_settings_mouse_hook);
+        g_settings_mouse_hook = nullptr;
+        LOG_INFO("🔄 Settings mouse hook removed during shutdown");
+    }
     if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd)) {
         LOG_INFO("🔄 Destroying settings overlay window...");
         DestroyWindow(g_settings_overlay_hwnd);
@@ -218,12 +308,34 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             LOG_DEBUG("🔄 Main window moved to: " + std::to_string(mainRect.left) + ", " + std::to_string(mainRect.top));
 
-            // Move settings overlay if it exists and is visible
+            // Move settings overlay if it exists and is visible (right-side popup)
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
+                RECT headerRect;
+                GetWindowRect(g_header_hwnd, &headerRect);
+                int panelWidth = 450;
+                int panelHeight = 450;
+                int overlayX = headerRect.right - g_settings_icon_right_offset - panelWidth;
+                int overlayY = headerRect.top + 104;
+                if (overlayY + panelHeight > mainRect.bottom) {
+                    panelHeight = mainRect.bottom - overlayY;
+                    if (panelHeight < 200) panelHeight = 200;
+                }
                 SetWindowPos(g_settings_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    overlayX, overlayY, panelWidth, panelHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                LOG_DEBUG("🔄 Moved settings overlay to match main window");
+            }
+
+            // Move cookie panel overlay if it exists and is visible (right-side popup)
+            if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int cpWidth = 450;
+                int cpHeight = 450;
+                int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
+                int cpY = hdrRect.top + 104;
+                SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
+                    cpX, cpY, cpWidth, cpHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
             // Move wallet overlay if it exists and is visible
@@ -231,7 +343,6 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     mainRect.left, mainRect.top, width, height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                LOG_DEBUG("🔄 Moved wallet overlay to match main window");
             }
 
             // Move backup overlay if it exists and is visible
@@ -267,6 +378,27 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetClientRect(hwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
+
+            // If in fullscreen mode, keep tabs filling entire window
+            if (g_is_fullscreen) {
+                std::vector<Tab*> fsTabs = TabManager::GetInstance().GetAllTabs();
+                for (Tab* tab : fsTabs) {
+                    if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                        SetWindowPos(tab->hwnd, nullptr, 0, 0, width, height,
+                                    SWP_NOZORDER | SWP_NOACTIVATE);
+                        if (tab->browser) {
+                            HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
+                            if (cef_hwnd && IsWindow(cef_hwnd)) {
+                                SetWindowPos(cef_hwnd, nullptr, 0, 0, width, height,
+                                            SWP_NOZORDER | SWP_NOACTIVATE);
+                                tab->browser->GetHost()->WasResized();
+                            }
+                        }
+                    }
+                }
+                return 0;
+            }
+
             // Header: 12% of parent height, minimum 100px (for tab bar 40px + toolbar 52px)
             int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
             int webviewHeight = height - shellHeight;
@@ -332,18 +464,44 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             RECT mainRect;
             GetWindowRect(hwnd, &mainRect);
 
-            // Resize settings overlay
+            // Reposition settings panel (right-side popup, right edge under icon)
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
+                RECT headerRect;
+                GetWindowRect(g_header_hwnd, &headerRect);
+                int panelWidth = 450;
+                int panelHeight = 450;
+                int overlayX = headerRect.right - g_settings_icon_right_offset - panelWidth;
+                int overlayY = headerRect.top + 104;
+                if (overlayY + panelHeight > mainRect.bottom) {
+                    panelHeight = mainRect.bottom - overlayY;
+                    if (panelHeight < 200) panelHeight = 200;
+                }
                 SetWindowPos(g_settings_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    overlayX, overlayY, panelWidth, panelHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-                // Notify CEF browser of resize
                 CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
                 if (settings_browser) {
                     settings_browser->GetHost()->WasResized();
                 }
-                LOG_DEBUG("🔄 Resized settings overlay to match main window");
+            }
+
+            // Reposition cookie panel (right-side popup, right edge under icon)
+            if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int cpWidth = 450;
+                int cpHeight = 450;
+                int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
+                int cpY = hdrRect.top + 104;
+                SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
+                    cpX, cpY, cpWidth, cpHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+                CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+                if (cookie_browser) {
+                    cookie_browser->GetHost()->WasResized();
+                }
             }
 
             // Resize wallet overlay
@@ -352,12 +510,10 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     mainRect.left, mainRect.top, width, height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-                // Notify CEF browser of resize
                 CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
                 if (wallet_browser) {
                     wallet_browser->GetHost()->WasResized();
                 }
-                LOG_DEBUG("🔄 Resized wallet overlay to match main window");
             }
 
             // Resize backup overlay
@@ -445,148 +601,72 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_MOUSEACTIVATE:
-            LOG_INFO("👆 Settings Overlay HWND received WM_MOUSEACTIVATE");
-            // Allow normal activation without forcing z-order
-            return MA_ACTIVATE;
+            // Prevent focus theft - matches cookie panel pattern
+            return MA_NOACTIVATE;
+
+        case WM_SETCURSOR: {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+
+        case WM_MOUSEMOVE: {
+            // Forward mouse moves to CEF for hover states
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
+            if (settings_browser) {
+                settings_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
 
         case WM_LBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Settings Overlay received WM_LBUTTONDOWN");
-            SetFocus(hwnd);
-
+            SetCapture(hwnd);  // Capture mouse so we get WM_LBUTTONUP
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            // Translate to CEF MouseEvent
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
             mouse_event.modifiers = 0;
 
-            // Find the settings browser
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
             if (settings_browser) {
-                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);  // mouse down
-                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);   // mouse up
-                LOG_DEBUG("🧠 Left-click sent to settings overlay browser");
-            } else {
-                LOG_WARNING("⚠️ No settings overlay browser to send left-click");
+                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
             }
-
             return 0;
         }
 
-        case WM_RBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Settings Overlay received WM_RBUTTONDOWN");
-            SetFocus(hwnd);
-
+        case WM_LBUTTONUP: {
+            ReleaseCapture();
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            // Translate to CEF MouseEvent
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
             mouse_event.modifiers = 0;
 
-            // Find the settings browser
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
             if (settings_browser) {
-                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);  // mouse down
-                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);   // mouse up
-                LOG_DEBUG("🧠 Right-click sent to settings overlay browser");
-            } else {
-                LOG_WARNING("⚠️ No settings overlay browser to send right-click");
+                settings_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
             }
-
             return 0;
         }
 
-        case WM_KEYDOWN: {
-            LOG_DEBUG("⌨️ Settings Overlay received WM_KEYDOWN - key: " + std::to_string(wParam));
-            SetFocus(hwnd);
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
-            // Find the settings browser
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
             if (settings_browser) {
-                // Create CEF key event
-                CefKeyEvent key_event;
-                key_event.type = KEYEVENT_KEYDOWN;
-                key_event.windows_key_code = wParam;
-                key_event.native_key_code = lParam;
-                key_event.is_system_key = false;
-
-                // Check for modifier keys
-                int modifiers = 0;
-                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
-                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
-                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
-                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
-                key_event.modifiers = modifiers;
-
-                settings_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Key down sent to settings overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_WARNING("⚠️ No settings overlay browser to send key down");
+                settings_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
             }
-
-            return 0;
-        }
-
-        case WM_KEYUP: {
-            LOG_DEBUG("⌨️ Settings Overlay received WM_KEYUP - key: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
-            // Find the settings browser
-            CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
-            if (settings_browser) {
-                // Create CEF key event
-                CefKeyEvent key_event;
-                key_event.type = KEYEVENT_KEYUP;
-                key_event.windows_key_code = wParam;
-                key_event.native_key_code = lParam;
-                key_event.is_system_key = false;
-
-                // Check for modifier keys
-                int modifiers = 0;
-                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
-                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
-                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
-                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
-                key_event.modifiers = modifiers;
-
-                settings_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Key up sent to settings overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_WARNING("⚠️ No settings overlay browser to send key up");
-            }
-
-            return 0;
-        }
-
-        case WM_CHAR: {
-            LOG_DEBUG("⌨️ Settings Overlay received WM_CHAR - char: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
-            // Find the settings browser
-            CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
-            if (settings_browser) {
-                // Create CEF key event
-                CefKeyEvent key_event;
-                key_event.type = KEYEVENT_CHAR;
-                key_event.windows_key_code = wParam;
-                key_event.native_key_code = lParam;
-                key_event.is_system_key = false;
-
-                // Check for modifier keys
-                int modifiers = 0;
-                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
-                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
-                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
-                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
-                key_event.modifiers = modifiers;
-
-                settings_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Char sent to settings overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_WARNING("⚠️ No settings overlay browser to send char");
-            }
-
             return 0;
         }
 
@@ -596,16 +676,9 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
 
         case WM_DESTROY:
-            LOG_INFO("❌ Settings Overlay received WM_DESTROY - cleaning up");
-            // Clean up any resources if needed
             return 0;
 
-        case WM_ACTIVATE:
-            LOG_DEBUG("⚡ Settings HWND activated with state: " + std::to_string(LOWORD(wParam)));
-            break;
-
         case WM_WINDOWPOSCHANGING:
-            // Allow normal z-order changes for better window management
             break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -1030,6 +1103,38 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// Settings Panel Mouse Hook for click-outside detection
+LRESULT CALLBACK SettingsPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+
+                RECT overlayRect;
+                GetWindowRect(g_settings_overlay_hwnd, &overlayRect);
+
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside settings panel - closing");
+                    // Close the browser and destroy window
+                    CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
+                    if (settings_browser) {
+                        settings_browser->GetHost()->CloseBrowser(false);
+                    }
+                    // Remove hook before destroying
+                    if (g_settings_mouse_hook) {
+                        UnhookWindowsHookEx(g_settings_mouse_hook);
+                        g_settings_mouse_hook = nullptr;
+                    }
+                    DestroyWindow(g_settings_overlay_hwnd);
+                    g_settings_overlay_hwnd = nullptr;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_settings_mouse_hook, nCode, wParam, lParam);
 }
 
 // Cookie Panel Mouse Hook for click-outside detection

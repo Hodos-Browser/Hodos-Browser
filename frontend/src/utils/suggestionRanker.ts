@@ -94,6 +94,17 @@ export function getAutocompleteSuggestion(
     if (urlWithoutProtocol.toLowerCase().startsWith(queryLower)) {
       return urlWithoutProtocol;
     }
+    // Try hostname suffixes for subdomains (e.g. "mail.google.com" → try "google.com")
+    try {
+      const hostname = new URL(top.url).hostname.replace(/^www\./, '');
+      const parts = hostname.split('.');
+      for (let i = 1; i < parts.length - 1; i++) {
+        const suffix = parts.slice(i).join('.');
+        if (suffix.toLowerCase().startsWith(queryLower)) {
+          return urlWithoutProtocol;
+        }
+      }
+    } catch { /* ignore parse errors */ }
     // Try title
     if (top.title.toLowerCase().startsWith(queryLower)) {
       return top.title;

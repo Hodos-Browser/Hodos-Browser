@@ -4,7 +4,7 @@
 //! for listOutputs when include='entire transactions' is requested.
 
 use crate::beef::{Beef, ParsedTransaction};
-use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository, MerkleProofRepository, BlockHeaderRepository};
+use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository, ProvenTxRepository, BlockHeaderRepository};
 use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api, enhance_tsc_with_height};
 use reqwest::Client;
 use std::sync::Mutex;
@@ -214,14 +214,15 @@ pub async fn build_beef_for_txid(
         let tx_index = beef.add_parent_transaction(tx_bytes.clone());
 
         // Check if this is a local unbroadcast transaction (no proof possible)
-        // Transactions with broadcast_status pending/failed/broadcast haven't been mined,
+        // Transactions with status unsigned/failed/sending/unproven haven't been mined,
         // so there's no merkle proof to fetch. Skip expensive API calls.
         let skip_proof_fetch = {
             let db_guard = db.lock().unwrap();
             let conn = db_guard.connection();
             let tx_repo = TransactionRepository::new(conn);
             match tx_repo.get_broadcast_status(&current_txid) {
-                Ok(Some(ref status)) if status == "confirmed" => false,
+                // "completed" (new_status) or "confirmed" (legacy broadcast_status) → need proof
+                Ok(Some(ref status)) if status == "completed" || status == "confirmed" => false,
                 Ok(Some(ref status)) => {
                     log::info!("   ⏭️  Transaction {} has status '{}', skipping proof fetch", current_txid, status);
                     true
@@ -231,58 +232,70 @@ pub async fn build_beef_for_txid(
             }
         };
 
-        // Fetch Merkle proof if available
+        // Fetch Merkle proof from proven_txs or API
         let has_bump;
         let enhanced_tsc = if skip_proof_fetch {
             serde_json::Value::Null
         } else {
-            let db_guard = db.lock().unwrap();
-            let conn = db_guard.connection();
-            let merkle_proof_repo = MerkleProofRepository::new(conn);
+            // Check proven_txs for cached proof
+            let cached_tsc = {
+                let db_guard = db.lock().unwrap();
+                let conn = db_guard.connection();
+                let proven_tx_repo = ProvenTxRepository::new(conn);
+                proven_tx_repo.get_merkle_proof_as_tsc(&current_txid).unwrap_or(None)
+            };
 
-            let cached_proof_result = merkle_proof_repo.get_by_parent_txid(&current_txid);
-            drop(db_guard);
-
-            match cached_proof_result {
-                Ok(Some(cached_proof)) => {
-                    log::info!("   ✅ Using cached Merkle proof for {} (height: {})", current_txid, cached_proof.block_height);
-                    {
-                        let db_guard = db.lock().unwrap();
-                        let conn = db_guard.connection();
-                        let merkle_proof_repo = MerkleProofRepository::new(conn);
-                        merkle_proof_repo.to_tsc_json(&cached_proof)
-                    }
+            match cached_tsc {
+                Some(tsc) => {
+                    log::info!("   ✅ Using proven_txs Merkle proof for {}", current_txid);
+                    tsc
                 },
-                Ok(None) => {
-                    log::info!("   🌐 Cache miss - fetching TSC proof from API...");
+                None => {
+                    log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
                     match fetch_tsc_proof_from_api(client, &current_txid).await {
                         Ok(Some(tsc_json)) => {
-                            // IMPORTANT: Lock must be scoped to avoid deadlock.
-                            // enhance_tsc_with_height needs BlockHeaderRepository (borrows from db_guard),
-                            // so we hold the lock during the call, then drop it before re-locking to cache.
+                            // Enhance with block height
                             let enhanced_result = {
                                 let db_guard = db.lock().unwrap();
                                 let conn = db_guard.connection();
                                 let block_header_repo = BlockHeaderRepository::new(conn);
                                 enhance_tsc_with_height(client, &block_header_repo, &tsc_json).await
-                            }; // db_guard dropped here - safe to re-lock below
+                            };
 
                             match enhanced_result {
                                 Ok(enhanced_tsc) => {
+                                    // Cache as proven_txs record
                                     {
                                         let db_guard = db.lock().unwrap();
                                         let conn = db_guard.connection();
-                                        if let Some(parent_txn_id) = {
+
+                                        let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
+                                        let tx_index_val = enhanced_tsc["index"].as_u64().unwrap_or(0);
+                                        let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
+
+                                        let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc).unwrap_or_default();
+
+                                        // Get raw_tx from parent_transactions cache or use empty
+                                        let raw_tx_bytes = {
                                             let parent_tx_repo = ParentTransactionRepository::new(conn);
-                                            parent_tx_repo.get_id_by_txid(&current_txid).unwrap_or(None)
-                                        } {
-                                            let target_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-                                            if let Ok(nodes_json) = serde_json::to_string(&enhanced_tsc["nodes"]) {
-                                                let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                                let tx_index = enhanced_tsc["index"].as_u64().unwrap_or(0);
-                                                let merkle_proof_repo = MerkleProofRepository::new(conn);
-                                                let _ = merkle_proof_repo.upsert(parent_txn_id, block_height, tx_index, target_hash, &nodes_json);
-                                                log::info!("   💾 Cached Merkle proof for {}", current_txid);
+                                            match parent_tx_repo.get_by_txid(&current_txid) {
+                                                Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
+                                                _ => tx_bytes.clone(), // Use the tx_bytes we already fetched
+                                            }
+                                        };
+
+                                        let proven_tx_repo = ProvenTxRepository::new(conn);
+                                        match proven_tx_repo.insert_or_get(
+                                            &current_txid, block_height, tx_index_val,
+                                            &merkle_path_bytes, &raw_tx_bytes,
+                                            block_hash, "",
+                                        ) {
+                                            Ok(proven_tx_id) => {
+                                                let _ = proven_tx_repo.link_transaction(&current_txid, proven_tx_id);
+                                                log::info!("   💾 Created proven_txs record for {}", current_txid);
+                                            }
+                                            Err(e) => {
+                                                log::warn!("   ⚠️  Failed to cache proven_tx for {}: {}", current_txid, e);
                                             }
                                         }
                                     }
@@ -303,10 +316,6 @@ pub async fn build_beef_for_txid(
                             serde_json::Value::Null
                         },
                     }
-                },
-                Err(e) => {
-                    log::warn!("   ⚠️  Database error checking cache: {}, skipping proof", e);
-                    serde_json::Value::Null
                 },
             }
         };

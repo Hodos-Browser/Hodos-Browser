@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography, CircularProgress } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
@@ -13,7 +13,7 @@ import type { Suggestion } from '../types/omnibox';
  */
 const OmniboxOverlayRoot: React.FC = () => {
   const [query, setQuery] = useState('');
-  const { suggestions, loading, autocomplete, search } = useOmniboxSuggestions();
+  const { suggestions, loading, search } = useOmniboxSuggestions();
 
   // Set body data attribute for CEF-level cursor fix
   useEffect(() => {
@@ -47,12 +47,8 @@ const OmniboxOverlayRoot: React.FC = () => {
     }
   }, [query]);
 
-  // Send autocomplete suggestion back to address bar
-  useEffect(() => {
-    if (autocomplete && window.cefMessage) {
-      window.cefMessage.send('omnibox_autocomplete', autocomplete);
-    }
-  }, [autocomplete]);
+  // Autocomplete IPC is now sent directly from useOmniboxSuggestions hook
+  // to avoid React useEffect deduplication when the same string is set twice
 
   // Don't render anything if no query
   if (!query) {
@@ -93,6 +89,36 @@ const OmniboxOverlayRoot: React.FC = () => {
         </List>
       )}
     </Box>
+  );
+};
+
+/**
+ * Favicon icon with fallback to HistoryIcon on load error
+ */
+const FaviconIcon: React.FC<{ url: string }> = ({ url }) => {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const domain = useMemo(() => {
+    try { return new URL(url).hostname; } catch { return null; }
+  }, [url]);
+
+  if (!domain || failed) {
+    return <HistoryIcon fontSize="small" color="action" />;
+  }
+
+  return (
+    <>
+      {!loaded && <HistoryIcon fontSize="small" color="action" />}
+      <img
+        src={`https://www.google.com/s2/favicons?domain=${domain}&sz=16`}
+        width={16}
+        height={16}
+        onLoad={() => setLoaded(true)}
+        onError={() => setFailed(true)}
+        style={{ display: loaded ? 'block' : 'none' }}
+        alt=""
+      />
+    </>
   );
 };
 
@@ -155,7 +181,7 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
       >
         <ListItemIcon sx={{ minWidth: 36, cursor: 'pointer' }}>
           {suggestion.type === 'history' ? (
-            <HistoryIcon fontSize="small" color="action" />
+            <FaviconIcon url={suggestion.url} />
           ) : (
             <SearchIcon fontSize="small" color="action" />
           )}

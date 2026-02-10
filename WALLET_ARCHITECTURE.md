@@ -1,273 +1,250 @@
-# Wallet Architecture & Migration Guide
+# Wallet Architecture
 
-## 🎯 Overview
+## Overview
 
-This document outlines the wallet architecture, implementation details, and migration path from Go (PoC) to Rust (production).
+The Hodos Browser wallet is a Rust-based HTTP server (Actix-web) running on `localhost:3301`. It handles all cryptographic operations, key management, transaction building/signing, and BRC-100 protocol endpoints. Private keys never leave this process.
 
-## 🏗️ Current Architecture (Go PoC)
+## Architecture
 
-### Wallet Components
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Go Wallet Backend                   │
-│                                                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐ │
-│  │  BitcoinWallet  │  │  WalletDaemon   │  │  KeyManager │ │
-│  │                 │  │                 │  │             │ │
-│  │ • Key Generation│  │ • Process Comm  │  │ • PBKDF2    │ │
-│  │ • File I/O      │  │ • Request Handle│  │ • Encryption│ │
-│  │ • Identity Mgmt │  │ • Error Handling│  │ • Decryption│ │
-│  └─────────────────┘  └─────────────────┘  └─────────────┘ │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                C++ CEF Bridge Layer                       │
-│              • Process Communication                       │
-│              • JSON Message Parsing                       │
-│              • Error Handling                             │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    React Frontend                          │
-│              • window.bitcoinBrowser API                   │
-│              • Identity Management UI                      │
-│              • Transaction Interface                       │
-└─────────────────────────────────────────────────────────────┘
+React Frontend (Port 5137)
+    │ window.hodosBrowser.*
+    ▼
+C++ CEF Shell (HTTP Interception)
+    │ Forwards wallet requests to localhost:3301
+    ▼
+Rust Wallet Backend (Port 3301)
+    │ Actix-web HTTP server
+    │ SQLite database (wallet.db, schema V24)
+    │ Background Monitor (7 tasks)
+    ▼
+Bitcoin SV Blockchain
+    │ WhatsOnChain API (UTXO lookup, proofs)
+    │ ARC / GorillaPool (transaction broadcast)
+    ▼
+On-chain verification
 ```
 
-## 🐹 Go Implementation Details
+## Core Components
 
-### Key Derivation (Current - Temporary)
-```go
-// Current: PBKDF2 with SHA256 (Bitcoin standard)
-// Note: Currently using hardcoded encryption key for PoC
-// Future: Implement PBKDF2 key derivation
-func (w *Wallet) encryptPrivateKey(privateKey []byte, password string) ([]byte, error) {
-    // TODO: Implement PBKDF2 key derivation
-    // For now, using hardcoded key for PoC
-    key := []byte("hardcoded-key-for-poc-32-bytes!!") // 32 bytes
+### AppState (src/main.rs)
 
-    // AES-256-CBC encryption
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return nil, err
-    }
+Shared state accessible to all HTTP handlers:
 
-    // Implementation details...
-    return encryptedData, nil
-}
+| Field | Type | Purpose |
+|-------|------|---------|
+| `database` | `Arc<Mutex<WalletDatabase>>` | SQLite connection (single writer) |
+| `balance_cache` | `BalanceCache` | In-memory balance with instant invalidation |
+| `current_user_id` | `i64` | Active user ID (default: 1) |
+| `shutdown` | `CancellationToken` | Graceful shutdown signal (Ctrl+C) |
+| `auth_sessions` | `Arc<Mutex<HashMap>>` | BRC-103/104 auth session state |
+| `message_store` | `Arc<Mutex<HashMap>>` | BRC-33 in-memory message relay |
+| `pending_transactions` | `Arc<Mutex<HashMap>>` | Two-phase sign: createAction → signAction |
+| `fee_rate_cache` | `FeeRateCache` | Cached fee rates from MAPI |
+
+### Database Layer (src/database/)
+
+SQLite with WAL mode, foreign keys enabled. Schema managed through numbered migrations (V1–V24).
+
+**Repository pattern**: Each table group has a dedicated repository struct:
+
+| Repository | Tables | Purpose |
+|------------|--------|---------|
+| `WalletRepository` | wallets | Master key storage, HD index |
+| `UserRepository` | users | Identity mapping (pubkey → userId) |
+| `AddressRepository` | addresses | HD address derivation cache |
+| `OutputRepository` | outputs | **Primary UTXO tracking** — spendable/spent_by model |
+| `TransactionRepository` | transactions | Transaction lifecycle (new_status) |
+| `ProvenTxRepository` | proven_txs | Immutable merkle proof records |
+| `ProvenTxReqRepository` | proven_tx_reqs | Proof acquisition lifecycle |
+| `TxLabelRepository` | tx_labels, tx_labels_map | Normalized transaction labels |
+| `TagRepository` | output_tags, output_tag_map | Output tagging/basket assignment |
+| `CertificateRepository` | certificates, certificate_fields | BRC-52 identity certificates |
+| `CommissionRepository` | commissions | Fee tracking per transaction |
+| `SettingsRepository` | settings | Persistent wallet configuration |
+| `SyncStateRepository` | sync_states | Multi-device sync state |
+
+### Cryptography (src/crypto/)
+
+| Module | Purpose |
+|--------|---------|
+| `brc42.rs` | ECDH-based child key derivation (Type-42) |
+| `brc43.rs` | Invoice number format: `{securityLevel}-{protocolID}-{keyID}` |
+| `signing.rs` | SHA-256, HMAC-SHA256, ECDSA signing |
+| `aesgcm_custom.rs` | AES-256-GCM encryption (BRC-2) |
+| `brc2.rs` | BRC-2 encrypt/decrypt with BRC-42 key derivation |
+| `mod.rs` | Key derivation routing, public key computation |
+
+### Key Derivation (src/database/helpers.rs)
+
+`derive_key_for_output()` is the single entry point for all signing. It reads derivation fields directly from the output record:
+
+| `derivation_prefix` | `derivation_suffix` | `sender_identity_key` | Derivation Path |
+|---------------------|---------------------|----------------------|-----------------|
+| `"2-receive address"` | `"{index}"` | `None` | BRC-42 self-derivation (standard) |
+| `"bip32"` | `"{index}"` | `None` | Legacy BIP32 HD (`m/{index}`) |
+| `NULL` | `NULL` | `None` | Master private key directly |
+| any | any | `Some(pubkey)` | BRC-42 counterparty derivation |
+
+### Transaction Lifecycle
+
+```
+createAction (build + select UTXOs)
+    → new_status: 'unsigned'
+    → inputs reserved (spent_by set)
+    → outputs created (spendable=0)
+
+signAction (sign + broadcast)
+    → new_status: 'sending' → 'unproven'
+    → proven_tx_req created
+    → Monitor acquires proof → 'completed'
+
+On failure:
+    → new_status: 'failed'
+    → ghost outputs deleted
+    → reserved inputs restored (spendable=1)
+    → balance cache invalidated
 ```
 
-**Security Notes:**
-- ✅ **Bitcoin Standard**: PBKDF2-SHA256 is the standard used in Bitcoin wallets
-- ✅ **BSV Compatible**: Follows same standards as Metanet Desktop and other BSV wallets
-- ✅ **Proven Security**: Used in Bitcoin for 15+ years, well-tested
-- 🟡 **Future Enhancement**: Argon2 available as optional upgrade for extra security
-- 🟡 **Iterations**: Can increase to 1,000,000+ for production if needed
+### Status System
 
-### File Structure
-```
-go-wallet/
-├── main.go               # Core wallet daemon with HTTP API
-├── go.mod               # Go module dependencies
-├── go.sum               # Dependency checksums
-└── wallet.exe           # Compiled binary (generated)
-```
+Single `new_status` column (V15+):
 
-### HTTP API Interface
-```go
-// HTTP Endpoints
-GET  /health                    # Health check
-GET  /identity/get              # Get wallet identity
-POST /identity/markBackedUp     # Mark wallet as backed up
+| Status | Meaning |
+|--------|---------|
+| `unprocessed` | Created, not signed |
+| `unsigned` | Awaiting signatures (two-phase) |
+| `nosend` | Signed but app broadcasts (overlay) |
+| `sending` | Being broadcast |
+| `unproven` | Broadcast, awaiting merkle proof |
+| `completed` | Has merkle proof (confirmed on-chain) |
+| `failed` | Broadcast failed or rejected |
 
-// Go Wallet Methods
-func (w *Wallet) CreateIdentity() (*IdentityData, error)
-func (w *Wallet) SaveIdentity(identity *IdentityData, filePath string) error
-func (w *Wallet) LoadIdentity(filePath string) (*IdentityData, error)
-```
+### BEEF/SPV (src/beef.rs, src/beef_helpers.rs)
 
-## 🦀 Future Rust Implementation
+Transactions are broadcast in BEEF (Background Evaluation Extended Format) which bundles SPV proofs:
 
-### Migration Strategy
-1. **Phase 1**: Go PoC (Current) ✅
-2. **Phase 2**: Go with enhanced security features
-3. **Phase 3**: Rust core with Go bindings
-4. **Phase 4**: Full Rust implementation
-5. **Phase 5**: Rust with hardware security modules
+- `beef.rs`: BEEF parser, TSC proof ↔ BUMP conversion
+- `beef_helpers.rs`: Recursive ancestry chain building with proof fetching
+- `parent_transactions` table: Raw tx cache for BEEF building
+- `proven_txs` table: Immutable merkle proof records
 
-### Rust Architecture (Planned)
-```rust
-// Core wallet structure
-pub struct BitcoinWallet {
-    private_key: secp256k1::SecretKey,
-    public_key: secp256k1::PublicKey,
-    address: Address,
-    key_manager: KeyManager,
-}
+## Background Services — Monitor Pattern
 
-// Key derivation with Argon2
-impl KeyManager {
-    pub fn derive_key(&self, password: &str, salt: &[u8]) -> Result<[u8; 32], Error> {
-        let config = argon2::Config::default();
-        argon2::hash_raw(password.as_bytes(), salt, &config)
-    }
-}
+The Monitor (`src/monitor/mod.rs`) runs as a single tokio task with a 30-second tick loop. It checks `CancellationToken` for shutdown and uses `try_lock()` to avoid blocking user HTTP requests.
 
-// File operations
-impl BitcoinWallet {
-    pub fn save_identity(&self, path: &Path) -> Result<(), Error>
-    pub fn load_identity(path: &Path) -> Result<Self, Error>
-    pub fn get_identity_data(&self) -> IdentityData
-}
-```
+| Task | Interval | Purpose |
+|------|----------|---------|
+| TaskCheckForProofs | 60s | Acquire merkle proofs (ARC → WoC fallback) |
+| TaskSendWaiting | 120s | Crash recovery for stuck `sending` txs |
+| TaskFailAbandoned | 300s | Fail stuck unprocessed/unsigned txs, clean ghost outputs |
+| TaskUnFail | 300s | Recover false failures (6-hour window, on-chain check) |
+| TaskReviewStatus | 60s | Status consistency: proven_tx_reqs → transactions → outputs |
+| TaskPurge | 3600s | Cleanup old events (7d) and completed proof requests (30d) |
+| TaskSyncPending | 30s | UTXO sync for addresses with `pending_utxo_check=1` |
 
-### Rust Dependencies (Planned)
-```toml
-[dependencies]
-secp256k1 = "0.27"           # Bitcoin cryptography
-bitcoin = "0.30"             # Bitcoin protocol
-argon2 = "0.5"               # Secure key derivation
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"           # JSON serialization
-anyhow = "1.0"               # Error handling
-```
+### Ghost Transaction Safety Rules
 
-## 🔄 Migration Path
+1. Background tasks never create output records — only sync from API via `/wallet/sync`
+2. Delete ghost outputs BEFORE restoring inputs on failure
+3. TaskUnFail does NOT re-create deleted outputs — relies on `/wallet/sync`
+4. Always invalidate balance cache after output changes
+5. Cleanup order: mark failed → delete ghost outputs → restore inputs → invalidate cache
 
-### Step 1: Python PoC (Current)
-- ✅ Basic wallet functionality
-- ✅ File I/O operations
-- ✅ Simple key derivation
-- ✅ Process communication
+## UTXO Synchronization
 
-### Step 2: Rust Core Integration
-```rust
-// Use PyO3 to create Python bindings
-use pyo3::prelude::*;
+Two mechanisms:
 
-#[pyclass]
-struct BitcoinWalletRust {
-    wallet: bitcoin_wallet::BitcoinWallet,
-}
+1. **Periodic (TaskSyncPending)**: Monitor checks addresses with `pending_utxo_check=1` every 30s
+2. **On-demand (`POST /wallet/sync`)**: Frontend or manual trigger, supports `?full=true` for all addresses
 
-#[pymethods]
-impl BitcoinWalletRust {
-    #[new]
-    fn new(password: &str) -> Self { /* ... */ }
+The sync endpoint:
+- Fetches UTXOs from WhatsOnChain for target addresses
+- Inserts new outputs via `upsert_received_utxo()`
+- Reconciles stale outputs: marks DB outputs not found in API as `external-spend`
+- Invalidates balance cache
 
-    fn get_identity(&self) -> PyResult<PyObject> { /* ... */ }
-}
-```
+## API Endpoints
 
-### Step 3: Full Rust Implementation
-- Replace Python daemon with Rust daemon
-- Update C++ bridge to communicate with Rust
-- Implement hardware security module support
-- Add comprehensive error handling
+### Wallet Operations
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Health check |
+| GET | `/wallet/status` | Wallet initialization status |
+| GET | `/wallet/balance` | Cached balance (instant) |
+| POST | `/wallet/sync` | On-demand UTXO sync with reconciliation |
 
-## 🔐 Security Considerations
+### BRC-100 Protocol (26/28 methods)
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/getPublicKey` | Identity/derived public key |
+| POST | `/.well-known/auth` | BRC-103/104 mutual authentication |
+| POST | `/createAction` | Build + sign transactions |
+| POST | `/signAction` | Complete two-phase signing |
+| POST | `/listOutputs` | Query outputs by basket/tag |
+| POST | `/listCertificates` | Query identity certificates |
+| POST | `/acquireCertificate` | Acquire new certificate |
+| POST | `/encrypt` | BRC-2 AES-256-GCM encryption |
+| POST | `/decrypt` | BRC-2 decryption |
 
-### Current (Python PoC)
-- **Key Derivation**: PBKDF2 with 100,000 iterations
-- **Encryption**: Fernet (AES-128)
-- **Process Isolation**: Python daemon process
-- **Memory Management**: Python garbage collection
+### Fee Calculation
 
-### Future (Rust Production)
-- **Key Derivation**: Argon2 with memory-hard parameters
-- **Encryption**: AES-256-GCM with authenticated encryption
-- **Process Isolation**: Rust daemon with memory safety
-- **Memory Management**: Zero-copy operations, secure memory clearing
+Dynamic size-based fees (not hardcoded):
+- Default: 1 sat/byte (1000 sat/KB)
+- Minimum: 200 satoshis
+- Two-pass: estimate → select UTXOs → recalculate with actual inputs
 
-## 📊 Performance Comparison
+## Database Schema (V24)
 
-| Operation | Python (Current) | Rust (Future) |
-|-----------|------------------|---------------|
-| Key Generation | ~10ms | ~1ms |
-| Key Derivation | ~100ms | ~50ms |
-| File I/O | ~5ms | ~1ms |
-| Memory Usage | ~50MB | ~10MB |
-| Startup Time | ~500ms | ~100ms |
+Current migration version: **V24** (24 migrations total).
 
-## 🧪 Testing Strategy
+### Active Tables
 
-### Python Testing
-```python
-# Unit tests for each component
-def test_wallet_creation():
-    wallet = BitcoinWallet("test_password")
-    assert wallet.wallet_exists() == True
+| Table | Purpose |
+|-------|---------|
+| wallets | Master key storage (mnemonic, HD index) |
+| users | Identity mapping (master pubkey → userId) |
+| addresses | HD address derivation cache |
+| transactions | Transaction lifecycle with `new_status` |
+| outputs | **Primary** — wallet-toolbox compatible UTXO tracking |
+| parent_transactions | Raw tx cache for BEEF building |
+| block_headers | Cached block headers |
+| proven_txs | Immutable merkle proof records |
+| proven_tx_reqs | Proof acquisition lifecycle tracking |
+| baskets | Output categorization by user |
+| output_tags | Tag definitions |
+| output_tag_map | Output ↔ tag junction (FK to outputs) |
+| certificates | BRC-52 identity certificates |
+| certificate_fields | Certificate field values (encrypted) |
+| tx_labels | Deduplicated label entities per user |
+| tx_labels_map | Label ↔ transaction junction |
+| commissions | Fee tracking per transaction |
+| settings | Persistent wallet configuration |
+| sync_states | Multi-device synchronization state |
+| monitor_events | Background task event logging |
+| transaction_inputs | Transaction input details |
+| transaction_outputs | Transaction output details |
 
-def test_key_derivation():
-    key_manager = KeyManager()
-    key = key_manager.derive_key("password", b"salt")
-    assert len(key) == 32
-```
+### Tables Dropped in V24
 
-### Rust Testing
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+| Table | Reason |
+|-------|--------|
+| merkle_proofs | Replaced by `proven_txs` (V16) |
+| domain_whitelist | JSON file used instead |
+| transaction_labels | Replaced by `tx_labels`/`tx_labels_map` (V19) |
 
-    #[test]
-    fn test_wallet_creation() {
-        let wallet = BitcoinWallet::new("test_password");
-        assert!(wallet.wallet_exists());
-    }
+### Tables Deferred for Future Cleanup
 
-    #[test]
-    fn test_key_derivation() {
-        let key_manager = KeyManager::new();
-        let key = key_manager.derive_key("password", b"salt").unwrap();
-        assert_eq!(key.len(), 32);
-    }
-}
-```
+| Table | Reason Still Exists |
+|-------|-------------------|
+| utxos | ~10 live code references in handlers.rs, cache_helpers.rs |
+| transactions.status/broadcast_status | ~15 live references to update_broadcast_status() |
 
-## 📝 Migration Checklist
+## Security Model
 
-### Python to Rust Migration
-- [ ] **Core Wallet Functions**
-  - [ ] Key generation and management
-  - [ ] File I/O operations
-  - [ ] Identity data structures
-  - [ ] Error handling
-
-- [ ] **Security Enhancements**
-  - [ ] Upgrade to Argon2 key derivation
-  - [ ] Implement AES-256-GCM encryption
-  - [ ] Add secure memory clearing
-  - [ ] Hardware security module support
-
-- [ ] **Performance Optimizations**
-  - [ ] Zero-copy operations
-  - [ ] Async I/O operations
-  - [ ] Memory pool management
-  - [ ] Concurrent operations
-
-- [ ] **Integration**
-  - [ ] C++ bridge updates
-  - [ ] Process communication
-  - [ ] Error propagation
-  - [ ] API compatibility
-
-## 🚀 Future Enhancements
-
-### Hardware Security
-- **HSM Integration**: Support for hardware security modules
-- **Secure Enclaves**: Intel SGX or ARM TrustZone integration
-- **Biometric Authentication**: Fingerprint or face recognition
-
-### Advanced Features
-- **Multi-signature Wallets**: Support for multiple key signatures
-- **Hierarchical Deterministic**: BIP32/BIP44 wallet support
-- **Offline Signing**: Air-gapped transaction signing
-- **Backup and Recovery**: Encrypted backup with recovery phrases
-
----
-
-*This document will be updated as the wallet implementation evolves and migration progresses.*
+1. **Private keys never leave Rust** — all signing in `crypto/` module
+2. **Memory safety** — Rust ownership model, no `unsafe` blocks in key-handling code
+3. **Process isolation** — wallet runs as separate process from browser
+4. **Parameterized SQL** — all queries use rusqlite params, no string interpolation
+5. **App-scoped identity keys** — BRC-103/104 returns derived keys per app, preventing cross-app tracking
+6. **Balance cache** — invalidated immediately on any output-modifying operation

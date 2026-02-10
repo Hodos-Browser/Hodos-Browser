@@ -60,6 +60,9 @@ public:
     void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
                           const std::vector<CefString>& icon_urls) override;
 
+    void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
+                                bool fullscreen) override;
+
     // CefLoadHandler methods
     void OnLoadError(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefFrame> frame,
