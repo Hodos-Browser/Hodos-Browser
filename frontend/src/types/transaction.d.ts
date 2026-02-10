@@ -38,4 +38,5 @@ export interface BalanceData {
   balance: number;
   usdValue: number;
   isLoading: boolean;
+  isRefreshing?: boolean;
 }

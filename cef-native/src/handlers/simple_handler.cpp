@@ -58,7 +58,7 @@
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
 #ifdef _WIN32
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
-    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance);
+    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0);
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
 #else
     // macOS global views
@@ -263,6 +263,16 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
         TabManager::GetInstance().UpdateTabFavicon(tab_id, favicon_url);
         LOG_DEBUG_BROWSER("🖼️ Tab " + std::to_string(tab_id) + " favicon updated: " + favicon_url);
     }
+}
+
+// Forward declaration for fullscreen handler in cef_browser_shell.cpp
+extern void HandleFullscreenChange(bool fullscreen);
+
+void SimpleHandler::OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
+                                           bool fullscreen) {
+    CEF_REQUIRE_UI_THREAD();
+    LOG_DEBUG_BROWSER(std::string("🖥️ Fullscreen mode change: ") + (fullscreen ? "ENTER" : "EXIT") + " (role: " + role_ + ")");
+    HandleFullscreenChange(fullscreen);
 }
 
 void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -1052,22 +1062,29 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_panel_show") {
+        // Parse icon right offset from args (physical pixels from right edge of header)
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> cp_args = message->GetArgumentList();
+        if (cp_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(cp_args->GetString(0).ToString()); } catch(...) {}
+        }
+
 #ifdef _WIN32
-        extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately);
-        extern void ShowCookiePanelOverlay();
+        extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void ShowCookiePanelOverlay(int iconRightOffset);
         extern HWND g_cookie_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         // Create if doesn't exist, otherwise show
         if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
-            CreateCookiePanelOverlay(g_hInstance, true);
+            CreateCookiePanelOverlay(g_hInstance, true, iconRightOffset);
         } else {
-            ShowCookiePanelOverlay();
+            ShowCookiePanelOverlay(iconRightOffset);
         }
 
-        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay shown");
+        LOG_DEBUG_BROWSER("Cookie panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #else
-        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+        LOG_DEBUG_BROWSER("Cookie panel not implemented on macOS");
 #endif
         return true;
     }
@@ -1079,6 +1096,42 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden");
 #else
         LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#endif
+        return true;
+    }
+
+    // Dedicated settings close — bypasses role_ check, works from any browser process
+    if (message_name == "settings_close") {
+        LOG_DEBUG_BROWSER("⚙️ settings_close message received");
+#ifdef _WIN32
+        extern HWND g_settings_overlay_hwnd;
+        extern HHOOK g_settings_mouse_hook;
+        if (g_settings_mouse_hook) {
+            UnhookWindowsHookEx(g_settings_mouse_hook);
+            g_settings_mouse_hook = nullptr;
+        }
+        CefRefPtr<CefBrowser> settings_browser = GetSettingsBrowser();
+        if (settings_browser) {
+            settings_browser->GetHost()->CloseBrowser(false);
+        }
+        if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd)) {
+            DestroyWindow(g_settings_overlay_hwnd);
+            g_settings_overlay_hwnd = nullptr;
+            LOG_DEBUG_BROWSER("✅ Settings overlay destroyed via settings_close");
+        }
+#elif defined(__APPLE__)
+        extern NSWindow* g_main_window;
+        extern NSWindow* g_settings_overlay_window;
+        if (g_settings_overlay_window) {
+            CefRefPtr<CefBrowser> settings_browser = GetSettingsBrowser();
+            if (settings_browser) {
+                settings_browser->GetHost()->CloseBrowser(false);
+            }
+            [g_main_window removeChildWindow:g_settings_overlay_window];
+            [g_settings_overlay_window close];
+            g_settings_overlay_window = nullptr;
+            LOG_DEBUG_BROWSER("✅ Settings overlay destroyed via settings_close (macOS)");
+        }
 #endif
         return true;
     }
@@ -1623,6 +1676,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             } else if (role_ == "settings") {
                 extern HWND g_settings_overlay_hwnd;
                 g_settings_overlay_hwnd = nullptr;
+                // Remove click-outside mouse hook
+                extern HHOOK g_settings_mouse_hook;
+                if (g_settings_mouse_hook) {
+                    UnhookWindowsHookEx(g_settings_mouse_hook);
+                    g_settings_mouse_hook = nullptr;
+                    LOG_DEBUG_BROWSER("✅ Settings mouse hook removed on overlay_close");
+                }
             } else if (role_ == "backup") {
                 extern HWND g_backup_overlay_hwnd;
                 g_backup_overlay_hwnd = nullptr;
@@ -1731,14 +1791,19 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "overlay_show_settings") {
-        LOG_DEBUG_BROWSER("🪟 overlay_show_settings message received from role: " + role_);
-        LOG_DEBUG_BROWSER("🪟 Creating settings overlay with separate process");
+        // Parse icon right offset from args (physical pixels from right edge of header)
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> settings_args = message->GetArgumentList();
+        if (settings_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(settings_args->GetString(0).ToString()); } catch(...) {}
+        }
+        LOG_DEBUG_BROWSER("Creating settings overlay with iconRightOffset=" + std::to_string(iconRightOffset));
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateSettingsOverlayWithSeparateProcess(g_hInstance);
+        CreateSettingsOverlayWithSeparateProcess(g_hInstance, iconRightOffset);
 #elif defined(__APPLE__)
-        CreateSettingsOverlayWithSeparateProcess();
+        CreateSettingsOverlayWithSeparateProcess(iconRightOffset);
 #endif
         return true;
     }
@@ -2018,20 +2083,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== WALLET PANEL TOGGLE (Cross-platform: uses separate overlay window) ==========
     if (message_name == "toggle_wallet_panel") {
-        LOG_DEBUG_BROWSER("💰 Toggle wallet panel requested");
-        LOG_DEBUG_BROWSER("💰 Creating wallet overlay with separate process");
+        // Parse icon right offset from args (physical pixels from right edge of header)
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> wallet_args = message->GetArgumentList();
+        if (wallet_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(wallet_args->GetString(0).ToString()); } catch(...) {}
+        }
+        LOG_DEBUG_BROWSER("Toggle wallet panel with iconRightOffset=" + std::to_string(iconRightOffset));
 
 #ifdef _WIN32
-        // Windows: Create overlay window (separate process for security)
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance);
-        LOG_DEBUG_BROWSER("✅ Wallet overlay created on Windows");
+        CreateWalletOverlayWithSeparateProcess(g_hInstance, iconRightOffset);
 #elif defined(__APPLE__)
-        // macOS: Create overlay window (separate process for security, consistent with Windows)
-        CreateWalletOverlayWithSeparateProcess();
-        LOG_DEBUG_BROWSER("✅ Wallet overlay created on macOS");
+        CreateWalletOverlayWithSeparateProcess(iconRightOffset);
 #else
-        LOG_DEBUG_BROWSER("⚠️ toggle_wallet_panel not implemented on this platform");
+        LOG_DEBUG_BROWSER("toggle_wallet_panel not implemented on this platform");
 #endif
         return true;
     }

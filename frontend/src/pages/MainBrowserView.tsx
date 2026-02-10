@@ -37,6 +37,12 @@ const MainBrowserView: React.FC = () => {
     const [autocompleteText, setAutocompleteText] = useState<string>('');
     const [userTypedText, setUserTypedText] = useState('https://metanetapps.com/');
     const addressInputRef = React.useRef<HTMLInputElement>(null);
+    const justNavigatedRef = React.useRef(false);
+    // Tracks navigation-in-progress to prevent tab sync from reverting address bar
+    const pendingNavigationRef = React.useRef(false);
+    const preNavTabUrlRef = React.useRef<string>('');
+    // Suppress autocomplete after Backspace/Delete so it doesn't re-fill
+    const suppressAutocompleteRef = React.useRef(false);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -104,6 +110,15 @@ const MainBrowserView: React.FC = () => {
         if (!isEditingAddress) {
             const activeTab = tabs.find(t => t.id === activeTabId);
             if (activeTab && activeTab.url) {
+                if (pendingNavigationRef.current) {
+                    if (activeTab.url === preNavTabUrlRef.current) {
+                        // Tab URL hasn't changed yet — skip to avoid flicker
+                        return;
+                    }
+                    // Tab URL changed — navigation complete
+                    pendingNavigationRef.current = false;
+                    preNavTabUrlRef.current = '';
+                }
                 setAddress(activeTab.url);
             }
         }
@@ -123,6 +138,10 @@ const MainBrowserView: React.FC = () => {
     React.useEffect(() => {
         const handleAutocomplete = (event: MessageEvent) => {
             if (event.data?.type === 'omnibox_autocomplete') {
+                // After Backspace/Delete, skip auto-fill but keep suggestions visible
+                if (suppressAutocompleteRef.current) {
+                    return;
+                }
                 const suggestion = event.data.suggestion;
                 if (suggestion && userTypedText && isEditingAddress) {
                     // Only show autocomplete if suggestion starts with current input
@@ -201,14 +220,11 @@ const MainBrowserView: React.FC = () => {
     };
 
     const handleViewCookies = () => {
-        console.log('🍪 NEW CODE: Sending cookie_panel_show IPC message');
         setShieldMenuAnchor(null);
-        // Show cookie panel overlay instead of navigating to history page
         if (window.cefMessage) {
-            window.cefMessage.send('cookie_panel_show');
-            console.log('🍪 IPC message sent: cookie_panel_show');
+            window.cefMessage.send('cookie_panel_show', '0');
         } else {
-            console.error('🍪 ERROR: window.cefMessage not available');
+            console.error('window.cefMessage not available');
         }
     };
 
@@ -319,14 +335,27 @@ const MainBrowserView: React.FC = () => {
                             }
                         }}
                         onKeyDown={(e) => {
+                            if (e.key === 'Backspace' || e.key === 'Delete') {
+                                // Suppress autocomplete re-fill after deletion
+                                suppressAutocompleteRef.current = true;
+                                setAutocompleteText('');
+                            } else if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
+                                // Any non-modifier key clears the suppression
+                                suppressAutocompleteRef.current = false;
+                            }
                             if (e.key === 'Enter') {
-                                // Navigate to the address (use full text with autocomplete if present)
-                                handleNavigate(address);
+                                const navigatedAddress = address;
+                                // Snapshot old tab URL so tab sync can suppress stale updates
+                                const activeTab = tabs.find(t => t.id === activeTabId);
+                                preNavTabUrlRef.current = activeTab?.url || '';
+                                pendingNavigationRef.current = true;
+                                handleNavigate(navigatedAddress);
                                 setIsEditingAddress(false);
                                 setAutocompleteText('');
-                                setUserTypedText(address);
+                                setUserTypedText(navigatedAddress);
+                                // Set ref so onBlur knows not to revert the address
+                                justNavigatedRef.current = true;
                                 e.currentTarget.blur();
-                                // Navigation dismisses overlay
                                 window.cefMessage?.send('omnibox_hide', []);
                             } else if (e.key === 'Escape') {
                                 // Escape dismisses overlay, keeps current input
@@ -358,7 +387,12 @@ const MainBrowserView: React.FC = () => {
                         onBlur={() => {
                             setIsEditingAddress(false);
                             setAutocompleteText('');
-                            setAddress(userTypedText);
+                            // Don't revert address if we just navigated (Enter was pressed)
+                            if (justNavigatedRef.current) {
+                                justNavigatedRef.current = false;
+                            } else {
+                                setAddress(userTypedText);
+                            }
                         }}
                         placeholder="Search or enter address"
                         style={{
@@ -378,9 +412,12 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Wallet Button */}
                 <IconButton
-                    onClick={() => {
+                    onClick={(e) => {
                         console.log('Wallet panel toggle clicked');
-                        window.cefMessage?.send('toggle_wallet_panel', []);
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        window.cefMessage?.send('toggle_wallet_panel', iconRightOffset.toString());
                     }}
                     size="small"
                     sx={{
@@ -414,10 +451,13 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Shield Badge - Cookie Blocking */}
                 <IconButton
-                    onClick={() => {
-                        console.log('🍪 Shield clicked - sending cookie_panel_show');
+                    onClick={(e) => {
+                        console.log('Shield clicked - sending cookie_panel_show');
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
                         if (window.cefMessage) {
-                            window.cefMessage.send('cookie_panel_show');
+                            window.cefMessage.send('cookie_panel_show', iconRightOffset.toString());
                         }
                     }}
                     size="small"
@@ -461,8 +501,11 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Settings Button */}
                 <IconButton
-                    onClick={() => {
-                        window.cefMessage?.send('overlay_show_settings', []);
+                    onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        window.cefMessage?.send('overlay_show_settings', iconRightOffset.toString());
                         window.hodosBrowser.overlay.toggleInput(true);
                     }}
                     size="small"

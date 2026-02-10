@@ -32,9 +32,8 @@ export const TabBar: React.FC<TabBarProps> = ({
         display: 'flex',
         alignItems: 'center',
         backgroundColor: '#dee1e6',
-        paddingX: 0.5,
-        paddingTop: 0.5,
-        height: 40,
+        paddingX: '6px',
+        height: 42,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,
@@ -58,22 +57,31 @@ export const TabBar: React.FC<TabBarProps> = ({
       {tabs.length === 0 && (
         <Box sx={{ display: 'flex', alignItems: 'center', px: 2, height: '100%' }}>
           {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: 'rgba(0, 0, 0, 0.5)' }} />}
-          <Typography variant="body2" sx={{ color: 'rgba(0, 0, 0, 0.6)', fontSize: 13 }}>
+          <Typography variant="body2" sx={{ color: 'rgba(0, 0, 0, 0.6)', fontSize: 12 }}>
             {isLoading ? 'Loading tabs...' : 'No tabs'}
           </Typography>
         </Box>
       )}
 
       {/* Render all tabs */}
-      {tabs.map((tab) => (
-        <TabComponent
-          key={tab.id}
-          tab={tab}
-          isActive={tab.id === activeTabId}
-          onClose={(e) => handleTabClose(e, tab.id)}
-          onClick={() => onSwitchTab(tab.id)}
-        />
-      ))}
+      {tabs.map((tab, index) => {
+        const isActive = tab.id === activeTabId;
+        // Show divider if this tab and the next are both inactive
+        const nextTab = tabs[index + 1];
+        const nextIsActive = nextTab ? nextTab.id === activeTabId : false;
+        const showDivider = !isActive && !nextIsActive && index < tabs.length - 1;
+
+        return (
+          <TabComponent
+            key={tab.id}
+            tab={tab}
+            isActive={isActive}
+            showDivider={showDivider}
+            onClose={(e) => handleTabClose(e, tab.id)}
+            onClick={() => onSwitchTab(tab.id)}
+          />
+        );
+      })}
 
       {/* New Tab Button */}
       <Tooltip title="New tab (Ctrl+T)" placement="bottom">
@@ -81,19 +89,20 @@ export const TabBar: React.FC<TabBarProps> = ({
           onClick={onCreateTab}
           size="small"
           sx={{
-            minWidth: 32,
-            width: 32,
-            height: 32,
+            minWidth: 28,
+            width: 28,
+            height: 28,
             borderRadius: '6px',
-            marginLeft: 0.5,
-            color: 'rgba(0, 0, 0, 0.6)',
+            marginLeft: '4px',
+            marginBottom: '2px',
+            color: 'rgba(0, 0, 0, 0.5)',
             '&:hover': {
-              backgroundColor: 'rgba(0, 0, 0, 0.05)',
+              backgroundColor: 'rgba(0, 0, 0, 0.06)',
               color: 'rgba(0, 0, 0, 0.87)',
             },
           }}
         >
-          <AddIcon fontSize="small" />
+          <AddIcon sx={{ fontSize: 18 }} />
         </IconButton>
       </Tooltip>
     </Box>

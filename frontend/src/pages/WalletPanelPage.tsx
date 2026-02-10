@@ -1,31 +1,27 @@
+import { useMemo } from 'react';
 import WalletPanel from '../components/WalletPanel';
 
 export default function WalletPanelPage() {
-  const handleClose = () => {
-    console.log('🔧 WalletPanelPage: Closing wallet panel overlay');
-    console.log('🔧 window.cefMessage:', window.cefMessage);
-    console.log('🔧 window.hodosBrowser?.overlay:', window.hodosBrowser?.overlay);
+  // Read icon position from URL param (physical pixels, passed from toolbar click)
+  const paddingRightPx = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const iro = parseInt(params.get('iro') || '0', 10);
+    if (iro <= 0) return 0;
+    const dpr = window.devicePixelRatio || 1;
+    return Math.round(iro / dpr);
+  }, []);
 
-    // Try the hodosBrowser.overlay.close method first (most reliable)
+  const handleClose = () => {
     if (window.hodosBrowser?.overlay?.close) {
-      console.log('🔧 Using window.hodosBrowser.overlay.close()');
       window.hodosBrowser.overlay.close();
     } else if (window.cefMessage?.send) {
-      console.log('🔧 Using window.cefMessage.send()');
       window.cefMessage.send('overlay_close', []);
-    } else {
-      console.error('❌ No close method available!');
     }
   };
 
   const handleBackgroundClick = (e: React.MouseEvent) => {
-    console.log('🔧 Background clicked, target:', e.target, 'currentTarget:', e.currentTarget);
-    // Only close if clicking the background, not the panel itself
     if (e.target === e.currentTarget) {
-      console.log('🔧 Click was on background, calling handleClose()');
       handleClose();
-    } else {
-      console.log('🔧 Click was on panel content, ignoring');
     }
   };
 
@@ -42,13 +38,13 @@ export default function WalletPanelPage() {
         padding: 0,
         overflow: 'hidden',
         display: 'flex',
-        justifyContent: 'flex-end',    // Align panel to right
-        alignItems: 'flex-start',      // Keep at top
-        paddingTop: '150px',           // Fixed spacing to clear header (99px header + 6px margin)
-        paddingRight: '0vw',           // Space from right edge (responsive to screen width)
+        justifyContent: 'flex-end',
+        alignItems: 'flex-start',
+        paddingTop: '150px',
+        paddingRight: paddingRightPx > 0 ? `${paddingRightPx}px` : '0px',
         boxSizing: 'border-box',
-        cursor: 'pointer',             // Indicate clickable background
-        backgroundColor: 'rgba(0, 0, 0, 0.01)',  // Nearly invisible backdrop to catch clicks
+        cursor: 'pointer',
+        backgroundColor: 'rgba(0, 0, 0, 0.01)',
       }}
     >
       <WalletPanel onClose={handleClose} />

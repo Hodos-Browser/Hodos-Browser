@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useTransaction } from '../hooks/useTransaction';
+import { getCachedPrice } from '../services/balanceCache';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
 
 interface TransactionFormProps {
@@ -29,9 +30,9 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   const [errors, setErrors] = useState<Partial<TransactionData>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // USD conversion state
+  // USD conversion state — seed price from localStorage cache if available
   const [amountInputMode, setAmountInputMode] = useState<AmountInputMode>('bsv');
-  const [bsvPrice, setBsvPrice] = useState<number>(0);
+  const [bsvPrice, setBsvPrice] = useState<number>(() => getCachedPrice()?.price ?? 0);
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
 
   // Fetch BSV price when switching to USD mode

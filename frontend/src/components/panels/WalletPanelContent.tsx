@@ -9,7 +9,7 @@ import '../../components/TransactionComponents.css';
 import '../../components/WalletPanel.css';
 
 const WalletPanel = () => {
-  const { balance, usdValue, isLoading: balanceLoading, refreshBalance } = useBalance();
+  const { balance, usdValue, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -161,26 +161,26 @@ const WalletPanel = () => {
             <button
               className="refresh-button"
               onClick={refreshBalance}
-              disabled={balanceLoading}
+              disabled={isRefreshing}
             >
-              {balanceLoading ? '⏳' : '🔄'} Refresh
+              {isRefreshing ? '⏳ Refreshing...' : '🔄 Refresh'}
             </button>
           </div>
           <div className="balance-content">
             <div className="balance-primary">
               <span className="balance-amount">
-                {balanceLoading ? '...' : (balance / 100000000).toFixed(8)}
+                {isLoading ? '...' : (balance / 100000000).toFixed(8)}
               </span>
               <span className="balance-currency">BSV</span>
             </div>
             <span className="balance-separator">|</span>
             <div className="balance-secondary">
               <span className="balance-usd">
-                ${balanceLoading ? '...' : usdValue.toFixed(2)} USD
+                ${isLoading ? '...' : usdValue.toFixed(2)} USD
               </span>
             </div>
           </div>
-          {balanceLoading && (
+          {isLoading && (
             <div className="balance-loading">
               <div className="loading-spinner"></div>
               Fetching balance from blockchain...
