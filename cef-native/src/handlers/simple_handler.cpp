@@ -17,6 +17,8 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/GoogleSuggestService.h"
+#include "../../include/core/CookieManager.h"
+#include "../../include/core/CookieBlockManager.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -119,6 +121,7 @@ CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::omnibox_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::cookie_panel_browser_ = nullptr;
 
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
     return overlay_browser_;
@@ -155,6 +158,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxBrowser() {
     return omnibox_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
+    return cookie_panel_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -605,6 +612,23 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "cookiepanel") {
+        cookie_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized.");
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        // CRITICAL: Set focus so interactions work
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Cookie panel browser focus enabled");
+
+        // Delayed resize/invalidate to fix first-render black screen issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -675,6 +699,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "omnibox" && browser == omnibox_browser_) {
         std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
         omnibox_browser_ = nullptr;
+    } else if (role_ == "cookiepanel" && browser == cookie_panel_browser_) {
+        std::cout << "  → Cookie panel overlay browser cleanup" << std::endl;
+        cookie_panel_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -1024,6 +1051,38 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "cookie_panel_show") {
+#ifdef _WIN32
+        extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern void ShowCookiePanelOverlay();
+        extern HWND g_cookie_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        // Create if doesn't exist, otherwise show
+        if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
+            CreateCookiePanelOverlay(g_hInstance, true);
+        } else {
+            ShowCookiePanelOverlay();
+        }
+
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay shown");
+#else
+        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "cookie_panel_hide") {
+#ifdef _WIN32
+        extern void HideCookiePanelOverlay();
+        HideCookiePanelOverlay();
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#endif
+        return true;
+    }
+
     if (message_name == "omnibox_update_query") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string query = args->GetString(0);
@@ -1040,6 +1099,27 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔍 Query forwarded to omnibox overlay: " + query);
         } else {
             LOG_DEBUG_BROWSER("⚠️ Omnibox browser not available for query forward");
+        }
+
+        return true;
+    }
+
+    if (message_name == "omnibox_autocomplete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestion = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+        LOG_DEBUG_BROWSER("🔍 Omnibox autocomplete received: " + suggestion);
+
+        // Forward to header browser's renderer process
+        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+        if (header_browser && header_browser->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> forward_msg = CefProcessMessage::Create("omnibox_autocomplete_update");
+            CefRefPtr<CefListValue> forward_args = forward_msg->GetArgumentList();
+            forward_args->SetString(0, suggestion);
+            header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, forward_msg);
+            LOG_DEBUG_BROWSER("🔍 Autocomplete forwarded to header browser: " + suggestion);
+        } else {
+            LOG_DEBUG_BROWSER("⚠️ Header browser not available for autocomplete forward");
         }
 
         return true;
@@ -2415,12 +2495,206 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== COOKIE MANAGEMENT MESSAGES ==========
+
+    if (message_name == "cookie_get_all") {
+        CookieManager::HandleGetAllCookies(browser);
+        return true;
+    }
+
+    if (message_name == "cookie_delete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0).ToString();
+        std::string name = args->GetString(1).ToString();
+        CookieManager::HandleDeleteCookie(browser, url, name);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_domain") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        CookieManager::HandleDeleteDomainCookies(browser, domain);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_all") {
+        CookieManager::HandleDeleteAllCookies(browser);
+        return true;
+    }
+
+    if (message_name == "cache_clear") {
+        CookieManager::HandleClearCache(browser);
+        return true;
+    }
+
+    if (message_name == "cache_get_size") {
+        CookieManager::HandleGetCacheSize(browser);
+        return true;
+    }
+
+    // ========== COOKIE BLOCKING MESSAGES ==========
+
+    if (message_name == "cookie_block_domain") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        std::string isWildcardStr = (args->GetSize() > 1) ? args->GetString(1).ToString() : "false";
+        bool isWildcard = (isWildcardStr == "true");
+
+        bool success = CookieBlockManager::GetInstance().AddBlockedDomain(domain, isWildcard, "user");
+
+        nlohmann::json response;
+        response["success"] = success;
+        response["domain"] = domain;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_block_domain_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_unblock_domain") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+
+        bool success = CookieBlockManager::GetInstance().RemoveBlockedDomain(domain);
+
+        nlohmann::json response;
+        response["success"] = success;
+        response["domain"] = domain;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_unblock_domain_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_get_blocklist") {
+        std::string json_str = CookieBlockManager::GetInstance().GetBlockedDomains();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_blocklist_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_allow_third_party") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+
+        bool success = CookieBlockManager::GetInstance().AddAllowedThirdParty(domain);
+
+        nlohmann::json response;
+        response["success"] = success;
+        response["domain"] = domain;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_allow_third_party_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_remove_third_party_allow") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+
+        bool success = CookieBlockManager::GetInstance().RemoveAllowedThirdParty(domain);
+
+        nlohmann::json response;
+        response["success"] = success;
+        response["domain"] = domain;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_remove_third_party_allow_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_get_block_log") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int limit = 100;
+        int offset = 0;
+        if (args->GetSize() > 0) {
+            try { limit = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+        }
+        if (args->GetSize() > 1) {
+            try { offset = std::stoi(args->GetString(1).ToString()); } catch (...) {}
+        }
+
+        std::string json_str = CookieBlockManager::GetInstance().GetBlockLog(limit, offset);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_block_log_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_clear_block_log") {
+        bool success = CookieBlockManager::GetInstance().ClearBlockLog();
+
+        nlohmann::json response;
+        response["success"] = success;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_clear_block_log_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_get_blocked_count") {
+        int browser_id = browser->GetIdentifier();
+        int count = CookieBlockManager::GetInstance().GetBlockedCountForBrowser(browser_id);
+
+        nlohmann::json response;
+        response["count"] = count;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_blocked_count_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "cookie_reset_blocked_count") {
+        int browser_id = browser->GetIdentifier();
+        CookieBlockManager::GetInstance().ResetBlockedCount(browser_id);
+
+        nlohmann::json response;
+        response["success"] = true;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_reset_blocked_count_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
     return false;
 }
 
 CefRefPtr<CefRequestHandler> SimpleHandler::GetRequestHandler() {
     return this;
 }
+
+// CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
+// so cookie blocking applies to all browsing.
+class CookieFilterResourceHandler : public CefResourceRequestHandler {
+public:
+    CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override {
+        if (CookieBlockManager::GetInstance().IsInitialized()) {
+            return new CookieAccessFilterWrapper();
+        }
+        return nullptr;
+    }
+    IMPLEMENT_REFCOUNTING(CookieFilterResourceHandler);
+};
 
 CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     CefRefPtr<CefBrowser> browser,
@@ -2459,7 +2733,12 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 #endif
     }
 
-    // For other requests, use default handling
+    // For non-wallet requests, return CookieFilterResourceHandler
+    // to apply cookie blocking to all browsing traffic
+    if (CookieBlockManager::GetInstance().IsInitialized()) {
+        return new CookieFilterResourceHandler();
+    }
+
     return nullptr;
 }
 

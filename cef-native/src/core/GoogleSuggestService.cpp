@@ -3,6 +3,7 @@
 #include <sstream>
 #include <iostream>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 
 // Convenience macros for logging
 #define LOG_DEBUG_GOOGLE(msg) Logger::Log(msg, 0, 2)
@@ -179,71 +180,45 @@ std::vector<std::string> GoogleSuggestService::fetchSuggestions(const std::strin
         return suggestions; // Return empty vector
     }
 
-    // Parse JSON response
+    LOG_DEBUG_GOOGLE("Raw Google response (first 500 chars): " + responseData.substr(0, 500));
+
+    // Parse JSON response using nlohmann::json for robustness
     // Response format: ["query", ["suggestion1", "suggestion2", ...], [], {"google:suggesttype":[...]}]
     // We need to extract the second array (index 1)
 
-    // Simple manual parsing for the array (avoiding nlohmann::json dependency issues)
-    // Find the second array opening bracket
-    size_t firstArrayStart = responseData.find('[');
-    if (firstArrayStart == std::string::npos) {
-        LOG_ERROR_GOOGLE("Invalid Google Suggest response format (no array)");
-        return suggestions;
-    }
+    try {
+        nlohmann::json jsonResponse = nlohmann::json::parse(responseData);
 
-    size_t secondArrayStart = responseData.find('[', firstArrayStart + 1);
-    if (secondArrayStart == std::string::npos) {
-        LOG_ERROR_GOOGLE("Invalid Google Suggest response format (no second array)");
-        return suggestions;
-    }
+        // Validate response structure
+        if (!jsonResponse.is_array() || jsonResponse.size() < 2) {
+            LOG_ERROR_GOOGLE("Invalid Google Suggest response: not an array or too few elements");
+            return suggestions;
+        }
 
-    size_t secondArrayEnd = responseData.find(']', secondArrayStart + 1);
-    if (secondArrayEnd == std::string::npos) {
-        LOG_ERROR_GOOGLE("Invalid Google Suggest response format (unclosed second array)");
-        return suggestions;
-    }
+        // Extract suggestions array (second element, index 1)
+        const auto& suggestionsArray = jsonResponse[1];
+        if (!suggestionsArray.is_array()) {
+            LOG_ERROR_GOOGLE("Invalid Google Suggest response: suggestions element is not an array");
+            return suggestions;
+        }
 
-    // Extract suggestions array content
-    std::string suggestionsStr = responseData.substr(secondArrayStart + 1,
-                                                     secondArrayEnd - secondArrayStart - 1);
-
-    // Parse individual suggestions (simple string split on quotes)
-    size_t pos = 0;
-    bool inQuote = false;
-    std::string currentSuggestion;
-
-    for (size_t i = 0; i < suggestionsStr.length(); i++) {
-        char c = suggestionsStr[i];
-
-        if (c == '"' && (i == 0 || suggestionsStr[i-1] != '\\')) {
-            if (inQuote) {
-                // End of suggestion
-                if (!currentSuggestion.empty()) {
-                    suggestions.push_back(currentSuggestion);
-                    currentSuggestion.clear();
+        // Extract each suggestion string
+        for (const auto& suggestion : suggestionsArray) {
+            if (suggestion.is_string()) {
+                std::string suggestionStr = suggestion.get<std::string>();
+                if (!suggestionStr.empty()) {
+                    suggestions.push_back(suggestionStr);
                 }
-                inQuote = false;
-            } else {
-                // Start of suggestion
-                inQuote = true;
-            }
-        } else if (inQuote) {
-            // Handle escape sequences
-            if (c == '\\' && i + 1 < suggestionsStr.length()) {
-                char next = suggestionsStr[i + 1];
-                if (next == '"' || next == '\\') {
-                    currentSuggestion += next;
-                    i++; // Skip next character
-                } else {
-                    currentSuggestion += c;
-                }
-            } else {
-                currentSuggestion += c;
             }
         }
-    }
 
-    LOG_DEBUG_GOOGLE("Parsed " + std::to_string(suggestions.size()) + " suggestions from Google");
+        LOG_DEBUG_GOOGLE("Parsed " + std::to_string(suggestions.size()) + " suggestions from Google");
+
+    } catch (const nlohmann::json::exception& e) {
+        LOG_ERROR_GOOGLE("JSON parsing failed: " + std::string(e.what()));
+        LOG_ERROR_GOOGLE("Response data: " + responseData.substr(0, 200));
+        return suggestions; // Return empty vector on parse error
+    }
 
 #else
     LOG_ERROR_GOOGLE("GoogleSuggestService only supported on Windows");

@@ -1350,23 +1350,198 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OMNIBOX AUTOCOMPLETE UPDATE ==========
+    if (message_name == "omnibox_autocomplete_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string suggestion = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Omnibox autocomplete update received in renderer: " + suggestion);
+
+        // Escape suggestion for JavaScript string
+        std::string escapedSuggestion = escapeJsonForJs(suggestion);
+
+        // Dispatch via window.postMessage (MainBrowserView listens for this)
+        std::string js = "window.postMessage({ type: 'omnibox_autocomplete', suggestion: '" + escapedSuggestion + "' }, '*');";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 omnibox_autocomplete message posted to window");
+        return true;
+    }
+
     // ========== GOOGLE SUGGEST RESPONSE ==========
     if (message_name == "google_suggest_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string suggestionsJson = args->GetString(0);
         int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response received: " + suggestionsJson + " (requestId: " + std::to_string(requestId) + ")");
+        LOG_DEBUG_RENDER("🔍 Google Suggest response received (length: " + std::to_string(suggestionsJson.length()) + "): " + suggestionsJson.substr(0, 200) + " (requestId: " + std::to_string(requestId) + ")");
 
-        // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
-        std::string escapedJson = escapeJsonForJs(suggestionsJson);
+        try {
+            // Escape JSON for JavaScript (using existing escapeJsonForJs helper)
+            std::string escapedJson = escapeJsonForJs(suggestionsJson);
 
-        // Dispatch custom event with suggestions and requestId
-        std::string js = "window.dispatchEvent(new CustomEvent('googleSuggestResponse', { detail: { suggestions: JSON.parse('" + escapedJson + "'), requestId: " + std::to_string(requestId) + " } }));";
+            LOG_DEBUG_RENDER("🔍 Escaped JSON (length: " + std::to_string(escapedJson.length()) + "): " + escapedJson.substr(0, 200));
+
+            // Use try-catch in JavaScript to prevent crashes
+            std::string js =
+                "try { "
+                "  var parsedSuggestions = JSON.parse('" + escapedJson + "'); "
+                "  window.dispatchEvent(new CustomEvent('googleSuggestResponse', { "
+                "    detail: { suggestions: parsedSuggestions, requestId: " + std::to_string(requestId) + " } "
+                "  })); "
+                "} catch(e) { "
+                "  console.error('Failed to parse Google suggestions:', e, 'JSON:', '" + escapedJson + "'); "
+                "}";
+
+            if (frame) {
+                frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+                LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
+            } else {
+                LOG_DEBUG_RENDER("⚠️ Frame is null, cannot dispatch Google Suggest response");
+            }
+        } catch (const std::exception& e) {
+            LOG_DEBUG_RENDER("❌ Exception in google_suggest_response handler: " + std::string(e.what()));
+        }
+
+        return true;
+    }
+
+    // ========== COOKIE/CACHE RESPONSE HANDLERS ==========
+
+    if (message_name == "cookie_get_all_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string cookiesJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(cookiesJson);
+        std::string js = "if (window.onCookieGetAllResponse) { window.onCookieGetAllResponse(JSON.parse('" + escaped + "')); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
 
-        LOG_DEBUG_RENDER("🔍 Google Suggest response dispatched to window with requestId: " + std::to_string(requestId));
+    if (message_name == "cookie_delete_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteResponse) { window.onCookieDeleteResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
 
+    if (message_name == "cookie_delete_domain_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteDomainResponse) { window.onCookieDeleteDomainResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_delete_all_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieDeleteAllResponse) { window.onCookieDeleteAllResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cache_clear_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCacheClearResponse) { window.onCacheClearResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cache_get_size_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCacheGetSizeResponse) { window.onCacheGetSizeResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    // ========== COOKIE BLOCKING RESPONSE HANDLERS ==========
+
+    if (message_name == "cookie_block_domain_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieBlockDomainResponse) { window.onCookieBlockDomainResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_unblock_domain_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieUnblockDomainResponse) { window.onCookieUnblockDomainResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_blocklist_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieBlocklistResponse) { window.onCookieBlocklistResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_allow_third_party_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieAllowThirdPartyResponse) { window.onCookieAllowThirdPartyResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_remove_third_party_allow_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieRemoveThirdPartyAllowResponse) { window.onCookieRemoveThirdPartyAllowResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_block_log_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieBlockLogResponse) { window.onCookieBlockLogResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_clear_block_log_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieClearBlockLogResponse) { window.onCookieClearBlockLogResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_blocked_count_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieBlockedCountResponse) { window.onCookieBlockedCountResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_reset_blocked_count_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieResetBlockedCountResponse) { window.onCookieResetBlockedCountResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
         return true;
     }
 

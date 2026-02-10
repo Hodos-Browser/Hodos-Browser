@@ -5,6 +5,7 @@ import WalletOverlayRoot from './pages/WalletOverlayRoot';
 import BackupOverlayRoot from './pages/BackupOverlayRoot';
 import BRC100AuthOverlayRoot from './pages/BRC100AuthOverlayRoot';
 import OmniboxOverlayRoot from './pages/OmniboxOverlayRoot';
+import CookiePanelOverlayRoot from './pages/CookiePanelOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
 import HistoryPage from './pages/HistoryPage';
 import WalletPanelPage from './pages/WalletPanelPage';
@@ -167,6 +168,7 @@ const App = () => {
         <Route path="/backup" element={<BackupOverlayRoot />} />
         <Route path="/brc100-auth" element={<BRC100AuthOverlayRoot />} />
         <Route path="/omnibox" element={<OmniboxOverlayRoot />} />
+        <Route path="/cookie-panel" element={<CookiePanelOverlayRoot />} />
       </Routes>
 
       {/* BRC-100 Authentication Modal */}

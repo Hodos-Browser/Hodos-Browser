@@ -1,6 +1,8 @@
 import type { AddressData } from './address';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
+import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
+import type { BlockedDomainEntry, BlockLogEntry, BlockDomainResponse, UnblockDomainResponse, AllowThirdPartyResponse, BlockedCountResponse, ClearBlockLogResponse } from './cookieBlocking';
 
 declare global {
   interface Window {
@@ -12,6 +14,25 @@ declare global {
         delete: (url: string) => boolean;
         clearAll: () => boolean;
         clearRange: (params: ClearRangeParams) => boolean;
+      };
+      cookies: {
+        getAll: () => Promise<CookieData[]>;
+        deleteCookie: (url: string, name: string) => Promise<CookieDeleteResponse>;
+        deleteDomainCookies: (domain: string) => Promise<CookieDeleteResponse>;
+        deleteAllCookies: () => Promise<CookieDeleteResponse>;
+        clearCache: () => Promise<{ success: boolean }>;
+        getCacheSize: () => Promise<CacheSizeResponse>;
+      };
+      cookieBlocking: {
+        blockDomain: (domain: string, isWildcard: boolean) => Promise<BlockDomainResponse>;
+        unblockDomain: (domain: string) => Promise<UnblockDomainResponse>;
+        getBlockList: () => Promise<BlockedDomainEntry[]>;
+        allowThirdParty: (domain: string) => Promise<AllowThirdPartyResponse>;
+        removeThirdPartyAllow: (domain: string) => Promise<AllowThirdPartyResponse>;
+        getBlockLog: (limit: number, offset: number) => Promise<BlockLogEntry[]>;
+        clearBlockLog: () => Promise<ClearBlockLogResponse>;
+        getBlockedCount: () => Promise<BlockedCountResponse>;
+        resetBlockedCount: () => Promise<void>;
       };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
@@ -82,6 +103,36 @@ declare global {
     onMarkWalletBackedUpError?: (error: string) => void;
     onGetBackupModalStateResponse?: (data: { shown: boolean }) => void;
     onSetBackupModalStateResponse?: (data: { success: boolean }) => void;
+    onCookieGetAllResponse?: (data: CookieData[]) => void;
+    onCookieGetAllError?: (error: string) => void;
+    onCookieDeleteResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteError?: (error: string) => void;
+    onCookieDeleteDomainResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteDomainError?: (error: string) => void;
+    onCookieDeleteAllResponse?: (data: CookieDeleteResponse) => void;
+    onCookieDeleteAllError?: (error: string) => void;
+    onCacheClearResponse?: (data: { success: boolean }) => void;
+    onCacheClearError?: (error: string) => void;
+    onCacheGetSizeResponse?: (data: CacheSizeResponse) => void;
+    onCacheGetSizeError?: (error: string) => void;
+    onCookieBlockDomainResponse?: (data: BlockDomainResponse) => void;
+    onCookieBlockDomainError?: (error: string) => void;
+    onCookieUnblockDomainResponse?: (data: UnblockDomainResponse) => void;
+    onCookieUnblockDomainError?: (error: string) => void;
+    onCookieBlocklistResponse?: (data: BlockedDomainEntry[]) => void;
+    onCookieBlocklistError?: (error: string) => void;
+    onCookieAllowThirdPartyResponse?: (data: AllowThirdPartyResponse) => void;
+    onCookieAllowThirdPartyError?: (error: string) => void;
+    onCookieRemoveThirdPartyAllowResponse?: (data: AllowThirdPartyResponse) => void;
+    onCookieRemoveThirdPartyAllowError?: (error: string) => void;
+    onCookieBlockLogResponse?: (data: BlockLogEntry[]) => void;
+    onCookieBlockLogError?: (error: string) => void;
+    onCookieClearBlockLogResponse?: (data: ClearBlockLogResponse) => void;
+    onCookieClearBlockLogError?: (error: string) => void;
+    onCookieBlockedCountResponse?: (data: BlockedCountResponse) => void;
+    onCookieBlockedCountError?: (error: string) => void;
+    onCookieResetBlockedCountResponse?: () => void;
+    onCookieResetBlockedCountError?: (error: string) => void;
     allSystemsReady?: boolean;
      __overlayReady?: boolean;
   }

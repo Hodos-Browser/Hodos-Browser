@@ -21,6 +21,11 @@ public:
         CefRefPtr<CefFrame> frame,
         CefRefPtr<CefRequest> request) override;
 
+    CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override;
+
     void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
                            CefRefPtr<CefFrame> frame,
                            CefRefPtr<CefRequest> request,

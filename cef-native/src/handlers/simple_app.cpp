@@ -26,6 +26,7 @@ extern HWND g_wallet_overlay_hwnd;
 extern HWND g_backup_overlay_hwnd;
 extern HWND g_brc100_auth_overlay_hwnd;
 extern HWND g_omnibox_overlay_hwnd;
+extern HWND g_cookie_panel_overlay_hwnd;
 #endif
 
 SimpleApp::SimpleApp()
@@ -108,21 +109,47 @@ void SimpleApp::OnContextInitialized() {
     std::cout << "✅ OnContextInitialized CALLED (Windows)" << std::endl;
 
     std::ofstream log("startup_log.txt", std::ios::app);
+    log << "\n========================================\n";
     log << "🚀 OnContextInitialized entered\n";
-    log << "→ header_hwnd_: " << header_hwnd_ << "\n";
-    log << "→ IsWindow(header_hwnd_): " << IsWindow(header_hwnd_) << "\n";
-    log << "→ webview_hwnd_: " << webview_hwnd_ << "\n";
-    log << "→ IsWindow(webview_hwnd_): " << IsWindow(webview_hwnd_) << "\n";
+    log << "→ this pointer: " << this << "\n";
+    log << "→ member header_hwnd_: " << header_hwnd_ << "\n";
+    log << "→ global g_header_hwnd: " << g_header_hwnd << "\n";
+    log << "→ global g_hwnd: " << g_hwnd << "\n";
+    log << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
+    log << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
+    log << "→ Proceeding without guard (original 625af25 behavior)\n";
+    log << "========================================\n";
     log.close();
+
+    std::ofstream log_trace("startup_log.txt", std::ios::app);
+    log_trace << "🔍 Starting header browser setup...\n";
+    log_trace.flush();
 
     // ───── header Browser Setup ─────
     RECT headerRect;
+    log_trace << "🔍 About to call GetClientRect on g_header_hwnd: " << g_header_hwnd << "\n";
+    log_trace.flush();
+
     GetClientRect(g_header_hwnd, &headerRect);
+
+    log_trace << "🔍 GetClientRect succeeded\n";
+    log_trace.close();
     int headerWidth = headerRect.right - headerRect.left;
     int headerHeight = headerRect.bottom - headerRect.top;
 
+    std::ofstream log2("startup_log.txt", std::ios::app);
+    log2 << "📊 Header setup:\n";
+    log2 << "→ g_header_hwnd: " << g_header_hwnd << "\n";
+    log2 << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
+    log2 << "→ IsWindowVisible(g_header_hwnd): " << IsWindowVisible(g_header_hwnd) << "\n";
+    log2 << "→ headerRect: " << headerWidth << "x" << headerHeight << "\n";
+
     CefWindowInfo header_window_info;
+    log2 << "🔍 Before SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
     header_window_info.SetAsChild(g_header_hwnd, CefRect(0, 0, headerWidth, headerHeight));
+    log2 << "🔍 After SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
+    log2 << "🔍 After SetAsChild - parent HWND: " << header_window_info.parent_window << "\n";
+    log2.close();
 
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
@@ -139,6 +166,10 @@ void SimpleApp::OnContextInitialized() {
             CefRequestContext::GetGlobalContext()
         );
         std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
+
+        std::ofstream log3("startup_log.txt", std::ios::app);
+        log3 << "✅ Header browser creation result: " << (header_result ? "success" : "failed") << "\n";
+        log3.close();
     } catch (...) {
         std::ofstream errLog("startup_log.txt", std::ios::app);
         errLog << "❌ header browser creation threw an exception!\n";
@@ -155,6 +186,13 @@ void SimpleApp::OnContextInitialized() {
 
     LOG_INFO_APP("📑 Creating initial tab with TabManager...");
 
+    std::ofstream log4("startup_log.txt", std::ios::app);
+    log4 << "📊 Tab setup:\n";
+    log4 << "→ g_hwnd: " << g_hwnd << "\n";
+    log4 << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
+    log4 << "→ tabHeight: " << tabHeight << "\n";
+    log4.close();
+
     try {
         int initial_tab_id = TabManager::GetInstance().CreateTab(
             "https://metanetapps.com/",
@@ -167,6 +205,10 @@ void SimpleApp::OnContextInitialized() {
 
         LOG_INFO_APP("✅ Initial tab created: ID " + std::to_string(initial_tab_id));
         std::cout << "Initial tab created: ID " << initial_tab_id << std::endl;
+
+        std::ofstream log5("startup_log.txt", std::ios::app);
+        log5 << "✅ Initial tab creation result: ID = " << initial_tab_id << "\n";
+        log5.close();
     } catch (...) {
         std::ofstream errLog("startup_log.txt", std::ios::app);
         errLog << "❌ Initial tab creation threw an exception!\n";
@@ -1055,5 +1097,206 @@ void HideOmniboxOverlay() {
     }
 
     LOG_INFO_APP("✅ Omnibox overlay hidden");
+}
+
+// Forward declarations for cookie panel overlay functions
+void ShowCookiePanelOverlay();
+void HideCookiePanelOverlay();
+
+void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately) {
+    LOG_INFO_APP("🍪 Creating cookie panel overlay with keep-alive pattern (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ")");
+
+    // Keep-alive check: if HWND already exists, conditionally show it
+    if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd)) {
+        LOG_INFO_APP("🍪 Cookie panel overlay already exists");
+        if (showImmediately) {
+            ShowCookiePanelOverlay();
+        }
+        return;
+    }
+
+    // Get main window dimensions
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position - right side panel (similar to wallet overlay positioning)
+    int panelWidth = 450;  // Wide enough for cookie list and controls
+    int panelHeight = 450;  // Full height
+    int overlayX = mainRect.right - panelWidth;  // Right edge of window
+    int overlayY = headerRect.top + 104;
+
+    LOG_INFO_APP("🍪 Creating cookie panel overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
+                 std::to_string(panelHeight));
+
+    // Create HWND for cookie panel overlay
+    HWND cookie_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFCookiePanelOverlayWindow",
+        L"Cookie Panel Overlay",
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!cookie_panel_hwnd) {
+        LOG_ERROR_APP("❌ Failed to create cookie panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position with SWP_NOACTIVATE (conditionally show)
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
+    SetWindowPos(cookie_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        flags);
+
+    // Store HWND globally
+    g_cookie_panel_overlay_hwnd = cookie_panel_hwnd;
+    LOG_INFO_APP("✅ Cookie panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(cookie_panel_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
+
+    // Create CEF browser subprocess for cookie panel overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(cookie_panel_hwnd, "CookiePanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> cookie_panel_handler(new SimpleHandler("cookiepanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(cookie_panel_hwnd, panelWidth, panelHeight);
+    cookie_panel_handler->SetRenderHandler(render_handler);
+
+    // Use global context (shared cache/cookies)
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, cookie_panel_handler,
+        "http://127.0.0.1:5137/cookie-panel",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("✅ Cookie panel overlay browser created with subprocess");
+
+        // If showing immediately, install mouse hook and enable mouse input
+        if (showImmediately) {
+            extern HHOOK g_cookie_panel_mouse_hook;
+            extern LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+            if (!g_cookie_panel_mouse_hook) {
+                g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
+                if (g_cookie_panel_mouse_hook) {
+                    LOG_INFO_APP("✅ Cookie panel mouse hook installed for click-outside detection");
+                } else {
+                    LOG_WARNING_APP("⚠️ Failed to install cookie panel mouse hook. Error: " + std::to_string(GetLastError()));
+                }
+            }
+
+            // Enable mouse input
+            LONG exStyle = GetWindowLong(cookie_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(cookie_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            LOG_INFO_APP("✅ Mouse input enabled for cookie panel overlay");
+        }
+    } else {
+        LOG_ERROR_APP("❌ Failed to create cookie panel overlay browser");
+    }
+}
+
+void ShowCookiePanelOverlay() {
+    // Guard: verify HWND exists
+    if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("⚠️ Cannot show cookie panel overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("🍪 Showing cookie panel overlay");
+
+    // Install global mouse hook for click-outside detection
+    extern HHOOK g_cookie_panel_mouse_hook;
+    extern LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_cookie_panel_mouse_hook) {
+        g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
+        if (g_cookie_panel_mouse_hook) {
+            LOG_INFO_APP("✅ Cookie panel mouse hook installed for click-outside detection");
+        } else {
+            LOG_WARNING_APP("⚠️ Failed to install cookie panel mouse hook. Error: " + std::to_string(GetLastError()));
+        }
+    }
+
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position - right side panel (similar to wallet overlay positioning)
+    int panelWidth = 450;  // Wide enough for cookie list and controls
+    int panelHeight = 450;  // Full height
+    int overlayX = mainRect.right - panelWidth;  // Right edge of window
+    int overlayY = headerRect.top + 104;
+
+    // Force position and show with SWP_NOACTIVATE
+    SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    // Remove WS_EX_TRANSPARENT to enable mouse input
+    LONG exStyle = GetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Trigger render update
+    CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie_browser && cookie_browser->GetHost()) {
+        cookie_browser->GetHost()->WasResized();
+        cookie_browser->GetHost()->Invalidate(PET_VIEW);
+        LOG_INFO_APP("🍪 Triggered render update for cookie panel browser");
+    }
+
+    LOG_INFO_APP("✅ Cookie panel overlay shown");
+}
+
+void HideCookiePanelOverlay() {
+    // Guard: verify HWND exists
+    if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("⚠️ Cannot hide cookie panel overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("🍪 Hiding cookie panel overlay");
+
+    // Remove global mouse hook
+    extern HHOOK g_cookie_panel_mouse_hook;
+    if (g_cookie_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_cookie_panel_mouse_hook);
+        g_cookie_panel_mouse_hook = nullptr;
+        LOG_INFO_APP("✅ Cookie panel mouse hook removed");
+    }
+
+    // Clear focus from cookie panel browser before hiding
+    CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie_browser) {
+        cookie_browser->GetHost()->SetFocus(false);
+        LOG_INFO_APP("✅ Cleared focus from cookie panel browser");
+    }
+
+    // Hide window (keep-alive - don't destroy)
+    ShowWindow(g_cookie_panel_overlay_hwnd, SW_HIDE);
+
+    // Return focus to header browser
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+        LOG_INFO_APP("✅ Returned focus to header browser");
+    }
+
+    LOG_INFO_APP("✅ Cookie panel overlay hidden");
 }
 #endif // _WIN32

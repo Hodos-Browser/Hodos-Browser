@@ -1,7 +1,20 @@
-import { Box, Container, Typography, Paper } from '@mui/material';
+import { useState } from 'react';
+import { Box, Container, Typography, Paper, Tabs, Tab } from '@mui/material';
+import {
+  History as HistoryIcon,
+  Cookie,
+  Storage,
+} from '@mui/icons-material';
+import { useSearchParams } from 'react-router-dom';
 import { HistoryPanel } from '../components/HistoryPanel';
+import { CookiesPanel } from '../components/CookiesPanel';
+import { CachePanel } from '../components/CachePanel';
 
 export function HistoryPage() {
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') === 'cookies' ? 1 : searchParams.get('tab') === 'cache' ? 2 : 0;
+  const [tabIndex, setTabIndex] = useState(initialTab);
+
   return (
     <Box
       sx={{
@@ -20,16 +33,33 @@ export function HistoryPage() {
             minHeight: '80vh',
           }}
         >
-          <Box sx={{ borderBottom: '1px solid rgba(0, 0, 0, 0.12)', p: 3, bgcolor: '#fafafa' }}>
+          <Box sx={{ borderBottom: '1px solid rgba(0, 0, 0, 0.12)', p: 3, pb: 0, bgcolor: '#fafafa' }}>
             <Typography variant="h4" component="h1" sx={{ fontWeight: 500 }}>
-              Browsing History
+              Browsing Data
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-              View and manage your browsing history
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
+              View and manage your browsing history, cookies, and cache
             </Typography>
+            <Tabs
+              value={tabIndex}
+              onChange={(_e, newValue) => setTabIndex(newValue)}
+              sx={{
+                '& .MuiTab-root': {
+                  textTransform: 'none',
+                  minHeight: 48,
+                  fontWeight: 500,
+                },
+              }}
+            >
+              <Tab icon={<HistoryIcon />} iconPosition="start" label="History" />
+              <Tab icon={<Cookie />} iconPosition="start" label="Cookies" />
+              <Tab icon={<Storage />} iconPosition="start" label="Cache" />
+            </Tabs>
           </Box>
 
-          <HistoryPanel />
+          {tabIndex === 0 && <HistoryPanel />}
+          {tabIndex === 1 && <CookiesPanel />}
+          {tabIndex === 2 && <CachePanel />}
         </Paper>
       </Container>
     </Box>

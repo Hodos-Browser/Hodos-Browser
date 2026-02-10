@@ -1,8 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  Box,
-  Toolbar,
-  IconButton,
+    Box,
+    Toolbar,
+    IconButton,
+    Badge,
+    Menu,
+    MenuItem,
+    ListItemIcon,
+    ListItemText,
+    Divider,
+    Snackbar,
+    Alert,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -10,10 +18,14 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import HistoryIcon from '@mui/icons-material/History';
 import SettingsIcon from '@mui/icons-material/Settings';
+import ShieldIcon from '@mui/icons-material/Shield';
+import BlockIcon from '@mui/icons-material/Block';
+import CookieIcon from '@mui/icons-material/Cookie';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { useCookieBlocking } from '../hooks/useCookieBlocking';
 import { TabBar } from '../components/TabBar';
 import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
@@ -23,6 +35,8 @@ const MainBrowserView: React.FC = () => {
     const [address, setAddress] = useState('https://metanetapps.com/');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const [autocompleteText, setAutocompleteText] = useState<string>('');
+    const [userTypedText, setUserTypedText] = useState('https://metanetapps.com/');
+    const addressInputRef = React.useRef<HTMLInputElement>(null);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -40,6 +54,50 @@ const MainBrowserView: React.FC = () => {
         closeActiveTab,
     } = useTabManager();
 
+    // Cookie blocking
+    const {
+        blockedCount,
+        blockedDomains,
+        fetchBlockedCount,
+        blockDomain,
+        resetBlockedCount,
+    } = useCookieBlocking();
+
+    // Shield menu state
+    const [shieldMenuAnchor, setShieldMenuAnchor] = useState<null | HTMLElement>(null);
+
+    // Toast state
+    const [toastOpen, setToastOpen] = useState(false);
+    const [toastMessage, setToastMessage] = useState('');
+
+    // Extract current domain from address bar
+    const currentDomain = useMemo(() => {
+        try {
+            const url = new URL(address);
+            if (url.protocol === 'http:' || url.protocol === 'https:') {
+                return url.hostname;
+            }
+            return '';
+        } catch {
+            return '';
+        }
+    }, [address]);
+
+    // Check if current domain is already blocked
+    const isCurrentDomainBlocked = useMemo(() => {
+        if (!currentDomain) return true; // Disable if no valid domain
+        return blockedDomains.some((d) => d.domain === currentDomain);
+    }, [currentDomain, blockedDomains]);
+
+    // Poll for blocked count every 3 seconds
+    React.useEffect(() => {
+        fetchBlockedCount();
+        const interval = setInterval(() => {
+            fetchBlockedCount();
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [fetchBlockedCount]);
+
     // Sync address bar with active tab's URL
     React.useEffect(() => {
         // Only update if user is not currently editing the address bar
@@ -51,27 +109,59 @@ const MainBrowserView: React.FC = () => {
         }
     }, [activeTabId, tabs, isEditingAddress]);
 
+    // Reset blocked count on navigation (when active tab URL changes)
+    React.useEffect(() => {
+        const activeTab = tabs.find(t => t.id === activeTabId);
+        if (activeTab?.url) {
+            resetBlockedCount().catch(() => {
+                // Silently ignore reset errors
+            });
+        }
+    }, [activeTabId, tabs, resetBlockedCount]);
+
     // Listen for autocomplete suggestions from omnibox overlay
     React.useEffect(() => {
         const handleAutocomplete = (event: MessageEvent) => {
             if (event.data?.type === 'omnibox_autocomplete') {
                 const suggestion = event.data.suggestion;
-                if (suggestion && address && isEditingAddress) {
+                if (suggestion && userTypedText && isEditingAddress) {
                     // Only show autocomplete if suggestion starts with current input
-                    if (suggestion.toLowerCase().startsWith(address.toLowerCase())) {
-                        setAutocompleteText(suggestion.slice(address.length));
+                    if (suggestion.toLowerCase().startsWith(userTypedText.toLowerCase())) {
+                        const autocompletePart = suggestion.slice(userTypedText.length);
+                        setAutocompleteText(autocompletePart);
+                        // Update the full address to include autocomplete
+                        setAddress(suggestion);
                     } else {
                         setAutocompleteText('');
+                        setAddress(userTypedText);
                     }
                 } else {
                     setAutocompleteText('');
+                    setAddress(userTypedText);
                 }
             }
         };
 
         window.addEventListener('message', handleAutocomplete);
         return () => window.removeEventListener('message', handleAutocomplete);
-    }, [address, isEditingAddress]);
+    }, [userTypedText, isEditingAddress]);
+
+    // Apply text selection to highlight autocomplete portion
+    React.useEffect(() => {
+        if (autocompleteText && isEditingAddress && addressInputRef.current) {
+            const input = addressInputRef.current;
+            const userLength = userTypedText.length;
+            const fullLength = address.length;
+
+            // Set selection to highlight the autocomplete part
+            // Use setTimeout to ensure this happens after React updates the DOM
+            setTimeout(() => {
+                if (document.activeElement === input) {
+                    input.setSelectionRange(userLength, fullLength);
+                }
+            }, 0);
+        }
+    }, [autocompleteText, address, userTypedText, isEditingAddress]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -94,6 +184,31 @@ const MainBrowserView: React.FC = () => {
             // It's a search query - search Google
             const searchUrl = toGoogleSearchUrl(input);
             navigate(searchUrl);
+        }
+    };
+
+    const handleQuickBlock = async () => {
+        setShieldMenuAnchor(null);
+        if (!currentDomain) return;
+        try {
+            await blockDomain(currentDomain, false);
+            setToastMessage(`Blocked: ${currentDomain}`);
+            setToastOpen(true);
+        } catch {
+            setToastMessage('Failed to block domain');
+            setToastOpen(true);
+        }
+    };
+
+    const handleViewCookies = () => {
+        console.log('🍪 NEW CODE: Sending cookie_panel_show IPC message');
+        setShieldMenuAnchor(null);
+        // Show cookie panel overlay instead of navigating to history page
+        if (window.cefMessage) {
+            window.cefMessage.send('cookie_panel_show');
+            console.log('🍪 IPC message sent: cookie_panel_show');
+        } else {
+            console.error('🍪 ERROR: window.cefMessage not available');
         }
     };
 
@@ -180,76 +295,91 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Simple Address Bar Input */}
-                <input
-                    type="text"
-                    value={address}
-                    onChange={(e) => {
-                        const newValue = e.target.value;
-                        setAddress(newValue);
-                        setIsEditingAddress(true);
-                        setAutocompleteText(''); // Clear autocomplete on input change
+                {/* Address Bar with Inline Autocomplete */}
+                <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                    <input
+                        ref={addressInputRef}
+                        type="text"
+                        value={address}
+                        onChange={(e) => {
+                            const newValue = e.target.value;
 
-                        // Send query to omnibox overlay for suggestions
-                        if (newValue.length > 0) {
-                            window.cefMessage?.send('omnibox_update_query', [newValue]);
-                            window.cefMessage?.send('omnibox_show', [newValue]);
-                        } else {
-                            window.cefMessage?.send('omnibox_hide', []);
-                        }
-                    }}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                            handleNavigate(address);
+                            // Update both the display value and the user-typed portion
+                            setAddress(newValue);
+                            setUserTypedText(newValue);
+                            setIsEditingAddress(true);
+                            setAutocompleteText(''); // Clear autocomplete on input change
+
+                            // Send query to omnibox overlay for suggestions
+                            if (newValue.length > 0) {
+                                window.cefMessage?.send('omnibox_update_query', [newValue]);
+                                window.cefMessage?.send('omnibox_show', [newValue]);
+                            } else {
+                                window.cefMessage?.send('omnibox_hide', []);
+                            }
+                        }}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                // Navigate to the address (use full text with autocomplete if present)
+                                handleNavigate(address);
+                                setIsEditingAddress(false);
+                                setAutocompleteText('');
+                                setUserTypedText(address);
+                                e.currentTarget.blur();
+                                // Navigation dismisses overlay
+                                window.cefMessage?.send('omnibox_hide', []);
+                            } else if (e.key === 'Escape') {
+                                // Escape dismisses overlay, keeps current input
+                                window.cefMessage?.send('omnibox_hide', []);
+                                setIsEditingAddress(false);
+                                setAutocompleteText('');
+                                setAddress(userTypedText);
+                                e.currentTarget.blur();
+                            } else if ((e.key === 'Tab' || e.key === 'ArrowRight' || e.key === 'End') && autocompleteText) {
+                                // Tab, Right arrow, or End accepts the autocomplete suggestion
+                                e.preventDefault();
+                                setUserTypedText(address);
+                                setAutocompleteText('');
+                                // Move cursor to end
+                                setTimeout(() => {
+                                    if (addressInputRef.current) {
+                                        addressInputRef.current.setSelectionRange(address.length, address.length);
+                                    }
+                                }, 0);
+                            }
+                        }}
+                        onFocus={(e) => {
+                            e.target.select();
+                            setIsEditingAddress(true);
+                            // Preemptive creation: create overlay subprocess on focus but don't show
+                            // Only shows when user types (see onChange handler)
+                            window.cefMessage?.send('omnibox_create', []);
+                        }}
+                        onBlur={() => {
                             setIsEditingAddress(false);
                             setAutocompleteText('');
-                            e.currentTarget.blur();
-                            // Navigation dismisses overlay
-                            window.cefMessage?.send('omnibox_hide', []);
-                        } else if (e.key === 'Escape') {
-                            // Escape dismisses overlay, keeps current input
-                            window.cefMessage?.send('omnibox_hide', []);
-                            setIsEditingAddress(false);
-                            setAutocompleteText('');
-                            e.currentTarget.blur();
-                        } else if (e.key === 'Tab' && autocompleteText) {
-                            // Tab accepts the autocomplete suggestion
-                            e.preventDefault();
-                            setAddress(address + autocompleteText);
-                            setAutocompleteText('');
-                        }
-                    }}
-                    onFocus={(e) => {
-                        e.target.select();
-                        setIsEditingAddress(true);
-                        // Preemptive creation: create overlay subprocess on focus but don't show
-                        // Only shows when user types (see onChange handler)
-                        window.cefMessage?.send('omnibox_create', []);
-                    }}
-                    onBlur={() => {
-                        setIsEditingAddress(false);
-                        setAutocompleteText('');
-                    }}
-                    placeholder="Search or enter address"
-                    style={{
-                        flex: 1,
-                        minWidth: 0,
-                        height: 36,
-                        borderRadius: 20,
-                        paddingLeft: 16,
-                        paddingRight: 16,
-                        backgroundColor: '#f1f3f4',
-                        border: '1px solid transparent',
-                        fontSize: 14,
-                        color: 'rgba(0, 0, 0, 0.87)',
-                        outline: 'none',
-                    }}
-                />
+                            setAddress(userTypedText);
+                        }}
+                        placeholder="Search or enter address"
+                        style={{
+                            width: '98%',
+                            height: 36,
+                            borderRadius: 20,
+                            paddingLeft: 16,
+                            paddingRight: 16,
+                            backgroundColor: '#f1f3f4',
+                            border: '1px solid transparent',
+                            fontSize: 14,
+                            color: 'rgba(0, 0, 0, 0.87)',
+                            outline: 'none',
+                        }}
+                    />
+                </Box>
 
                 {/* Wallet Button */}
                 <IconButton
                     onClick={() => {
-                        console.log('💰 Wallet panel toggle clicked');
+                        console.log('Wallet panel toggle clicked');
                         window.cefMessage?.send('toggle_wallet_panel', []);
                     }}
                     size="small"
@@ -282,6 +412,53 @@ const MainBrowserView: React.FC = () => {
                     <HistoryIcon fontSize="small" />
                 </IconButton>
 
+                {/* Shield Badge - Cookie Blocking */}
+                <IconButton
+                    onClick={() => {
+                        console.log('🍪 Shield clicked - sending cookie_panel_show');
+                        if (window.cefMessage) {
+                            window.cefMessage.send('cookie_panel_show');
+                        }
+                    }}
+                    size="small"
+                    title="Cookie blocking"
+                    sx={{
+                        flexShrink: 0,
+                        color: blockedCount > 0 ? 'primary.main' : 'rgba(0, 0, 0, 0.6)',
+                        '&:hover': {
+                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                        }
+                    }}
+                >
+                    <Badge
+                        badgeContent={blockedCount}
+                        color="error"
+                        max={99}
+                        invisible={blockedCount === 0}
+                        sx={{ '& .MuiBadge-badge': { fontSize: '0.65rem', minWidth: 16, height: 16 } }}
+                    >
+                        <ShieldIcon fontSize="small" />
+                    </Badge>
+                </IconButton>
+                <Menu
+                    anchorEl={shieldMenuAnchor}
+                    open={Boolean(shieldMenuAnchor)}
+                    onClose={() => setShieldMenuAnchor(null)}
+                >
+                    <MenuItem onClick={handleQuickBlock} disabled={isCurrentDomainBlocked}>
+                        <ListItemIcon><BlockIcon fontSize="small" /></ListItemIcon>
+                        <ListItemText>{currentDomain ? `Block ${currentDomain}` : 'No domain to block'}</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={handleViewCookies}>
+                        <ListItemIcon><CookieIcon fontSize="small" /></ListItemIcon>
+                        <ListItemText>View Cookies</ListItemText>
+                    </MenuItem>
+                    <Divider />
+                    <MenuItem disabled>
+                        <ListItemText>Blocked: {blockedCount} cookies</ListItemText>
+                    </MenuItem>
+                </Menu>
+
                 {/* Settings Button */}
                 <IconButton
                     onClick={() => {
@@ -302,6 +479,23 @@ const MainBrowserView: React.FC = () => {
                     <SettingsIcon fontSize="small" />
                 </IconButton>
             </Toolbar>
+
+            {/* Toast for quick-block */}
+            <Snackbar
+                open={toastOpen}
+                autoHideDuration={3000}
+                onClose={() => setToastOpen(false)}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+            >
+                <Alert
+                    onClose={() => setToastOpen(false)}
+                    severity="success"
+                    variant="filled"
+                    sx={{ width: '100%' }}
+                >
+                    {toastMessage}
+                </Alert>
+            </Snackbar>
         </Box>
     );
 };

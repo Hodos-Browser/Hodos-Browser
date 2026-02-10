@@ -1,4 +1,5 @@
 #include "../../include/core/HttpRequestInterceptor.h"
+#include "../../include/core/CookieBlockManager.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
 #include "include/cef_request.h"
@@ -1047,6 +1048,16 @@ bool HttpRequestInterceptor::OnResourceResponse(CefRefPtr<CefBrowser> browser,
     return false;
 }
 
+
+CefRefPtr<CefCookieAccessFilter> HttpRequestInterceptor::GetCookieAccessFilter(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    CefRefPtr<CefRequest> request) {
+    if (CookieBlockManager::GetInstance().IsInitialized()) {
+        return new CookieAccessFilterWrapper();
+    }
+    return nullptr;
+}
 
 bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
     // Check if URL contains wallet endpoints

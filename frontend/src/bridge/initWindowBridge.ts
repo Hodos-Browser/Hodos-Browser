@@ -438,3 +438,335 @@ if (!(window.hodosBrowser as any).omnibox) {
     },
   };
 }
+
+// Cookie Management API
+if (!(window.hodosBrowser as any).cookies) {
+  (window.hodosBrowser as any).cookies = {
+    getAll: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          resolve([]);
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        }, 5000);
+
+        window.onCookieGetAllResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        };
+        window.onCookieGetAllError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieGetAllResponse;
+          delete window.onCookieGetAllError;
+        };
+        window.cefMessage?.send('cookie_get_all', []);
+      });
+    },
+
+    deleteCookie: (url: string, name: string) => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteResponse;
+          delete window.onCookieDeleteError;
+        };
+        window.onCookieDeleteError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteResponse;
+          delete window.onCookieDeleteError;
+        };
+        window.cefMessage?.send('cookie_delete', [url, name]);
+      });
+    },
+
+    deleteDomainCookies: (domain: string) => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteDomainResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteDomainResponse;
+          delete window.onCookieDeleteDomainError;
+        };
+        window.onCookieDeleteDomainError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteDomainResponse;
+          delete window.onCookieDeleteDomainError;
+        };
+        window.cefMessage?.send('cookie_delete_domain', [domain]);
+      });
+    },
+
+    deleteAllCookies: () => {
+      return new Promise((resolve, reject) => {
+        window.onCookieDeleteAllResponse = (data: any) => {
+          resolve(data);
+          delete window.onCookieDeleteAllResponse;
+          delete window.onCookieDeleteAllError;
+        };
+        window.onCookieDeleteAllError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCookieDeleteAllResponse;
+          delete window.onCookieDeleteAllError;
+        };
+        window.cefMessage?.send('cookie_delete_all', []);
+      });
+    },
+
+    clearCache: () => {
+      return new Promise((resolve, reject) => {
+        window.onCacheClearResponse = (data: any) => {
+          resolve(data);
+          delete window.onCacheClearResponse;
+          delete window.onCacheClearError;
+        };
+        window.onCacheClearError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCacheClearResponse;
+          delete window.onCacheClearError;
+        };
+        window.cefMessage?.send('cache_clear', []);
+      });
+    },
+
+    getCacheSize: () => {
+      return new Promise((resolve, reject) => {
+        window.onCacheGetSizeResponse = (data: any) => {
+          resolve(data);
+          delete window.onCacheGetSizeResponse;
+          delete window.onCacheGetSizeError;
+        };
+        window.onCacheGetSizeError = (error: string) => {
+          reject(new Error(error));
+          delete window.onCacheGetSizeResponse;
+          delete window.onCacheGetSizeError;
+        };
+        window.cefMessage?.send('cache_get_size', []);
+      });
+    },
+  };
+}
+
+// ==========================================
+// Cookie Blocking API
+// ==========================================
+if (!(window.hodosBrowser as any).cookieBlocking) {
+  (window.hodosBrowser as any).cookieBlocking = {
+    blockDomain: (domain: string, isWildcard: boolean) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Block domain timeout'));
+          delete window.onCookieBlockDomainResponse;
+          delete window.onCookieBlockDomainError;
+        }, 5000);
+
+        window.onCookieBlockDomainResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieBlockDomainResponse;
+          delete window.onCookieBlockDomainError;
+        };
+        window.onCookieBlockDomainError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieBlockDomainResponse;
+          delete window.onCookieBlockDomainError;
+        };
+        window.cefMessage?.send('cookie_block_domain', [domain, isWildcard.toString()]);
+      });
+    },
+
+    unblockDomain: (domain: string) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Unblock domain timeout'));
+          delete window.onCookieUnblockDomainResponse;
+          delete window.onCookieUnblockDomainError;
+        }, 5000);
+
+        window.onCookieUnblockDomainResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieUnblockDomainResponse;
+          delete window.onCookieUnblockDomainError;
+        };
+        window.onCookieUnblockDomainError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieUnblockDomainResponse;
+          delete window.onCookieUnblockDomainError;
+        };
+        window.cefMessage?.send('cookie_unblock_domain', [domain]);
+      });
+    },
+
+    getBlockList: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          resolve([]);
+          delete window.onCookieBlocklistResponse;
+          delete window.onCookieBlocklistError;
+        }, 5000);
+
+        window.onCookieBlocklistResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieBlocklistResponse;
+          delete window.onCookieBlocklistError;
+        };
+        window.onCookieBlocklistError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieBlocklistResponse;
+          delete window.onCookieBlocklistError;
+        };
+        window.cefMessage?.send('cookie_get_blocklist', []);
+      });
+    },
+
+    allowThirdParty: (domain: string) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Allow third party timeout'));
+          delete window.onCookieAllowThirdPartyResponse;
+          delete window.onCookieAllowThirdPartyError;
+        }, 5000);
+
+        window.onCookieAllowThirdPartyResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieAllowThirdPartyResponse;
+          delete window.onCookieAllowThirdPartyError;
+        };
+        window.onCookieAllowThirdPartyError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieAllowThirdPartyResponse;
+          delete window.onCookieAllowThirdPartyError;
+        };
+        window.cefMessage?.send('cookie_allow_third_party', [domain]);
+      });
+    },
+
+    removeThirdPartyAllow: (domain: string) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Remove third party allow timeout'));
+          delete window.onCookieRemoveThirdPartyAllowResponse;
+          delete window.onCookieRemoveThirdPartyAllowError;
+        }, 5000);
+
+        window.onCookieRemoveThirdPartyAllowResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieRemoveThirdPartyAllowResponse;
+          delete window.onCookieRemoveThirdPartyAllowError;
+        };
+        window.onCookieRemoveThirdPartyAllowError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieRemoveThirdPartyAllowResponse;
+          delete window.onCookieRemoveThirdPartyAllowError;
+        };
+        window.cefMessage?.send('cookie_remove_third_party_allow', [domain]);
+      });
+    },
+
+    getBlockLog: (limit: number, offset: number) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          resolve([]);
+          delete window.onCookieBlockLogResponse;
+          delete window.onCookieBlockLogError;
+        }, 5000);
+
+        window.onCookieBlockLogResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieBlockLogResponse;
+          delete window.onCookieBlockLogError;
+        };
+        window.onCookieBlockLogError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieBlockLogResponse;
+          delete window.onCookieBlockLogError;
+        };
+        window.cefMessage?.send('cookie_get_block_log', [limit.toString(), offset.toString()]);
+      });
+    },
+
+    clearBlockLog: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Clear block log timeout'));
+          delete window.onCookieClearBlockLogResponse;
+          delete window.onCookieClearBlockLogError;
+        }, 5000);
+
+        window.onCookieClearBlockLogResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieClearBlockLogResponse;
+          delete window.onCookieClearBlockLogError;
+        };
+        window.onCookieClearBlockLogError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieClearBlockLogResponse;
+          delete window.onCookieClearBlockLogError;
+        };
+        window.cefMessage?.send('cookie_clear_block_log', []);
+      });
+    },
+
+    getBlockedCount: () => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          resolve({ count: 0 });
+          delete window.onCookieBlockedCountResponse;
+          delete window.onCookieBlockedCountError;
+        }, 5000);
+
+        window.onCookieBlockedCountResponse = (data: any) => {
+          clearTimeout(timeout);
+          resolve(data);
+          delete window.onCookieBlockedCountResponse;
+          delete window.onCookieBlockedCountError;
+        };
+        window.onCookieBlockedCountError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieBlockedCountResponse;
+          delete window.onCookieBlockedCountError;
+        };
+        window.cefMessage?.send('cookie_get_blocked_count', []);
+      });
+    },
+
+    resetBlockedCount: () => {
+      return new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Reset blocked count timeout'));
+          delete window.onCookieResetBlockedCountResponse;
+          delete window.onCookieResetBlockedCountError;
+        }, 5000);
+
+        window.onCookieResetBlockedCountResponse = () => {
+          clearTimeout(timeout);
+          resolve();
+          delete window.onCookieResetBlockedCountResponse;
+          delete window.onCookieResetBlockedCountError;
+        };
+        window.onCookieResetBlockedCountError = (error: string) => {
+          clearTimeout(timeout);
+          reject(new Error(error));
+          delete window.onCookieResetBlockedCountResponse;
+          delete window.onCookieResetBlockedCountError;
+        };
+        window.cefMessage?.send('cookie_reset_blocked_count', []);
+      });
+    },
+  };
+}
