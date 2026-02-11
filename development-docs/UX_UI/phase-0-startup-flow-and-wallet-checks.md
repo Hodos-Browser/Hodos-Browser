@@ -406,7 +406,7 @@ checkWalletStatus();
 **Current Behavior** (as of 2025-01-27):
 - ✅ Browser loads without checking wallet (wallet check is commented out)
 - ❌ Wallet button currently opens wallet overlay directly (does NOT check if wallet exists)
-- ⚠️ Wallet check on Wallet button click needs to be implemented (see [Wallet Initialization Flow](../UX_UI/UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow))
+- ⚠️ Wallet check on Wallet button click needs to be implemented (see [Wallet Initialization Flow](./helper-1-implementation-guide-checklist.md#wallet-initialization-flow))
 
 ---
 
@@ -654,7 +654,7 @@ bool checkWalletServerHealth() {
 
 ## Integration with Wallet Initialization Flow
 
-This startup flow integrates with the [Wallet Initialization Flow](../UX_UI/UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow):
+This startup flow integrates with the [Wallet Initialization Flow](./helper-1-implementation-guide-checklist.md#wallet-initialization-flow):
 
 1. **Startup**: Checks if wallet exists, starts server if valid
 2. **Wallet Button Click**: Checks wallet status, shows setup modal if needed

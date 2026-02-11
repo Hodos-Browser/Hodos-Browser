@@ -30,12 +30,12 @@ The Web3 BitcoinSV UI/UX enhancement includes the startup flow (foundation) and 
 
 | Interface | Status | Implementation File | Last Updated |
 |-----------|--------|-------------------|--------------|
-| 0. Startup Flow and Wallet Checks | 📋 Planning | [STARTUP_FLOW_AND_WALLET_CHECKS.md](./STARTUP_FLOW_AND_WALLET_CHECKS.md) | 2025-01-27 |
-| 1. Initial Setup/Recovery | 📋 Planning | [INITIAL_SETUP_RECOVERY.md](./INITIAL_SETUP_RECOVERY.md) | - |
-| 2. User Notifications | 📋 Planning | [USER_NOTIFICATIONS.md](./USER_NOTIFICATIONS.md) | - |
-| 3. Light Wallet | 📋 Planning | [LIGHT_WALLET.md](./LIGHT_WALLET.md) | - |
-| 4. Full Wallet | 📋 Planning | [FULL_WALLET.md](./FULL_WALLET.md) | - |
-| 5. Activity Status Indicator | 📋 Planning (Low Priority) | [ACTIVITY_STATUS_INDICATOR.md](./ACTIVITY_STATUS_INDICATOR.md) | - |
+| 0. Startup Flow and Wallet Checks | 📋 Planning | [phase-0-startup-flow-and-wallet-checks.md](./phase-0-startup-flow-and-wallet-checks.md) | 2025-01-27 |
+| 1. Initial Setup/Recovery | 📋 Planning | [phase-1-initial-setup-recovery.md](./phase-1-initial-setup-recovery.md) | - |
+| 2. User Notifications | 📋 Planning | [phase-2-user-notifications.md](./phase-2-user-notifications.md) | - |
+| 3. Light Wallet | 📋 Planning | [phase-3-light-wallet.md](./phase-3-light-wallet.md) | - |
+| 4. Full Wallet | 📋 Planning | [phase-4-full-wallet.md](./phase-4-full-wallet.md) | - |
+| 5. Activity Status Indicator | 📋 Planning (Low Priority) | [phase-5-activity-status-indicator.md](./phase-5-activity-status-indicator.md) | - |
 
 **Status Legend:**
 - 📋 Planning - Design and planning phase
@@ -50,7 +50,7 @@ The Web3 BitcoinSV UI/UX enhancement includes the startup flow (foundation) and 
 The interfaces should be implemented in the following order to ensure dependencies are met:
 
 0. **Startup Flow and Wallet Checks** (Foundation - triggers Initial Setup, must be implemented first)
-   - See: [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md)
+   - See: [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md)
    - Status: 📋 Planning
    - **Prerequisites**: None - this is the entry point
 1. **Initial Setup/Recovery** (Foundation - enables wallet functionality, triggered by Startup Flow)
@@ -64,52 +64,26 @@ The interfaces should be implemented in the following order to ensure dependenci
 ## Shared Resources
 
 ### Design Principles
-- **[Design Principles & Philosophy](./DESIGN_PRINCIPLES.md)** - Foundational design guidelines
+- **[Design Philosophy](./helper-2-design-philosophy.md)** - Foundational design guidelines
 
 ### Related Documentation
-- **[UI/UX Enhancement Guide](./UI_UX_ENHANCEMENT_GUIDE.md)** - Frontend architecture
-- **[Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md)** - Startup sequence
+- **[Implementation Guide & Checklist](./helper-1-implementation-guide-checklist.md)** - Frontend architecture + per-interface checklist
+- **[Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md)** - Startup sequence
 - **[HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md)** - Request interception patterns
-- **[UX Design Considerations](./UX_DESIGN_CONSIDERATIONS.md)** - User experience considerations
+- **[UX Design Considerations](./helper-3-ux-considerations.md)** - User experience considerations
+- **[Color Guidelines & Logos](./helper-4-branding-colors-logos.md)** - Brand colors and logo usage
 
 ---
 
 ## Implementation Checklist
 
-For each interface, the implementation plan should cover:
-
-### Frontend (React/TypeScript)
-- [ ] Component structure and props
-- [ ] State management
-- [ ] UI/UX flow
-- [ ] Styling approach
-- [ ] Integration with existing components
-
-### CEF-Native (C++)
-- [ ] Window/overlay management
-- [ ] Message handling
-- [ ] Process isolation
-- [ ] Event triggers
-
-### Rust Wallet Backend
-- [ ] API endpoints
-- [ ] Database schema changes
-- [ ] Business logic
-- [ ] Error handling
-
-### Database
-- [ ] Schema changes
-- [ ] Data models
-- [ ] Migration scripts
-- [ ] Indexes and queries
-
-### Testing
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] User acceptance testing
-- [ ] Cross-browser/platform testing
+See **[helper-1-implementation-guide-checklist.md](./helper-1-implementation-guide-checklist.md)** for the full per-interface checklist (Frontend, CEF-Native, Rust, Database, Testing).
 
 ---
+
+## Reorganization
+
+A phased layout (0–5, helper-1–4) and link updates are proposed in [REORGANIZATION_PLAN.md](./REORGANIZATION_PLAN.md). The progression guide is [IMPLEMENTATION_OUTLINE.md](./IMPLEMENTATION_OUTLINE.md).
 
 ## Notes
 

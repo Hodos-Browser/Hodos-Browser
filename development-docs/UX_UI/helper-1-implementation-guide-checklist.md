@@ -1058,7 +1058,7 @@ const MyComponent: React.FC = () => {
 
 **Planned Implementation**: The wallet initialization flow will handle checking if a wallet exists, creating new wallets, and recovering existing wallets. This flow will be **user-initiated** (via Wallet button click) and **non-blocking** (browser startup continues regardless of wallet status).
 
-**Related Documentation**: For detailed information about the browser startup sequence and wallet file checks, see [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md).
+**Related Documentation**: For detailed information about the browser startup sequence and wallet file checks, see [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md).
 
 ### Architecture Principles (Planned)
 
@@ -1074,7 +1074,7 @@ const MyComponent: React.FC = () => {
 **⚠️ NOT YET IMPLEMENTED** - This flow needs to be implemented in C++ startup code.
 
 **Location**: C++ backend (browser process startup)
-**Detailed Documentation**: See [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md#startup-sequence)
+**Detailed Documentation**: See [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md#startup-sequence)
 
 **Planned Steps** (to be implemented):
 1. Check if wallet database file exists: `%APPDATA%/HodosBrowser/wallet/wallet.db`
@@ -1521,9 +1521,9 @@ Check wallet.getStatus()
 
 ## Related Documentation
 
-- **[Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md)**: Complete browser startup sequence and wallet file checks
+- **[Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md)**: Complete browser startup sequence and wallet file checks
 - **[HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md)**: HTTP request interception and domain whitelisting
-- **[UX Design Considerations](./UX_DESIGN_CONSIDERATIONS.md)**: User experience design principles and patterns
+- **[UX Design Considerations](./helper-3-ux-considerations.md)**: User experience design principles and patterns
 
 ---
 
@@ -1548,6 +1548,43 @@ When implementing UI/UX enhancements:
 - ❌ Don't break window object APIs
 - ❌ Don't change message formats without backend updates
 - ❌ Don't modify critical CSS constraints
+
+---
+
+## Implementation Checklist (Per Interface)
+
+For each phase/interface, the implementation plan should cover:
+
+### Frontend (React/TypeScript)
+- [ ] Component structure and props
+- [ ] State management
+- [ ] UI/UX flow
+- [ ] Styling approach
+- [ ] Integration with existing components
+
+### CEF-Native (C++)
+- [ ] Window/overlay management
+- [ ] Message handling
+- [ ] Process isolation
+- [ ] Event triggers
+
+### Rust Wallet Backend
+- [ ] API endpoints
+- [ ] Database schema changes
+- [ ] Business logic
+- [ ] Error handling
+
+### Database
+- [ ] Schema changes
+- [ ] Data models
+- [ ] Migration scripts
+- [ ] Indexes and queries
+
+### Testing
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] User acceptance testing
+- [ ] Cross-browser/platform testing
 
 ---
 

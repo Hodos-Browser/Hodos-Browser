@@ -2,7 +2,7 @@
 
 This document outlines user experience design considerations for HodosBrowser wallet interactions. These designs prioritize user understanding, security, and informed consent.
 
-**Related Documentation**: For foundational design principles, philosophy, and interaction rules, see [Design Principles & Philosophy](./DESIGN_PRINCIPLES.md).
+**Related Documentation**: For foundational design principles, philosophy, and interaction rules, see [Design Principles & Philosophy](./helper-2-design-philosophy.md).
 
 ---
 
@@ -44,7 +44,7 @@ Wallet creation is the user's first interaction with the system. It must be:
 
 ### Design Principles Applied
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 - **Human-Readable**: Display mnemonic clearly, use simple language
 - **Immediate Feedback**: Show clear success/error states after wallet creation
@@ -78,7 +78,7 @@ Recovery flows must balance security with usability. Users in recovery mode are 
 
 ### Design Principles Applied
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 - **Human-Readable**: Simple recovery language, avoid technical terms
 - **Immediate Feedback**: Show progress during recovery ("Scanning addresses...", "Found X addresses...")
@@ -153,7 +153,7 @@ When applications request access to the user's master identity key (privileged a
 
 ### Design Principles
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 1. **Default to Privacy**: Non-privileged (app-scoped) identity should be the default
 2. **Clear Trade-offs**: User must understand what they're giving up and gaining
@@ -201,7 +201,7 @@ When applications request access to the user's master identity key (privileged a
 
 **Design Considerations**:
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 - Notifications must be non-dismissible for high-risk operations
 - Clear visual hierarchy: routine operations vs. dangerous ones

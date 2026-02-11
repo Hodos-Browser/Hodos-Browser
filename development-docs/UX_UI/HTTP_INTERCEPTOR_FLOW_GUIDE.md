@@ -446,7 +446,7 @@ if (!domainVerifier.isDomainWhitelisted(requestDomain_)) {
 
 **Planned Implementation**: The wallet initialization will move wallet checks to user-initiated actions (Wallet button click) rather than automatic startup checks.
 
-**Note**: For the planned wallet initialization flow, see [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) and [Wallet Initialization Flow](./UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow).
+**Note**: For the planned wallet initialization flow, see [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md) and [Wallet Initialization Flow](./helper-1-implementation-guide-checklist.md#wallet-initialization-flow).
 
 This code was previously used to check wallet status on startup and prompt users to create/backup their wallet. It's currently **commented out** but serves as a reference for similar startup checks.
 
@@ -550,7 +550,7 @@ This code demonstrates a **startup check pattern**:
 - ❌ Wallet checks on Wallet button click are **NOT YET IMPLEMENTED**
 - ✅ Frontend startup check is commented out (as intended)
 
-**Planned Implementation**: The wallet initialization flow will NOT use this startup pattern. Instead, wallet checks will happen when the user clicks the Wallet button. See [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) for the planned implementation.
+**Planned Implementation**: The wallet initialization flow will NOT use this startup pattern. Instead, wallet checks will happen when the user clicks the Wallet button. See [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md) for the planned implementation.
 
 ### Differences from HTTP Interceptor Flow
 

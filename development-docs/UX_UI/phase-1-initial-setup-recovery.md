@@ -229,7 +229,7 @@ interface WalletSetupModalProps {
 
 ## Design Considerations
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 Key considerations:
 - [ ] Security of mnemonic display
@@ -276,12 +276,33 @@ Key considerations:
 
 ---
 
+## Coordination with Wallet Backup & Recovery Plan
+
+Phase-1 (this document) is the **UX/UI** for create and recover flows. The **backend** for backup and recovery (file format, encryption, on-chain, sync) is defined in [WALLET_BACKUP_AND_RECOVERY_PLAN.md](../WALLET_BACKUP_AND_RECOVERY_PLAN.md).
+
+### When to Build What
+
+- **Phase B1 (local file export/import)** from the backup plan should be implemented **before or in parallel with** Phase-1 so that “Recover from backup file” has a real backend. The Phase-1 UI will call e.g. `POST /wallet/import` and `POST /wallet/export`; those are implemented in Phase B1.
+- **Phase B2 (on-chain backup)** and **Phase B3 (cloud sync scaffolding)** can follow after Phase-1 and B1 are done.
+
+We do **not** merge the two plans into one: the backup plan stays the single source of truth for data model, encryption, and recovery logic; Phase-1 stays the single source of truth for screens, flows, and triggers. Cross-reference only.
+
+### MVP Scope (from backup plan; relevant to Phase-1)
+
+- **Cloud sync**: Scaffolding only in MVP. No cloud implementation or testing. Plan for it; don’t build it in MVP.
+- **Local file backup**: Plan and **test** local file export and recover in MVP. Phase-1 “Recover from file” must use the real B1 import path and be tested end-to-end.
+- **External wallet import (TypeScript BSV/SDK)**: As part of **planning** for Phase-1, export a backup from another wallet built with the TypeScript BSV/SDK and mirror that format in our export/import (hopefully just JSON). Handle **camelCase (TS/JSON) ↔ snake_case (Rust/DB)** in file recovery so we can import their exports and they can import ours. During planning, obtain a sample export from the other wallet and use it to validate our import/export format.
+- **On-chain backup**: Novel to our wallet; we will only test our own. Likely same JSON (subset) encrypted and stored (e.g. PushDrop token with self-counterparty, or OP_RETURN). **Compress** the data before putting it in the token/OP_RETURN to save space and cost; decompress after decrypt on recovery.
+
+---
+
 ## Related Documentation
 
-- [Startup Flow and Wallet Checks](./STARTUP_FLOW_AND_WALLET_CHECKS.md) - Startup wallet detection
-- [UI/UX Enhancement Guide](./UI_UX_ENHANCEMENT_GUIDE.md) - Frontend architecture
-- [Design Principles](./DESIGN_PRINCIPLES.md) - Design guidelines
-- [Wallet Initialization Flow](./UI_UX_ENHANCEMENT_GUIDE.md#wallet-initialization-flow) - Detailed flow
+- [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md) - Startup wallet detection
+- [UI/UX Enhancement Guide](./helper-1-implementation-guide-checklist.md) - Frontend architecture
+- [Design Principles](./helper-2-design-philosophy.md) - Design guidelines
+- [Wallet Initialization Flow](./helper-1-implementation-guide-checklist.md#wallet-initialization-flow) - Detailed flow
+- [Wallet Backup & Recovery Plan](../WALLET_BACKUP_AND_RECOVERY_PLAN.md) - Backup data model, local file, on-chain, cloud scaffolding
 
 ---
 

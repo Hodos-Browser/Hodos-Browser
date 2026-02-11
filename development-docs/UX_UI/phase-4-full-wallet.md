@@ -280,7 +280,7 @@ FullWalletView
 
 ## Design Considerations
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 Key considerations:
 - [ ] Comprehensive navigation
@@ -335,10 +335,10 @@ Key considerations:
 
 ## Related Documentation
 
-- [Light Wallet Interface](./LIGHT_WALLET.md) - Quick wallet access
-- [Initial Setup/Recovery](./INITIAL_SETUP_RECOVERY.md) - Wallet setup
-- [UI/UX Enhancement Guide](./UI_UX_ENHANCEMENT_GUIDE.md) - Frontend architecture
-- [Design Principles](./DESIGN_PRINCIPLES.md) - Design guidelines
+- [Light Wallet Interface](./phase-3-light-wallet.md) - Quick wallet access
+- [Initial Setup/Recovery](./phase-1-initial-setup-recovery.md) - Wallet setup
+- [UI/UX Enhancement Guide](./helper-1-implementation-guide-checklist.md) - Frontend architecture
+- [Design Principles](./helper-2-design-philosophy.md) - Design guidelines
 
 ---
 

@@ -285,7 +285,7 @@ struct ActivitySummary {
 
 ## Design Considerations
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 Key considerations:
 - [ ] **Privacy First**: Don't expose activity details unless user wants to see
@@ -337,10 +337,10 @@ Key considerations:
 
 ## Related Documentation
 
-- [User Notifications](./USER_NOTIFICATIONS.md) - Notification system (different - active notifications)
+- [User Notifications](./phase-2-user-notifications.md) - Notification system (different - active notifications)
 - [HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md) - Request interception
-- [Design Principles](./DESIGN_PRINCIPLES.md) - Design guidelines
-- [UX Design Considerations](./UX_DESIGN_CONSIDERATIONS.md) - UX patterns
+- [Design Principles](./helper-2-design-philosophy.md) - Design guidelines
+- [UX Design Considerations](./helper-3-ux-considerations.md) - UX patterns
 
 ---
 

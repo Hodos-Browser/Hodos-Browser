@@ -219,7 +219,7 @@ interface LightWalletProps {
 
 ## Design Considerations
 
-**Reference**: [Design Principles](./DESIGN_PRINCIPLES.md)
+**Reference**: [Design Principles](./helper-2-design-philosophy.md)
 
 Key considerations:
 - [ ] Minimal UI (focus on essentials)
@@ -270,9 +270,9 @@ Key considerations:
 
 ## Related Documentation
 
-- [Full Wallet Interface](./FULL_WALLET.md) - Complete wallet interface
-- [Initial Setup/Recovery](./INITIAL_SETUP_RECOVERY.md) - Wallet setup
-- [Design Principles](./DESIGN_PRINCIPLES.md) - Design guidelines
+- [Full Wallet Interface](./phase-4-full-wallet.md) - Complete wallet interface
+- [Initial Setup/Recovery](./phase-1-initial-setup-recovery.md) - Wallet setup
+- [Design Principles](./helper-2-design-philosophy.md) - Design guidelines
 
 ---
 

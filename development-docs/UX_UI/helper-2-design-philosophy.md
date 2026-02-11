@@ -429,11 +429,11 @@ Please check your connection and try again."
 ## Usage
 
 These principles will be referenced in:
-- [Initial Setup/Recovery Implementation](./INITIAL_SETUP_RECOVERY.md)
-- [User Notifications Implementation](./USER_NOTIFICATIONS.md)
-- [Light Wallet Implementation](./LIGHT_WALLET.md)
-- [Full Wallet Implementation](./FULL_WALLET.md)
-- [Activity Status Indicator Implementation](./ACTIVITY_STATUS_INDICATOR.md)
+- [Initial Setup/Recovery Implementation](./phase-1-initial-setup-recovery.md)
+- [User Notifications Implementation](./phase-2-user-notifications.md)
+- [Light Wallet Implementation](./phase-3-light-wallet.md)
+- [Full Wallet Implementation](./phase-4-full-wallet.md)
+- [Activity Status Indicator Implementation](./phase-5-activity-status-indicator.md)
 
 ---
 

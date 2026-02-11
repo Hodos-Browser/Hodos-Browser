@@ -697,7 +697,41 @@ Phase B2 (on-chain backup) is positioned after the monitor pattern (Phase 6) so 
 
 ---
 
-## 9. Open Questions
+## 9. MVP & Planning Notes (Feb 2026)
+
+These notes shape what we build and test in the MVP and how we coordinate with the Phase-1 Initial Setup/Recovery UX sprint.
+
+### Cloud Sync: Scaffolding Only for MVP
+
+- **Implement**: Scaffolding only (e.g. `SyncProvider` trait, stub `RemoteProvider`). No cloud transport implementation or testing in MVP.
+- **Goal**: Codebase is ready to plug in cloud sync later without reworking the backup format or serialization.
+
+### Local File Backup: Plan and Test in MVP
+
+- **Implement and test**: Local encrypted file export and import (Phase B1).
+- **Goal**: Users can export a `.bsv-wallet` file and recover from it; we test this path end-to-end in MVP.
+
+### External Wallet Import (TypeScript BSV/SDK Compatibility)
+
+- **Planning**: As part of Phase-1 planning, export a backup from another wallet built with the TypeScript BSV/SDK and inspect the format.
+- **Goal**: Mirror that format in our export (backup) and import code so we can recover from their exports and they can recover from ours. Ideally the format is just a JSON structure.
+- **Consideration**: Handle **camelCase (TypeScript/JSON) ↔ snake_case (Rust/DB)** in file recovery. Our backup entity format should support round-tripping with SDK-style camelCase field names when deserializing; serialize to a consistent format (e.g. snake_case for our file, or match SDK exactly). Add tests that import a sample export from the other wallet.
+
+### On-Chain Backup: Novel to Our Wallet; Compress Before Storing
+
+- **Scope**: On-chain backup/recovery is novel to our wallet. We will only be able to test with our own backups (no third-party consumer in MVP).
+- **Format**: Same JSON (or the non-HD subset) **encrypted** and stored on-chain. Option under consideration: **PushDrop token with self-counterparty** (so only we can read/reclaim); alternative is OP_RETURN as in Section 4 (simpler, unspendable).
+- **Compression**: **Compress the payload before encrypting** and before putting it into the token/OP_RETURN to save space and cost (e.g. zstd or gzip). Decompress after decrypt during recovery. Size estimates in Section 2 already suggest ~40–60% reduction with compression; make compression a required step for on-chain backup.
+
+### Coordination with Phase-1 Initial Setup/Recovery (UX)
+
+- Phase-1 (UX) provides the UI for: create wallet, recover from mnemonic, **recover from backup file**.
+- **Phase B1 (local file export/import)** should be implemented **before or in parallel with** Phase-1 so that “Recover from file” has a real backend. Phase B2 (on-chain) and B3 (cloud scaffolding) can follow.
+- See `development-docs/UX_UI/phase-1-initial-setup-recovery.md` for the interface plan and triggers.
+
+---
+
+## 10. Open Questions
 
 These will be answered during implementation:
 
@@ -719,7 +753,7 @@ These will be answered during implementation:
 
 ---
 
-## 10. Future: External BIP32 Wallet Import
+## 11. Future: External BIP32 Wallet Import
 
 **Status**: Not yet scheduled — documented for planning awareness.
 
@@ -758,7 +792,7 @@ wallet import flow.
 
 ---
 
-## 11. Notes from State Maintenance Sprint (Phases 6-8, Feb 2026)
+## 12. Notes from State Maintenance Sprint (Phases 6-8, Feb 2026)
 
 These notes capture things learned during the wallet-toolbox alignment sprint that are relevant to backup/recovery implementation. Review when starting Phase B1.
 
