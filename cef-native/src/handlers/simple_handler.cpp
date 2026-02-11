@@ -19,6 +19,7 @@
 #include "../../include/core/GoogleSuggestService.h"
 #include "../../include/core/CookieManager.h"
 #include "../../include/core/CookieBlockManager.h"
+#include "../../include/core/BookmarkManager.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -2734,6 +2735,314 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_reset_blocked_count_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    // ========== BOOKMARK MESSAGES ==========
+
+    if (message_name == "bookmark_add") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0).ToString();
+        std::string title = args->GetString(1).ToString();
+
+        // Parse folder_id: empty string means -1 (root)
+        int folder_id = -1;
+        if (args->GetSize() > 2) {
+            std::string folderStr = args->GetString(2).ToString();
+            if (!folderStr.empty()) {
+                try { folder_id = std::stoi(folderStr); } catch (...) { folder_id = -1; }
+            }
+        }
+
+        // Parse tags: JSON array string
+        std::vector<std::string> tagsVec;
+        if (args->GetSize() > 3) {
+            std::string tagsStr = args->GetString(3).ToString();
+            if (!tagsStr.empty()) {
+                try {
+                    nlohmann::json tagsJson = nlohmann::json::parse(tagsStr);
+                    if (tagsJson.is_array()) {
+                        for (const auto& tag : tagsJson) {
+                            if (tag.is_string()) {
+                                tagsVec.push_back(tag.get<std::string>());
+                            }
+                        }
+                    }
+                } catch (...) {
+                    // Invalid JSON, use empty tags
+                }
+            }
+        }
+
+        std::string json_str = BookmarkManager::GetInstance().AddBookmark(url, title, folder_id, tagsVec);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_add_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_get") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+
+        std::string json_str = BookmarkManager::GetInstance().GetBookmark(id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_get_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+
+        // Parse fields JSON object
+        std::string title = "";
+        std::string url = "";
+        int folder_id = -1;
+        std::vector<std::string> tagsVec;
+        bool hasTitle = false, hasUrl = false, hasFolderId = false, hasTags = false;
+
+        if (args->GetSize() > 1) {
+            std::string fieldsStr = args->GetString(1).ToString();
+            if (!fieldsStr.empty()) {
+                try {
+                    nlohmann::json fields = nlohmann::json::parse(fieldsStr);
+                    if (fields.contains("title") && fields["title"].is_string()) {
+                        title = fields["title"].get<std::string>();
+                        hasTitle = true;
+                    }
+                    if (fields.contains("url") && fields["url"].is_string()) {
+                        url = fields["url"].get<std::string>();
+                        hasUrl = true;
+                    }
+                    if (fields.contains("folderId")) {
+                        if (fields["folderId"].is_null()) {
+                            folder_id = -1;
+                        } else if (fields["folderId"].is_number()) {
+                            folder_id = fields["folderId"].get<int>();
+                        }
+                        hasFolderId = true;
+                    }
+                    if (fields.contains("tags") && fields["tags"].is_array()) {
+                        for (const auto& tag : fields["tags"]) {
+                            if (tag.is_string()) {
+                                tagsVec.push_back(tag.get<std::string>());
+                            }
+                        }
+                        hasTags = true;
+                    }
+                } catch (...) {
+                    // Invalid JSON fields
+                }
+            }
+        }
+
+        // If fields not provided, get current bookmark data to fill in defaults
+        std::string json_str;
+        if (!hasTitle || !hasUrl || !hasFolderId || !hasTags) {
+            // Get current bookmark to fill in missing fields
+            std::string currentJson = BookmarkManager::GetInstance().GetBookmark(id);
+            try {
+                nlohmann::json current = nlohmann::json::parse(currentJson);
+                if (current.contains("id")) {
+                    if (!hasTitle) title = current.value("title", "");
+                    if (!hasUrl) url = current.value("url", "");
+                    if (!hasFolderId) {
+                        if (current["folder_id"].is_null()) {
+                            folder_id = -1;
+                        } else {
+                            folder_id = current.value("folder_id", -1);
+                        }
+                    }
+                    if (!hasTags && current.contains("tags") && current["tags"].is_array()) {
+                        for (const auto& tag : current["tags"]) {
+                            if (tag.is_string()) {
+                                tagsVec.push_back(tag.get<std::string>());
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+                // Could not parse current bookmark - will proceed with defaults
+            }
+        }
+
+        json_str = BookmarkManager::GetInstance().UpdateBookmark(id, title, url, folder_id, tagsVec);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_update_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_remove") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+
+        std::string json_str = BookmarkManager::GetInstance().RemoveBookmark(id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_remove_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_search") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string query = args->GetString(0).ToString();
+        int limit = 50;
+        int offset = 0;
+        if (args->GetSize() > 1) {
+            try { limit = std::stoi(args->GetString(1).ToString()); } catch (...) {}
+        }
+        if (args->GetSize() > 2) {
+            try { offset = std::stoi(args->GetString(2).ToString()); } catch (...) {}
+        }
+
+        std::string json_str = BookmarkManager::GetInstance().SearchBookmarks(query, limit, offset);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_search_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_get_all") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int folder_id = -1;
+        int limit = 50;
+        int offset = 0;
+        if (args->GetSize() > 0) {
+            std::string folderStr = args->GetString(0).ToString();
+            if (!folderStr.empty()) {
+                try { folder_id = std::stoi(folderStr); } catch (...) { folder_id = -1; }
+            }
+        }
+        if (args->GetSize() > 1) {
+            try { limit = std::stoi(args->GetString(1).ToString()); } catch (...) {}
+        }
+        if (args->GetSize() > 2) {
+            try { offset = std::stoi(args->GetString(2).ToString()); } catch (...) {}
+        }
+
+        std::string json_str = BookmarkManager::GetInstance().GetAllBookmarks(folder_id, limit, offset);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_get_all_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_is_bookmarked") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0).ToString();
+
+        std::string json_str = BookmarkManager::GetInstance().IsBookmarked(url);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_is_bookmarked_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_get_all_tags") {
+        std::string json_str = BookmarkManager::GetInstance().GetAllTags();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_get_all_tags_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_update_last_accessed") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+
+        std::string json_str = BookmarkManager::GetInstance().UpdateLastAccessed(id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_update_last_accessed_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_create") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string name = args->GetString(0).ToString();
+        int parent_id = -1;
+        if (args->GetSize() > 1) {
+            std::string parentStr = args->GetString(1).ToString();
+            if (!parentStr.empty() && parentStr != "-1") {
+                try { parent_id = std::stoi(parentStr); } catch (...) { parent_id = -1; }
+            }
+        }
+
+        std::string json_str = BookmarkManager::GetInstance().CreateFolder(name, parent_id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_folder_create_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_list") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int parent_id = -1;
+        if (args->GetSize() > 0) {
+            std::string parentStr = args->GetString(0).ToString();
+            if (!parentStr.empty() && parentStr != "-1") {
+                try { parent_id = std::stoi(parentStr); } catch (...) { parent_id = -1; }
+            }
+        }
+
+        std::string json_str = BookmarkManager::GetInstance().ListFolders(parent_id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_folder_list_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_update") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+        std::string name = (args->GetSize() > 1) ? args->GetString(1).ToString() : "";
+
+        std::string json_str = BookmarkManager::GetInstance().UpdateFolder(id, name);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_folder_update_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_remove") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        int64_t id = 0;
+        try { id = std::stoi(args->GetString(0).ToString()); } catch (...) {}
+
+        std::string json_str = BookmarkManager::GetInstance().RemoveFolder(id);
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_folder_remove_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_get_tree") {
+        std::string json_str = BookmarkManager::GetInstance().GetFolderTree();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("bookmark_folder_get_tree_response");
         responseMsg->GetArgumentList()->SetString(0, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;

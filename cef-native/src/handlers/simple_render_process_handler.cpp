@@ -1545,5 +1545,133 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== BOOKMARK RESPONSE HANDLERS ==========
+
+    if (message_name == "bookmark_add_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkAddResponse) { window.onBookmarkAddResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_get_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkGetResponse) { window.onBookmarkGetResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_update_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkUpdateResponse) { window.onBookmarkUpdateResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_remove_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkRemoveResponse) { window.onBookmarkRemoveResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_search_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkSearchResponse) { window.onBookmarkSearchResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_get_all_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkGetAllResponse) { window.onBookmarkGetAllResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_is_bookmarked_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkIsBookmarkedResponse) { window.onBookmarkIsBookmarkedResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_get_all_tags_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkGetAllTagsResponse) { window.onBookmarkGetAllTagsResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_update_last_accessed_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkUpdateLastAccessedResponse) { window.onBookmarkUpdateLastAccessedResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_create_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkFolderCreateResponse) { window.onBookmarkFolderCreateResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_list_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkFolderListResponse) { window.onBookmarkFolderListResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_update_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkFolderUpdateResponse) { window.onBookmarkFolderUpdateResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_remove_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkFolderRemoveResponse) { window.onBookmarkFolderRemoveResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "bookmark_folder_get_tree_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onBookmarkFolderGetTreeResponse) { window.onBookmarkFolderGetTreeResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
     return false;
 }
