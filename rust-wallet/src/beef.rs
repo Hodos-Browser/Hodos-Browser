@@ -344,12 +344,22 @@ impl Beef {
         let _tree_height = nodes.len() as u8;
 
         // Convert TSC proof to BUMP format
-        // This matches the TypeScript SDK's convertProofToMerklePath function
         let merkle_proof = tsc_proof_to_bump(txid, block_height, tx_index_in_block, nodes)?;
 
-        // Add BUMP and update mapping
-        let bump_index = self.bumps.len();
-        self.bumps.push(merkle_proof);
+        // BRC-62 requires one BUMP per unique block. If a BUMP for this block_height
+        // already exists, merge the new proof into it (like TS SDK's Beef.mergeBump +
+        // MerklePath.combine). Otherwise create a new BUMP.
+        let existing_bump_index = self.bumps.iter().position(|b| b.block_height == block_height);
+
+        let bump_index = if let Some(idx) = existing_bump_index {
+            log::info!("   🔀 Merging BUMP for block {} into existing BUMP index {}", block_height, idx);
+            merge_bump(&mut self.bumps[idx], &merkle_proof)?;
+            idx
+        } else {
+            let idx = self.bumps.len();
+            self.bumps.push(merkle_proof);
+            idx
+        };
 
         // Associate this BUMP with the transaction
         if tx_index < self.tx_to_bump.len() {
@@ -1003,6 +1013,96 @@ fn write_varint(bytes: &mut Vec<u8>, value: u64) {
     }
 }
 
+/// Read the varint offset from a pre-formatted BUMP node byte slice.
+/// Nodes are stored as [offset varint][flags u8][hash 32 bytes if not duplicate].
+/// Returns (offset_value, bytes_consumed).
+fn read_node_offset(node: &[u8]) -> Result<(u64, usize), String> {
+    if node.is_empty() {
+        return Err("Empty node bytes".to_string());
+    }
+    let first = node[0];
+    if first < 0xfd {
+        Ok((first as u64, 1))
+    } else if first == 0xfd {
+        if node.len() < 3 {
+            return Err("Varint too short for 0xfd prefix".to_string());
+        }
+        let val = u16::from_le_bytes([node[1], node[2]]) as u64;
+        Ok((val, 3))
+    } else if first == 0xfe {
+        if node.len() < 5 {
+            return Err("Varint too short for 0xfe prefix".to_string());
+        }
+        let val = u32::from_le_bytes([node[1], node[2], node[3], node[4]]) as u64;
+        Ok((val, 5))
+    } else {
+        if node.len() < 9 {
+            return Err("Varint too short for 0xff prefix".to_string());
+        }
+        let val = u64::from_le_bytes([
+            node[1], node[2], node[3], node[4],
+            node[5], node[6], node[7], node[8],
+        ]);
+        Ok((val, 9))
+    }
+}
+
+/// Merge a new MerkleProof into an existing one for the same block.
+/// Follows the TS SDK's MerklePath.combine() algorithm:
+/// - For each level, add nodes from the new proof that aren't already present (by offset)
+/// - If a node with the same offset exists but the new one has the txid flag (0x02),
+///   replace it to preserve the txid marker
+/// - Keep nodes sorted by offset at each level
+fn merge_bump(existing: &mut MerkleProof, new_proof: &MerkleProof) -> Result<(), String> {
+    // Use the max tree height (should be identical for same block, but be safe)
+    let max_height = std::cmp::max(existing.tree_height, new_proof.tree_height);
+
+    // Extend existing levels if the new proof has more
+    while existing.levels.len() < new_proof.levels.len() {
+        existing.levels.push(Vec::new());
+    }
+    existing.tree_height = max_height;
+
+    for level_idx in 0..new_proof.levels.len() {
+        for new_node in &new_proof.levels[level_idx] {
+            let (new_offset, new_varint_len) = read_node_offset(new_node)?;
+            let new_flag = if new_node.len() > new_varint_len { new_node[new_varint_len] } else { 0 };
+
+            // Check if a node with this offset already exists at this level
+            let mut found = false;
+            for existing_node in existing.levels[level_idx].iter_mut() {
+                let (existing_offset, existing_varint_len) = read_node_offset(existing_node)?;
+                if existing_offset == new_offset {
+                    found = true;
+                    // If new node has txid flag (0x02) and existing doesn't, replace it
+                    let existing_flag = if existing_node.len() > existing_varint_len {
+                        existing_node[existing_varint_len]
+                    } else {
+                        0
+                    };
+                    if new_flag == 0x02 && existing_flag != 0x02 {
+                        *existing_node = new_node.clone();
+                    }
+                    break;
+                }
+            }
+
+            if !found {
+                existing.levels[level_idx].push(new_node.clone());
+            }
+        }
+
+        // Keep nodes sorted by offset at each level
+        existing.levels[level_idx].sort_by(|a, b| {
+            let (offset_a, _) = read_node_offset(a).unwrap_or((0, 0));
+            let (offset_b, _) = read_node_offset(b).unwrap_or((0, 0));
+            offset_a.cmp(&offset_b)
+        });
+    }
+
+    Ok(())
+}
+
 /// Convert WhatsOnChain TSC proof to BUMP format
 /// This matches the TypeScript SDK's convertProofToMerklePath function
 fn tsc_proof_to_bump(
@@ -1223,6 +1323,194 @@ fn write_bump(bytes: &mut Vec<u8>, bump: &MerkleProof) -> Result<(), String> {
         for node in level_nodes {
             bytes.extend(node);
         }
+    }
+
+    Ok(())
+}
+
+/// Validate BEEF V1 bytes by parsing them exactly as a receiver (ARC) would.
+/// Logs detailed diagnostics about every transaction, input, and output script.
+/// Returns Ok(()) if valid, or Err with the first error found.
+pub fn validate_beef_v1_hex(v1_hex: &str) -> Result<(), String> {
+    use sha2::{Sha256, Digest};
+
+    let bytes = hex::decode(v1_hex)
+        .map_err(|e| format!("Invalid hex: {}", e))?;
+    let total_len = bytes.len();
+    let mut cursor = Cursor::new(bytes.as_slice());
+
+    log::info!("🔍 BEEF V1 VALIDATION — {} total bytes", total_len);
+
+    // Read 4-byte version marker
+    let mut version = [0u8; 4];
+    cursor.read_exact(&mut version)
+        .map_err(|e| format!("Version: {}", e))?;
+    if version != BEEF_V1_MARKER {
+        return Err(format!("Not BEEF V1: {:02x?}", version));
+    }
+    log::info!("   ✅ Version: 0100beef");
+
+    // Read number of BUMPs
+    let num_bumps = read_varint(&mut cursor)?;
+    log::info!("   📊 BUMPs: {}", num_bumps);
+
+    // Skip BUMPs (parse them to advance cursor correctly)
+    for b in 0..num_bumps {
+        let bump_start = cursor.position();
+        let block_height = read_varint(&mut cursor)?;
+        let tree_height = read_u8(&mut cursor)?;
+        for level in 0..tree_height {
+            let num_nodes = read_varint(&mut cursor)?;
+            for _ in 0..num_nodes {
+                let _offset = read_varint(&mut cursor)?;
+                let flags = read_u8(&mut cursor)?;
+                if flags & 0x01 == 0 {
+                    // Not a duplicate — 32-byte hash follows
+                    let mut hash = [0u8; 32];
+                    cursor.read_exact(&mut hash)
+                        .map_err(|e| format!("BUMP {} level {} hash: {}", b, level, e))?;
+                }
+            }
+        }
+        let bump_bytes = cursor.position() - bump_start;
+        log::info!("   BUMP {}: blockHeight={}, treeHeight={}, {} bytes", b, block_height, tree_height, bump_bytes);
+    }
+
+    let tx_section_start = cursor.position();
+    log::info!("   📍 Transaction section starts at byte offset {}", tx_section_start);
+
+    // Read number of transactions
+    let num_txs = read_varint(&mut cursor)?;
+    log::info!("   📊 Transactions: {}", num_txs);
+
+    // Parse each transaction
+    for t in 0..num_txs {
+        let tx_start = cursor.position();
+
+        // Parse the transaction structure
+        // Version (4 bytes)
+        let mut ver = [0u8; 4];
+        cursor.read_exact(&mut ver)
+            .map_err(|e| format!("TX {} version: {}", t, e))?;
+        let version = u32::from_le_bytes(ver);
+
+        // Inputs
+        let input_count = read_varint(&mut cursor)
+            .map_err(|e| format!("TX {} input_count: {}", t, e))?;
+        let mut input_details = Vec::new();
+        for i in 0..input_count {
+            let mut prev_hash = [0u8; 32];
+            cursor.read_exact(&mut prev_hash)
+                .map_err(|e| format!("TX {} input {} prevhash: {}", t, i, e))?;
+            let prev_txid = hex::encode(prev_hash.iter().rev().copied().collect::<Vec<u8>>());
+
+            let mut prev_vout_buf = [0u8; 4];
+            cursor.read_exact(&mut prev_vout_buf)
+                .map_err(|e| format!("TX {} input {} prevvout: {}", t, i, e))?;
+            let prev_vout = u32::from_le_bytes(prev_vout_buf);
+
+            let script_len = read_varint(&mut cursor)
+                .map_err(|e| format!("TX {} input {} scriptSig len: {}", t, i, e))?;
+            let remaining = total_len as u64 - cursor.position();
+            if script_len > remaining {
+                let err_msg = format!(
+                    "TX {} input {} scriptSig: varint says {} bytes but only {} remain (pos={}, total={}). Prev: {}:{}",
+                    t, i, script_len, remaining, cursor.position(), total_len, &prev_txid[..16], prev_vout
+                );
+                log::error!("   ❌ {}", err_msg);
+                return Err(err_msg);
+            }
+            let mut script = vec![0u8; script_len as usize];
+            cursor.read_exact(&mut script)
+                .map_err(|e| format!("TX {} input {} scriptSig data: {}", t, i, e))?;
+
+            let mut seq_buf = [0u8; 4];
+            cursor.read_exact(&mut seq_buf)
+                .map_err(|e| format!("TX {} input {} sequence: {}", t, i, e))?;
+
+            input_details.push(format!(
+                "{}:{}  scriptSig={} bytes",
+                &prev_txid[..16], prev_vout, script_len
+            ));
+        }
+
+        // Outputs
+        let output_count = read_varint(&mut cursor)
+            .map_err(|e| format!("TX {} output_count: {}", t, e))?;
+        let mut output_details = Vec::new();
+        for o in 0..output_count {
+            let mut val_buf = [0u8; 8];
+            cursor.read_exact(&mut val_buf)
+                .map_err(|e| format!("TX {} output {} value: {}", t, o, e))?;
+            let value = u64::from_le_bytes(val_buf);
+
+            let script_len = read_varint(&mut cursor)
+                .map_err(|e| format!("TX {} output {} scriptPubKey len: {}", t, o, e))?;
+            let remaining = total_len as u64 - cursor.position();
+            if script_len > remaining {
+                let err_msg = format!(
+                    "TX {} output {} scriptPubKey: varint says {} bytes but only {} remain (pos={}, total={}). Value: {} sats",
+                    t, o, script_len, remaining, cursor.position(), total_len, value
+                );
+                log::error!("   ❌ {}", err_msg);
+                return Err(err_msg);
+            }
+            let mut script = vec![0u8; script_len as usize];
+            cursor.read_exact(&mut script)
+                .map_err(|e| format!("TX {} output {} scriptPubKey data: {}", t, o, e))?;
+
+            output_details.push(format!(
+                "{} sats  scriptPubKey={} bytes  first3={:02x?}",
+                value, script_len, &script[..script.len().min(3)]
+            ));
+        }
+
+        // Locktime (4 bytes)
+        let mut lt_buf = [0u8; 4];
+        cursor.read_exact(&mut lt_buf)
+            .map_err(|e| format!("TX {} locktime: {}", t, e))?;
+        let locktime = u32::from_le_bytes(lt_buf);
+
+        let tx_end = cursor.position();
+        let tx_len = tx_end - tx_start;
+
+        // Compute TXID for identification
+        let tx_bytes = &bytes[tx_start as usize..tx_end as usize];
+        let hash1 = Sha256::digest(tx_bytes);
+        let hash2 = Sha256::digest(&hash1);
+        let txid: Vec<u8> = hash2.iter().rev().copied().collect();
+        let txid_hex = hex::encode(&txid);
+
+        log::info!("   TX {} (offset {}..{}, {} bytes): txid={}", t, tx_start, tx_end, tx_len, &txid_hex[..16]);
+        log::info!("      version={}, locktime={}, {} inputs, {} outputs", version, locktime, input_count, output_count);
+        for detail in &input_details {
+            log::info!("      IN:  {}", detail);
+        }
+        for detail in &output_details {
+            log::info!("      OUT: {}", detail);
+        }
+
+        // Read BUMP flag (V1: after transaction)
+        let flag = read_u8(&mut cursor)
+            .map_err(|e| format!("TX {} bump flag: {}", t, e))?;
+        if flag == 0x01 {
+            let bump_idx = read_varint(&mut cursor)?;
+            log::info!("      BUMP: index {}", bump_idx);
+        } else if flag == 0x00 {
+            log::info!("      BUMP: none");
+        } else {
+            let err_msg = format!("TX {} unexpected bump flag: 0x{:02x} (expected 0x00 or 0x01)", t, flag);
+            log::error!("   ❌ {}", err_msg);
+            return Err(err_msg);
+        }
+    }
+
+    let final_pos = cursor.position();
+    let remaining = total_len as u64 - final_pos;
+    if remaining > 0 {
+        log::warn!("   ⚠️ {} trailing bytes after last transaction", remaining);
+    } else {
+        log::info!("   ✅ BEEF V1 validation passed — all {} transactions parsed cleanly", num_txs);
     }
 
     Ok(())

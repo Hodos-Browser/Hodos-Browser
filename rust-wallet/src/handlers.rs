@@ -6130,6 +6130,34 @@ pub async fn sign_action(
     log::info!("      - Total transactions: {}", beef.transactions.len());
     log::info!("      - Merkle proofs (BUMPs): {}", beef.bumps.len());
 
+    // Validate each in-memory transaction before serialization
+    for (i, tx_bytes) in beef.transactions.iter().enumerate() {
+        use sha2::{Sha256, Digest};
+        let h1 = Sha256::digest(tx_bytes);
+        let h2 = Sha256::digest(&h1);
+        let tid: Vec<u8> = h2.iter().rev().copied().collect();
+        match crate::beef::ParsedTransaction::from_bytes(tx_bytes) {
+            Ok(parsed) => {
+                log::info!("   🔎 BEEF TX {}: txid={}, {} bytes, {} inputs, {} outputs",
+                    i, &hex::encode(&tid)[..16], tx_bytes.len(), parsed.inputs.len(), parsed.outputs.len());
+                for (j, inp) in parsed.inputs.iter().enumerate() {
+                    log::info!("       IN  {}: {}:{} scriptSig={} bytes{}",
+                        j, &inp.prev_txid[..16], inp.prev_vout, inp.script.len(),
+                        if inp.script.is_empty() { " ⚠️ EMPTY" } else { "" });
+                }
+                for (j, out) in parsed.outputs.iter().enumerate() {
+                    log::info!("       OUT {}: {} sats, scriptPubKey={} bytes{}",
+                        j, out.value, out.script.len(),
+                        if out.script.is_empty() { " ⚠️ EMPTY" } else { "" });
+                }
+            }
+            Err(e) => {
+                log::error!("   ❌ BEEF TX {} ({} bytes): PARSE FAILED: {}", i, tx_bytes.len(), e);
+                log::error!("       First 40 bytes: {}", hex::encode(&tx_bytes[..tx_bytes.len().min(40)]));
+            }
+        }
+    }
+
     // Generate standard BEEF first (for logging)
     let standard_beef_hex = match beef.to_hex() {
         Ok(hex) => hex,
@@ -6659,26 +6687,29 @@ pub(crate) async fn broadcast_transaction(
     // NOTE: ARC only accepts BEEF V1, not V2 - we must convert if needed.
     {
         let hex_for_arc = if is_beef {
-            // Check if it's Atomic BEEF (01010101) - need to strip header and convert to V1
+            // Check if it's Atomic BEEF (01010101) - strip 36-byte header to get V1 directly.
+            // Atomic BEEF = [01010101](4) + [txid BE](32) + [BEEF V1 data](variable)
+            // = 36 bytes header = 72 hex chars. The V1 data was already serialized by
+            // to_atomic_beef_hex(), so we extract it directly instead of re-parsing.
             if beef_or_raw_hex.starts_with("01010101") {
-                log::info!("   📦 Input is Atomic BEEF, converting to BEEF V1 for ARC...");
-                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-                    Ok(beef) => {
-                        match beef.to_v1_hex() {
-                            Ok(v1_hex) => {
-                                log::info!("   ✅ Converted to BEEF V1 ({} hex chars)", v1_hex.len());
-                                Some(v1_hex)
-                            }
-                            Err(e) => {
-                                log::warn!("   ⚠️ Failed to convert to BEEF V1: {}", e);
-                                None
-                            }
+                log::info!("   📦 Input is Atomic BEEF, stripping 36-byte header to get BEEF V1...");
+                if beef_or_raw_hex.len() > 72 {
+                    let v1_hex = &beef_or_raw_hex[72..];
+                    if v1_hex.starts_with("0100beef") {
+                        log::info!("   ✅ Extracted BEEF V1 ({} hex chars) — no re-parse needed", v1_hex.len());
+                        Some(v1_hex.to_string())
+                    } else {
+                        // V1 marker not found — fall back to parse/re-serialize
+                        log::warn!("   ⚠️ Stripped data doesn't start with 0100beef (got {}), falling back to parse",
+                            &v1_hex[..v1_hex.len().min(8)]);
+                        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                            Ok(beef) => beef.to_v1_hex().ok(),
+                            Err(_) => None,
                         }
                     }
-                    Err(e) => {
-                        log::warn!("   ⚠️ Failed to parse Atomic BEEF: {}", e);
-                        None
-                    }
+                } else {
+                    log::warn!("   ⚠️ Atomic BEEF too short ({} hex chars)", beef_or_raw_hex.len());
+                    None
                 }
             } else if beef_or_raw_hex.starts_with("0200beef") {
                 // BEEF V2 - convert to V1 for ARC
@@ -6713,6 +6744,14 @@ pub(crate) async fn broadcast_transaction(
         };
 
         if let Some(hex_to_send) = hex_for_arc {
+            // Validate BEEF before sending to ARC — parse every transaction to catch corrupt data
+            if hex_to_send.starts_with("0100beef") {
+                match crate::beef::validate_beef_v1_hex(&hex_to_send) {
+                    Ok(()) => log::info!("   ✅ Pre-broadcast BEEF validation passed"),
+                    Err(e) => log::error!("   ❌ Pre-broadcast BEEF validation FAILED: {}", e),
+                }
+            }
+
             let mut arc_backoff_ms = 2000u64;
             for arc_attempt in 1..=MAX_BROADCAST_ATTEMPTS {
                 if arc_attempt > 1 {
@@ -7086,15 +7125,9 @@ pub struct ArcResponse {
 async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Result<ArcResponse, String> {
     let url = "https://arc.gorillapool.io/v1/tx";
 
-    // ARC accepts BEEF V1, EF, or raw tx hex in JSON body: { "rawTx": "<hex>" }
-    // ARC auto-detects the format from the hex content.
-    // Per ARC docs: Content-Type must be application/json
-    let body = serde_json::json!({
-        "rawTx": beef_or_raw_hex
-    });
+    log::info!("   📡 ARC: Sending {} hex chars to {}", beef_or_raw_hex.len(), url);
 
-    log::info!("   📡 ARC: Sending transaction ({} hex chars) to {}", beef_or_raw_hex.len(), url);
-
+    let body = serde_json::json!({ "rawTx": beef_or_raw_hex });
     let response = client.post(url)
         .header("Content-Type", "application/json")
         .json(&body)

@@ -26,6 +26,7 @@ import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useCookieBlocking } from '../hooks/useCookieBlocking';
+import { useBackgroundBalancePoller } from '../hooks/useBackgroundBalancePoller';
 import { TabBar } from '../components/TabBar';
 import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
@@ -45,6 +46,9 @@ const MainBrowserView: React.FC = () => {
     const suppressAutocompleteRef = React.useRef(false);
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
+
+    // Keep localStorage balance/price cache warm for wallet overlay
+    useBackgroundBalancePoller();
 
     // Tab management
     const {
