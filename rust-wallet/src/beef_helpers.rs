@@ -221,8 +221,8 @@ pub async fn build_beef_for_txid(
             let conn = db_guard.connection();
             let tx_repo = TransactionRepository::new(conn);
             match tx_repo.get_broadcast_status(&current_txid) {
-                // "completed" (new_status) or "confirmed" (legacy broadcast_status) → need proof
-                Ok(Some(ref status)) if status == "completed" || status == "confirmed" => false,
+                // "completed" → has proof, include as proven leaf
+                Ok(Some(ref status)) if status == "completed" => false,
                 Ok(Some(ref status)) => {
                     log::info!("   ⏭️  Transaction {} has status '{}', skipping proof fetch", current_txid, status);
                     true

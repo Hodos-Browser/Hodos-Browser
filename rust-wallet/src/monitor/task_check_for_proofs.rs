@@ -33,7 +33,7 @@ const ORPHAN_TIMEOUT_SECS: i64 = 2 * 60 * 60;
 
 struct PendingTxInfo {
     txid: String,
-    new_status: String,
+    status: String,
     age_secs: i64,
 }
 
@@ -45,17 +45,17 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         let conn = db.connection();
 
         let mut stmt = conn.prepare(
-            "SELECT txid, new_status, (strftime('%s', 'now') - timestamp) as age_secs
+            "SELECT txid, status, (strftime('%s', 'now') - created_at) as age_secs
              FROM transactions
-             WHERE new_status IN ('sending', 'unproven', 'nosend')
-             ORDER BY timestamp DESC LIMIT ?1"
+             WHERE status IN ('sending', 'unproven', 'nosend')
+             ORDER BY created_at DESC LIMIT ?1"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let rows = stmt.query_map(
             rusqlite::params![MAX_BATCH as i64],
             |row| Ok(PendingTxInfo {
                 txid: row.get(0)?,
-                new_status: row.get(1)?,
+                status: row.get(1)?,
                 age_secs: row.get(2)?,
             }),
         ).map_err(|e| format!("SQL query: {}", e))?;
@@ -73,7 +73,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 
     for tx_info in &pending_txs {
         let txid = &tx_info.txid;
-        let is_nosend = tx_info.new_status == "nosend";
+        let is_nosend = tx_info.status == "nosend";
         let timeout_secs = if is_nosend { NOSEND_TIMEOUT_SECS } else { UNPROVEN_TIMEOUT_SECS };
         let is_timed_out = tx_info.age_secs > timeout_secs;
 
@@ -269,7 +269,7 @@ fn mark_failed(state: &web::Data<AppState>, txid: &str) {
             .as_secs() as i64;
 
         if let Err(e) = conn.execute(
-            "UPDATE transactions SET new_status = 'failed', failed_at = ?1 WHERE txid = ?2 AND new_status != 'failed'",
+            "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE txid = ?2 AND status != 'failed'",
             rusqlite::params![now, txid],
         ) {
             warn!("   ⚠️ Failed to mark {} as failed: {}", short_txid, e);

@@ -44,9 +44,9 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         let stuck_cutoff = now - STUCK_THRESHOLD_SECS;
 
         let mut stmt = conn.prepare(
-            "SELECT id, txid, raw_tx, timestamp FROM transactions
-             WHERE new_status = 'sending'
-             AND timestamp < ?1"
+            "SELECT id, txid, raw_tx, created_at FROM transactions
+             WHERE status = 'sending'
+             AND created_at < ?1"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let rows = stmt.query_map(
@@ -178,7 +178,7 @@ fn promote_to_unproven(state: &web::Data<AppState>, txid: &str) {
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
 
-        // Update status to unproven (broadcast_status = "broadcast" maps to new_status = "unproven")
+        // Update status to unproven (broadcast_status = "broadcast" maps to status = "unproven")
         let tx_repo = TransactionRepository::new(conn);
         if let Err(e) = tx_repo.update_broadcast_status(txid, "broadcast") {
             warn!("   ⚠️ Failed to promote {} to unproven: {}", short_txid, e);
@@ -212,7 +212,7 @@ fn cleanup_failed_sending(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
             .as_secs() as i64;
 
         if let Err(e) = conn.execute(
-            "UPDATE transactions SET new_status = 'failed', failed_at = ?1 WHERE id = ?2",
+            "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE id = ?2",
             rusqlite::params![now, tx_id],
         ) {
             warn!("   ⚠️ Failed to mark tx {} as failed: {}", short_txid, e);

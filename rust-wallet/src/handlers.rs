@@ -4101,7 +4101,7 @@ pub async fn create_action(
         let basket_repo = crate::database::BasketRepository::new(db.connection());
 
         // Get or create the "default" basket for change outputs (BRC-99)
-        let default_basket_id = match basket_repo.find_or_insert("default") {
+        let default_basket_id = match basket_repo.find_or_insert("default", state.current_user_id) {
             Ok(id) => Some(id),
             Err(e) => {
                 log::warn!("   ⚠️  Failed to get 'default' basket: {}", e);
@@ -4156,7 +4156,7 @@ pub async fn create_action(
 
         for bo in &pending_basket_outputs {
             // Resolve basket ID (find existing or create new)
-            let basket_id = match basket_repo.find_or_insert(&bo.basket_name) {
+            let basket_id = match basket_repo.find_or_insert(&bo.basket_name, state.current_user_id) {
                 Ok(id) => id,
                 Err(e) => {
                     log::warn!("   ⚠️  Failed to resolve basket '{}': {}", bo.basket_name, e);
@@ -6220,7 +6220,7 @@ pub async fn sign_action(
         // The ARC poller will periodically check old nosend transactions on WhatsOnChain
         // to see if they were broadcast by the app and update status accordingly.
         if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Nosend) {
-            log::warn!("   ⚠️  Failed to update new_status: {}", e);
+            log::warn!("   ⚠️  Failed to update status: {}", e);
         } else {
             log::info!("   💾 Transaction status: nosend (app will broadcast to overlay)");
         }
@@ -6229,11 +6229,21 @@ pub async fn sign_action(
         // Status is "nosend" since we're not broadcasting - the app will
         {
             let conn = db.connection();
+            let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(conn);
+
+            // Clean up stale proven_tx_req from previous signing phase.
+            // In two-phase signing, phase 1 creates a proven_tx_req for the partially-signed
+            // txid. Phase 2 produces a different txid, so the old record would be polled forever.
+            if let Some(ref old_tx) = old_txid {
+                if old_tx != &txid {
+                    let _ = proven_tx_req_repo.delete_by_txid(old_tx);
+                }
+            }
+
             let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
                 Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
                 _ => Vec::new(),
             };
-            let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(conn);
             match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "nosend") {
                 Ok(req_id) => {
                     log::info!("   📋 Created proven_tx_req {} for {} (status: nosend)", req_id, txid);
@@ -6718,7 +6728,7 @@ pub(crate) async fn broadcast_transaction(
                         // Verify ARC returned the expected txid
                         if let Some(expected_txid) = txid_for_cache {
                             if arc_txid != "unknown" && arc_txid != expected_txid {
-                                log::warn!("   ⚠️ ARC txid MISMATCH: expected {} but got {}",
+                                log::debug!("   ℹ️  ARC txid differs from expected: {} vs {} (common with BEEF ancestry)",
                                     &expected_txid[..expected_txid.len().min(16)],
                                     &arc_txid[..arc_txid.len().min(16)]);
                             }
@@ -7781,8 +7791,7 @@ pub async fn send_transaction(
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
 
-            // Update broadcast status to "broadcast" (maps to new_status "unproven" in Phase 1)
-            // so ARC poller tracks this transaction for confirmation
+            // Update status to "unproven" so monitor tracks this transaction for proof acquisition
             {
                 use crate::database::TransactionRepository;
                 let db = state.database.lock().unwrap();
@@ -8967,7 +8976,7 @@ pub async fn internalize_action(
             let script_hex = hex::encode(&output.script);
 
             // Get or create basket
-            let basket_id = match basket_repo.find_or_insert(&insertion.basket) {
+            let basket_id = match basket_repo.find_or_insert(&insertion.basket, state.current_user_id) {
                 Ok(id) => id,
                 Err(e) => {
                     log::error!("   ❌ Failed to get basket '{}': {}", insertion.basket, e);
@@ -9655,7 +9664,7 @@ pub async fn list_outputs(
         let output_repo = crate::database::OutputRepository::new(db.connection());
 
         // Resolve basket (find or create)
-        let basket_id = match basket_repo.find_or_insert(&req.basket) {
+        let basket_id = match basket_repo.find_or_insert(&req.basket, state.current_user_id) {
             Ok(id) => id,
             Err(e) => {
                 log::error!("   Failed to find or create basket: {}", e);

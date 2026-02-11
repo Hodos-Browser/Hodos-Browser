@@ -256,7 +256,7 @@ pub async fn list_certificates(
     let mut cert_responses = Vec::new();
     for cert in certificates {
         // Get certificate fields (returns HashMap<String, CertificateField>)
-        let fields_map = if let Some(cert_id) = cert.id {
+        let fields_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut fields_json = serde_json::Map::new();
@@ -276,7 +276,7 @@ pub async fn list_certificates(
         };
 
         // Get keyring (from certificate fields' master_key)
-        let keyring_map = if let Some(cert_id) = cert.id {
+        let keyring_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut keyring_json = serde_json::Map::new();
@@ -787,26 +787,12 @@ async fn acquire_certificate_direct(
         }
         Ok(false) => {
             log::info!("   ✅ Certificate is ACTIVE - revocation outpoint is unspent");
-            // Extract txid from revocationOutpoint (format: "txid.vout") and set as certificate_txid
-            // Since the revocationOutpoint exists on-chain, we know the transaction exists
-            if let Some(txid) = certificate.revocation_outpoint.split('.').next() {
-                if txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()) {
-                    certificate.certificate_txid = Some(txid.to_string());
-                    log::info!("   📍 Extracted txid from revocationOutpoint: {}", txid);
-                }
-            }
+            log::info!("   ✅ Certificate is ACTIVE - revocation outpoint is unspent");
         }
         Err(e) => {
             log::warn!("   Failed to check revocation status: {} - proceeding anyway", e);
             // Continue with acquisition even if revocation check fails
             // This allows certificates to be acquired even if API is temporarily unavailable
-            // Try to extract txid from revocationOutpoint anyway (might still be on-chain)
-            if let Some(txid) = certificate.revocation_outpoint.split('.').next() {
-                if txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()) {
-                    certificate.certificate_txid = Some(txid.to_string());
-                    log::info!("   📍 Extracted txid from revocationOutpoint (check failed, but using txid anyway): {}", txid);
-                }
-            }
         }
     }
 
@@ -3242,7 +3228,7 @@ pub async fn discover_by_identity_key(
     let mut cert_responses = Vec::new();
     for cert in certificates {
         // Get certificate fields
-        let fields_map = if let Some(cert_id) = cert.id {
+        let fields_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut fields_json = serde_json::Map::new();
@@ -3262,7 +3248,7 @@ pub async fn discover_by_identity_key(
         };
 
         // Get keyring from certificate fields' master_key
-        let keyring_map = if let Some(cert_id) = cert.id {
+        let keyring_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut keyring_json = serde_json::Map::new();
@@ -3395,7 +3381,7 @@ pub async fn discover_by_attributes(
 
     for cert in all_certificates {
         // Get certificate fields
-        let fields = match cert.id {
+        let fields = match cert.certificate_id {
             Some(cert_id) => {
                 match cert_repo.get_certificate_fields(cert_id) {
                     Ok(f) => f,
@@ -3479,7 +3465,7 @@ pub async fn discover_by_attributes(
     let mut cert_responses = Vec::new();
     for cert in paginated {
         // Get certificate fields for response
-        let fields_map = if let Some(cert_id) = cert.id {
+        let fields_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut fields_json = serde_json::Map::new();
@@ -3499,7 +3485,7 @@ pub async fn discover_by_attributes(
         };
 
         // Get keyring from certificate fields' master_key
-        let keyring_map = if let Some(cert_id) = cert.id {
+        let keyring_map = if let Some(cert_id) = cert.certificate_id {
             match cert_repo.get_certificate_fields(cert_id) {
                 Ok(fields) => {
                     let mut keyring_json = serde_json::Map::new();

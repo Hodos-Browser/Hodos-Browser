@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::certificate::types::{Certificate, CertificateField};
 use std::collections::HashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use sha2::{Sha256, Digest};
 
 pub struct CertificateRepository<'a> {
     conn: &'a Connection,
@@ -32,38 +31,23 @@ impl<'a> CertificateRepository<'a> {
             STANDARD.encode(&certificate.serial_number),
             hex::encode(&certificate.certifier));
 
-        // Insert certificate (without transaction for now - Connection is &self, not &mut)
-        // TODO: Consider restructuring to support transactions
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let created_at = if certificate.created_at == 0 { now } else { certificate.created_at };
+
+        // Insert certificate
         let certificate_id = {
-            let created_at = if certificate.acquired_at == 0 {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-            } else {
-                certificate.acquired_at
-            };
-
-            // Workaround: If certificate_txid is None, generate a placeholder based on certificate data
-            // This is needed because existing databases may have NOT NULL constraint on certificate_txid
-            // For certificates acquired via issuance protocol, there's no transaction ID yet
-            let certificate_txid = certificate.certificate_txid.clone().unwrap_or_else(|| {
-                // Generate a unique placeholder: hash of type + serial_number
-                let mut hasher = Sha256::new();
-                hasher.update(&certificate.type_);
-                hasher.update(&certificate.serial_number);
-                let hash = hasher.finalize();
-                format!("Not on Chain_{}", hex::encode(&hash[..16])) // Use first 16 bytes for shorter ID
-            });
-
             self.conn.execute(
                 "INSERT INTO certificates (
-                    certificate_txid, identity_key, type, serial_number, certifier,
-                    subject, verifier, revocation_outpoint, signature, is_deleted, acquired_at
+                    user_id, type, serial_number, certifier,
+                    subject, verifier, revocation_outpoint, signature, is_deleted,
+                    created_at, updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
-                    certificate_txid,
-                    hex::encode(&certificate.subject),  // identity_key for backward compatibility
+                    certificate.user_id.unwrap_or(1),  // Default to user 1
                     STANDARD.encode(&certificate.type_),
                     STANDARD.encode(&certificate.serial_number),
                     hex::encode(&certificate.certifier),
@@ -73,6 +57,7 @@ impl<'a> CertificateRepository<'a> {
                     hex::encode(&certificate.signature),
                     certificate.is_deleted as i32,
                     created_at,
+                    created_at,
                 ],
             )?;
 
@@ -80,36 +65,30 @@ impl<'a> CertificateRepository<'a> {
         };
 
         // Insert certificate fields
+        let user_id = certificate.user_id.unwrap_or(1);
         for (field_name, field) in certificate.fields.iter_mut() {
-            let created_at = if field.created_at == 0 {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-            } else {
-                field.created_at
-            };
+            let field_created = if field.created_at == 0 { now } else { field.created_at };
 
             self.conn.execute(
                 "INSERT INTO certificate_fields (
-                    certificate_id, field_name, field_value, master_key, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    certificateId, user_id, field_name, field_value, master_key, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     certificate_id,
+                    user_id,
                     field_name,
                     STANDARD.encode(&field.field_value),
                     STANDARD.encode(&field.master_key),
-                    created_at,
-                    created_at,
+                    field_created,
+                    field_created,
                 ],
             )?;
 
-            field.id = Some(certificate_id);  // Store certificate_id in field
             field.certificate_id = Some(certificate_id);
+            field.user_id = Some(user_id);
         }
 
-        // No transaction to commit (inserts done directly)
-        certificate.id = Some(certificate_id);
+        certificate.certificate_id = Some(certificate_id);
         info!("   ✅ Certificate inserted with ID: {}", certificate_id);
 
         Ok(certificate_id)
@@ -125,9 +104,9 @@ impl<'a> CertificateRepository<'a> {
         certifier: &[u8],
     ) -> SqliteResult<Option<Certificate>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, certificate_txid, identity_key, type, serial_number, certifier,
+            "SELECT certificateId, user_id, type, serial_number, certifier,
                     subject, verifier, revocation_outpoint, signature, is_deleted,
-                    acquired_at, relinquished_at
+                    created_at, updated_at
              FROM certificates
              WHERE type = ?1 AND serial_number = ?2 AND certifier = ?3
              LIMIT 1"
@@ -149,38 +128,7 @@ impl<'a> CertificateRepository<'a> {
         match cert_result {
             Ok(mut cert) => {
                 // Load fields
-                cert.fields = self.get_certificate_fields(cert.id.unwrap())?;
-                Ok(Some(cert))
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Get certificate by transaction ID
-    pub fn get_by_txid(&self, txid: &str) -> SqliteResult<Option<Certificate>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, certificate_txid, identity_key, type, serial_number, certifier,
-                    subject, verifier, revocation_outpoint, signature, is_deleted,
-                    acquired_at, relinquished_at
-             FROM certificates
-             WHERE certificate_txid = ?1
-             LIMIT 1"
-        )?;
-
-        let cert_result = stmt.query_row(
-            params![txid],
-            |row| {
-                let id: i64 = row.get(0)?;
-                let certificate = self.build_certificate_from_row(row, id)?;
-                Ok(certificate)
-            },
-        );
-
-        match cert_result {
-            Ok(mut cert) => {
-                // Load fields
-                cert.fields = self.get_certificate_fields(cert.id.unwrap())?;
+                cert.fields = self.get_certificate_fields(cert.certificate_id.unwrap())?;
                 Ok(Some(cert))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -202,9 +150,9 @@ impl<'a> CertificateRepository<'a> {
         offset: Option<i32>,
     ) -> SqliteResult<Vec<Certificate>> {
         let mut query = String::from(
-            "SELECT id, certificate_txid, identity_key, type, serial_number, certifier,
+            "SELECT certificateId, user_id, type, serial_number, certifier,
                     subject, verifier, revocation_outpoint, signature, is_deleted,
-                    acquired_at, relinquished_at
+                    created_at, updated_at
              FROM certificates
              WHERE 1=1"
         );
@@ -231,7 +179,7 @@ impl<'a> CertificateRepository<'a> {
             params_vec.push(Box::new(if deleted { 1 } else { 0 }));
         }
 
-        query.push_str(" ORDER BY acquired_at DESC");
+        query.push_str(" ORDER BY created_at DESC");
 
         if let Some(l) = limit {
             query.push_str(" LIMIT ?");
@@ -257,7 +205,7 @@ impl<'a> CertificateRepository<'a> {
         for cert_result in cert_iter {
             let mut cert = cert_result?;
             // Load fields for each certificate
-            if let Some(cert_id) = cert.id {
+            if let Some(cert_id) = cert.certificate_id {
                 cert.fields = self.get_certificate_fields(cert_id)?;
             }
             certificates.push(cert);
@@ -269,24 +217,24 @@ impl<'a> CertificateRepository<'a> {
     /// Get certificate fields for a certificate ID
     pub fn get_certificate_fields(&self, certificate_id: i64) -> SqliteResult<HashMap<String, CertificateField>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, field_name, field_value, master_key, created_at, updated_at
+            "SELECT certificateId, user_id, field_name, field_value, master_key, created_at, updated_at
              FROM certificate_fields
-             WHERE certificate_id = ?1"
+             WHERE certificateId = ?1"
         )?;
 
         let field_iter = stmt.query_map(
             params![certificate_id],
             |row| {
                 Ok(CertificateField {
-                    id: Some(row.get(0)?),
-                    certificate_id: Some(certificate_id),
-                    field_name: row.get(1)?,
-                    field_value: STANDARD.decode(row.get::<_, String>(2)?)
-                        .map_err(|e| rusqlite::Error::InvalidColumnType(2, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
-                    master_key: STANDARD.decode(row.get::<_, String>(3)?)
+                    certificate_id: Some(row.get(0)?),
+                    user_id: row.get(1)?,
+                    field_name: row.get(2)?,
+                    field_value: STANDARD.decode(row.get::<_, String>(3)?)
                         .map_err(|e| rusqlite::Error::InvalidColumnType(3, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    master_key: STANDARD.decode(row.get::<_, String>(4)?)
+                        .map_err(|e| rusqlite::Error::InvalidColumnType(4, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )?;
@@ -302,7 +250,7 @@ impl<'a> CertificateRepository<'a> {
 
     /// Update certificate relinquished status
     ///
-    /// Sets `is_deleted = true` and `relinquished_at = NOW()`.
+    /// Sets `is_deleted = true` and `updated_at = NOW()`.
     pub fn update_relinquished(
         &self,
         type_: &[u8],
@@ -316,7 +264,7 @@ impl<'a> CertificateRepository<'a> {
 
         let rows_affected = self.conn.execute(
             "UPDATE certificates
-             SET is_deleted = 1, relinquished_at = ?1
+             SET is_deleted = 1, updated_at = ?1
              WHERE type = ?2 AND serial_number = ?3 AND certifier = ?4",
             params![
                 now,
@@ -330,36 +278,39 @@ impl<'a> CertificateRepository<'a> {
     }
 
     /// Helper: Build certificate from database row
+    ///
+    /// Column order: certificateId(0), user_id(1), type(2), serial_number(3),
+    /// certifier(4), subject(5), verifier(6), revocation_outpoint(7),
+    /// signature(8), is_deleted(9), created_at(10), updated_at(11)
     fn build_certificate_from_row(
         &self,
         row: &rusqlite::Row,
         id: i64,
     ) -> SqliteResult<Certificate> {
-        let verifier_hex: Option<String> = row.get(7)?;
-        let relinquished_at: Option<i64> = row.get(12)?;
+        let verifier_hex: Option<String> = row.get(6)?;
 
         Ok(Certificate {
-            id: Some(id),
-            certificate_txid: row.get(1)?,
-            type_: STANDARD.decode(row.get::<_, String>(3)?)
+            certificate_id: Some(id),
+            user_id: row.get(1)?,
+            type_: STANDARD.decode(row.get::<_, String>(2)?)
+                .map_err(|e| rusqlite::Error::InvalidColumnType(2, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
+            serial_number: STANDARD.decode(row.get::<_, String>(3)?)
                 .map_err(|e| rusqlite::Error::InvalidColumnType(3, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
-            subject: hex::decode(row.get::<_, String>(6)?)
-                .map_err(|e| rusqlite::Error::InvalidColumnType(6, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
-            serial_number: STANDARD.decode(row.get::<_, String>(4)?)
-                .map_err(|e| rusqlite::Error::InvalidColumnType(4, format!("Invalid base64: {}", e), rusqlite::types::Type::Text))?,
-            certifier: hex::decode(row.get::<_, String>(5)?)
+            certifier: hex::decode(row.get::<_, String>(4)?)
+                .map_err(|e| rusqlite::Error::InvalidColumnType(4, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
+            subject: hex::decode(row.get::<_, String>(5)?)
                 .map_err(|e| rusqlite::Error::InvalidColumnType(5, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
             verifier: verifier_hex.map(|h| hex::decode(h))
                 .transpose()
-                .map_err(|e| rusqlite::Error::InvalidColumnType(7, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
-            revocation_outpoint: row.get(8)?,
-            signature: hex::decode(row.get::<_, String>(9)?)
-                .map_err(|e| rusqlite::Error::InvalidColumnType(9, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
+                .map_err(|e| rusqlite::Error::InvalidColumnType(6, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
+            revocation_outpoint: row.get(7)?,
+            signature: hex::decode(row.get::<_, String>(8)?)
+                .map_err(|e| rusqlite::Error::InvalidColumnType(8, format!("Invalid hex: {}", e), rusqlite::types::Type::Text))?,
             fields: HashMap::new(),  // Will be loaded separately
             keyring: HashMap::new(),  // Will be populated from fields
-            acquired_at: row.get(11)?,
-            is_deleted: row.get::<_, i32>(10)? != 0,
-            relinquished_at,
+            is_deleted: row.get::<_, i32>(9)? != 0,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         })
     }
 }

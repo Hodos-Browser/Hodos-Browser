@@ -38,8 +38,7 @@ impl ActionStatus {
 
 /// Consolidated transaction status aligned with BSV SDK wallet-toolbox.
 ///
-/// Replaces the dual ActionStatus + broadcast_status system with a single
-/// status field. This is stored in the `new_status` column on the transactions table.
+/// Single `status` column on the transactions table.
 ///
 /// Mapping from old dual status:
 ///   (created, pending)      → Unsigned

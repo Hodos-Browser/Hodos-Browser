@@ -75,7 +75,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -106,7 +106,7 @@ impl<'a> OutputRepository<'a> {
         Ok(outputs)
     }
 
-    /// Get spendable outputs from CONFIRMED transactions only (new_status = 'completed')
+    /// Get spendable outputs from CONFIRMED transactions only (status = 'completed')
     ///
     /// Used for confirmed-output preference in UTXO selection to avoid building
     /// long chains of unconfirmed transactions. Falls back to all spendable outputs
@@ -121,7 +121,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.new_status = 'completed' OR o.transaction_id IS NULL)
+               AND (t.status = 'completed' OR o.transaction_id IS NULL)
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -260,7 +260,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))",
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))",
             rusqlite::params![user_id],
             |row| row.get(0),
         )?;
@@ -277,7 +277,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.spendable = 1
-               AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))",
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))",
             [],
             |row| row.get(0),
         )?;
@@ -292,7 +292,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.new_status IS NULL OR t.new_status NOT IN ('unsigned', 'failed'))",
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))",
             rusqlite::params![user_id],
             |row| row.get(0),
         )?;

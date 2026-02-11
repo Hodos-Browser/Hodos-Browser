@@ -154,6 +154,21 @@ impl<'a> ProvenTxReqRepository<'a> {
         Ok(())
     }
 
+    /// Delete a proof request by txid.
+    ///
+    /// Used when txid changes during two-phase signing: the old proven_tx_req
+    /// for the partially-signed txid is stale and would be polled forever.
+    pub fn delete_by_txid(&self, txid: &str) -> CacheResult<()> {
+        let rows = self.conn.execute(
+            "DELETE FROM proven_tx_reqs WHERE txid = ?1",
+            rusqlite::params![txid],
+        )?;
+        if rows > 0 {
+            log::info!("   🗑️  Deleted stale proven_tx_req for txid {}", &txid[..std::cmp::min(16, txid.len())]);
+        }
+        Ok(())
+    }
+
     /// Add a timestamped history note to the proof request's history JSON
     pub fn add_history_note(&self, id: i64, event: &str, details: &str) -> CacheResult<()> {
         let now = Self::now();

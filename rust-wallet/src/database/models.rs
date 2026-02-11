@@ -134,16 +134,18 @@ pub struct ProvenTxReq {
     pub updated_at: i64,
 }
 
-/// Basket model matching the `baskets` table
+/// Basket model matching the `output_baskets` table
 #[derive(Debug, Clone)]
 pub struct Basket {
     pub id: Option<i64>,
+    pub user_id: i64,
     pub name: String,
     pub description: Option<String>,
     pub token_type: Option<String>,
     pub protocol_id: Option<String>,
+    pub is_deleted: bool,
     pub created_at: i64,
-    pub last_used: Option<i64>,
+    pub updated_at: i64,
 }
 
 /// Output tag model matching the `output_tags` table

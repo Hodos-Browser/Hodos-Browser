@@ -39,7 +39,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 
         let mut stmt = conn.prepare(
             "SELECT id, txid FROM transactions
-             WHERE new_status = 'failed'
+             WHERE status = 'failed'
              AND failed_at IS NOT NULL
              AND failed_at >= ?1"
         ).map_err(|e| format!("SQL prepare: {}", e))?;

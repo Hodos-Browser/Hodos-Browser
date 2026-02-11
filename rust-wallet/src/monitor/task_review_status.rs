@@ -74,7 +74,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
             "SELECT o.outputId, o.txid, t.id
              FROM outputs o
              INNER JOIN transactions t ON o.transaction_id = t.id
-             WHERE t.new_status = 'completed'
+             WHERE t.status = 'completed'
              AND o.spendable = 0
              AND o.spent_by IS NULL
              AND (o.spending_description IS NULL OR o.spending_description != 'external-spend')"
@@ -110,7 +110,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         // Find failed txs past the UnFail window that still have reserved outputs
         let mut stmt = conn.prepare(
             "SELECT t.id, t.txid FROM transactions t
-             WHERE t.new_status = 'failed'
+             WHERE t.status = 'failed'
              AND t.failed_at IS NOT NULL
              AND t.failed_at < ?1
              AND EXISTS (

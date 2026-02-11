@@ -8,14 +8,14 @@ use thiserror::Error;
 /// Certificate model matching the `certificates` table
 ///
 /// **BRC-52 Structure**: Represents a BRC-52 identity certificate
-/// **Database**: Maps to `certificates` table (migration v7)
+/// **Database**: Maps to `certificates` table (toolbox-aligned V1 schema)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Certificate {
     /// Database ID (None for new certificates)
-    pub id: Option<i64>,
+    pub certificate_id: Option<i64>,
 
-    /// Certificate transaction ID (from blockchain)
-    pub certificate_txid: Option<String>,
+    /// User ID (FK to users table)
+    pub user_id: Option<i64>,
 
     /// Certificate type identifier (base64-encoded)
     /// **BRC-52**: `type` field
@@ -23,7 +23,6 @@ pub struct Certificate {
 
     /// Subject's identity key (33-byte compressed public key, hex-encoded)
     /// **BRC-52**: `subject` field
-    /// **Database**: Stored as `subject` (also `identity_key` for backward compatibility)
     pub subject: Vec<u8>,
 
     /// Unique serial number (base64-encoded)
@@ -57,28 +56,28 @@ pub struct Certificate {
     /// **Database**: Stored as `master_key` in `certificate_fields` table
     pub keyring: HashMap<String, Vec<u8>>,
 
-    /// Timestamp when certificate was acquired (Unix timestamp)
-    pub acquired_at: i64,
-
     /// Soft delete flag (true if certificate is relinquished)
     /// **Database**: `is_deleted` column
     pub is_deleted: bool,
 
-    /// Timestamp when certificate was relinquished (Unix timestamp, optional)
-    pub relinquished_at: Option<i64>,
+    /// Created timestamp (Unix timestamp)
+    pub created_at: i64,
+
+    /// Updated timestamp (Unix timestamp)
+    pub updated_at: i64,
 }
 
 /// Certificate field model matching the `certificate_fields` table
 ///
 /// **BRC-52 Structure**: Represents a single encrypted field in a certificate
-/// **Database**: Maps to `certificate_fields` table
+/// **Database**: Maps to `certificate_fields` table (composite key: certificateId + field_name)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificateField {
-    /// Database ID (None for new fields)
-    pub id: Option<i64>,
-
     /// Foreign key to `certificates` table
     pub certificate_id: Option<i64>,
+
+    /// User ID (FK to users table)
+    pub user_id: Option<i64>,
 
     /// Field name (e.g., "name", "email", "age")
     pub field_name: String,
@@ -150,8 +149,8 @@ impl Certificate {
             .as_secs() as i64;
 
         Self {
-            id: None,
-            certificate_txid: None,
+            certificate_id: None,
+            user_id: None,
             type_,
             subject,
             serial_number,
@@ -161,9 +160,9 @@ impl Certificate {
             signature,
             fields,
             keyring,
-            acquired_at: now,
             is_deleted: false,
-            relinquished_at: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -173,9 +172,9 @@ impl Certificate {
         (&self.type_, &self.serial_number, &self.certifier)
     }
 
-    /// Check if certificate is active (not deleted and not relinquished)
+    /// Check if certificate is active (not deleted/relinquished)
     pub fn is_active(&self) -> bool {
-        !self.is_deleted && self.relinquished_at.is_none()
+        !self.is_deleted
     }
 }
 
@@ -192,8 +191,8 @@ impl CertificateField {
             .as_secs() as i64;
 
         Self {
-            id: None,
             certificate_id: None,
+            user_id: None,
             field_name,
             field_value,
             master_key,

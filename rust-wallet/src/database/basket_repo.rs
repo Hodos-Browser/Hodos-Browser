@@ -88,7 +88,7 @@ impl<'a> BasketRepository<'a> {
     ///
     /// # Returns
     /// The basket ID (existing or newly created)
-    pub fn find_or_insert(&self, name: &str) -> Result<i64> {
+    pub fn find_or_insert(&self, name: &str, user_id: i64) -> Result<i64> {
         // Always normalize - makes function idempotent
         // trim().to_lowercase() is itself idempotent, so double-normalization is safe
         let normalized_name = name.trim().to_lowercase();
@@ -98,18 +98,18 @@ impl<'a> BasketRepository<'a> {
             .unwrap()
             .as_secs() as i64;
 
-        // Try to find existing basket with normalized name
+        // Try to find existing basket with normalized name for this user
         let basket_id: Result<i64> = self.conn.query_row(
-            "SELECT id FROM baskets WHERE name = ?1",
-            rusqlite::params![normalized_name],
+            "SELECT basketId FROM output_baskets WHERE name = ?1 AND user_id = ?2",
+            rusqlite::params![normalized_name, user_id],
             |row| row.get(0),
         );
 
         match basket_id {
             Ok(id) => {
-                // Update last_used timestamp
+                // Update updated_at timestamp
                 self.conn.execute(
-                    "UPDATE baskets SET last_used = ?1 WHERE id = ?2",
+                    "UPDATE output_baskets SET updated_at = ?1 WHERE basketId = ?2",
                     rusqlite::params![now, id],
                 )?;
                 Ok(id)
@@ -117,11 +117,11 @@ impl<'a> BasketRepository<'a> {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Insert new basket with normalized name
                 self.conn.execute(
-                    "INSERT INTO baskets (name, created_at, last_used) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![normalized_name, now, now],
+                    "INSERT INTO output_baskets (user_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![user_id, normalized_name, now, now],
                 )?;
                 let id = self.conn.last_insert_rowid();
-                info!("   ✅ Created new basket '{}' with id {}", normalized_name, id);
+                info!("   ✅ Created new basket '{}' with id {} for user {}", normalized_name, id, user_id);
                 Ok(id)
             }
             Err(e) => Err(e),
@@ -136,8 +136,8 @@ impl<'a> BasketRepository<'a> {
         let normalized_name = name.trim().to_lowercase();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, token_type, protocol_id, created_at, last_used
-             FROM baskets WHERE name = ?1"
+            "SELECT basketId, user_id, name, description, token_type, protocol_id, is_deleted, created_at, updated_at
+             FROM output_baskets WHERE name = ?1"
         )?;
 
         let basket = stmt.query_row(
@@ -145,12 +145,14 @@ impl<'a> BasketRepository<'a> {
             |row| {
                 Ok(Basket {
                     id: Some(row.get(0)?),
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    token_type: row.get(3)?,
-                    protocol_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                    last_used: row.get(6)?,
+                    user_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    token_type: row.get(4)?,
+                    protocol_id: row.get(5)?,
+                    is_deleted: row.get::<_, i32>(6)? != 0,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             },
         );
@@ -165,8 +167,8 @@ impl<'a> BasketRepository<'a> {
     /// Get basket by ID
     pub fn get_by_id(&self, id: i64) -> Result<Option<Basket>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, token_type, protocol_id, created_at, last_used
-             FROM baskets WHERE id = ?1"
+            "SELECT basketId, user_id, name, description, token_type, protocol_id, is_deleted, created_at, updated_at
+             FROM output_baskets WHERE basketId = ?1"
         )?;
 
         let basket = stmt.query_row(
@@ -174,12 +176,14 @@ impl<'a> BasketRepository<'a> {
             |row| {
                 Ok(Basket {
                     id: Some(row.get(0)?),
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    token_type: row.get(3)?,
-                    protocol_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                    last_used: row.get(6)?,
+                    user_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    token_type: row.get(4)?,
+                    protocol_id: row.get(5)?,
+                    is_deleted: row.get::<_, i32>(6)? != 0,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             },
         );

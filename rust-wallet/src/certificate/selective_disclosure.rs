@@ -52,7 +52,7 @@ pub fn create_keyring_for_verifier(
 
     // Get master keyring from database
     let cert_repo = CertificateRepository::new(db_conn);
-    let certificate_fields = cert_repo.get_certificate_fields(certificate.id.unwrap())
+    let certificate_fields = cert_repo.get_certificate_fields(certificate.certificate_id.unwrap())
         .map_err(|e| CertificateError::Database(format!("Failed to get certificate fields: {}", e)))?;
 
     // Build master keyring map (fieldName → encrypted master key)
@@ -124,14 +124,8 @@ mod tests {
         // Create in-memory database
         let conn = Connection::open_in_memory().unwrap();
 
-        // Run all migrations (v1 through v7)
+        // Run consolidated schema migration
         migrations::create_schema_v1(&conn).unwrap();
-        migrations::create_schema_v2(&conn).unwrap();
-        migrations::create_schema_v3(&conn).unwrap();
-        migrations::create_schema_v4(&conn).unwrap();
-        migrations::create_schema_v5(&conn).unwrap();
-        migrations::create_schema_v6(&conn).unwrap();
-        migrations::create_schema_v7(&conn).unwrap();
 
         // Generate valid test keys using secp256k1
         let secp = Secp256k1::new();
@@ -197,14 +191,11 @@ mod tests {
             std::collections::HashMap::new(),
         );
 
-        // Set required fields for database insertion
-        certificate.certificate_txid = Some(test_txid.to_string());
-
         // Insert certificate into database
         use crate::database::certificate_repo::CertificateRepository;
         let cert_repo = CertificateRepository::new(&conn);
         let certificate_id = cert_repo.insert_certificate_with_fields(&mut certificate).unwrap();
-        certificate.id = Some(certificate_id);
+        certificate.certificate_id = Some(certificate_id);
 
         (conn, certificate, subject_private_key, certifier_public_key, verifier_public_key)
     }

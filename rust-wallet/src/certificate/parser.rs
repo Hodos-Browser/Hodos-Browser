@@ -220,12 +220,6 @@ pub fn parse_certificate_from_json(
         keyring,
     );
 
-    // Set certificate_txid if provided (optional)
-    if let Some(txid) = json_data.get("certificate_txid")
-        .and_then(|v| v.as_str()) {
-        certificate.certificate_txid = Some(txid.to_string());
-    }
-
     // Set verifier if provided (optional validationKey)
     if let Some(verifier_hex) = json_data.get("verifier")
         .or_else(|| json_data.get("validationKey"))

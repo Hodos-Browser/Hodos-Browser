@@ -103,7 +103,7 @@ impl WalletDatabase {
     ///
     /// Returns: (wallet_id, mnemonic_phrase, first_address)
     pub fn create_wallet_with_first_address(&self) -> Result<(i64, String, String)> {
-        use super::{WalletRepository, AddressRepository};
+        use super::{WalletRepository, AddressRepository, UserRepository};
         use crate::crypto::brc42::derive_child_public_key;
         use bip39::{Mnemonic, Language};
         use bip32::XPrv;
@@ -119,17 +119,12 @@ impl WalletDatabase {
         // Create repositories
         let wallet_repo = WalletRepository::new(&self.conn);
         let address_repo = AddressRepository::new(&self.conn);
+        let user_repo = UserRepository::new(&self.conn);
 
-        // Create wallet (generates mnemonic)
+        // 1. Create wallet (generates mnemonic)
         let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet()?;
 
-        // Create the "default" basket for change outputs (BRC-99 requirement)
-        use super::BasketRepository;
-        let basket_repo = BasketRepository::new(&self.conn);
-        basket_repo.find_or_insert("default")?;
-        info!("   ✅ Created 'default' basket for change outputs");
-
-        // Parse mnemonic and derive master keys
+        // 2. Parse mnemonic and derive master keys (needed for user creation)
         let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_phrase)
             .map_err(|e| rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
@@ -154,7 +149,18 @@ impl WalletDatabase {
             ))?;
         let master_pubkey = PublicKey::from_secret_key(&secp, &secret_key).serialize().to_vec();
 
-        // Create BRC-43 invoice number for first address: "2-receive address-0"
+        // 3. Create default user (identity_key = master pubkey hex)
+        let identity_key_hex = hex::encode(&master_pubkey);
+        let user_id = user_repo.create(&identity_key_hex)?;
+        info!("   ✅ Default user created with ID: {}", user_id);
+
+        // 4. Create the "default" basket for change outputs (BRC-99 requirement)
+        use super::BasketRepository;
+        let basket_repo = BasketRepository::new(&self.conn);
+        basket_repo.find_or_insert("default", user_id)?;
+        info!("   ✅ Created 'default' basket for change outputs");
+
+        // 5. Create BRC-43 invoice number for first address: "2-receive address-0"
         let invoice_number = "2-receive address-0";
         info!("   Invoice number: {}", invoice_number);
 
@@ -330,7 +336,8 @@ impl WalletDatabase {
         let basket_repo = BasketRepository::new(&self.conn);
 
         // find_or_insert is idempotent - will create if missing, return existing if present
-        basket_repo.find_or_insert("default")?;
+        // Use default user_id = 1 (single-user wallet)
+        basket_repo.find_or_insert("default", 1)?;
         info!("   ✅ 'default' basket exists (created if missing)");
 
         Ok(())
@@ -344,728 +351,36 @@ impl WalletDatabase {
     /// Run database migrations
     ///
     /// Checks current schema version and applies any pending migrations.
+    /// Consolidated: single V1 creates the full target schema.
     fn migrate(&self) -> Result<()> {
         info!("   Starting migration process...");
         use crate::database::migrations;
 
         // Create schema_version table if it doesn't exist
-        info!("   Step 1: Creating schema_version table...");
-        match self.conn.execute(
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             )",
             [],
-        ) {
-            Ok(rows_affected) => {
-                info!("   ✅ schema_version table created/verified (rows affected: {})", rows_affected);
-            }
-            Err(e) => {
-                error!("❌ Failed to create schema_version table: {}", e);
-                error!("   Error type: {:?}", e);
-                return Err(e);
-            }
-        }
+        )?;
 
-        // Check current version
-        // If table is empty, default to version 0
-        info!("   Step 2: Checking current schema version...");
-        let current_version: i32 = match self.conn
+        // Check current version (0 if empty)
+        let current_version: i32 = self.conn
             .query_row(
                 "SELECT MAX(version) FROM schema_version",
                 [],
                 |row| row.get::<_, Option<i32>>(0),
-            ) {
-            Ok(Some(version)) => {
-                info!("   ✅ Current version found: {}", version);
-                version
-            }
-            Ok(None) => {
-                info!("   ✅ No version found (empty table), defaulting to 0");
-                0  // Table exists but is empty
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                info!("   ✅ No rows found, defaulting to 0");
-                0  // No rows found
-            }
-            Err(e) => {
-                error!("❌ Failed to query schema version: {}", e);
-                error!("   Error type: {:?}", e);
-                return Err(e);  // Other error
-            }
-        };
-
-        info!("   Step 3: Current schema version is: {}", current_version);
+            )
+            .unwrap_or(None)
+            .unwrap_or(0);
 
         info!("   Current schema version: {}", current_version);
 
-        // Apply migrations in order
         if current_version < 1 {
-            info!("   Applying migration to version 1...");
-
-            // Test: Try creating just the wallets table first
-            info!("   TEST: Creating wallets table only...");
-            match self.conn.execute(
-                "CREATE TABLE IF NOT EXISTS wallets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    mnemonic TEXT NOT NULL,
-                    current_index INTEGER NOT NULL DEFAULT 0,
-                    backed_up BOOLEAN NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                )",
-                [],
-            ) {
-                Ok(_) => {
-                    info!("   ✅ TEST: wallets table created successfully");
-                }
-                Err(e) => {
-                    error!("❌ TEST: Failed to create wallets table: {}", e);
-                    error!("   Error type: {:?}", e);
-                    return Err(e);
-                }
-            }
-
-            // If test succeeds, continue with full migration
-            match migrations::create_schema_v1(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 1...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (1)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 1 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 1 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 2
-        if current_version < 2 {
-            info!("   Applying migration to version 2...");
-            match migrations::create_schema_v2(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 2...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (2)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 2 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 2 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 3
-        if current_version < 3 {
-            info!("   Applying migration to version 3...");
-            match migrations::create_schema_v3(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 3...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (3)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 3 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 3 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 4
-        if current_version < 4 {
-            info!("   Applying migration to version 4...");
-            match migrations::create_schema_v4(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 4...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (4)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 4 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 4 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 5 (Group C enhancements)
-        if current_version < 5 {
-            info!("   Applying migration to version 5...");
-            match migrations::create_schema_v5(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 5...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (5)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 5 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 5 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 6 (Tag tables for listOutputs)
-        if current_version < 6 {
-            info!("   Applying migration to version 6...");
-            match migrations::create_schema_v6(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 6...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (6)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 6 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 6 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 7 (Certificate Management - Part 3)
-        if current_version < 7 {
-            info!("   Applying migration to version 7...");
-            match migrations::create_schema_v7(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 7...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (7)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 7 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 7 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 8 (BRC-33 Message Relay Persistence)
-        if current_version < 8 {
-            info!("   Applying migration to version 8...");
-            match migrations::create_schema_v8(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 8...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (8)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 8 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 8 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 9 (Basket & Tag Support Enhancements)
-        if current_version < 9 {
-            info!("   Applying migration to version 9...");
-            match migrations::create_schema_v9(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 9...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (9)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 9 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 9 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 10 (Transaction Chaining Support)
-        if current_version < 10 {
-            info!("   Applying migration to version 10...");
-            match migrations::create_schema_v10(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 10...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (10)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 10 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 10 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 11 (Fix Orphan UTXOs)
-        if current_version < 11 {
-            info!("   Applying migration to version 11...");
-            match migrations::create_schema_v11(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 11...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (11)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 11 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 11 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 12 (Basket Output Tracking - nullable address_id)
-        if current_version < 12 {
-            info!("   Applying migration to version 12...");
-            match migrations::create_schema_v12(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 12...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (12)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 12 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 12 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        if current_version < 13 {
-            info!("   Applying migration to version 13...");
-            match migrations::create_schema_v13(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 13...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (13)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 13 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 13 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        if current_version < 14 {
-            info!("   Applying migration to version 14...");
-            match migrations::create_schema_v14(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 14...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (14)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 14 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 14 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 15 (Status Consolidation + UnFail)
-        if current_version < 15 {
-            info!("   Applying migration to version 15...");
-            match migrations::create_schema_v15(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 15...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (15)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 15 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 15 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 16 (Proven Transaction Model)
-        if current_version < 16 {
-            info!("   Applying migration to version 16...");
-            match migrations::create_schema_v16(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 16...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (16)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 16 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 16 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 17 (Multi-User Foundation)
-        if current_version < 17 {
-            info!("   Applying migration to version 17...");
-            match migrations::create_schema_v17(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 17...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (17)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 17 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 17 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 18 (Output Model Transition - Phase 4A)
-        if current_version < 18 {
-            info!("   Applying migration to version 18...");
-            match migrations::create_schema_v18(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 18...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (18)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 18 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 18 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 19 (Labels, Commissions, Supporting Tables - Phase 5)
-        if current_version < 19 {
-            info!("   Applying migration to version 19...");
-            match migrations::create_schema_v19(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 19...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (19)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 19 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 19 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 20 (Monitor Events Table - Phase 6A)
-        if current_version < 20 {
-            info!("   Applying migration to version 20...");
-            match migrations::create_schema_v20(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 20...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (20)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 20 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 20 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 21 (Repair proven_txs merkle_path height)
-        if current_version < 21 {
-            info!("   Applying migration to version 21...");
-            match migrations::create_schema_v21(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 21...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (21)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 21 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 21 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        if current_version < 22 {
-            info!("   Applying migration to version 22...");
-            match migrations::create_schema_v22(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 22...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (22)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 22 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 22 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 23 (Phase 7A: Re-tag output derivation fields)
-        if current_version < 23 {
-            info!("   Applying migration to version 23...");
-            match migrations::create_schema_v23(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 23...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (23)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 23 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 23 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Apply migration to version 24 (Phase 8C: Schema cleanup)
-        if current_version < 24 {
-            info!("   Applying migration to version 24...");
-            match migrations::create_schema_v24(&self.conn) {
-                Ok(()) => {
-                    info!("   Inserting schema version 24...");
-                    match self.conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (24)",
-                        [],
-                    ) {
-                        Ok(_) => {
-                            info!("   ✅ Migration to version 24 complete");
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to insert schema version: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Migration to version 24 failed: {}", e);
-                    error!("   Error details: {:?}", e);
-                    return Err(e);
-                }
-            }
+            info!("   Applying consolidated schema V1...");
+            migrations::create_schema_v1(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
+            info!("   ✅ Schema V1 applied");
         }
 
         Ok(())

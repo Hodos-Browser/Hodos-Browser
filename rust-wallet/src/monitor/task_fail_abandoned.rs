@@ -29,8 +29,8 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         // Find transactions stuck in unprocessed/unsigned for more than 5 minutes
         let mut stmt = conn.prepare(
             "SELECT id, txid FROM transactions
-             WHERE new_status IN ('unprocessed', 'unsigned')
-             AND (strftime('%s', 'now') - timestamp) > ?1"
+             WHERE status IN ('unprocessed', 'unsigned')
+             AND (strftime('%s', 'now') - created_at) > ?1"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let abandoned: Vec<(i64, String)> = stmt.query_map(
@@ -59,7 +59,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 .as_secs() as i64;
 
             if let Err(e) = conn.execute(
-                "UPDATE transactions SET new_status = 'failed', failed_at = ?1 WHERE id = ?2",
+                "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE id = ?2",
                 rusqlite::params![now, tx_id],
             ) {
                 warn!("   ⚠️ Failed to mark tx {} as failed: {}", short_txid, e);
