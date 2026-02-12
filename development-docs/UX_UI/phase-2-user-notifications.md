@@ -10,6 +10,48 @@
 
 ---
 
+## Prerequisites and Key Reference
+
+- **Before starting Phase 2**: Complete **[CR-2 (Interceptor Architecture)](../CEF_REFINEMENT_TRACKER.md#cr-2-interceptor-architecture)**. CR-2 moves wallet HTTP calls off the UI thread, replaces the single-global `g_pendingAuthRequest` with a per-request map, adds thread safety, and caches the whitelist in memory. Phase 2 adds multiple notification types that all need concurrent pending request support — without CR-2, the interceptor cannot handle this.
+- **Primary technical reference**: [HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md). Treat it as a **helper document** for Phase 2 — the guide is not consolidated into this phase doc so it stays a single, reusable reference for anyone working on interceptor-based flows. Use it during planning and implementation.
+- **Full analysis**: [CEF Refinement Tracker](../CEF_REFINEMENT_TRACKER.md) documents all known interceptor issues, race conditions, and architecture recommendations (including Brave Browser comparison).
+
+**Whitelist and DB**: The domain whitelist is currently JSON-only. Phase 2 is the right time to design and add a whitelist table (and migration): we will need to define permission levels (e.g. spending levels, certificate levels) per site. This also completes CR-3.1 (move whitelist to DB), eliminating the C++/Rust dual-system mismatch. See [Wallet Backup & Recovery Plan](../WALLET_BACKUP_AND_RECOVERY_PLAN.md) Section 12 for the note on whitelist deferral.
+
+---
+
+## Decisions (2026-02-11)
+
+> **No-Wallet HTTP Intercept Trigger**
+>
+> If an HTTP request to the wallet is intercepted by the C++ layer but no wallet exists, the
+> create/recover modal (from Phase 1) should pop up automatically. This is a secondary trigger
+> in addition to the Wallet button click. The user discovers they need a wallet organically
+> when a site tries to use BRC-100.
+
+> **Phase 0.1: Domain Permissions Research & Design Sprint**
+>
+> Before implementing Phase 2, a dedicated research sprint (Phase 0.1) should study and design
+> the domain permissions model. This covers: what parameters users can set per domain (spending
+> limits per-tx / per-day / per-session, certificate auto-approve levels, data sharing levels),
+> sensible defaults, and the DB table schema (`domain_permissions`). This research feeds both
+> Phase 2 (notifications) and Phase 4 (full wallet settings UI where users can review/modify
+> domain permissions). Keep the model **simple for MVP** — see auto-approve note below.
+
+> **Simplified Auto-Approve for MVP**
+>
+> The full auto-approve engine described in helper-3 (per-domain limits, rate limits, protocol
+> whitelisting) is too complex for MVP. Instead:
+> - Trusted domains can auto-approve below a configurable sat threshold (per-tx and per-day)
+> - Certificate read operations can be auto-approved for trusted domains
+> - Everything else prompts the user
+> - Build the sophisticated engine in a later sprint
+>
+> The goal is: avoid constant notifications but still have guard rails. Give the user some
+> control with good defaults. Don't overwhelm them with knobs.
+
+---
+
 ## Interface Description
 
 The User Notifications system:
@@ -149,7 +191,7 @@ These are **outline questions** only; detailed research and design in the phase 
 
 - [Design Philosophy](./helper-2-design-philosophy.md) – Escalation levels, non-annoying permissions.
 - [UX Considerations](./helper-3-ux-considerations.md) – Notification system, guard rails, auto-approve.
-- [HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md) – How requests are paused and resumed.
+- [HTTP Interceptor Flow Guide](./HTTP_INTERCEPTOR_FLOW_GUIDE.md) – Primary technical reference for this phase; how requests are paused and resumed (use as helper, not merged into this doc).
 - [Activity Status Indicator](./phase-5-activity-status-indicator.md) – Passive activity vs active notifications.
 
 ---

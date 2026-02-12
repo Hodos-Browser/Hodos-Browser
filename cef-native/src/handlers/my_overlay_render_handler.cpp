@@ -158,6 +158,33 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         }
     }
 
+    // Check if dimensions changed and reallocate bitmap if needed
+    if (width != width_ || height != height_) {
+        // Delete old bitmap
+        if (hbitmap_) {
+            DeleteObject(hbitmap_);
+            hbitmap_ = nullptr;
+            dib_data_ = nullptr;
+        }
+
+        // Create new bitmap with updated dimensions
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        hbitmap_ = CreateDIBSection(hdc_mem_, &bmi, DIB_RGB_COLORS, &dib_data_, nullptr, 0);
+        if (hbitmap_) {
+            SelectObject(hdc_mem_, hbitmap_);
+        }
+
+        width_ = width;
+        height_ = height;
+    }
+
     if (buffer && dib_data_) {
         std::memcpy(dib_data_, buffer, width * height * 4);
     }

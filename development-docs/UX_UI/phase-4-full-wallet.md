@@ -6,7 +6,7 @@
 **Purpose**: Complete wallet management interface with all features (addresses, transactions, settings, certificates, etc.)
 
 **Status**: 📋 Planning Phase
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-11
 
 ---
 
@@ -354,10 +354,46 @@ Key considerations:
 
 ---
 
+## Decisions & Notes (2026-02-11)
+
+> **Route Namespace Reservation**
+>
+> Phase 4 proposes routes like `/wallet/overview`, `/wallet/addresses`, etc. But `/wallet` is
+> already used by the existing wallet overlay (`WalletOverlayRoot.tsx`). During Phase 4 planning,
+> resolve this conflict:
+> - Option A: Move the light wallet overlay to a non-route trigger (overlay system only, no URL route)
+> - Option B: Use `/wallet-full/*` for Phase 4 routes
+> - Option C: Phase 4 replaces the overlay entirely and owns `/wallet/*`
+>
+> **Decide during Phase 4 planning session.** In the meantime, Phases 1-3 should NOT add new
+> `/wallet/*` routes — use the overlay system instead.
+
+> **WalletContext for State Management**
+>
+> Phase 4 has 7+ sub-routes sharing state (balance, selected address, transaction filters,
+> certificates). The current "no global state library" approach (useState/useEffect + hooks)
+> will likely be insufficient. During Phase 4 planning, evaluate whether a `WalletContext`
+> (React Context) is needed to share wallet state across sub-routes. This is the recommended
+> approach — it avoids a full state library while providing the shared state Phase 4 needs.
+
+> **Scope Clarification: What "UTXO Management" Actually Means**
+>
+> The original doc listed "UTXO management (view, select, consolidate)" as a feature. In
+> practice, this means:
+> - **Basket-labeled outputs**: Display PushDrop tokens and basket-grouped outputs separately
+>   from regular UTXOs. Provide a button to "spend back to normal" (convert token to regular UTXO).
+> - **Certificates**: Display certificates, allow user to delete/revoke (spend the cert output).
+> - **Domain permissions**: A settings panel where the user can search for a domain and adjust
+>   basic auto-approve parameters (spending limits, certificate levels). Feeds from Phase 0.1 design.
+> - **NOT in scope for MVP**: Advanced UTXO selection, manual UTXO consolidation, coin control.
+>   These are power-user features for a future sprint.
+
+---
+
 ## Implementation Notes
 
 - This is the most complex interface
-- Should build on Light Wallet patterns
+- Should build on Light Wallet patterns (Phase 3 polish)
 - Consider phased implementation (core features first, advanced later)
 - Review existing `WalletPanelLayout.tsx` for patterns
 - May need significant database query optimizations

@@ -241,19 +241,27 @@ When applications request access to the user's master identity key (privileged a
 
 **Purpose**: Reduce friction for legitimate, low-risk operations while maintaining security.
 
-**TODO**: Design auto-approve rules for:
+> **MVP Scope Decision (2026-02-11)**: Keep auto-approve **simple** for MVP.
+> The full engine (per-domain limits, rate limits, protocol whitelisting, cooldowns)
+> is deferred to a later sprint. The goal is: avoid constant notifications, maintain
+> guard rails, give the user some control with good defaults.
+>
+> **Phase 0.1 (Domain Permissions Research)** should study and design the permission
+> model before Phase 2 implementation. This feeds into Phase 2 (notifications) and
+> Phase 4 (full wallet settings where users review/modify domain permissions).
 
-- [ ] **Trusted domains**: User-configured list of always-trusted apps
-- [ ] **Protocol whitelisting**: Specific protocol+keyID combinations
-- [ ] **Value limits**: Auto-approve below X satoshis per transaction/day
-- [ ] **Rate limits**: Max N auto-approvals per minute/hour
-- [ ] **Certificate types**: Auto-approve viewing certain certificate types
+**MVP Auto-Approve Rules** (simple defaults):
 
-**Auto-Approve Configuration UI**:
+- [ ] **Trusted domains**: User-configured list of trusted apps
+- [ ] **Spending limits**: Auto-approve below a configurable sat threshold (per-tx and per-day)
+- [ ] **Certificate reads**: Auto-approve certificate read operations for trusted domains
+- [ ] **Everything else prompts**: All other operations require explicit user approval
+
+**MVP Auto-Approve Settings UI** (simplified):
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ⚡ Auto-Approve Settings                                   │
+│  Auto-Approve Settings                                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Trusted Apps:                                              │
@@ -263,13 +271,9 @@ When applications request access to the user's master identity key (privileged a
 │  │ + Add trusted app...                                │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
-│  Transaction Limits:                                        │
+│  Spending Limits:                                           │
 │  • Auto-approve up to: [____1000____] sats per tx          │
 │  • Daily auto-approve limit: [___10000___] sats            │
-│                                                             │
-│  Rate Limits:                                               │
-│  • Max auto-approvals: [__5__] per minute                  │
-│  • Cooldown after limit: [__60__] seconds                  │
 │                                                             │
 │  ┌─────────────────┐                                       │
 │  │  Save Settings  │                                       │
@@ -278,14 +282,17 @@ When applications request access to the user's master identity key (privileged a
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Security Considerations**:
+**Future Sprint** (post-MVP): Add rate limits, protocol whitelisting, per-domain granular
+controls, cooldown timers, certificate-type-specific rules.
+
+**Security Considerations** (apply to both MVP and full engine):
 
 - Auto-approve must NEVER apply to:
   - Master identity key access
   - Certificate issuance
   - Transactions above threshold
   - Unknown/new domains
-- Auto-approve settings should require password/PIN to modify
+- Auto-approve settings should require PIN to modify
 - Clear audit log of all auto-approved actions
 
 ---

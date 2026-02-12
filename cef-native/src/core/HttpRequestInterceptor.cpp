@@ -28,6 +28,7 @@ std::string g_pendingModalDomain = "";
 #include <fstream>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <ctime>
@@ -40,6 +41,24 @@ std::string g_pendingModalDomain = "";
 #define LOG_INFO_HTTP(msg) Logger::Log(msg, 1, 2)
 #define LOG_WARNING_HTTP(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_HTTP(msg) Logger::Log(msg, 3, 2)
+
+// Escape string for safe embedding in single-quoted JS string literals.
+// Prevents JS injection when concatenating into ExecuteJavaScript() calls.
+static std::string escapeForJsSingleQuote(const std::string& input) {
+    std::string escaped;
+    escaped.reserve(input.length() + 16);
+    for (char c : input) {
+        switch (c) {
+            case '\\': escaped += "\\\\"; break;
+            case '\'': escaped += "\\'"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\0': escaped += "\\0"; break;
+            default: escaped += c; break;
+        }
+    }
+    return escaped;
+}
 
 // Domain verification class
 class DomainVerifier {
@@ -190,6 +209,9 @@ public:
                 LOG_DEBUG_HTTP("🔐 BRC-100 auth request from non-whitelisted domain: " + requestDomain_);
                 triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
 
+                // Timeout: auto-reject after 60 seconds if user doesn't respond
+                postAuthTimeout(60000, "{\"error\":\"Authentication approval timeout\",\"status\":\"error\"}");
+
                 // Don't return error response immediately - wait for user response
                 LOG_DEBUG_HTTP("🔐 Waiting for user response to BRC-100 auth request");
                 handle_request = true;
@@ -198,6 +220,9 @@ public:
                 // ALL other requests (including wallet endpoints) require whitelist approval
                 LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " not whitelisted for endpoint " + endpoint_ + ", triggering approval modal");
                 triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
+
+                // Timeout: auto-reject after 60 seconds if user doesn't respond
+                postAuthTimeout(60000, "{\"error\":\"Domain approval timeout\",\"status\":\"error\"}");
 
                 // Don't return error response immediately - wait for user response
                 LOG_DEBUG_HTTP("🔐 Waiting for user response to domain approval request");
@@ -281,6 +306,14 @@ public:
     void onHTTPResponseReceived(const std::string& data) {
         LOG_DEBUG_HTTP("🌐 AsyncWalletResourceHandler received HTTP response: " + data);
 
+        // Atomically claim the response slot — only the first caller proceeds.
+        // Prevents crash from double Continue() if timeout and real response race.
+        bool expected = false;
+        if (!httpCompleted_.compare_exchange_strong(expected, true)) {
+            LOG_DEBUG_HTTP("🌐 Response already delivered, ignoring duplicate");
+            return;
+        }
+
         responseData_ = data;
         requestCompleted_ = true;
 
@@ -296,6 +329,13 @@ public:
     void onAuthResponseReceived(const std::string& data) {
         LOG_DEBUG_HTTP("🔐 AsyncWalletResourceHandler received auth response: " + data);
 
+        // Atomically claim the response slot — only the first caller proceeds.
+        bool expected = false;
+        if (!httpCompleted_.compare_exchange_strong(expected, true)) {
+            LOG_DEBUG_HTTP("🔐 Auth response already delivered, ignoring duplicate");
+            return;
+        }
+
         responseData_ = data;
         requestCompleted_ = true;
 
@@ -305,6 +345,24 @@ public:
             readCallback_->Continue();
             LOG_DEBUG_HTTP("🔐 readCallback_->Continue() called successfully for auth response");
         }
+    }
+
+    // Timeout handling - called by WalletTimeoutTask
+    void handleHttpTimeout() {
+        if (httpCompleted_.load()) return;  // Already responded, skip
+        LOG_DEBUG_HTTP("⏱️ Wallet HTTP request timeout - sending error");
+        onHTTPResponseReceived("{\"error\":\"Wallet request timeout\",\"status\":\"error\"}");
+        // Cancel the in-flight request (safe even if already completed)
+        if (urlRequest_) {
+            urlRequest_->Cancel();
+            urlRequest_ = nullptr;
+        }
+    }
+
+    void handleAuthTimeout(const std::string& errorJson) {
+        if (httpCompleted_.load()) return;  // Already responded, skip
+        LOG_DEBUG_HTTP("⏱️ Approval timeout - sending error");
+        onAuthResponseReceived(errorJson);
     }
 
     // Trigger domain approval modal using the existing BRC-100 auth modal system
@@ -326,7 +384,7 @@ public:
         g_pendingAuthRequest.endpoint = endpoint;
         g_pendingAuthRequest.body = ""; // No body for domain approval
         g_pendingAuthRequest.isValid = true;
-        g_pendingAuthRequest.handler = nullptr; // Will be set when we create the handler
+        g_pendingAuthRequest.handler = this;
 
         // Send message to frontend to create overlay with domain approval request data
         CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
@@ -335,9 +393,9 @@ public:
                 console.log('🔒 Domain approval request received in header browser');
                 // Set the pending BRC-100 auth request data (reusing existing system)
                 window.pendingBRC100AuthRequest = {
-                    domain: ')" + domain + R"(',
-                    method: ')" + method + R"(',
-                    endpoint: ')" + endpoint + R"(',
+                    domain: ')" + escapeForJsSingleQuote(domain) + R"(',
+                    method: ')" + escapeForJsSingleQuote(method) + R"(',
+                    endpoint: ')" + escapeForJsSingleQuote(endpoint) + R"(',
                     body: '',
                     type: 'domain_approval'
                 };
@@ -388,10 +446,10 @@ void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string
             console.log('🔐 BRC-100 auth request received in header browser');
             // Set the pending auth request data
             window.pendingBRC100AuthRequest = {
-                domain: ')" + domain + R"(',
-                method: ')" + method + R"(',
-                endpoint: ')" + endpoint + R"(',
-                body: ')" + body + R"('
+                domain: ')" + escapeForJsSingleQuote(domain) + R"(',
+                method: ')" + escapeForJsSingleQuote(method) + R"(',
+                endpoint: ')" + escapeForJsSingleQuote(endpoint) + R"(',
+                body: ')" + escapeForJsSingleQuote(body) + R"('
             };
             console.log('🔐 Set pending auth request:', window.pendingBRC100AuthRequest);
             // Create the settings overlay (which will show the BRC-100 auth modal)
@@ -420,6 +478,8 @@ void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string
 
 private:
     void startAsyncHTTPRequest();
+    void postAuthTimeout(int delayMs, const std::string& errorJson);
+    void postHttpTimeout();
 
     // Request data
     std::string method_;
@@ -432,6 +492,7 @@ private:
     std::string responseData_;
     size_t responseOffset_;
     bool requestCompleted_;
+    std::atomic<bool> httpCompleted_{false};
 
     // Browser reference for modal triggering
     CefRefPtr<CefBrowser> browser_;
@@ -443,6 +504,41 @@ private:
     IMPLEMENT_REFCOUNTING(AsyncWalletResourceHandler);
     DISALLOW_COPY_AND_ASSIGN(AsyncWalletResourceHandler);
 };
+
+// Timeout task for delayed execution on UI thread
+class WalletTimeoutTask : public CefTask {
+public:
+    enum Type { HTTP_TIMEOUT, AUTH_TIMEOUT };
+
+    WalletTimeoutTask(AsyncWalletResourceHandler* handler, Type type,
+                      const std::string& errorJson)
+        : handler_(handler), type_(type), errorJson_(errorJson) {}
+
+    void Execute() override {
+        if (type_ == HTTP_TIMEOUT) {
+            handler_->handleHttpTimeout();
+        } else {
+            handler_->handleAuthTimeout(errorJson_);
+        }
+    }
+
+private:
+    CefRefPtr<AsyncWalletResourceHandler> handler_;
+    Type type_;
+    std::string errorJson_;
+
+    IMPLEMENT_REFCOUNTING(WalletTimeoutTask);
+    DISALLOW_COPY_AND_ASSIGN(WalletTimeoutTask);
+};
+
+void AsyncWalletResourceHandler::postAuthTimeout(int delayMs, const std::string& errorJson) {
+    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::AUTH_TIMEOUT, errorJson), delayMs);
+}
+
+void AsyncWalletResourceHandler::postHttpTimeout() {
+    // 45s timeout — wallet operations (createAction, broadcast) can take 30+ seconds
+    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), 45000);
+}
 
 // Function to store pending auth request data
 void storePendingAuthRequest(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body) {
@@ -753,6 +849,9 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
         // Create a simple task that will call our method
         CefPostTask(TID_UI, new URLRequestCreationTask(this, httpRequest, client, context));
         LOG_DEBUG_HTTP("🌐 Task posted to UI thread successfully");
+
+        // Timeout: cancel request after 15 seconds if no response
+        postHttpTimeout();
 
     } catch (const std::exception& e) {
         LOG_DEBUG_HTTP("🌐 Exception caught: " + std::string(e.what()));

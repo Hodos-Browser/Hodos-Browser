@@ -79,6 +79,8 @@ Phase 5: Activity Status Indicator (passive activity/permission indicator)
 
 **Detail doc:** [phase-2-user-notifications.md](phase-2-user-notifications.md)
 
+**Before starting Phase 2:** Do a detailed analysis of the HTTP interceptor flow. **Key reference (helper for this phase):** [HTTP Interceptor Flow Guide](HTTP_INTERCEPTOR_FLOW_GUIDE.md) — keep as a standalone reusable doc; do not consolidate into phase-2.
+
 **Key outcomes:**
 - Modal prompts for payment, sign, encrypt, certificate (and optional “Block site”).
 - Optional lightweight notifications for first-time/low-risk.

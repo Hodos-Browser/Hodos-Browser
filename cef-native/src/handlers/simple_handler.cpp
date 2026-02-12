@@ -54,6 +54,7 @@
 #define LOG_WARNING_BROWSER(msg) Logger::Log(msg, 2, 2)
 
 #include "../../include/core/PendingAuthRequest.h"
+extern std::string g_pendingModalDomain;
 #define LOG_ERROR_BROWSER(msg) Logger::Log(msg, 3, 2)
 
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
@@ -593,6 +594,14 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("⌨️ BRC-100 Auth browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+
     } else if (role_ == "settings_menu") {
         settings_menu_browser_ = browser;
         LOG_DEBUG_BROWSER("📋 Settings menu browser initialized.");
@@ -1973,8 +1982,12 @@ bool SimpleHandler::OnProcessMessageReceived(
                     // User rejected the authentication request
                     LOG_DEBUG_BROWSER("🔐 User rejected auth request");
 
-                    // Clear the pending request
-                    g_pendingAuthRequest.isValid = false;
+                    // Send error response back to the original HTTP request so it doesn't hang
+                    extern void handleAuthResponse(const std::string& responseData);
+                    handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
+
+                    // Clear the pending modal domain
+                    g_pendingModalDomain = "";
                 }
             } catch (const std::exception& e) {
                 LOG_DEBUG_BROWSER("🔐 Error parsing auth response JSON: " + std::string(e.what()));

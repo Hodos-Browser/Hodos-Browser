@@ -13,13 +13,25 @@ This document outlines the **planned** startup sequence of Hodos Browser, includ
 - ✅ Frontend wallet check on startup is COMMENTED OUT (as intended)
 
 **Planned Implementation** (not yet implemented):
-- ✅ C++ browser will check wallet file existence on startup
-- ✅ C++ browser will start wallet server if wallet exists
-- ✅ Rust wallet server will NOT auto-create wallet (user-initiated only)
-- ✅ Frontend will check wallet when user clicks Wallet button
 
-**Document Version:** 1.0
-**Last Updated:** 2025-01-27
+> **DECISION (2026-02-11): Option A — Always Start Server**
+>
+> The C++ browser will **always** start the Rust wallet server on launch, regardless of
+> whether a wallet DB exists. The server returns `{ exists: false }` from `/wallet/status`
+> when no wallet is present. This avoids the chicken-and-egg problem (frontend can't call
+> the API if the server isn't running) and is the simplest architecture.
+>
+> The C++ file-existence check and SQLite validation are **removed** from the startup path.
+> The Rust server handles all wallet state detection internally.
+
+- ✅ C++ browser will **always** start the Rust wallet server on startup
+- ✅ Rust wallet server will NOT auto-create wallet (user-initiated only)
+- ✅ Server returns `{ exists: false }` when no wallet DB exists
+- ✅ Frontend will check wallet when user clicks Wallet button
+- ✅ Phase 2: If an HTTP request to wallet is intercepted but no wallet exists, the create/recover modal can also be triggered
+
+**Document Version:** 1.1
+**Last Updated:** 2026-02-11
 **Target Audience:** Developers implementing startup logic and wallet initialization
 
 ---
@@ -48,17 +60,17 @@ The Hodos Browser startup flow is designed to be **non-blocking** and **wallet-o
 
 | Aspect | Current State | Planned State |
 |--------|--------------|---------------|
-| **C++ Wallet File Check** | ❌ Not implemented | ✅ Check file on startup |
-| **C++ Wallet Server Start** | ❌ Not implemented | ✅ Start server if wallet exists |
+| **C++ Wallet Server Start** | ❌ Not implemented | ✅ **Always** start server on launch |
+| **C++ Wallet File Check** | ❌ Not implemented | ❌ Removed — server handles this |
 | **Rust Auto-Create Wallet** | ✅ Auto-creates on server start | ❌ User-initiated only |
 | **Frontend Startup Check** | ✅ Commented out (disabled) | ✅ Check on Wallet button click |
 
 ### Key Principles (Planned Implementation)
 
 1. **Non-blocking startup**: Browser launches regardless of wallet status
-2. **File-based check**: Fast wallet existence check without starting server
-3. **On-demand server**: Wallet server starts only when needed
-4. **User-driven creation**: Wallet creation/recovery only happens via user action
+2. **Always-on server**: Wallet server always starts; returns `exists: false` if no DB
+3. **User-driven creation**: Wallet creation/recovery only happens via user action
+4. **Two modal triggers**: Wallet button click (Phase 1) and HTTP intercept with no wallet (Phase 2)
 
 ### Wallet States
 
@@ -87,8 +99,8 @@ The Hodos Browser startup flow is designed to be **non-blocking** and **wallet-o
 7. Create webview window (`g_webview_hwnd`) - Web content (hidden, tabs handle content)
 8. Initialize CEF framework (`CefInitialize()`)
 9. Initialize HistoryManager
-10. **Check wallet file existence** (see [Wallet File Check](#wallet-file-check))
-11. **Conditionally start wallet server** (see [Wallet Server Startup](#wallet-server-startup))
+10. **Always start wallet server** (see [Wallet Server Startup](#wallet-server-startup))
+11. **Wait for server ready** (poll `/health`)
 12. Enter message loop
 
 **⚠️ TO BE IMPLEMENTED**
@@ -101,26 +113,10 @@ The Hodos Browser startup flow is designed to be **non-blocking** and **wallet-o
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // ... existing initialization ...
 
-    // TODO: Add wallet file check and server startup here
-    // Set wallet directory path
-    std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
-    std::string wallet_dir = appdata_path + "\\HodosBrowser\\wallet";
-    std::string wallet_db_path = wallet_dir + "\\wallet.db";
-
-    // Check if wallet file exists
-    bool wallet_exists = std::filesystem::exists(wallet_db_path);
-
-    if (wallet_exists) {
-        // Validate wallet database
-        if (validateWalletDatabase(wallet_db_path)) {
-            // Start wallet server
-            startWalletServer();
-        } else {
-            LOG_WARNING("Wallet database exists but is invalid");
-        }
-    } else {
-        LOG_INFO("No wallet found - browser will continue without wallet");
-    }
+    // Always start wallet server — it handles wallet existence internally
+    // Server returns { exists: false } from /wallet/status when no DB present
+    startWalletServer();
+    waitForWalletServerReady();
 
     // ... continue with browser initialization ...
 }
@@ -412,7 +408,7 @@ checkWalletStatus();
 
 ## Flow Diagrams
 
-### Complete Startup Flow
+### Complete Startup Flow (Option A — Always Start Server)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -437,38 +433,18 @@ checkWalletStatus();
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│         Check Wallet File Exists?                            │
-│         (%APPDATA%/HodosBrowser/wallet/wallet.db)           │
-└──────────────┬───────────────────────────────┬──────────────┘
-               │                               │
-        ┌──────▼──────┐                ┌──────▼──────┐
-        │   EXISTS    │                │  NOT EXISTS │
-        └──────┬──────┘                └──────┬──────┘
-               │                               │
-               ▼                               │
-┌──────────────────────────────┐              │
-│   Validate Wallet Database?   │              │
-└──────┬───────────────────────┘              │
-       │                                        │
-   ┌───▼───┐                              ┌───▼───┐
-   │ VALID │                              │ SKIP  │
-   └───┬───┘                              └───┬───┘
-       │                                      │
-       ▼                                      │
-┌──────────────────────────────┐             │
-│   Start Wallet Server         │             │
-│   (Rust Actix-web on :3301)   │             │
-└──────┬───────────────────────┘             │
-       │                                      │
-       ▼                                      │
-┌──────────────────────────────┐             │
-│   Wait for Server Ready       │             │
-│   (Poll /health endpoint)     │             │
-└──────┬───────────────────────┘             │
-       │                                      │
-       └──────────────┬──────────────────────┘
-                       │
-                       ▼
+│   Always Start Wallet Server                                │
+│   (Rust Actix-web on :3301)                                 │
+│   Server handles wallet existence check internally          │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│   Wait for Server Ready                                     │
+│   (Poll /health endpoint)                                   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              Initialize CEF Browsers                        │
 │              (Header: React UI, Tabs: Web Content)          │
@@ -676,12 +652,16 @@ This startup flow integrates with the [Wallet Initialization Flow](./helper-1-im
 - ❌ Wallet button does NOT check wallet existence before opening overlay
 
 **What Needs to be Implemented**:
-1. ⚠️ Add wallet file check in C++ `WinMain()` startup code
-2. ⚠️ Add wallet database validation function
-3. ⚠️ Add wallet server startup logic in C++ startup
-4. ⚠️ Remove auto-creation from Rust wallet server startup
-5. ⚠️ Add wallet existence check to Wallet button click handler
-6. ⚠️ Create WalletSetupModal component for create/recover flow
+1. ⚠️ **[PREREQUISITE]** Disable wallet auto-creation in Rust server (`main.rs`) — server must start without creating a wallet
+2. ⚠️ Add wallet server startup logic in C++ startup (always start, no conditional)
+3. ⚠️ Server `/wallet/status` returns `{ exists: false }` when no wallet DB present
+4. ⚠️ Add wallet existence check to Wallet button click handler
+5. ⚠️ Create WalletSetupModal component for create/recover flow
+6. ⚠️ **[TESTING]** Test `<input type="file">` in CEF overlay subprocess — if it doesn't work, build a C++ bridge method to open a native `OPENFILENAME` dialog (needed for Phase 1 "Recover from file")
+
+### CEF Refinement Prerequisite
+
+**[CR-1 (Critical Stability & Security)](../CEF_REFINEMENT_TRACKER.md#cr-1-critical-stability--security)** should be completed before or alongside Phase 0. CR-1 fixes JS injection, auth hangs, and overlay buffer overflows that affect the current browser. These are independent of UX work and can be done in parallel.
 
 ### Planned Behavior (After Implementation)
 

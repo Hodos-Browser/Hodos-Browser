@@ -306,9 +306,21 @@ We do **not** merge the two plans into one: the backup plan stays the single sou
 
 ---
 
+## Decisions (2026-02-11)
+
+> **Encryption Key Decision (resolved)**
+>
+> - **On-chain backup encryption**: Derived from mnemonic via HKDF-SHA256. Anyone with the mnemonic can decrypt — this is intentional for mnemonic-only recovery.
+> - **Local file backup encryption**: User-provided PIN/passphrase. The wallet creation flow should include a PIN creation step. This PIN is used when exporting/importing `.bsv-wallet` files.
+> - **Implication for Phase 1 UI**: The "Create New Wallet" flow needs a PIN creation step after mnemonic display/confirmation. The "Recover from file" flow needs a PIN entry field.
+
+> **File Picker in CEF Overlays**
+>
+> Phase 0 planning must test whether `<input type="file">` works in CEF overlay subprocesses. If not, a C++ bridge method (`window.hodosBrowser.openFileDialog()`) will be needed to open a native file dialog and return the selected path to the frontend. This must be resolved before implementing "Recover from file."
+
 ## Open Questions
 
-1. Modal vs Full Shell Window - which is preferred?
+1. ~~Modal vs Full Shell Window - which is preferred?~~ (Use modal/overlay — consistent with existing patterns)
 2. Should we track setup completion in database?
 3. What validation is needed for mnemonic format?
 4. How to handle partial recovery scenarios?

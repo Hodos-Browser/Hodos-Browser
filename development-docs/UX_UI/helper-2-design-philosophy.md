@@ -283,6 +283,82 @@ Please check your connection and try again."
 
 ---
 
+## Standard UI Patterns
+
+### Empty States
+
+Every screen that can have zero items must show a purposeful empty state — not a blank area.
+
+**Pattern**: Icon (optional) + message + action button
+
+**Examples**:
+- Transaction list: "No transactions yet. Send or receive BSV to get started." [Send] [Receive]
+- Address list: "No additional addresses. Your default address is shown above." [Generate New]
+- Certificate list: "No certificates acquired yet. Certificates are issued by apps you interact with."
+
+**Rules**:
+- Never show a blank white area where a list would be
+- Always suggest a next action when possible
+- Keep the message friendly and non-technical
+- Use the same empty state component/pattern everywhere for consistency
+
+### Offline / Error States
+
+When the wallet backend, blockchain APIs, or network are unreachable, show a standard error component.
+
+**Pattern**: Icon + message explaining what happened + what user can do + action button
+
+**Standard Error Component**:
+```
+┌─────────────────────────────────────────┐
+│  ⚠  [Error Icon]                        │
+│                                         │
+│  [What happened - friendly language]    │
+│  [What the user can do next]            │
+│                                         │
+│  [Retry]  [View Details]                │
+└─────────────────────────────────────────┘
+```
+
+**Specific cases**:
+- Wallet server unreachable: "Can't connect to wallet. The wallet service may still be starting. Try again in a moment." [Retry]
+- Network/API down: "Can't reach the network. Your wallet is safe — check your internet connection." [Retry]
+- Partial failure: "Balance loaded, but transaction history is temporarily unavailable." [Retry History]
+
+**Rules**:
+- Never show raw HTTP errors (500, 404, etc.) to users
+- Always explain what happened in plain language
+- Always suggest a next action
+- Use warning yellow for recoverable errors, red for failures
+- "View Details" expands to show technical info (for support/debugging)
+
+### Confirmation Patterns for Destructive Actions
+
+For actions that can't be undone (delete, revoke, clear), use a standard confirmation pattern.
+
+**Pattern**: Modal with warning + description of what will happen + red action button
+
+```
+┌─────────────────────────────────────────┐
+│  Delete Address Label?                  │
+│                                         │
+│  This will remove the label "Savings"   │
+│  from address 1A2b3C... The address     │
+│  and its funds are not affected.        │
+│                                         │
+│  [Cancel]  [Delete] (red)               │
+└─────────────────────────────────────────┘
+```
+
+**Rules**:
+- Always explain what will happen in concrete terms
+- Destructive button is red and on the right
+- Cancel/safe option is on the left and visually subdued
+- Never use destructive confirmation for non-destructive actions
+- Use this same modal pattern for all destructive actions (consistency)
+
+---
+
 ## Progressive Disclosure
 
 **Principle**: Reveal complexity progressively.

@@ -192,15 +192,15 @@ Export:
   User clicks "Export Wallet Backup" in settings
     → Wallet serializes all entities to JSON (format above)
     → Wallet encrypts with AES-256-GCM
-    → Encryption key derived from mnemonic via HKDF-SHA256
-      (or user-provided passphrase — TBD, see Open Questions)
-    → Save as .bsv-wallet file
+    → Encryption key derived from user PIN/passphrase via HKDF-SHA256
+      (DECISION: user PIN for file backup, NOT mnemonic — see Open Questions #1)
+    → Save as .bsv-wallet file (encryption byte = 0x02)
     → User stores file wherever they want
 
 Import:
   User clicks "Import Wallet Backup" in settings
     → Select .bsv-wallet file
-    → Enter mnemonic (or passphrase)
+    → Enter PIN/passphrase (same one used during export)
     → Decrypt
     → Validate: check wallet_identity_key matches derived master pubkey
     → Merge entities into database (insert or update, never overwrite newer data)
@@ -735,7 +735,10 @@ These notes shape what we build and test in the MVP and how we coordinate with t
 
 These will be answered during implementation:
 
-1. **Encryption key source**: Derive from mnemonic (no extra password) or require a separate passphrase? Mnemonic-derived is more convenient but means anyone with the mnemonic can decrypt the backup.
+1. ~~**Encryption key source**~~: **RESOLVED (2026-02-11)**
+   - **On-chain backup (Mechanism B)**: Encryption key derived from mnemonic via HKDF-SHA256. Anyone with the mnemonic can decrypt — this is intentional, since mnemonic-only recovery must work without any other secret.
+   - **Local file backup (Mechanism A)**: Encryption key derived from a **user-provided PIN/passphrase** (not the mnemonic). The PIN is created during wallet setup (Phase 1) and entered during file import. This means the `.bsv-wallet` file is useless without both the file AND the PIN — an extra layer of protection for exported files.
+   - **Implication**: The file format encryption byte distinguishes the two: `0x01 = AES-256-GCM, mnemonic-derived` (on-chain), `0x02 = AES-256-GCM, user-PIN-derived` (file export).
 
 2. **Backup update trigger**: Timer-based (daily), event-based (on confirmed non-HD output), or on wallet shutdown? Probably a combination.
 
@@ -798,7 +801,7 @@ These notes capture things learned during the wallet-toolbox alignment sprint th
 
 ### All Transition Plan Dependencies Resolved
 
-All 8 phases of the transition plan are complete (schema V24). The dependency map in Section 8 is fully satisfied — Phases B1, B2, and B3 can all be started without waiting on anything.
+All transition plan phases are complete. For MVP, the many individual migrations were consolidated into a single migration; the resulting schema reflects the same state (formerly described as schema V24). The dependency map in Section 8 is fully satisfied — Phases B1, B2, and B3 can all be started without waiting on anything.
 
 ### Per-Output Key Derivation is Live (Phase 7)
 
@@ -823,12 +826,15 @@ The Monitor now runs 7 tasks with graceful shutdown (CancellationToken) and DB l
 
 ### Dropped Tables
 
-These tables referenced in the plan no longer exist:
-- `domain_whitelist` — dropped in V24 (was already excluded from backup in Section 2)
-- `transaction_labels` — dropped in V24. Labels are now in `tx_labels` / `tx_labels_map` only
-- `merkle_proofs` — dropped in V24. Proof data is in `proven_txs` only
+These tables referenced in the plan no longer exist in the current schema:
+- `transaction_labels` — consolidated; labels are now in `tx_labels` / `tx_labels_map` only
+- `merkle_proofs` — consolidated; proof data is in `proven_txs` only
 
 The backup entity format in Section 2 should serialize from `tx_labels`/`tx_labels_map` (not `transaction_labels`).
+
+### Whitelist Not Yet in Database
+
+The **domain whitelist** is not yet in the database; it is still backed by a JSON file only. At least one additional migration will be needed to add a whitelist table. Design is **deferred until Phase 2 (User Notifications)** in the UX_UI sprint, when we define what permission levels (e.g. spending levels, certificate levels) the user can allow per site. Doing the whitelist table design and migration at that stage keeps the schema aligned with the notification/permission model. See `development-docs/UX_UI/phase-2-user-notifications.md`.
 
 ### NoSend Transaction Semantics — Important for Recovery
 
@@ -843,7 +849,7 @@ The backup entity format in Section 2 should serialize from `tx_labels`/`tx_labe
 
 ### Output Tag Map FK Fixed
 
-V24 rebuilt `output_tag_map` with correct FK to `outputs(outputId)` instead of `utxos(id)`. The backup entity format for output tags should reference `outputId` (not the old utxo id).
+The consolidated migration rebuilt `output_tag_map` with correct FK to `outputs(outputId)` instead of `utxos(id)`. The backup entity format for output tags should reference `outputId` (not the old utxo id).
 
 ### Existing backup.rs
 

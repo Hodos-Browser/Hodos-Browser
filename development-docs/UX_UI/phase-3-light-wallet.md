@@ -6,25 +6,42 @@
 **Purpose**: Quick access wallet interface for common operations (balance, send, receive)
 
 **Status**: 📋 Planning Phase
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-11
+
+---
+
+## Decision (2026-02-11): Phase 3 = Polish of Existing Wallet Overlay
+
+> **Phase 3 is NOT a new component.** The existing `WalletPanelLayout.tsx` / `WalletOverlayRoot.tsx`
+> already provides balance, send, receive, and transaction history. Phase 3 is a **polish and
+> branding pass** on the existing wallet overlay to bring it up to production quality.
+>
+> Phase 4 (Full Wallet) will later extend this into a comprehensive management interface.
+
+### What Phase 3 Adds/Fixes
+
+- **Hodos branding**: Replace any default/blue accents with Hodos gold (`#a67c00`) color scheme
+- **Hodos logo**: Add `Hodos_Gold_Icon.svg` or `Hodos_Black_Icon.svg` to wallet header
+- **Button feedback**: All buttons must have hover, pressed, disabled, and loading states (currently missing)
+- **Progress indicators**: Send transaction should show a progress bar / status ("Broadcasting...", "Confirmed")
+- **BSV QR code**: Add standard BSV QR code to the receive section so users can scan with their mobile wallet and auto-populate the address
+- **Micro UX fixes**: "Copied" feedback on address copy, inline validation on send form, empty state messages
+- **Consistent color scheme**: Apply the full Hodos palette (gold, teal, semantic colors) throughout
 
 ---
 
 ## Interface Description
 
-The Light Wallet provides quick access to essential wallet functions:
+The Light Wallet (existing wallet overlay) provides quick access to essential wallet functions:
 - View balance
 - Send transactions
-- Receive (show address/QR code)
+- Receive (show address + **BSV QR code**)
 - View recent transactions (limited)
 - Quick actions
 
 **Design Philosophy**: Minimal, fast, focused on common tasks without full wallet complexity.
 
-**Display Context**:
-- Modal (overlay-style)
-- Panel (side panel)
-- Compact view
+**Display Context**: Overlay panel (existing `WalletOverlayRoot.tsx` pattern)
 
 ---
 
@@ -273,17 +290,18 @@ Key considerations:
 - [Full Wallet Interface](./phase-4-full-wallet.md) - Complete wallet interface
 - [Initial Setup/Recovery](./phase-1-initial-setup-recovery.md) - Wallet setup
 - [Design Principles](./helper-2-design-philosophy.md) - Design guidelines
+- [CEF Refinement Tracker](../CEF_REFINEMENT_TRACKER.md) - **CR-3 items** (debug overlay removal, settings overlay stale pointer, logging cleanup) can be done alongside Phase 3 polish since both touch overlay and UX code
 
 ---
 
-## Open Questions
+## Open Questions (Updated 2026-02-11)
 
-1. Modal vs Panel - which is preferred?
-2. What transaction fields are essential for "light" send?
-3. How many recent transactions to show?
-4. Should light wallet support multiple addresses?
-5. Real-time updates or periodic refresh?
-6. Should it replace or complement existing wallet overlay?
+1. ~~Modal vs Panel~~ → **Resolved**: Existing overlay panel (no change)
+2. What transaction fields are essential for "light" send? (address, amount, optional memo — keep current)
+3. How many recent transactions to show? (5-10, keep current)
+4. ~~Should light wallet support multiple addresses?~~ → No, keep single current address for light wallet
+5. ~~Real-time updates or periodic refresh?~~ → Keep existing balance poller pattern
+6. ~~Should it replace or complement existing wallet overlay?~~ → **Resolved**: Phase 3 IS the existing overlay, polished
 
 ---
 
