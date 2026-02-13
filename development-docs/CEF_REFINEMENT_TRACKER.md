@@ -1,7 +1,7 @@
 # CEF Refinement — Phase Tracker & Reference Guide
 
 **Created**: 2026-02-11
-**Last Updated**: 2026-02-11
+**Last Updated**: 2026-02-12
 **Purpose**: Phased checklist for stability, security, and architecture improvements to the C++ CEF browser shell, HTTP interceptor, overlay rendering, and C++/Rust communication layer.
 
 **How to use this document**: Each CEF Refinement (CR) phase has a checklist. Check items off as they are implemented. UX_UI phase docs reference this tracker so that pre-phase planning considers the relevant CR prerequisites.
@@ -51,7 +51,7 @@
 - [x] **CR-1.5 — Wallet HTTP request timeout** (HANG) ✅ 2026-02-12
   - **File**: `HttpRequestInterceptor.cpp:773`
   - **Problem**: `CefURLRequest::Create()` to `localhost:3301` has no timeout. Hung wallet server = indefinite hang.
-  - **Fix**: Added `std::atomic<bool> httpCompleted_` flag. 15s `CefPostDelayedTask` timer sends error and cancels request if not completed.
+  - **Fix**: Added `std::atomic<bool> httpCompleted_` flag with `compare_exchange_strong` guard in both response handlers (prevents double `readCallback_->Continue()` crash). 45s `CefPostDelayedTask` timer sends error and cancels request if not completed. `WalletTimeoutTask` uses `CefRefPtr` (not raw pointer) to prevent use-after-free on delayed fire.
 
 - [x] **CR-1.6 — Auth approval wait timeout** (HANG) ✅ 2026-02-12
   - **File**: `HttpRequestInterceptor.cpp:193-206`

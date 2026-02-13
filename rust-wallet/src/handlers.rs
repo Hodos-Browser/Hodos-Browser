@@ -1721,6 +1721,41 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
     }))
 }
 
+// Create a new wallet (user-initiated, Phase 0)
+//
+// Returns the mnemonic for the user to back up. If a wallet already exists,
+// returns 409 Conflict.
+pub async fn wallet_create(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("🔑 /wallet/create called");
+
+    let db = state.database.lock().unwrap();
+
+    // Check if wallet already exists
+    use crate::database::WalletRepository;
+    let wallet_repo = WalletRepository::new(db.connection());
+    if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
+        log::warn!("   ⚠️  Wallet already exists — rejecting create request");
+        return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet already exists"}));
+    }
+
+    // Create wallet using existing method
+    match db.create_wallet_with_first_address() {
+        Ok((wallet_id, mnemonic, address)) => {
+            log::info!("   ✅ Wallet created (ID: {})", wallet_id);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "mnemonic": mnemonic,
+                "address": address,
+                "walletId": wallet_id
+            }))
+        }
+        Err(e) => {
+            log::error!("   ❌ Failed to create wallet: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
 // Wallet balance endpoint
 //
 // Pure DB/cache read — never does API calls. UTXO syncing is the

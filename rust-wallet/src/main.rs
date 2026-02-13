@@ -100,7 +100,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize database (primary storage)
     let db_path = wallet_dir.join("wallet.db");
-    let (database, default_user_id) = match WalletDatabase::new(db_path.clone()) {
+    let (database, default_user_id, wallet_exists) = match WalletDatabase::new(db_path.clone()) {
         Ok(db) => {
             println!("✅ Database initialized");
             println!("   Database path: {}", db_path.display());
@@ -113,105 +113,98 @@ async fn main() -> std::io::Result<()> {
             // Check if wallet exists in database
             use database::{WalletRepository, AddressRepository};
             let wallet_repo = WalletRepository::new(db.connection());
-            match wallet_repo.get_primary_wallet() {
+            let wallet_exists = match wallet_repo.get_primary_wallet() {
                 Ok(Some(wallet)) => {
                     println!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
                     println!("   Addresses: {}", wallet.current_index + 1);
+                    true
                 }
                 Ok(None) => {
-                    // No wallet in database - create new wallet
-                    println!("🔑 No wallet in database - creating new wallet...");
-                    match db.create_wallet_with_first_address() {
-                        Ok((wallet_id, mnemonic, address)) => {
-                            println!("   ✅ Wallet created!");
-                            println!("   Wallet ID: {}", wallet_id);
-                            println!("   First address: {}", address);
-                            println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY): {}", mnemonic);
-                        }
-                        Err(e) => {
-                            eprintln!("   ❌ Failed to create wallet: {}", e);
-                        }
-                    }
+                    println!("🔑 No wallet in database - server ready for user-initiated creation");
+                    false
                 }
                 Err(e) => {
                     eprintln!("   ⚠️  Error checking for wallet: {}", e);
+                    false
                 }
-            }
+            };
 
-            // Ensure master pubkey address exists (for existing wallets created before this feature)
-            if let Err(e) = db.ensure_master_address_exists() {
-                eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
-            }
+            if wallet_exists {
+                // Ensure master pubkey address exists (for existing wallets created before this feature)
+                if let Err(e) = db.ensure_master_address_exists() {
+                    eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
+                }
 
-            // Ensure "default" basket exists (for existing wallets created before BRC-100 support)
-            if let Err(e) = db.ensure_default_basket_exists() {
-                eprintln!("   ⚠️  Failed to ensure default basket exists: {}", e);
-            }
+                // Ensure "default" basket exists (for existing wallets created before BRC-100 support)
+                if let Err(e) = db.ensure_default_basket_exists() {
+                    eprintln!("   ⚠️  Failed to ensure default basket exists: {}", e);
+                }
 
-            // Cleanup stale pending transactions (created but never broadcast)
-            // These occur when the process crashes between creating a transaction and broadcasting it.
-            // Their change outputs are ghost outputs that don't exist on-chain.
-            {
-                use database::{TransactionRepository, OutputRepository};
-                let conn = db.connection();
-                let tx_repo = TransactionRepository::new(conn);
+                // Cleanup stale pending transactions (created but never broadcast)
+                // These occur when the process crashes between creating a transaction and broadcasting it.
+                // Their change outputs are ghost outputs that don't exist on-chain.
+                {
+                    use database::{TransactionRepository, OutputRepository};
+                    let conn = db.connection();
+                    let tx_repo = TransactionRepository::new(conn);
 
-                // Find transactions stuck in 'unsigned' (never broadcast) for more than 5 minutes
-                match tx_repo.get_stale_pending_transactions(300) {
-                    Ok(stale_txs) if !stale_txs.is_empty() => {
-                        println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
-                        let output_repo = OutputRepository::new(conn);
+                    // Find transactions stuck in 'unsigned' (never broadcast) for more than 5 minutes
+                    match tx_repo.get_stale_pending_transactions(300) {
+                        Ok(stale_txs) if !stale_txs.is_empty() => {
+                            println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
+                            let output_repo = OutputRepository::new(conn);
 
-                        for (txid, inputs) in &stale_txs {
-                            // 1. Delete ghost change outputs (outputs of the never-broadcast tx)
-                            match output_repo.delete_by_txid(txid) {
-                                Ok(count) if count > 0 => {
-                                    println!("   🗑️  Deleted {} ghost output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                            for (txid, inputs) in &stale_txs {
+                                // 1. Delete ghost change outputs (outputs of the never-broadcast tx)
+                                match output_repo.delete_by_txid(txid) {
+                                    Ok(count) if count > 0 => {
+                                        println!("   🗑️  Deleted {} ghost output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
-                            }
 
-                            // 2. Restore input outputs that were marked as spent by this tx
-                            match output_repo.restore_by_spending_description(txid) {
-                                Ok(count) if count > 0 => {
-                                    println!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                // 2. Restore input outputs that were marked as spent by this tx
+                                match output_repo.restore_by_spending_description(txid) {
+                                    Ok(count) if count > 0 => {
+                                        println!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
-                            }
 
-                            // 3. Mark the transaction as 'failed'
-                            if let Err(e) = tx_repo.update_broadcast_status(txid, "failed") {
-                                eprintln!("   ⚠️  Failed to update status for {}: {}", &txid[..std::cmp::min(16, txid.len())], e);
-                            }
+                                // 3. Mark the transaction as 'failed'
+                                if let Err(e) = tx_repo.update_broadcast_status(txid, "failed") {
+                                    eprintln!("   ⚠️  Failed to update status for {}: {}", &txid[..std::cmp::min(16, txid.len())], e);
+                                }
 
-                            println!("   ✅ Cleaned up stale tx {} ({} inputs)", &txid[..std::cmp::min(16, txid.len())], inputs.len());
+                                println!("   ✅ Cleaned up stale tx {} ({} inputs)", &txid[..std::cmp::min(16, txid.len())], inputs.len());
+                            }
+                            println!("   ✅ Stale transaction cleanup complete");
                         }
-                        println!("   ✅ Stale transaction cleanup complete");
-                    }
-                    Ok(_) => {
-                        // No stale transactions - normal case
-                    }
-                    Err(e) => {
-                        eprintln!("   ⚠️  Failed to check for stale pending transactions: {}", e);
+                        Ok(_) => {
+                            // No stale transactions - normal case
+                        }
+                        Err(e) => {
+                            eprintln!("   ⚠️  Failed to check for stale pending transactions: {}", e);
+                        }
                     }
                 }
-            }
 
-            // Restore any outputs with stale placeholder reservations.
-            // This catches cases where the handler crashed between output reservation
-            // and txid update (e.g., signing failure, deadlock, process kill).
-            {
-                use database::OutputRepository;
-                let conn = db.connection();
-                let output_repo = OutputRepository::new(conn);
+                // Restore any outputs with stale placeholder reservations.
+                // This catches cases where the handler crashed between output reservation
+                // and txid update (e.g., signing failure, deadlock, process kill).
+                {
+                    use database::OutputRepository;
+                    let conn = db.connection();
+                    let output_repo = OutputRepository::new(conn);
 
-                match output_repo.restore_pending_placeholders() {
-                    Ok(count) if count > 0 => {
-                        println!("♻️  Restored {} output(s) with stale placeholder reservations", count);
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("   ⚠️  Failed to restore placeholder outputs: {}", e);
+                    match output_repo.restore_pending_placeholders() {
+                        Ok(count) if count > 0 => {
+                            println!("♻️  Restored {} output(s) with stale placeholder reservations", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("   ⚠️  Failed to restore placeholder outputs: {}", e);
+                        }
                     }
                 }
             }
@@ -238,7 +231,7 @@ async fn main() -> std::io::Result<()> {
                 }
             };
 
-            (Arc::new(Mutex::new(db)), default_user_id)
+            (Arc::new(Mutex::new(db)), default_user_id, wallet_exists)
         }
         Err(e) => {
             eprintln!("❌ Failed to initialize database: {}", e);
@@ -253,9 +246,9 @@ async fn main() -> std::io::Result<()> {
     // All background work is now handled by the Monitor pattern.
     let current_user_id = default_user_id;
 
-    // Initialize balance cache and seed with current balance
+    // Initialize balance cache and seed with current balance (only if wallet exists)
     let balance_cache = Arc::new(balance_cache::BalanceCache::new());
-    {
+    if wallet_exists {
         let db = database.lock().unwrap();
         let output_repo = database::OutputRepository::new(db.connection());
         match output_repo.calculate_balance(current_user_id) {
@@ -343,10 +336,16 @@ async fn main() -> std::io::Result<()> {
 
     // Start Monitor — the sole background task scheduler (Phase 6 complete)
     // Replaces: arc_status_poller, cache_sync, utxo_sync background services
-    println!("🔄 Starting Monitor (background task scheduler)...");
-    monitor::Monitor::start(app_state.clone());
-    println!("   ✅ Monitor started with 7 tasks");
-    println!();
+    // Only start if wallet exists — no background work to do without a wallet
+    if wallet_exists {
+        println!("🔄 Starting Monitor (background task scheduler)...");
+        monitor::Monitor::start(app_state.clone());
+        println!("   ✅ Monitor started with 7 tasks");
+        println!();
+    } else {
+        println!("⏸️  Monitor skipped (no wallet yet)");
+        println!();
+    }
 
     // Start HTTP server with graceful shutdown support (Phase 8D)
     let server = HttpServer::new(move || {
@@ -430,6 +429,7 @@ async fn main() -> std::io::Result<()> {
 
             // Custom wallet endpoints
             .route("/wallet/status", web::get().to(handlers::wallet_status))
+            .route("/wallet/create", web::post().to(handlers::wallet_create))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
             .route("/wallet/sync", web::post().to(handlers::wallet_sync))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))

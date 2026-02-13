@@ -4,8 +4,8 @@
 
 This document serves as the master index and tracker for the five Web3 BitcoinSV UI/UX interfaces being implemented for Hodos Browser.
 
-**Document Version:** 1.1
-**Last Updated:** 2026-02-11
+**Document Version:** 1.2
+**Last Updated:** 2026-02-13
 **Target Audience:** UI/UX Developers, Full-Stack Developers
 
 ---
@@ -32,7 +32,7 @@ The Web3 BitcoinSV UI/UX enhancement includes the startup flow (foundation) and 
 
 | Interface | Status | Implementation File | Last Updated |
 |-----------|--------|-------------------|--------------|
-| 0. Startup Flow and Wallet Checks | 📋 Planning | [phase-0-startup-flow-and-wallet-checks.md](./phase-0-startup-flow-and-wallet-checks.md) | 2026-02-11 |
+| 0. Startup Flow and Wallet Checks | ✅ Complete | [phase-0-startup-flow-and-wallet-checks.md](./phase-0-startup-flow-and-wallet-checks.md) | 2026-02-13 |
 | 0.1 Domain Permissions Research | 📋 Planning | *(no dedicated doc yet — research sprint)* | 2026-02-11 |
 | 1. Initial Setup/Recovery | 📋 Planning | [phase-1-initial-setup-recovery.md](./phase-1-initial-setup-recovery.md) | 2026-02-11 |
 | B1. Local File Backup (parallel w/ Phase 1) | 📋 Planning | [WALLET_BACKUP_AND_RECOVERY_PLAN.md](../WALLET_BACKUP_AND_RECOVERY_PLAN.md) | 2026-02-11 |
@@ -47,7 +47,7 @@ Stability, security, and architecture improvements to the C++ native layer. Trac
 
 | Phase | Name | Status | UX Dependency |
 |-------|------|--------|---------------|
-| CR-1 | Critical Stability & Security | 📋 Planning | Before/alongside UX Phase 0 |
+| CR-1 | Critical Stability & Security | ✅ Complete (2026-02-12) | Before/alongside UX Phase 0 |
 | CR-2 | Interceptor Architecture | 📋 Planning | Must complete before UX Phase 2 |
 | CR-3 | Polish & Lifecycle | 📋 Planning | Alongside UX Phase 2–3 |
 
@@ -65,9 +65,8 @@ The interfaces should be implemented in the following order to ensure dependenci
 
 0. **Startup Flow and Wallet Checks** (Foundation - always start server, triggers Initial Setup)
    - See: [Startup Flow and Wallet Checks](./phase-0-startup-flow-and-wallet-checks.md)
-   - Status: 📋 Planning
-   - **Prerequisites**: Disable wallet auto-creation in Rust server
-   - **Decision**: Option A — always start server (returns `exists: false` if no wallet)
+   - Status: ✅ Complete (2026-02-13)
+   - Auto-creation disabled, `POST /wallet/create` endpoint, C++ auto-launch with Job Object, frontend NoWallet prompt with mnemonic backup
    - **Testing**: Verify `<input type="file">` works in CEF overlays (needed for Phase 1)
 0.1. **Domain Permissions Research & Design** (Research sprint — feeds Phase 2 and Phase 4)
    - Study: per-domain spending limits (per-tx, per-day, per-session), certificate auto-approve levels

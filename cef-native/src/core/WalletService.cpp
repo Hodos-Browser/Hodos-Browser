@@ -320,7 +320,7 @@ bool WalletService::isHealthy() {
 
     auto response = makeHttpRequest("GET", "/health");
 
-    if (response.contains("status") && response["status"] == "healthy") {
+    if (response.contains("status") && response["status"] == "ok") {
         std::cout << "✅ Rust wallet is healthy" << std::endl;
         return true;
     } else {
@@ -345,7 +345,7 @@ void WalletService::ensureInitialized() {
         size_t lastSlash = exeDir.find_last_of("\\/");
         if (lastSlash != std::string::npos) {
             exeDir = exeDir.substr(0, lastSlash);
-            daemonPath_ = exeDir + "\\..\\..\\..\\..\\go-wallet\\wallet.exe";
+            daemonPath_ = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
         }
 
         // Set up console control handler

@@ -70,6 +70,15 @@ int g_wallet_icon_right_offset = 0;
 // Fullscreen state tracking
 bool g_is_fullscreen = false;
 
+// Wallet server process management
+PROCESS_INFORMATION g_walletServerProcess = {};
+bool g_walletServerRunning = false;
+HANDLE g_walletJobObject = nullptr;  // Job object: auto-kills child when parent exits
+
+// Forward declarations for wallet server management
+void StartWalletServer();
+void StopWalletServer();
+
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO(msg) Logger::Log(msg, 1, 0)
@@ -170,10 +179,9 @@ void HandleFullscreenChange(bool fullscreen) {
 void ShutdownApplication() {
     LOG_INFO("🛑 Starting graceful application shutdown...");
 
-    // Step 0: Stop Go daemon first (to prevent orphaned processes)
-    LOG_INFO("🔄 Stopping Go daemon...");
-    // Note: WalletService destructor will be called automatically when the app exits
-    // This ensures the daemon is properly terminated
+    // Step 0: Stop wallet server first (to prevent orphaned processes)
+    LOG_INFO("🔄 Stopping wallet server...");
+    StopWalletServer();
 
     // Step 1: Close all CEF browsers first
     LOG_INFO("🔄 Closing CEF browsers...");
@@ -1245,6 +1253,153 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Lightweight health check — returns true if GET /health responds with "ok".
+// Uses a short 2-second timeout so it fails fast when nothing is listening.
+static bool QuickHealthCheck() {
+    HINTERNET hSession = WinHttpOpen(L"HodosBrowser/HealthCheck",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    // Set connect + receive timeouts to 2 seconds
+    DWORD timeout = 2000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    BOOL ok = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!ok) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    ok = WinHttpReceiveResponse(hRequest, nullptr);
+    bool healthy = false;
+    if (ok) {
+        // Read a small response to check for "ok"
+        DWORD dwSize = 0;
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize > 0 && dwSize < 4096) {
+            std::vector<char> buf(dwSize + 1, 0);
+            DWORD dwRead = 0;
+            WinHttpReadData(hRequest, buf.data(), dwSize, &dwRead);
+            std::string body(buf.data(), dwRead);
+            healthy = (body.find("\"ok\"") != std::string::npos);
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return healthy;
+}
+
+// Start the Rust wallet server as a subprocess (or detect if already running)
+void StartWalletServer() {
+    // First check if wallet server is already running (dev workflow: cargo run separately)
+    if (QuickHealthCheck()) {
+        LOG_INFO("Wallet server already running (dev mode) - skipping launch");
+        g_walletServerRunning = true;
+        return;
+    }
+
+    // Resolve exe path relative to browser executable
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string exeDir(exePath);
+    size_t lastSlash = exeDir.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        exeDir = exeDir.substr(0, lastSlash);
+    }
+    std::string walletExe = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+
+    // Check if the exe exists
+    if (GetFileAttributesA(walletExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        LOG_WARNING("Wallet server executable not found: " + walletExe);
+        LOG_WARNING("Browser will run without auto-launched wallet server");
+        return;
+    }
+
+    LOG_INFO("Launching wallet server: " + walletExe);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    ZeroMemory(&g_walletServerProcess, sizeof(PROCESS_INFORMATION));
+
+    if (!CreateProcessA(
+        walletExe.c_str(),
+        nullptr,
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &g_walletServerProcess)) {
+        LOG_ERROR("Failed to launch wallet server. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    LOG_INFO("Wallet server process created (PID: " + std::to_string(g_walletServerProcess.dwProcessId) + ")");
+
+    // Assign to a Job Object so the child is auto-killed when the browser exits
+    // (covers crashes, Task Manager kills, and any exit path we miss)
+    g_walletJobObject = CreateJobObject(nullptr, nullptr);
+    if (g_walletJobObject) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {};
+        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(g_walletJobObject, JobObjectExtendedLimitInformation,
+            &jobInfo, sizeof(jobInfo));
+        AssignProcessToJobObject(g_walletJobObject, g_walletServerProcess.hProcess);
+        LOG_INFO("Wallet server assigned to job object (auto-kill on browser exit)");
+    }
+
+    // Poll for health — max 10 attempts, 500ms apart (5 seconds total)
+    for (int i = 0; i < 10; i++) {
+        Sleep(500);
+        if (QuickHealthCheck()) {
+            LOG_INFO("Wallet server is healthy after " + std::to_string((i + 1) * 500) + "ms");
+            g_walletServerRunning = true;
+            return;
+        }
+    }
+
+    LOG_WARNING("Wallet server did not become healthy within 5 seconds - continuing anyway");
+    g_walletServerRunning = true;  // Process was launched, just slow to start
+}
+
+// Stop the Rust wallet server subprocess
+void StopWalletServer() {
+    if (!g_walletServerRunning) return;
+
+    if (g_walletServerProcess.hProcess) {
+        LOG_INFO("Terminating wallet server (PID: " + std::to_string(g_walletServerProcess.dwProcessId) + ")");
+        TerminateProcess(g_walletServerProcess.hProcess, 0);
+        WaitForSingleObject(g_walletServerProcess.hProcess, 3000);
+        CloseHandle(g_walletServerProcess.hProcess);
+        CloseHandle(g_walletServerProcess.hThread);
+        ZeroMemory(&g_walletServerProcess, sizeof(PROCESS_INFORMATION));
+    }
+
+    if (g_walletJobObject) {
+        CloseHandle(g_walletJobObject);
+        g_walletJobObject = nullptr;
+    }
+
+    g_walletServerRunning = false;
+    LOG_INFO("Wallet server stopped");
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
     CefMainArgs main_args(hInstance);
@@ -1441,10 +1596,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_ERROR("Failed to initialize BookmarkManager");
     }
 
+    // Start wallet server (auto-launch or detect already running)
+    LOG_INFO("Starting wallet server...");
+    StartWalletServer();
+
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
 
     CefRunMessageLoop();
+
+    // Stop wallet server before CEF shutdown
+    LOG_INFO("Stopping wallet server...");
+    StopWalletServer();
+
     CefShutdown();
     return 0;
 }
