@@ -3,6 +3,7 @@ export interface TransactionData {
   amount: string;
   feeRate: string;
   memo?: string;
+  sendMax?: boolean;
 }
 
 export interface Transaction {

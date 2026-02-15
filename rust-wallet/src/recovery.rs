@@ -21,11 +21,16 @@ use log::info;
 use bip39::{Mnemonic, Language};
 use bip32::XPrv;
 use secp256k1::{Secp256k1, SecretKey, PublicKey};
+use secp256k1::ecdsa::Signature;
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 use bs58;
 use crate::crypto::brc42::derive_child_public_key;
 use crate::utxo_fetcher::fetch_utxos_for_address;
+use crate::transaction::{
+    Transaction, TxInput, TxOutput, OutPoint, Script,
+    calculate_sighash, SIGHASH_ALL_FORKID,
+};
 
 // ============================================================================
 // BIP32 Key Derivation (Legacy)
@@ -381,4 +386,301 @@ fn pubkey_to_address(pubkey_bytes: &[u8]) -> Result<String, rusqlite::Error> {
 struct AddressInfo {
     address: String,
     public_key: String,
+}
+
+// ============================================================================
+// External Wallet Recovery (Centbee, etc.)
+// ============================================================================
+
+/// Derive a private key at an arbitrary BIP32 path from a seed.
+///
+/// `segments` is a list of `(index, is_hardened)` pairs, e.g.:
+/// - `[(44, true), (0, false), (0, false)]` for Centbee receive chain prefix
+///
+/// Returns 32-byte private key.
+pub fn derive_key_at_path(seed: &[u8], segments: &[(u32, bool)]) -> std::result::Result<Vec<u8>, String> {
+    let master = XPrv::new(seed)
+        .map_err(|e| format!("Failed to create master key: {}", e))?;
+
+    let mut current = master;
+    for &(index, hardened) in segments {
+        let child_num = bip32::ChildNumber::new(index, hardened)
+            .map_err(|e| format!("Invalid child number {}h={}: {}", index, hardened, e))?;
+        current = current.derive_child(child_num)
+            .map_err(|e| format!("Derivation failed at {}h={}: {}", index, hardened, e))?;
+    }
+
+    Ok(current.private_key().to_bytes().to_vec())
+}
+
+/// Derive address + keys at an arbitrary BIP32 path from a seed.
+///
+/// Returns `(address, pubkey_hex, privkey_bytes)`.
+pub fn derive_address_at_path(
+    seed: &[u8],
+    segments: &[(u32, bool)],
+) -> std::result::Result<(String, String, Vec<u8>), String> {
+    let privkey_bytes = derive_key_at_path(seed, segments)?;
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&privkey_bytes)
+        .map_err(|e| format!("Invalid private key: {}", e))?;
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_bytes = public_key.serialize();
+
+    let address = pubkey_to_address(&pubkey_bytes)
+        .map_err(|e| format!("Address derivation failed: {}", e))?;
+    let pubkey_hex = hex::encode(&pubkey_bytes);
+
+    Ok((address, pubkey_hex, privkey_bytes))
+}
+
+/// Configuration for an external BIP39 wallet's derivation paths.
+pub struct ExternalWalletConfig {
+    pub name: &'static str,
+    /// Path prefixes for each chain (without the final address index).
+    /// e.g. receive = `[(44,true),(0,false),(0,false)]`
+    pub chains: Vec<Vec<(u32, bool)>>,
+    pub chain_labels: Vec<&'static str>,
+}
+
+impl ExternalWalletConfig {
+    /// Centbee wallet: BIP44 with only 44' hardened, path m/44'/0/0/{i} (receive) and m/44'/0/1/{i} (change).
+    pub fn centbee() -> Self {
+        Self {
+            name: "centbee",
+            chains: vec![
+                vec![(44, true), (0, false), (0, false)], // receive
+                vec![(44, true), (0, false), (1, false)], // change
+            ],
+            chain_labels: vec!["receive", "change"],
+        }
+    }
+}
+
+/// A UTXO found on an external wallet's address, with its private key for sweep signing.
+pub struct ExternalUTXO {
+    pub txid: String,
+    pub vout: u32,
+    pub satoshis: i64,
+    pub script_hex: String,
+    pub private_key: Vec<u8>,
+    pub address: String,
+    pub chain_index: usize,
+    pub address_index: u32,
+}
+
+/// Result of scanning an external wallet for UTXOs.
+pub struct ExternalScanResult {
+    pub utxos: Vec<ExternalUTXO>,
+    pub total_balance: i64,
+    pub addresses_scanned: u32,
+}
+
+/// Scan an external wallet's derivation paths for UTXOs.
+///
+/// For each chain in `config`, iterates address indices 0..N, appending `(index, false)`
+/// to the chain prefix. Stops after `gap_limit` consecutive empty addresses per chain.
+/// Rate-limits API calls at 100ms intervals.
+pub async fn scan_external_wallet(
+    seed: &[u8],
+    config: &ExternalWalletConfig,
+    gap_limit: u32,
+) -> std::result::Result<ExternalScanResult, String> {
+    let mut all_utxos = Vec::new();
+    let mut total_balance: i64 = 0;
+    let mut total_scanned: u32 = 0;
+
+    for (chain_idx, chain_prefix) in config.chains.iter().enumerate() {
+        let label = config.chain_labels.get(chain_idx).unwrap_or(&"unknown");
+        info!("   Scanning {} chain ({})...", config.name, label);
+
+        let mut gap_count: u32 = 0;
+        let mut addr_index: u32 = 0;
+
+        loop {
+            if gap_count >= gap_limit {
+                info!("   Gap limit reached on {} chain after {} addresses", label, addr_index);
+                break;
+            }
+
+            // Build full path: chain_prefix + (addr_index, false)
+            let mut path = chain_prefix.clone();
+            path.push((addr_index, false));
+
+            let (address, _pubkey_hex, privkey_bytes) = derive_address_at_path(seed, &path)?;
+
+            // Fetch UTXOs from blockchain
+            match fetch_utxos_for_address(&address, addr_index as i32).await {
+                Ok(utxos) if !utxos.is_empty() => {
+                    let addr_balance: i64 = utxos.iter().map(|u| u.satoshis).sum();
+                    info!("   Found {} UTXO(s) on {} idx {} ({} sats)",
+                          utxos.len(), label, addr_index, addr_balance);
+
+                    for utxo in utxos {
+                        all_utxos.push(ExternalUTXO {
+                            txid: utxo.txid.clone(),
+                            vout: utxo.vout,
+                            satoshis: utxo.satoshis,
+                            script_hex: utxo.script.clone(),
+                            private_key: privkey_bytes.clone(),
+                            address: address.clone(),
+                            chain_index: chain_idx,
+                            address_index: addr_index,
+                        });
+                        total_balance += utxo.satoshis;
+                    }
+                    gap_count = 0;
+                }
+                Ok(_) => {
+                    gap_count += 1;
+                }
+                Err(e) => {
+                    log::warn!("   Failed to fetch UTXOs for {} idx {}: {}", label, addr_index, e);
+                    gap_count += 1;
+                }
+            }
+
+            total_scanned += 1;
+            addr_index += 1;
+
+            // Rate limiting
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    info!("   External scan complete: {} UTXOs, {} sats, {} addresses scanned",
+          all_utxos.len(), total_balance, total_scanned);
+
+    Ok(ExternalScanResult {
+        utxos: all_utxos,
+        total_balance,
+        addresses_scanned: total_scanned,
+    })
+}
+
+/// Build sweep transactions that move all external UTXOs to a single destination address.
+///
+/// Batches UTXOs into groups of up to `max_inputs_per_tx` to avoid oversized transactions.
+/// Returns `Vec<(raw_tx_hex, fee, output_value)>` for each sweep transaction.
+pub fn build_sweep_transactions(
+    utxos: &[ExternalUTXO],
+    destination_address: &str,
+    fee_rate_sats_per_kb: u64,
+    max_inputs_per_tx: usize,
+) -> std::result::Result<Vec<(String, u64, i64)>, String> {
+    if utxos.is_empty() {
+        return Err("No UTXOs to sweep".to_string());
+    }
+
+    // Decode destination address to get pubkey hash for P2PKH locking script
+    let dest_script = address_to_p2pkh_script(destination_address)?;
+
+    let mut results = Vec::new();
+
+    // Process UTXOs in batches
+    for batch in utxos.chunks(max_inputs_per_tx) {
+        let total_input: i64 = batch.iter().map(|u| u.satoshis).sum();
+
+        // Estimate fee: P2PKH unlocking = 107 bytes, input = 32+4+varint+107+4 = 148 bytes
+        let est_size = 4 // version
+            + 1 // input count varint
+            + batch.len() * 148 // inputs (P2PKH unlocking ~107 bytes)
+            + 1 // output count varint
+            + 8 + 1 + dest_script.len() // single output
+            + 4; // locktime
+        let fee = std::cmp::max(
+            ((est_size as u64 * fee_rate_sats_per_kb) + 999) / 1000,
+            200, // MIN_FEE_SATS
+        );
+
+        let output_value = total_input - fee as i64;
+        if output_value < 546 {
+            // Dust — skip this batch (or it could be a single tiny UTXO)
+            log::warn!("   Sweep batch skipped: output {} sats < dust limit (inputs: {} sats, fee: {} sats)",
+                      output_value, total_input, fee);
+            continue;
+        }
+
+        // Build transaction
+        let mut tx = Transaction::new();
+
+        // Add inputs (unsigned)
+        for utxo in batch {
+            let input = TxInput::new(OutPoint::new(&utxo.txid, utxo.vout));
+            tx.add_input(input);
+        }
+
+        // Add single output
+        tx.add_output(TxOutput::new(output_value, dest_script.clone()));
+
+        // Sign each input
+        let secp = Secp256k1::new();
+        for (i, utxo) in batch.iter().enumerate() {
+            let locking_script_bytes = hex::decode(&utxo.script_hex)
+                .map_err(|e| format!("Bad script hex for UTXO {}:{}: {}", &utxo.txid[..16.min(utxo.txid.len())], utxo.vout, e))?;
+
+            // Calculate sighash
+            let sighash = calculate_sighash(&tx, i, &locking_script_bytes, utxo.satoshis, SIGHASH_ALL_FORKID)
+                .map_err(|e| format!("Sighash failed for input {}: {}", i, e))?;
+
+            // Sign with ECDSA
+            let secret_key = SecretKey::from_slice(&utxo.private_key)
+                .map_err(|e| format!("Invalid privkey for input {}: {}", i, e))?;
+            let message = secp256k1::Message::from_digest_slice(&sighash)
+                .map_err(|e| format!("Invalid sighash digest for input {}: {}", i, e))?;
+            let sig: Signature = secp.sign_ecdsa(&message, &secret_key);
+
+            // DER-encode signature + append hashtype byte (0x41 = SIGHASH_ALL_FORKID)
+            let mut sig_bytes = sig.serialize_der().to_vec();
+            sig_bytes.push(SIGHASH_ALL_FORKID as u8);
+
+            // Get public key
+            let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+            let pubkey_bytes = public_key.serialize();
+
+            // Build unlocking script and set on input
+            let unlocking = Script::p2pkh_unlocking_script(&sig_bytes, &pubkey_bytes);
+            tx.inputs[i].set_script(unlocking.bytes);
+        }
+
+        // Serialize
+        let raw_hex = tx.to_hex()
+            .map_err(|e| format!("Failed to serialize sweep tx: {}", e))?;
+
+        results.push((raw_hex, fee, output_value));
+    }
+
+    if results.is_empty() {
+        return Err("All UTXO batches were below dust limit after fees".to_string());
+    }
+
+    Ok(results)
+}
+
+/// Convert a Base58Check Bitcoin address to a P2PKH locking script (25 bytes).
+pub fn address_to_p2pkh_script(address: &str) -> std::result::Result<Vec<u8>, String> {
+    let decoded = bs58::decode(address)
+        .into_vec()
+        .map_err(|e| format!("Invalid address base58: {}", e))?;
+
+    if decoded.len() != 25 {
+        return Err(format!("Address decoded to {} bytes, expected 25", decoded.len()));
+    }
+
+    // Verify checksum
+    let payload = &decoded[..21];
+    let checksum = &decoded[21..25];
+    let hash = Sha256::digest(&Sha256::digest(payload));
+    if &hash[..4] != checksum {
+        return Err("Address checksum mismatch".to_string());
+    }
+
+    // Extract 20-byte pubkey hash (skip version byte)
+    let pubkey_hash = &decoded[1..21];
+
+    let script = Script::p2pkh_locking_script(pubkey_hash)
+        .map_err(|e| format!("Failed to build P2PKH script: {}", e))?;
+
+    Ok(script.bytes)
 }

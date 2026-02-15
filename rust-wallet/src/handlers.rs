@@ -2920,6 +2920,11 @@ pub struct CreateActionOptions {
     #[serde(rename = "randomizeOutputs")]
     pub randomize_outputs: Option<bool>, // Default: true
 
+    /// When true, select ALL spendable UTXOs and set output amount = total_input - fee.
+    /// Used by the "MAX" button in the light wallet to send the entire balance.
+    #[serde(rename = "sendMax")]
+    pub send_max: Option<bool>,
+
     /// BRC-100: TXIDs of previously-created noSend transactions to broadcast
     /// alongside this transaction. Used for transaction chaining where the first
     /// tx is created with noSend=true, then the second tx uses sendWith to
@@ -3295,6 +3300,12 @@ pub async fn create_action(
         log::info!("   Total from user inputs: {} satoshis", user_input_total);
     }
 
+    // Extract send_max early — needed before UTXO selection
+    let send_max = req.options.as_ref().and_then(|o| o.send_max).unwrap_or(false);
+    if send_max {
+        log::info!("   💰 Send max mode: will select all UTXOs and calculate output amount after fee");
+    }
+
     // Calculate total output amount
     let mut total_output: i64 = 0;
     for (i, output) in req.outputs.iter().enumerate() {
@@ -3573,13 +3584,20 @@ pub async fn create_action(
         }
 
         // Select UTXOs to cover the amount needed from wallet
-        // Uses confirmed preference when no explicit inputs are provided
         if !all_utxos.is_empty() {
-            selected_utxos = select_utxos_with_preference(
-                confirmed_utxos.as_deref(),
-                &all_utxos,
-                wallet_amount_needed,
-            );
+            if send_max {
+                // Send max: select ALL available UTXOs to drain the wallet
+                selected_utxos = all_utxos.clone();
+                let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
+                log::info!("   Send max: selected ALL {} UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+            } else {
+                // Normal: greedy selection with confirmed preference
+                selected_utxos = select_utxos_with_preference(
+                    confirmed_utxos.as_deref(),
+                    &all_utxos,
+                    wallet_amount_needed,
+                );
+            }
 
             if selected_utxos.is_empty() && user_inputs.is_empty() {
                 log::error!("   Insufficient funds");
@@ -3591,8 +3609,10 @@ pub async fn create_action(
                 }));
             }
 
-            let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
-            log::info!("   Selected {} wallet UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+            if !send_max {
+                let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
+                log::info!("   Selected {} wallet UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+            }
 
             // Mark selected UTXOs as "in use" immediately (still under the lock)
             if !selected_utxos.is_empty() {
@@ -3684,14 +3704,27 @@ pub async fn create_action(
     }
 
     // Recalculate fee with accurate input count
+    let change_output_overhead = if send_max { 0 } else { 25 + 9 }; // No change output for send_max
     let estimated_tx_size = estimate_transaction_size(&actual_input_script_lengths, &output_script_lengths)
-        + 25 + 9;  // Add P2PKH change output (25 script + 8 value + 1 varint)
+        + change_output_overhead;  // P2PKH change output (25 script + 8 value + 1 varint)
 
     estimated_fee = calculate_fee(estimated_tx_size, fee_rate_sats_per_kb) as i64;
 
     log::info!("   📊 Recalculated fee with actual {} inputs:", actual_input_count);
-    log::info!("      Estimated tx size: {} bytes", estimated_tx_size);
+    log::info!("      Estimated tx size: {} bytes (change output: {})", estimated_tx_size, !send_max);
     log::info!("      Recalculated fee: {} satoshis", estimated_fee);
+
+    // Send max: override output amount = total_input - fee (no change)
+    if send_max {
+        total_output = total_input - estimated_fee;
+        if total_output < 546 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Balance too small to cover transaction fees (balance: {}, fee: {})",
+                    total_input, estimated_fee)
+            }));
+        }
+        log::info!("   💰 Send max: output amount = {} satoshis (fee: {})", total_output, estimated_fee);
+    }
 
     // Build transaction
     let mut tx = Transaction::new();
@@ -3882,8 +3915,13 @@ pub async fn create_action(
             }));
         };
 
-        let satoshis = output.satoshis.unwrap_or(0);
-        log::info!("   Output {}: {} satoshis", i, satoshis);
+        // For send_max, override the first output amount with calculated total_output
+        let satoshis = if send_max && i == 0 {
+            total_output
+        } else {
+            output.satoshis.unwrap_or(0)
+        };
+        log::info!("   Output {}: {} satoshis{}", i, satoshis, if send_max && i == 0 { " (send_max)" } else { "" });
         log::info!("   Output {} script (hex): {}", i, hex::encode(&script_bytes));
 
         // Collect basket output metadata for database insertion (BRC-100)
@@ -6559,6 +6597,7 @@ pub async fn process_action(
             return_txid_only: Some(false),
             no_send: None,
             randomize_outputs: None,
+            send_max: None,
             send_with: None,
         }),
         input_beef: None,
@@ -7757,9 +7796,11 @@ pub async fn get_current_address(state: web::Data<AppState>) -> HttpResponse {
 pub struct SendTransactionRequest {
     #[serde(rename = "toAddress")]
     pub to_address: String,
-    pub amount: i64,      // Satoshis
+    pub amount: Option<i64>,   // Satoshis (required unless sendMax=true)
     #[serde(rename = "feeRate")]
     pub fee_rate: Option<i64>, // Satoshis per byte (currently ignored - deferred)
+    #[serde(rename = "sendMax")]
+    pub send_max: Option<bool>, // When true, send entire balance minus fees
 }
 
 pub async fn send_transaction(
@@ -7780,8 +7821,11 @@ pub async fn send_transaction(
         }
     };
 
+    let send_max = req.send_max.unwrap_or(false);
+    let amount = req.amount.unwrap_or(0);
+
     log::info!("   To address: {}", req.to_address);
-    log::info!("   Amount: {} satoshis", req.amount);
+    log::info!("   Amount: {} satoshis, sendMax: {}", amount, send_max);
     if let Some(fee_rate) = req.fee_rate {
         log::info!("   Fee rate: {} sat/byte (⚠️ currently ignored)", fee_rate);
     }
@@ -7795,20 +7839,28 @@ pub async fn send_transaction(
         }));
     }
 
-    // Validate amount
-    if req.amount <= 0 {
-        log::error!("   Invalid amount: {}", req.amount);
+    // Validate amount (skip when sendMax — amount will be calculated by createAction)
+    if !send_max && amount <= 0 {
+        log::error!("   Invalid amount: {}", amount);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false,
             "error": "Amount must be greater than 0"
         }));
     }
 
+    // For sendMax: set output satoshis to 0 as placeholder — createAction will override
+    let output_satoshis = if send_max { 0 } else { amount };
+    let description = if send_max {
+        format!("Send max to {}", req.to_address)
+    } else {
+        format!("Send {} satoshis to {}", amount, req.to_address)
+    };
+
     // Convert to CreateActionRequest format
     let create_req = CreateActionRequest {
         inputs: None,  // send_transaction doesn't use inputBEEF
         outputs: vec![CreateActionOutput {
-            satoshis: Some(req.amount),
+            satoshis: Some(output_satoshis),
             script: None,
             address: Some(req.to_address.clone()),
             custom_instructions: None,
@@ -7816,7 +7868,7 @@ pub async fn send_transaction(
             basket: None,  // Simple send doesn't use baskets
             tags: None,    // Simple send doesn't use tags
         }],
-        description: Some(format!("Send {} satoshis to {}", req.amount, req.to_address)),
+        description: Some(description),
         labels: Some(vec!["send".to_string(), "wallet".to_string()]),
         options: Some(CreateActionOptions {
             sign_and_process: Some(true),
@@ -7824,6 +7876,7 @@ pub async fn send_transaction(
             return_txid_only: Some(false),
             no_send: Some(true), // Don't let createAction broadcast - we'll do it ourselves
             randomize_outputs: Some(true), // Default behavior
+            send_max: if send_max { Some(true) } else { None },
             send_with: None,
         }),
         input_beef: None,
@@ -9883,6 +9936,312 @@ pub async fn wallet_recover(
             "Recovery complete! Found {} addresses with {} UTXOs, total balance: {} satoshis.",
             result.addresses_found, result.utxos_found, result.total_balance
         ),
+    })
+}
+
+// ============================================================================
+// External Wallet Recovery (Centbee, etc.) — Phase 1c
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct ExternalRecoveryRequest {
+    pub mnemonic: String,
+    pub passphrase: Option<String>, // BIP39 passphrase (= Centbee PIN)
+    pub wallet_type: String,        // "centbee"
+    pub gap_limit: Option<u32>,     // default 25
+    pub confirm: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ExternalRecoveryResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub utxos_found: u32,
+    pub total_balance: i64,
+    pub sweep_txids: Vec<String>,
+    pub total_fees: u64,
+    pub brc42_balance: i64,
+    pub message: String,
+}
+
+/// Recover from an external BIP39 wallet (e.g. Centbee) by sweeping funds to BRC-42.
+///
+/// POST /wallet/recover-external
+///
+/// 1. Validates mnemonic + passphrase + wallet_type
+/// 2. Scans external derivation paths for UTXOs (using passphrase as BIP39 passphrase)
+/// 3. Creates Hodos wallet from same mnemonic (BRC-42, passphrase used as PIN)
+/// 4. Builds + broadcasts sweep transactions to the first BRC-42 address
+/// 5. Records sweep outputs in DB
+pub async fn wallet_recover_external(
+    state: web::Data<AppState>,
+    req: web::Json<ExternalRecoveryRequest>,
+) -> HttpResponse {
+    log::info!("🔄 /wallet/recover-external called (type: {})", req.wallet_type);
+
+    // 1. Validate confirmation
+    if req.confirm != Some(true) {
+        return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+            success: false,
+            error: Some("Recovery requires explicit confirmation. Set 'confirm': true".to_string()),
+            utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+            total_fees: 0, brc42_balance: 0, message: String::new(),
+        });
+    }
+
+    // 2. Validate wallet_type
+    if req.wallet_type != "centbee" {
+        return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+            success: false,
+            error: Some(format!("Unsupported wallet type: '{}'. Supported: 'centbee'", req.wallet_type)),
+            utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+            total_fees: 0, brc42_balance: 0, message: String::new(),
+        });
+    }
+
+    // 3. Validate passphrase (Centbee PIN = 4 digits)
+    let passphrase = match &req.passphrase {
+        Some(p) if p.len() == 4 && p.chars().all(|c| c.is_ascii_digit()) => p.clone(),
+        Some(_) => {
+            return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some("Centbee PIN must be exactly 4 digits".to_string()),
+                utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+                total_fees: 0, brc42_balance: 0, message: String::new(),
+            });
+        }
+        None => {
+            return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some("Centbee recovery requires a 4-digit PIN as passphrase".to_string()),
+                utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+                total_fees: 0, brc42_balance: 0, message: String::new(),
+            });
+        }
+    };
+
+    // 4. Validate mnemonic
+    let mnemonic_trimmed = req.mnemonic.trim().to_string();
+    let word_count = mnemonic_trimmed.split_whitespace().count();
+    if word_count != 12 {
+        return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+            success: false,
+            error: Some(format!("Expected 12 words, got {}", word_count)),
+            utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+            total_fees: 0, brc42_balance: 0, message: String::new(),
+        });
+    }
+    let mnemonic = match bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_trimmed) {
+        Ok(m) => m,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some("Invalid mnemonic — check spelling and word order".to_string()),
+                utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+                total_fees: 0, brc42_balance: 0, message: String::new(),
+            });
+        }
+    };
+
+    // 5. Check no wallet exists (DB lock, release immediately)
+    {
+        let db = state.database.lock().unwrap();
+        use crate::database::WalletRepository;
+        let wallet_repo = WalletRepository::new(db.connection());
+        if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
+            log::warn!("   ⚠️  Wallet already exists — rejecting external recovery");
+            return HttpResponse::Conflict().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some("Wallet already exists".to_string()),
+                utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+                total_fees: 0, brc42_balance: 0, message: String::new(),
+            });
+        }
+    } // DB lock released
+
+    // 6. Derive external seed (mnemonic + Centbee PIN as BIP39 passphrase)
+    let external_seed = mnemonic.to_seed(&passphrase);
+
+    // 7. Scan external wallet (NO lock)
+    let config = crate::recovery::ExternalWalletConfig::centbee();
+    let gap_limit = req.gap_limit.unwrap_or(25);
+
+    log::info!("   🔍 Scanning {} wallet with gap limit {}...", config.name, gap_limit);
+    let scan_result = match crate::recovery::scan_external_wallet(&external_seed, &config, gap_limit).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   ❌ External wallet scan failed: {}", e);
+            return HttpResponse::InternalServerError().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some(format!("Scan failed: {}", e)),
+                utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+                total_fees: 0, brc42_balance: 0, message: String::new(),
+            });
+        }
+    };
+
+    // 8. If no UTXOs found, return error (don't create wallet)
+    if scan_result.utxos.is_empty() {
+        log::info!("   ⚠️  No funds found on external wallet");
+        return HttpResponse::Ok().json(ExternalRecoveryResponse {
+            success: false,
+            error: Some("No funds found on this wallet. Check your mnemonic and Centbee PIN.".to_string()),
+            utxos_found: 0, total_balance: 0, sweep_txids: vec![],
+            total_fees: 0, brc42_balance: 0, message: String::new(),
+        });
+    }
+
+    log::info!("   📊 Found {} UTXOs, total {} sats", scan_result.utxos.len(), scan_result.total_balance);
+
+    // 9. Create Hodos wallet (DB lock) — Centbee PIN is reused as Hodos PIN
+    let (wallet_id, user_id, dest_address) = {
+        let mut db = state.database.lock().unwrap();
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_trimmed, Some(&passphrase)) {
+            Ok((wid, uid, addr, _pubkey)) => (wid, uid, addr),
+            Err(e) => {
+                log::error!("   ❌ Failed to create wallet: {}", e);
+                return HttpResponse::InternalServerError().json(ExternalRecoveryResponse {
+                    success: false,
+                    error: Some(format!("Failed to create wallet: {}", e)),
+                    utxos_found: scan_result.utxos.len() as u32,
+                    total_balance: scan_result.total_balance,
+                    sweep_txids: vec![], total_fees: 0, brc42_balance: 0,
+                    message: String::new(),
+                });
+            }
+        }
+    }; // DB lock released
+
+    log::info!("   ✅ Hodos wallet created (ID: {}), destination: {}", wallet_id, dest_address);
+
+    // 10. Get fee rate (NO lock)
+    let fee_rate = state.fee_rate_cache.get_rate().await;
+    log::info!("   💰 Fee rate: {} sat/KB", fee_rate);
+
+    // 11. Build sweep transactions (NO lock)
+    let sweep_txs = match crate::recovery::build_sweep_transactions(
+        &scan_result.utxos, &dest_address, fee_rate, 50,
+    ) {
+        Ok(txs) => txs,
+        Err(e) => {
+            log::error!("   ❌ Failed to build sweep txs: {}", e);
+            // Wallet created but sweep failed — start Monitor anyway
+            crate::monitor::Monitor::start(state.clone());
+            state.balance_cache.set(0);
+            return HttpResponse::Ok().json(ExternalRecoveryResponse {
+                success: false,
+                error: Some(format!("Wallet created but sweep failed: {}. Your Centbee funds are still accessible — try again.", e)),
+                utxos_found: scan_result.utxos.len() as u32,
+                total_balance: scan_result.total_balance,
+                sweep_txids: vec![], total_fees: 0, brc42_balance: 0,
+                message: String::new(),
+            });
+        }
+    };
+
+    log::info!("   📦 Built {} sweep transaction(s)", sweep_txs.len());
+
+    // 12. Broadcast each sweep tx (NO lock)
+    let mut successful_txids = Vec::new();
+    let mut total_fees: u64 = 0;
+    let mut total_swept: i64 = 0;
+
+    for (i, (raw_hex, fee, output_value)) in sweep_txs.iter().enumerate() {
+        log::info!("   📡 Broadcasting sweep tx {}/{} ({} sats, fee {} sats)...",
+                  i + 1, sweep_txs.len(), output_value, fee);
+
+        match crate::handlers::broadcast_transaction(raw_hex, None, None).await {
+            Ok(msg) => {
+                log::info!("   ✅ Sweep tx {}/{} broadcast: {}", i + 1, sweep_txs.len(), msg);
+
+                // Compute txid from the raw tx bytes (double SHA256, reversed)
+                let txid = match hex::decode(raw_hex) {
+                    Ok(bytes) => {
+                        use sha2::{Sha256, Digest};
+                        let hash1 = Sha256::digest(&bytes);
+                        let hash2 = Sha256::digest(&hash1);
+                        let reversed: Vec<u8> = hash2.into_iter().rev().collect();
+                        hex::encode(reversed)
+                    }
+                    Err(_) => format!("sweep-tx-{}", i),
+                };
+
+                successful_txids.push(txid);
+                total_fees += fee;
+                total_swept += output_value;
+            }
+            Err(e) => {
+                log::error!("   ❌ Sweep tx {}/{} broadcast failed: {}", i + 1, sweep_txs.len(), e);
+                // Partial success — continue with remaining txs
+            }
+        }
+
+        // Delay between broadcasts
+        if i + 1 < sweep_txs.len() {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // 13. Record sweep outputs in DB (DB lock)
+    if !successful_txids.is_empty() {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        for (i, txid) in successful_txids.iter().enumerate() {
+            let output_value = sweep_txs.get(i).map(|(_, _, v)| *v).unwrap_or(0);
+            // Build the locking script hex for the destination address
+            let script_hex = match crate::recovery::address_to_p2pkh_script(&dest_address) {
+                Ok(script_bytes) => hex::encode(&script_bytes),
+                Err(e) => {
+                    log::error!("   ❌ Failed to build script for output recording: {}", e);
+                    continue;
+                }
+            };
+
+            if let Err(e) = output_repo.upsert_received_utxo(
+                user_id, txid, 0, output_value, &script_hex, 0,
+            ) {
+                log::error!("   ❌ Failed to record sweep output {}:{}: {}", &txid[..16.min(txid.len())], 0, e);
+            }
+        }
+    } // DB lock released
+
+    // 14. Start Monitor + seed balance cache
+    crate::monitor::Monitor::start(state.clone());
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(user_id) {
+            Ok(bal) => state.balance_cache.set(bal),
+            Err(_) => state.balance_cache.set(total_swept),
+        }
+    }
+
+    let brc42_balance = total_swept;
+    let message = if successful_txids.len() == sweep_txs.len() {
+        format!(
+            "Migration complete! Swept {} UTXOs in {} transaction(s). Fees: {} sats. BRC-42 balance: {} sats.",
+            scan_result.utxos.len(), successful_txids.len(), total_fees, brc42_balance
+        )
+    } else {
+        format!(
+            "Partial migration: {}/{} sweep transactions broadcast successfully. Some funds may still be on Centbee addresses — the Monitor will sync them.",
+            successful_txids.len(), sweep_txs.len()
+        )
+    };
+
+    log::info!("   ✅ External recovery complete: {}", message);
+
+    HttpResponse::Ok().json(ExternalRecoveryResponse {
+        success: true,
+        error: None,
+        utxos_found: scan_result.utxos.len() as u32,
+        total_balance: scan_result.total_balance,
+        sweep_txids: successful_txids,
+        total_fees,
+        brc42_balance,
+        message,
     })
 }
 

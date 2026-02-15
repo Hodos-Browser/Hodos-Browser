@@ -450,6 +450,7 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
             .route("/wallet/unlock", web::post().to(handlers::wallet_unlock))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))
+            .route("/wallet/recover-external", web::post().to(handlers::wallet_recover_external))
             .route("/wallet/cleanup", web::post().to(handlers::wallet_cleanup))
             .route("/wallet/export", web::post().to(handlers::wallet_export))
             .service(

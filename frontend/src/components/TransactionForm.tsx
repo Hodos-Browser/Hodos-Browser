@@ -117,7 +117,12 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     } else {
       let satoshis: number;
 
-      if (amountInputMode === 'usd') {
+      if (formData.sendMax) {
+        // sendMax: backend calculates the exact amount minus fees — skip balance check
+        if (balance <= 0) {
+          newErrors.amount = 'No balance to send';
+        }
+      } else if (amountInputMode === 'usd') {
         if (bsvPrice <= 0) {
           newErrors.amount = 'Price not available. Please switch to BSV mode or try again.';
         } else {
@@ -145,7 +150,14 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   }, [formData, balance, amountInputMode, bsvPrice, convertUsdToSatoshis]);
 
   const handleInputChange = useCallback((field: keyof TransactionData, value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData(prev => {
+      const next = { ...prev, [field]: value };
+      // Clear sendMax when user manually changes the amount
+      if (field === 'amount' && prev.sendMax) {
+        next.sendMax = false;
+      }
+      return next;
+    });
 
     // Clear error for this field when user starts typing
     if (errors[field]) {
@@ -331,9 +343,13 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
               onClick={() => {
                 if (amountInputMode === 'usd' && bsvPrice > 0) {
                   const maxUsd = convertSatoshisToUsd(balance, bsvPrice);
-                  handleInputChange('amount', maxUsd.toFixed(2));
+                  setFormData(prev => ({ ...prev, amount: maxUsd.toFixed(2), sendMax: true }));
                 } else {
-                  handleInputChange('amount', formatBalance(balance));
+                  setFormData(prev => ({ ...prev, amount: formatBalance(balance), sendMax: true }));
+                }
+                // Clear any existing amount error
+                if (errors.amount) {
+                  setErrors(prev => ({ ...prev, amount: undefined }));
                 }
               }}
               disabled={isSubmitting || isLoading || (amountInputMode === 'usd' && bsvPrice === 0)}

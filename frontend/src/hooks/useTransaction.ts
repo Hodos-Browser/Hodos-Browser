@@ -16,11 +16,16 @@ export const useTransaction = () => {
         throw new Error('Bitcoin Browser wallet not available');
       }
 
-      const response = await window.hodosBrowser.wallet.sendTransaction({
+      const txData: any = {
         toAddress: data.recipient,
         amount: Math.round(parseFloat(data.amount) * 100000000),
         feeRate: parseInt(data.feeRate)
-      });
+      };
+      if (data.sendMax) {
+        txData.sendMax = true;
+      }
+
+      const response = await window.hodosBrowser.wallet.sendTransaction(txData);
 
       return response;
     } catch (err) {

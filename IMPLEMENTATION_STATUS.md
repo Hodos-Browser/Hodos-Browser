@@ -913,11 +913,110 @@ TaskReviewStatus Section 2 was re-enabling outputs that `/wallet/sync` correctly
 
 All 8 phases of the wallet-toolbox alignment transition plan are complete. The plan document at `development-docs/STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` can be archived.
 
+---
+
+## UX Phase 0: Startup Flow and Wallet Checks — COMPLETED (2026-02-13)
+
+- Rust: Auto-creation disabled; `wallet_exists` guards maintenance, balance cache seed, monitor start
+- Rust: `POST /wallet/create` endpoint added (returns mnemonic, 409 if exists)
+- C++: Health check fixed (`"ok"` not `"healthy"`), daemon path updated to rust-wallet
+- C++: `StartWalletServer()`/`StopWalletServer()` in cef_browser_shell.cpp (auto-launch, health poll, dev-mode detection)
+- Frontend: WalletPanelPage checks `/wallet/status`; shows NoWallet prompt with create + mnemonic backup flow
+
+## CEF Critical Stability (CR-1) — COMPLETED (2026-02-12)
+
+All 7 critical CEF fixes: JS injection, auth rejection hang, black screen, buffer overflow, timeouts, handler storage.
+
+---
+
+## UX Phase 1: Initial Setup & Recovery — COMPLETED (2026-02-15)
+
+All three sub-phases and the PIN system are implemented and tested.
+
+### Phase 1a: Mnemonic Recovery — COMPLETED (2026-02-14)
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/wallet_repo.rs` | `create_wallet_with_mnemonic()` — validates BIP39, inserts with `backed_up=true` |
+| `rust-wallet/src/database/connection.rs` | `create_wallet_from_existing_mnemonic()` — full wallet record creation |
+| `rust-wallet/src/database/output_repo.rs` | `upsert_received_utxo_with_derivation()` — explicit "BIP32"/"BRC-42" derivation |
+| `rust-wallet/src/recovery.rs` | Removed unused `_db` param; added `utxos: Vec<UTXO>` to RecoveredAddress |
+| `rust-wallet/src/monitor/mod.rs` | `MONITOR_STARTED` AtomicBool double-start guard |
+| `rust-wallet/src/handlers.rs` | `wallet_create` drops lock before Monitor; `wallet_recover` rewritten |
+| `frontend/src/pages/WalletPanelPage.tsx` | Recovery button, mnemonic input form, progress display |
+
+### PIN System — COMPLETED (2026-02-14)
+
+| Component | Detail |
+|-----------|--------|
+| Schema | V2 migration adds `pin_salt TEXT`; V1 includes it for fresh DBs |
+| Encryption | AES-256-GCM + PBKDF2-HMAC-SHA256 (600K iterations, 16-byte salt) |
+| Session cache | `WalletDatabase.cached_mnemonic` — set on unlock/create/recover |
+| Legacy wallets | `pin_salt = NULL` → plaintext auto-cached at startup, no PIN prompt |
+| Endpoints | `POST /wallet/unlock`, `GET /wallet/status` returns `{exists, locked}` |
+| Frontend | `PinInput` component (4 password boxes, auto-advance, auto-submit) |
+
+### Phase 1b: Encrypted Wallet File Backup — COMPLETED (2026-02-14)
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/backup.rs` | 21 serde structs, `collect_payload()`, `encrypt_backup()` / `decrypt_backup()`, `import_to_db()` |
+| `rust-wallet/src/handlers.rs` | `wallet_export` (password >=8 chars), `wallet_import` (PIN + password + backup file) |
+| `rust-wallet/src/main.rs` | Routes `/wallet/export` and `/wallet/import` (100MB payload) |
+| `frontend/src/pages/WalletOverlayRoot.tsx` | "Export Backup" button, password form, downloads `.hodos-wallet` |
+| `frontend/src/pages/WalletPanelPage.tsx` | "Import from Backup" button, native file picker + password + PIN flow |
+
+**File format**: `{ format: "hodos-wallet-backup", version: 1, created_at, salt: hex, data: base64 }`
+**Identity verification**: Master pubkey from backup mnemonic must match `identity_key` in backup payload.
+**CEF fix**: `CefDialogHandler::OnFileDialog` sets `g_file_dialog_active` flag to prevent overlay destruction during file dialog.
+
+### Phase 1c: Centbee External Wallet Recovery — COMPLETED (2026-02-15)
+
+| File | Changes |
+|------|---------|
+| `rust-wallet/src/recovery.rs` | `derive_key_at_path`, `derive_address_at_path`, `ExternalWalletConfig::centbee()`, `scan_external_wallet`, `build_sweep_transactions`, `address_to_p2pkh_script` |
+| `rust-wallet/src/handlers.rs` | `wallet_recover_external` — POST /wallet/recover-external; Centbee PIN auto-reused as Hodos PIN |
+| `rust-wallet/src/main.rs` | Route `/wallet/recover-external` |
+| `frontend/src/pages/WalletPanelPage.tsx` | "Recover from Centbee" button, mnemonic+PIN form, sweep progress, migration success screen |
+
+**Centbee paths**: receive `m/44'/0/0/{i}`, change `m/44'/0/1/{i}` (only 44' hardened).
+**Sweep**: Batches of 50 UTXOs, P2PKH SIGHASH_ALL_FORKID signing, broadcast via ARC.
+**PIN reuse**: Centbee 4-digit PIN becomes the Hodos wallet PIN (no separate creation step).
+
+### Send Max Fix — COMPLETED (2026-02-15)
+
+The MAX button in the light wallet send form was not deducting fees. Fixed by adding `sendMax` flag:
+
+| Layer | Change |
+|-------|--------|
+| Rust `CreateActionOptions` | Added `send_max: Option<bool>` |
+| Rust `send_transaction` | Passes `sendMax` through; skips amount validation when true |
+| Rust `create_action` | When `sendMax`: selects ALL UTXOs, calculates fee without change output, sets output = total_input - fee |
+| Frontend `TransactionForm.tsx` | MAX button sets `sendMax: true`; manual edits clear it; validation skips balance check |
+| Frontend `useTransaction.ts` | Passes `sendMax` to bridge |
+
+**Fee rates**: Backend uses dynamic rates from ARC GorillaPool `/v1/policy` (1-hour cache, fallback 1000 sat/KB).
+
+### Phase 1 Testing Summary
+
+| Test | Result |
+|------|--------|
+| Fresh wallet creation with PIN | Pass |
+| Unlock after restart (correct/wrong PIN) | Pass |
+| Mnemonic recovery with blockchain scan | Pass |
+| Edge cases (PIN mismatch, partial scan, localStorage) | Pass |
+| File export (encrypted `.hodos-wallet`) | Pass |
+| File import (full wallet state restore) | Pass |
+| Centbee recovery (scan + sweep + migration) | Pass |
+| Send Max (full balance minus fees) | Pass |
+| Legacy wallet backward compatibility | Pass |
+
+---
+
 ### Known Issues / Future Work
 
 - **Frontend sync button**: `POST /wallet/sync` endpoint exists but frontend UI trigger not yet implemented
 - **Frontend balance polling**: `useBalance.ts` has polling commented out — re-enable in frontend phase
 - **Broadcast timeout wrapping**: Retry logic can block 30+ seconds, needs async timeout or cancellation
 - **utxos table migration**: ~10 live code references remain in handlers.rs, cache_helpers.rs — deferred
-- **Recovery sprint**: `recover_wallet_from_mnemonic` needs update for outputs-based model
 - **Key linkage methods**: `revealCounterpartyKeyLinkage` and `revealSpecificKeyLinkage` not yet implemented (low priority)
