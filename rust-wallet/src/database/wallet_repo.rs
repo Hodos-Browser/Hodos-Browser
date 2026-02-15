@@ -3,7 +3,7 @@
 //! Handles CRUD operations for wallets in the database.
 
 use rusqlite::{Connection, Result};
-use log::{info, error};
+use log::info;
 use bip39::{Mnemonic, Language};
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngCore;
@@ -19,13 +19,12 @@ impl<'a> WalletRepository<'a> {
     }
 
     /// Create a new wallet with a generated mnemonic
-    /// Returns the wallet ID and the mnemonic phrase
-    pub fn create_wallet(&self) -> Result<(i64, String)> {
+    /// If `pin` is provided, the mnemonic is encrypted before storage.
+    /// Returns the wallet ID and the **plaintext** mnemonic phrase (for display to user).
+    pub fn create_wallet(&self, pin: Option<&str>) -> Result<(i64, String)> {
         info!("   Creating new wallet in database...");
 
         // Generate new mnemonic (12 words = 128 bits of entropy)
-        // bip39 2.0 API: generate entropy first, then create mnemonic from it
-        use rand::RngCore;
         let mut entropy = [0u8; 16]; // 16 bytes = 128 bits = 12 words
         rand::thread_rng().fill_bytes(&mut entropy);
 
@@ -36,29 +35,39 @@ impl<'a> WalletRepository<'a> {
             ))?;
 
         let mnemonic_phrase = mnemonic.to_string();
-        info!("   Generated mnemonic: {}", mnemonic_phrase);
 
-        // Get current timestamp
+        // Encrypt mnemonic if PIN provided
+        let (stored_mnemonic, pin_salt) = if let Some(pin) = pin {
+            let (salt_hex, encrypted_hex) = crate::crypto::pin::encrypt_mnemonic(&mnemonic_phrase, pin)
+                .map_err(|e| rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some(format!("Failed to encrypt mnemonic: {}", e))
+                ))?;
+            (encrypted_hex, Some(salt_hex))
+        } else {
+            (mnemonic_phrase.clone(), None)
+        };
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        // Insert wallet into database
         self.conn.execute(
-            "INSERT INTO wallets (mnemonic, current_index, backed_up, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO wallets (mnemonic, pin_salt, current_index, backed_up, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                mnemonic_phrase,
-                0,  // Start with index 0
-                false,  // Not backed up yet
+                stored_mnemonic,
+                pin_salt,
+                0,
+                false,
                 now,
-                now,  // updated_at same as created_at initially
+                now,
             ],
         )?;
 
         let wallet_id = self.conn.last_insert_rowid();
-        info!("   ✅ Wallet created with ID: {}", wallet_id);
+        info!("   ✅ Wallet created with ID: {} (PIN: {})", wallet_id, pin.is_some());
 
         Ok((wallet_id, mnemonic_phrase))
     }
@@ -66,7 +75,7 @@ impl<'a> WalletRepository<'a> {
     /// Get wallet by ID
     pub fn get_by_id(&self, wallet_id: i64) -> Result<Option<Wallet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, mnemonic, current_index, backed_up, created_at
+            "SELECT id, mnemonic, pin_salt, current_index, backed_up, created_at
              FROM wallets
              WHERE id = ?1"
         )?;
@@ -77,9 +86,10 @@ impl<'a> WalletRepository<'a> {
                 Ok(Wallet {
                     id: Some(row.get(0)?),
                     mnemonic: row.get(1)?,
-                    current_index: row.get(2)?,
-                    backed_up: row.get(3)?,
-                    created_at: row.get(4)?,
+                    pin_salt: row.get(2)?,
+                    current_index: row.get(3)?,
+                    backed_up: row.get(4)?,
+                    created_at: row.get(5)?,
                 })
             },
         );
@@ -95,7 +105,7 @@ impl<'a> WalletRepository<'a> {
     /// In the future, we might support multiple wallets, but for now there's only one
     pub fn get_primary_wallet(&self) -> Result<Option<Wallet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, mnemonic, current_index, backed_up, created_at
+            "SELECT id, mnemonic, pin_salt, current_index, backed_up, created_at
              FROM wallets
              ORDER BY id ASC
              LIMIT 1"
@@ -107,9 +117,10 @@ impl<'a> WalletRepository<'a> {
                 Ok(Wallet {
                     id: Some(row.get(0)?),
                     mnemonic: row.get(1)?,
-                    current_index: row.get(2)?,
-                    backed_up: row.get(3)?,
-                    created_at: row.get(4)?,
+                    pin_salt: row.get(2)?,
+                    current_index: row.get(3)?,
+                    backed_up: row.get(4)?,
+                    created_at: row.get(5)?,
                 })
             },
         );
@@ -128,6 +139,59 @@ impl<'a> WalletRepository<'a> {
             rusqlite::params![new_index, wallet_id],
         )?;
         Ok(())
+    }
+
+    /// Create a wallet from an existing mnemonic (recovery flow)
+    ///
+    /// Validates the mnemonic, inserts with `backed_up = true` (user already has it).
+    /// If `pin` is provided, the mnemonic is encrypted before storage.
+    /// Returns the wallet ID and the **plaintext** mnemonic phrase.
+    pub fn create_wallet_with_mnemonic(&self, mnemonic_phrase: &str, pin: Option<&str>) -> Result<(i64, String)> {
+        info!("   Creating wallet from existing mnemonic...");
+
+        // Validate mnemonic
+        let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid mnemonic: {}", e))
+            ))?;
+
+        let phrase = mnemonic.to_string();
+
+        // Encrypt mnemonic if PIN provided
+        let (stored_mnemonic, pin_salt) = if let Some(pin) = pin {
+            let (salt_hex, encrypted_hex) = crate::crypto::pin::encrypt_mnemonic(&phrase, pin)
+                .map_err(|e| rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some(format!("Failed to encrypt mnemonic: {}", e))
+                ))?;
+            (encrypted_hex, Some(salt_hex))
+        } else {
+            (phrase.clone(), None)
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO wallets (mnemonic, pin_salt, current_index, backed_up, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                stored_mnemonic,
+                pin_salt,
+                0,
+                true,
+                now,
+                now,
+            ],
+        )?;
+
+        let wallet_id = self.conn.last_insert_rowid();
+        info!("   ✅ Wallet created from mnemonic with ID: {} (PIN: {})", wallet_id, pin.is_some());
+
+        Ok((wallet_id, phrase))
     }
 
     /// Mark wallet as backed up

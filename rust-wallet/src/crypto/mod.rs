@@ -7,6 +7,7 @@ pub mod brc43;
 pub mod brc2;
 pub mod ghash;
 pub mod aesgcm_custom;
+pub mod pin;
 
 #[cfg(test)]
 mod aesgcm_custom_test;

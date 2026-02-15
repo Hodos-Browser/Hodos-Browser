@@ -96,6 +96,14 @@ function TabPanel(props: TabPanelProps) {
 const WalletOverlayRoot: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
 
+  // Export backup state
+  const [showExportForm, setShowExportForm] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
+  const [exportConfirm, setExportConfirm] = useState('');
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
+
   // Transactions state
   const [actions, setActions] = useState<Action[]>([]);
   const [actionsLoading, setActionsLoading] = useState(false);
@@ -309,6 +317,52 @@ const WalletOverlayRoot: React.FC = () => {
     }
   };
 
+  const handleExportBackup = async () => {
+    if (exportPassword.length < 8) {
+      setExportError('Password must be at least 8 characters');
+      return;
+    }
+    if (exportPassword !== exportConfirm) {
+      setExportError('Passwords do not match');
+      return;
+    }
+    setExporting(true);
+    setExportError(null);
+    try {
+      const res = await fetch('http://localhost:3301/wallet/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: exportPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setExportError(data.error || 'Export failed');
+        setExporting(false);
+        return;
+      }
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const date = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `hodos-wallet-backup-${date}.hodos-wallet`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportSuccess(true);
+      setExportPassword('');
+      setExportConfirm('');
+      setTimeout(() => {
+        setExportSuccess(false);
+        setShowExportForm(false);
+      }, 3000);
+    } catch {
+      setExportError('Failed to connect to wallet server');
+    }
+    setExporting(false);
+  };
+
   const formatSatoshis = (sats: number): string => {
     return (sats / 100000000).toFixed(8) + ' BSV';
   };
@@ -347,14 +401,72 @@ const WalletOverlayRoot: React.FC = () => {
         </Toolbar>
       </AppBar>
 
-      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Tabs value={tabValue} onChange={handleTabChange} aria-label="wallet tabs">
+      <Box sx={{ borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center' }}>
+        <Tabs value={tabValue} onChange={handleTabChange} aria-label="wallet tabs" sx={{ flexGrow: 1 }}>
           <Tab label="Transactions" />
           <Tab label="Addresses" />
           <Tab label="UTXOs" />
           <Tab label="Certificates" />
         </Tabs>
+        <Button
+          variant="outlined"
+          size="small"
+          onClick={() => {
+            setShowExportForm(!showExportForm);
+            setExportError(null);
+            setExportPassword('');
+            setExportConfirm('');
+            setExportSuccess(false);
+          }}
+          sx={{ mr: 2, whiteSpace: 'nowrap' }}
+        >
+          {showExportForm ? 'Cancel' : 'Export Backup'}
+        </Button>
       </Box>
+
+      {/* Export Backup Form */}
+      {showExportForm && (
+        <Box sx={{ p: 2, backgroundColor: '#f5f5f5', borderBottom: 1, borderColor: 'divider' }}>
+          {exportSuccess ? (
+            <Alert severity="success">Backup downloaded successfully!</Alert>
+          ) : (
+            <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Typography variant="body2" color="text.secondary" sx={{ minWidth: '200px' }}>
+                Choose a password to encrypt your backup. This is NOT your PIN.
+              </Typography>
+              <input
+                type="password"
+                placeholder="Password (min 8 chars)"
+                value={exportPassword}
+                onChange={e => { setExportPassword(e.target.value); setExportError(null); }}
+                disabled={exporting}
+                style={{ padding: '6px 10px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '13px' }}
+              />
+              <input
+                type="password"
+                placeholder="Confirm password"
+                value={exportConfirm}
+                onChange={e => { setExportConfirm(e.target.value); setExportError(null); }}
+                disabled={exporting}
+                style={{ padding: '6px 10px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '13px' }}
+              />
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleExportBackup}
+                disabled={exporting || exportPassword.length < 8}
+              >
+                {exporting ? 'Encrypting...' : 'Download'}
+              </Button>
+              {exportError && (
+                <Typography variant="body2" color="error" sx={{ width: '100%' }}>
+                  {exportError}
+                </Typography>
+              )}
+            </Box>
+          )}
+        </Box>
+      )}
 
       <Box
         sx={{

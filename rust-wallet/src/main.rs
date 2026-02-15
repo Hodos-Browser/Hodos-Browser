@@ -101,7 +101,7 @@ async fn main() -> std::io::Result<()> {
     // Initialize database (primary storage)
     let db_path = wallet_dir.join("wallet.db");
     let (database, default_user_id, wallet_exists) = match WalletDatabase::new(db_path.clone()) {
-        Ok(db) => {
+        Ok(mut db) => {
             println!("✅ Database initialized");
             println!("   Database path: {}", db_path.display());
 
@@ -117,6 +117,21 @@ async fn main() -> std::io::Result<()> {
                 Ok(Some(wallet)) => {
                     println!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
                     println!("   Addresses: {}", wallet.current_index + 1);
+
+                    // PIN-protected vs legacy wallet startup
+                    if wallet.pin_salt.is_some() {
+                        println!("🔒 Wallet is PIN-protected — waiting for unlock via /wallet/unlock");
+                        // Mnemonic is encrypted; defer ensure_master_address_exists to unlock handler
+                    } else {
+                        // Legacy wallet: plaintext mnemonic — cache it for immediate use
+                        println!("🔓 Legacy wallet (no PIN) — auto-caching mnemonic");
+                        db.cache_mnemonic(wallet.mnemonic.clone());
+
+                        // Ensure master pubkey address exists (needs cached mnemonic)
+                        if let Err(e) = db.ensure_master_address_exists() {
+                            eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
+                        }
+                    }
                     true
                 }
                 Ok(None) => {
@@ -130,10 +145,6 @@ async fn main() -> std::io::Result<()> {
             };
 
             if wallet_exists {
-                // Ensure master pubkey address exists (for existing wallets created before this feature)
-                if let Err(e) = db.ensure_master_address_exists() {
-                    eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
-                }
 
                 // Ensure "default" basket exists (for existing wallets created before BRC-100 support)
                 if let Err(e) = db.ensure_default_basket_exists() {
@@ -437,8 +448,15 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/address/current", web::get().to(handlers::get_current_address))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
+            .route("/wallet/unlock", web::post().to(handlers::wallet_unlock))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))
             .route("/wallet/cleanup", web::post().to(handlers::wallet_cleanup))
+            .route("/wallet/export", web::post().to(handlers::wallet_export))
+            .service(
+                web::resource("/wallet/import")
+                    .app_data(web::PayloadConfig::new(100 * 1024 * 1024))  // 100MB for large backups
+                    .route(web::post().to(handlers::wallet_import))
+            )
 
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))

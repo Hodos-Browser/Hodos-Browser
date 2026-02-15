@@ -1706,42 +1706,69 @@ pub async fn decrypt(
 pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
     use crate::database::WalletRepository;
 
-    // Check database first (primary storage)
     let db = state.database.lock().unwrap();
     let wallet_repo = WalletRepository::new(db.connection());
     let exists = wallet_repo.get_primary_wallet()
         .map(|opt| opt.is_some())
         .unwrap_or(false);
+    let locked = exists && db.is_pin_protected() && !db.is_unlocked();
     drop(db);
 
-    log::info!("📋 Wallet status: exists={}", exists);
+    log::info!("📋 Wallet status: exists={}, locked={}", exists, locked);
 
     HttpResponse::Ok().json(serde_json::json!({
-        "exists": exists
+        "exists": exists,
+        "locked": locked
     }))
 }
 
 // Create a new wallet (user-initiated, Phase 0)
 //
+// Accepts optional JSON body with `pin` for mnemonic encryption.
 // Returns the mnemonic for the user to back up. If a wallet already exists,
-// returns 409 Conflict.
-pub async fn wallet_create(state: web::Data<AppState>) -> HttpResponse {
-    log::info!("🔑 /wallet/create called");
+// returns 409 Conflict. Starts Monitor after creation.
+#[derive(serde::Deserialize)]
+pub struct WalletCreateRequest {
+    pub pin: Option<String>,
+}
 
-    let db = state.database.lock().unwrap();
+pub async fn wallet_create(
+    state: web::Data<AppState>,
+    body: web::Json<WalletCreateRequest>,
+) -> HttpResponse {
+    log::info!("🔑 /wallet/create called (PIN: {})", body.pin.is_some());
 
-    // Check if wallet already exists
-    use crate::database::WalletRepository;
-    let wallet_repo = WalletRepository::new(db.connection());
-    if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
-        log::warn!("   ⚠️  Wallet already exists — rejecting create request");
-        return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet already exists"}));
+    // Validate PIN format if provided
+    if let Some(ref pin) = body.pin {
+        if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "PIN must be exactly 4 digits"}));
+        }
     }
 
-    // Create wallet using existing method
-    match db.create_wallet_with_first_address() {
+    // --- DB lock scope: check existence + create wallet ---
+    let result = {
+        let mut db = state.database.lock().unwrap();
+
+        use crate::database::WalletRepository;
+        let wallet_repo = WalletRepository::new(db.connection());
+        if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
+            log::warn!("   ⚠️  Wallet already exists — rejecting create request");
+            return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet already exists"}));
+        }
+
+        db.create_wallet_with_first_address(body.pin.as_deref())
+    }; // DB lock released here
+
+    match result {
         Ok((wallet_id, mnemonic, address)) => {
             log::info!("   ✅ Wallet created (ID: {})", wallet_id);
+
+            // Start Monitor (safe to call multiple times — has double-start guard)
+            crate::monitor::Monitor::start(state.clone());
+
+            // Seed balance cache with 0 (new wallet)
+            state.balance_cache.set(0);
+
             HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "mnemonic": mnemonic,
@@ -1754,6 +1781,81 @@ pub async fn wallet_create(state: web::Data<AppState>) -> HttpResponse {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+// Unlock a PIN-protected wallet (one-time per session)
+//
+// Decrypts the mnemonic using the provided PIN and caches it in memory.
+// After unlock: runs ensure_master_address_exists, starts Monitor, seeds balance cache.
+// Returns 401 on wrong PIN, 400 on invalid format, 409 if not PIN-protected or already unlocked.
+#[derive(serde::Deserialize)]
+pub struct WalletUnlockRequest {
+    pub pin: String,
+}
+
+pub async fn wallet_unlock(
+    state: web::Data<AppState>,
+    body: web::Json<WalletUnlockRequest>,
+) -> HttpResponse {
+    log::info!("🔓 /wallet/unlock called");
+
+    // Validate PIN format
+    if body.pin.len() != 4 || !body.pin.chars().all(|c| c.is_ascii_digit()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "PIN must be exactly 4 digits"}));
+    }
+
+    // Unlock the wallet (decrypt + cache mnemonic)
+    {
+        let mut db = state.database.lock().unwrap();
+
+        if !db.is_pin_protected() {
+            return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet is not PIN-protected"}));
+        }
+
+        if db.is_unlocked() {
+            return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet is already unlocked"}));
+        }
+
+        match db.unlock(&body.pin) {
+            Ok(()) => {
+                log::info!("   ✅ Wallet unlocked successfully");
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("Wrong PIN") || err_msg.contains("decryption failed") {
+                    log::warn!("   ❌ Invalid PIN");
+                    return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid PIN"}));
+                }
+                log::error!("   ❌ Unlock failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+            }
+        }
+
+        // Now that mnemonic is cached, ensure master address exists
+        if let Err(e) = db.ensure_master_address_exists() {
+            log::warn!("   ⚠️  Failed to ensure master address: {}", e);
+        }
+    } // DB lock released
+
+    // Start Monitor (safe — has double-start guard)
+    crate::monitor::Monitor::start(state.clone());
+
+    // Seed balance cache
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(state.current_user_id) {
+            Ok(bal) => {
+                state.balance_cache.set(bal);
+                log::info!("   ✅ Balance cache seeded: {} satoshis", bal);
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to seed balance cache: {}", e);
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({"success": true}))
 }
 
 // Wallet balance endpoint
@@ -9561,6 +9663,7 @@ pub async fn wallet_restore(
 #[derive(Deserialize)]
 pub struct RecoveryRequest {
     pub mnemonic: String,
+    pub pin: Option<String>,
     pub gap_limit: Option<u32>,
     pub start_index: Option<u32>,
     pub max_index: Option<u32>,
@@ -9576,18 +9679,19 @@ pub struct RecoveryResponse {
     pub message: String,
 }
 
-/// Recover wallet from mnemonic
+/// Recover wallet from mnemonic (Phase 1a)
 ///
 /// POST /wallet/recover
 ///
-/// **WARNING**: This will overwrite the existing wallet!
+/// Creates wallet from provided mnemonic, scans blockchain for UTXOs,
+/// persists everything, starts Monitor.
 ///
 /// Request body:
 /// {
 ///   "mnemonic": "word1 word2 ... word12",
 ///   "gap_limit": 20,
 ///   "start_index": 0,
-///   "confirm": true // Must be true to proceed
+///   "confirm": true
 /// }
 pub async fn wallet_recover(
     state: web::Data<AppState>,
@@ -9595,7 +9699,7 @@ pub async fn wallet_recover(
 ) -> HttpResponse {
     log::info!("🔍 /wallet/recover called");
 
-    // Safety check: require explicit confirmation
+    // 1. Validate confirmation
     if req.confirm != Some(true) {
         log::warn!("   ⚠️  Recovery requires explicit confirmation");
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -9604,51 +9708,182 @@ pub async fn wallet_recover(
         }));
     }
 
-    // Create recovery options
+    // 2. Validate PIN format if provided
+    if let Some(ref pin) = req.pin {
+        if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "PIN must be exactly 4 digits"
+            }));
+        }
+    }
+
+    // 3. Validate mnemonic upfront (fast fail before DB)
+    let mnemonic_trimmed = req.mnemonic.trim().to_string();
+    let word_count = mnemonic_trimmed.split_whitespace().count();
+    if word_count != 12 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": format!("Expected 12 words, got {}", word_count)
+        }));
+    }
+    if bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_trimmed).is_err() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid mnemonic — check spelling and word order"
+        }));
+    }
+
+    // 4. DB lock: check wallet doesn't exist + create wallet record
+    let (wallet_id, user_id) = {
+        let mut db = state.database.lock().unwrap();
+
+        use crate::database::WalletRepository;
+        let wallet_repo = WalletRepository::new(db.connection());
+        if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
+            log::warn!("   ⚠️  Wallet already exists — rejecting recover request");
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "success": false,
+                "error": "Wallet already exists"
+            }));
+        }
+
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_trimmed, req.pin.as_deref()) {
+            Ok((wid, uid, _addr, _pubkey)) => (wid, uid),
+            Err(e) => {
+                log::error!("   ❌ Failed to create wallet from mnemonic: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to create wallet: {}", e)
+                }));
+            }
+        }
+    }; // DB lock released
+
+    // 4. Scan blockchain with NO lock held (network calls)
     let options = crate::recovery::RecoveryOptions {
-        mnemonic: req.mnemonic.clone(),
+        mnemonic: mnemonic_trimmed,
         gap_limit: req.gap_limit.unwrap_or(20),
         start_index: req.start_index.unwrap_or(0),
         max_index: req.max_index,
     };
 
-    // Get database
-    let db = state.database.lock().unwrap();
+    let scan_result = crate::recovery::recover_wallet_from_mnemonic(options).await;
 
-    // Run recovery
-    match crate::recovery::recover_wallet_from_mnemonic(options, &db).await {
-        Ok(result) => {
-            log::info!("   ✅ Recovery complete!");
-            log::info!("   📊 Found {} addresses with {} UTXOs, total balance: {} satoshis",
-                      result.addresses_found, result.utxos_found, result.total_balance);
-
-            // TODO: Save recovered addresses and UTXOs to database
-            // For now, we just return the results
-            // In a full implementation, we would:
-            // 1. Create/update wallet with mnemonic
-            // 2. Insert recovered addresses
-            // 3. Insert recovered UTXOs
-            // 4. Update wallet index
-
-            HttpResponse::Ok().json(RecoveryResponse {
-                success: true,
-                addresses_found: result.addresses_found,
-                utxos_found: result.utxos_found,
-                total_balance: result.total_balance,
-                message: format!(
-                    "Recovery complete! Found {} addresses with {} UTXOs, total balance: {} satoshis. ",
-                    result.addresses_found, result.utxos_found, result.total_balance
-                ),
-            })
-        }
+    let result = match scan_result {
+        Ok(r) => r,
         Err(e) => {
-            log::error!("   ❌ Recovery failed: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false,
-                "error": format!("Recovery failed: {}", e)
-            }))
+            log::warn!("   ⚠️  Blockchain scan failed, but wallet was created: {}", e);
+            // Partial success: wallet exists, but no UTXOs found
+            // Start Monitor anyway — TaskSyncPending will find UTXOs later
+            crate::monitor::Monitor::start(state.clone());
+            state.balance_cache.set(0);
+            return HttpResponse::Ok().json(RecoveryResponse {
+                success: true,
+                addresses_found: 0,
+                utxos_found: 0,
+                total_balance: 0,
+                message: format!(
+                    "Wallet created but blockchain scan failed: {}. \
+                     Use Sync to find your UTXOs.",
+                    e
+                ),
+            });
+        }
+    };
+
+    log::info!("   📊 Scan found {} addresses with {} UTXOs, total balance: {} sats",
+              result.addresses_found, result.utxos_found, result.total_balance);
+
+    // 5. DB lock: insert discovered addresses + UTXOs + update wallet index
+    let mut max_index: i32 = 0;
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let address_repo = crate::database::AddressRepository::new(conn);
+        let output_repo = crate::database::OutputRepository::new(conn);
+        let wallet_repo = crate::database::WalletRepository::new(conn);
+
+        for addr in &result.addresses {
+            let addr_index = addr.index as i32;
+            if addr_index > max_index {
+                max_index = addr_index;
+            }
+
+            // Check if address already exists at this index (index 0 + master are created above)
+            if address_repo.get_by_wallet_and_index(wallet_id, addr_index).ok().flatten().is_none() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                let address_model = crate::database::Address {
+                    id: None,
+                    wallet_id,
+                    index: addr_index,
+                    address: addr.address.clone(),
+                    public_key: addr.public_key.clone(),
+                    used: addr.has_utxos,
+                    balance: addr.balance,
+                    pending_utxo_check: true,
+                    created_at: now,
+                };
+                if let Err(e) = address_repo.create(&address_model) {
+                    log::error!("   ❌ Failed to insert address idx={}: {}", addr_index, e);
+                }
+            }
+
+            // Insert UTXOs with correct derivation method
+            for utxo in &addr.utxos {
+                if let Err(e) = output_repo.upsert_received_utxo_with_derivation(
+                    user_id,
+                    &utxo.txid,
+                    utxo.vout,
+                    utxo.satoshis,
+                    &utxo.script,
+                    addr_index,
+                    &addr.derivation_method,
+                ) {
+                    log::error!("   ❌ Failed to insert UTXO {}:{}: {}",
+                              &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
+                }
+            }
+        }
+
+        // Update wallet's current_index to the highest discovered address
+        if max_index > 0 {
+            if let Err(e) = wallet_repo.update_current_index(wallet_id, max_index) {
+                log::error!("   ❌ Failed to update wallet current_index: {}", e);
+            }
+        }
+    } // DB lock released
+
+    // 6. Start Monitor
+    crate::monitor::Monitor::start(state.clone());
+
+    // 7. Seed balance cache
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(user_id) {
+            Ok(bal) => state.balance_cache.set(bal),
+            Err(_) => state.balance_cache.set(result.total_balance),
         }
     }
+
+    log::info!("   ✅ Recovery complete! {} addresses, {} UTXOs, {} sats",
+              result.addresses_found, result.utxos_found, result.total_balance);
+
+    HttpResponse::Ok().json(RecoveryResponse {
+        success: true,
+        addresses_found: result.addresses_found,
+        utxos_found: result.utxos_found,
+        total_balance: result.total_balance,
+        message: format!(
+            "Recovery complete! Found {} addresses with {} UTXOs, total balance: {} satoshis.",
+            result.addresses_found, result.utxos_found, result.total_balance
+        ),
+    })
 }
 
 // ============================================================================
@@ -10359,5 +10594,220 @@ pub async fn wallet_cleanup(state: web::Data<AppState>) -> HttpResponse {
         "validSats": valid_sats,
         "ghostsRemoved": ghosts_removed,
         "ghostSats": ghost_sats,
+    }))
+}
+
+// ============================================================================
+// Encrypted Wallet Backup — Export & Import (Phase 1b)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct WalletExportRequest {
+    pub password: String,
+}
+
+/// POST /wallet/export — encrypt all wallet entities into a .hodos-wallet file
+pub async fn wallet_export(
+    state: web::Data<AppState>,
+    body: web::Json<WalletExportRequest>,
+) -> HttpResponse {
+    log::info!("   /wallet/export called");
+
+    if body.password.len() < 8 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Password must be at least 8 characters"
+        }));
+    }
+
+    let db = state.database.lock().unwrap();
+
+    // Get cached mnemonic (fails if locked)
+    let mnemonic = match db.get_cached_mnemonic() {
+        Ok(m) => m,
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("SQLITE_AUTH") {
+                return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Wallet is locked"}));
+            }
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    // Get identity key (master public key hex)
+    let identity_key = match crate::database::helpers::get_master_public_key_from_db(&db) {
+        Ok(pubkey) => hex::encode(&pubkey),
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    // Collect all entities
+    let payload = match crate::backup::collect_payload(db.connection(), &identity_key, &mnemonic) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("   Failed to collect backup payload: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+    drop(db);
+
+    // Encrypt
+    match crate::backup::encrypt_backup(&payload, &body.password) {
+        Ok(encrypted) => {
+            log::info!("   Backup exported: {} users, {} txs, {} outputs",
+                      payload.users.len(), payload.transactions.len(), payload.outputs.len());
+            HttpResponse::Ok().json(encrypted)
+        }
+        Err(e) => {
+            log::error!("   Encryption failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e}))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WalletImportRequest {
+    pub pin: Option<String>,
+    pub password: String,
+    pub backup: crate::backup::EncryptedBackup,
+}
+
+/// POST /wallet/import — restore wallet from encrypted backup file (mnemonic included in backup)
+pub async fn wallet_import(
+    state: web::Data<AppState>,
+    body: web::Json<WalletImportRequest>,
+) -> HttpResponse {
+    log::info!("   /wallet/import called");
+
+    // 1. Validate PIN format
+    if let Some(ref pin) = body.pin {
+        if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "PIN must be exactly 4 digits"}));
+        }
+    }
+
+    // 2. Decrypt backup
+    let payload = match crate::backup::decrypt_backup(&body.backup, &body.password) {
+        Ok(p) => p,
+        Err(e) => {
+            if e.contains("Invalid password") {
+                return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid backup password"}));
+            }
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+        }
+    };
+
+    // 3. Validate mnemonic from backup
+    let mnemonic_trimmed = payload.mnemonic.trim().to_string();
+    if mnemonic_trimmed.split_whitespace().count() != 12 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Backup contains invalid mnemonic"
+        }));
+    }
+    if bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_trimmed).is_err() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Backup contains invalid mnemonic"
+        }));
+    }
+
+    // 4. Verify mnemonic matches the identity_key in the backup (integrity check)
+    let identity_key_hex = {
+        use bip39::{Mnemonic, Language};
+        use bip32::XPrv;
+        use secp256k1::{Secp256k1, SecretKey, PublicKey};
+
+        let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_trimmed).unwrap();
+        let seed = mnemonic.to_seed("");
+        let master_key = match XPrv::new(&seed) {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Key derivation failed: {}", e)
+                }));
+            }
+        };
+        let privkey = master_key.private_key().to_bytes();
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&privkey).unwrap();
+        let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+        hex::encode(pubkey.serialize())
+    };
+
+    if identity_key_hex != payload.identity_key {
+        log::warn!("   Backup integrity check failed: mnemonic does not match identity_key");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Backup file is corrupted - mnemonic does not match identity key"
+        }));
+    }
+
+    // 5. Check wallet doesn't exist + create wallet record
+    {
+        let mut db = state.database.lock().unwrap();
+
+        use crate::database::WalletRepository;
+        let wallet_repo = WalletRepository::new(db.connection());
+        if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) {
+            return HttpResponse::Conflict().json(serde_json::json!({"error": "Wallet already exists"}));
+        }
+
+        // Create wallet with mnemonic from backup (+ PIN encryption if provided)
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_trimmed, body.pin.as_deref()) {
+            Ok(_) => {}
+            Err(e) => {
+                log::error!("   Failed to create wallet from mnemonic: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to create wallet: {}", e)
+                }));
+            }
+        }
+
+        // Delete auto-created user, basket, addresses so import_to_db can insert backup's entities
+        let conn = db.connection();
+        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = (SELECT id FROM wallets LIMIT 1)", []);
+        let _ = conn.execute("DELETE FROM output_baskets", []);
+        let _ = conn.execute("DELETE FROM users", []);
+
+        // Import all backup entities
+        if let Err(e) = crate::backup::import_to_db(conn, &payload) {
+            log::error!("   Import failed: {}", e);
+            // Rollback: delete the wallet record too since import failed
+            let _ = conn.execute("DELETE FROM wallets", []);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Import failed: {}", e)
+            }));
+        }
+
+        // Update wallet's current_index from backup
+        let _ = conn.execute(
+            "UPDATE wallets SET current_index = ?1, backed_up = 1 WHERE id = ?2",
+            rusqlite::params![payload.wallet.current_index, payload.wallet.id],
+        );
+    } // DB lock released
+
+    // 6. Start Monitor
+    crate::monitor::Monitor::start(state.clone());
+
+    // 7. Seed balance cache
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.calculate_balance(state.current_user_id) {
+            Ok(bal) => state.balance_cache.set(bal),
+            Err(_) => state.balance_cache.set(0),
+        }
+    }
+
+    log::info!("   Import complete: {} users, {} txs, {} outputs, {} certs",
+              payload.users.len(), payload.transactions.len(),
+              payload.outputs.len(), payload.certificates.len());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "users": payload.users.len(),
+        "addresses": payload.addresses.len(),
+        "transactions": payload.transactions.len(),
+        "outputs": payload.outputs.len(),
+        "certificates": payload.certificates.len(),
+        "proven_txs": payload.proven_txs.len(),
     }))
 }

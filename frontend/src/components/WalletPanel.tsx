@@ -270,11 +270,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         variant="outlined"
         startIcon={<SettingsIcon />}
         onClick={handleAdvanced}
-        fullWidth
         size="small"
+        fullWidth
         sx={{
-          fontSize: '12px',
           marginTop: '8px',
+          fontSize: '12px',
           borderColor: '#2d5016',
           color: '#2d5016',
           '&:hover': {
@@ -283,7 +283,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           }
         }}
       >
-        Advanced Wallet
+        Advanced
       </Button>
     </div>
   );

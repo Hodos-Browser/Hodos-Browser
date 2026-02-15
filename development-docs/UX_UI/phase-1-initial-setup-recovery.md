@@ -328,11 +328,103 @@ We do **not** merge the two plans into one: the backup plan stays the single sou
 
 ---
 
+## Decisions (2026-02-14)
+
+> **PIN / Passphrase Timing (resolved)**
+>
+> - **No PIN during wallet creation.** PIN/passphrase is prompted only at **export time** (when user clicks "Export Wallet Backup").
+> - **At import time**, user enters the same passphrase they chose during export.
+> - This avoids adding complexity to the creation flow and means users who never export never need a PIN.
+
+> **Periodic Local Backup (resolved)**
+>
+> - **No automatic periodic local backup.** Local export is user-initiated only.
+> - Periodic backup to the same disk provides no additional safety (if disk fails, backup is lost too).
+> - On-chain backup (Phase B2) is the automatic "always available" safety net.
+> - Cloud sync (Phase B3+) is the future automatic off-device backup.
+
+> **Backup/Export Format (resolved)**
+>
+> - **Use the same JSON entity format as the BSV SDK wallet-toolbox sync protocol.**
+> - 13 entity types in dependency order: provenTx → provenTxReq → outputBasket → txLabel → outputTag → transaction → output → txLabelMap → outputTagMap → certificate → certificateField → commission
+> - Entity field names use **camelCase** to match SDK (e.g., `transactionId`, `outputId`, `basketId`).
+> - Our Rust serde structs use `#[serde(rename_all = "camelCase")]` or per-field `#[serde(rename)]`.
+> - This means local file export, cloud sync, and on-chain backup all share the same serialization code.
+> - Round-trip compatibility: we can import SDK wallet exports and they can import ours.
+
+> **MetaNet Client Export Format (research finding)**
+>
+> - MetaNet Client only exports two master private keys (primary + privileged) as plain text.
+> - This is NOT a full wallet backup — it's just the keys needed to authenticate to their cloud sync service.
+> - Full wallet recovery from MetaNet requires connecting to `storage.babbage.systems` using those keys.
+> - **Implication**: Our file backup format is much more complete (full entity export, encrypted).
+
+> **Cloud Sync Architecture (research finding, deferred to Phase B3+)**
+>
+> - BSV SDK uses a custom JSON-RPC 2.0 server with BRC-103/104 auth.
+> - Sync is chunk-based bidirectional replication (NOT automatic — triggered on demand).
+> - Reference server: `wallet-infra` repo (Express.js + StorageProvider).
+> - Running cost: ~$5-20/mo VPS for small user base.
+> - Our `getSyncChunk` / `processSyncChunk` endpoints would need ID remapping and merge logic.
+> - **Decision**: Deferred past Phase 1. Build local file backup first (same entity format), add cloud later.
+
+---
+
+## Centbee Wallet Recovery (Deferred — End-of-Sprint)
+
+### Background
+
+Centbee is a BSV wallet **closing on April 1, 2026**. Users need to recover their funds.
+This feature adds a "Recover from Centbee" option to the recovery UI.
+
+### Key Derivation Scheme
+
+Centbee uses **standard BIP39 with the user's 4-digit PIN as the BIP39 passphrase**:
+
+| Property | Value |
+|----------|-------|
+| Mnemonic | 12 words, BIP39 standard |
+| PIN usage | BIP39 passphrase: `mnemonic.to_seed(pin_string)` |
+| Receive path | `m/44'/0/0/{index}` (only 44' is hardened) |
+| Change path | `m/44'/0/1/{index}` (only 44' is hardened) |
+| Address format | P2PKH mainnet (prefix `1`) |
+| Gap limit | 20-50 (not officially documented) |
+
+**Critical**: Without the correct PIN, derivation produces completely different addresses (the PIN is cryptographically baked into the seed, not just a local unlock).
+
+### Implementation Plan
+
+1. **UI**: Add "Recover from Centbee" button in recovery flow
+2. **Inputs**: 12-word mnemonic + 4-digit PIN
+3. **Seed**: `BIP39::mnemonic_to_seed(words, pin)` — PIN as passphrase
+4. **Scan receive**: `m/44'/0/0/{i}` for i = 0..gap_limit
+5. **Scan change**: `m/44'/0/1/{i}` for i = 0..gap_limit
+6. **Note**: Path uses hardened 44' but **normal** (non-hardened) coin type 0 and account 0 — non-standard
+7. **Sweep**: Build transaction(s) spending all found UTXOs to user's Hodos BRC-42 address
+8. **Edge case**: If PIN is wrong, derivation succeeds but addresses have no funds — warn user
+
+### Sources
+
+- Recovery tutorial by "Truth Machine" (Medium): step-by-step with Ian Coleman BIP39 tool
+- BSV Hub "Mnemonic to BRC-100" tool: supports Centbee wallet type
+- BSV Wallet Derivation Paths (juniper.nz): reference document
+- ElectrumSV Issue #59: BIP44 derivation for BSV wallets
+
+### Status
+
+**Deferred to end-of-sprint.** Will implement after core recovery (1a) and file backup (1b) are complete.
+The April 1 deadline gives us ~6 weeks.
+
+---
+
 ## Implementation Notes
 
 - This interface overlaps with existing Wallet Initialization Flow documentation
 - Review existing commented-out wallet setup code in `App.tsx`
 - Consider reusing patterns from HTTP Interceptor Flow for modals
+- Existing `wallet_recover` handler (handlers.rs:9592) scans blockchain but does NOT save to DB — must be fixed
+- Existing `recovery.rs` has BIP32 + BRC-42 scanning but no DB writes — needs full implementation
+- Existing `backup.rs` only does SQLite file copy — will be replaced by `src/backup/` module
 
 ---
 

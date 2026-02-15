@@ -56,6 +56,9 @@ HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
 HWND g_cookie_panel_overlay_hwnd = nullptr;
 
+// File dialog guard — prevents overlay close when a native file dialog is open
+bool g_file_dialog_active = false;
+
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
@@ -565,7 +568,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_ACTIVATEAPP: {
             // wParam is TRUE if app is being activated, FALSE if deactivated
             if (!wParam) {
-                // App is losing focus - close wallet overlay if it's open
+                // App is losing focus
+
+                // If a native file dialog is open (e.g. from <input type="file">),
+                // skip overlay destruction — the dialog steals activation temporarily.
+                if (g_file_dialog_active) {
+                    LOG_DEBUG("📱 App losing focus but file dialog is active - keeping overlays open");
+                    break;
+                }
+
+                // Close wallet overlay if it's open
                 LOG_DEBUG("📱 App losing focus - closing wallet overlay if open");
                 if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                     LOG_INFO("💰 Closing wallet overlay due to app focus loss");
@@ -585,6 +597,12 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     extern void HideOmniboxOverlay();
                     HideOmniboxOverlay();
                     LOG_DEBUG("🔍 Dismissed omnibox overlay on focus loss");
+                }
+            } else {
+                // App regaining focus — clear file dialog guard
+                if (g_file_dialog_active) {
+                    LOG_DEBUG("📱 App regaining focus - clearing file dialog guard");
+                    g_file_dialog_active = false;
                 }
             }
             break;

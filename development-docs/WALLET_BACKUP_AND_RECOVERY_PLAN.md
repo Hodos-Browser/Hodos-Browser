@@ -857,4 +857,131 @@ There is already a `src/backup.rs` file with basic DB file copy logic. Phase B1 
 
 ---
 
+## 13. Research Findings — BSV SDK Sync Protocol (2026-02-14)
+
+### SDK Sync Architecture
+
+The BSV SDK wallet-toolbox uses a **chunk-based bidirectional replication protocol** over JSON-RPC 2.0:
+
+- **Transport**: JSON-RPC 2.0 over HTTPS, single `POST /` endpoint
+- **Authentication**: BRC-103/104 mutual authentication
+- **Hosted services**: `storage.babbage.systems`, `store.txs.systems`
+- **Trigger**: On-demand only (no automatic timer — `TaskSyncWhenIdle` is a stub)
+- **Conflict resolution**: Last-write-wins based on `updated_at` timestamps
+
+### Sync Entity Order (dependency chain)
+
+```
+1. provenTx        (immutable; never updated after creation)
+2. provenTxReq     (references provenTx)
+3. outputBasket    (must exist before outputs)
+4. txLabel         (must exist before txLabelMaps)
+5. outputTag       (must exist before outputTagMaps)
+6. transaction     (references provenTx)
+7. output          (references transaction, basket)
+8. txLabelMap      (references txLabel, transaction)
+9. outputTagMap    (references outputTag, output)
+10. certificate    (must exist before certificateFields)
+11. certificateField (references certificate)
+12. commission     (references transaction)
+```
+
+### Key Protocol Methods
+
+| Method | Purpose |
+|--------|---------|
+| `getSyncChunk` | Pull incremental data (paginated by offsets per entity type) |
+| `processSyncChunk` | Push data, merge with ID remapping |
+| `findOrInsertSyncStateAuth` | Initialize sync session |
+| `makeAvailable` | Initialize storage, get table settings |
+
+### SyncChunk Payload Shape
+
+```json
+{
+  "fromStorageIdentityKey": "02abc...",
+  "toStorageIdentityKey": "02def...",
+  "userIdentityKey": "02abc...",
+  "user": { "userId": 1, "identityKey": "02abc...", "activeStorage": "local" },
+  "provenTxs": [ ... ],
+  "transactions": [ ... ],
+  "outputs": [ ... ],
+  "certificates": [ ... ],
+  "certificateFields": [ ... ],
+  "outputBaskets": [ ... ],
+  "txLabels": [ ... ],
+  "txLabelMaps": [ ... ],
+  "outputTags": [ ... ],
+  "outputTagMaps": [ ... ],
+  "commissions": [ ... ],
+  "provenTxReqs": [ ... ]
+}
+```
+
+All entity field names use **camelCase** (e.g., `transactionId`, `basketId`, `provenTxId`).
+Binary data (rawTx, lockingScript, merklePath, inputBEEF) encoded as `number[]` arrays.
+Timestamps use `created_at` / `updated_at` (snake_case exception).
+
+### ID Remapping During Merge
+
+Each entity type maintains an `idMap: Record<number, number>` mapping foreign IDs to local IDs.
+When inserting an entity from a remote chunk:
+1. Look up all FK references in the appropriate idMap (e.g., `output.transactionId` → `syncMap.transaction.idMap[foreignTxId]`)
+2. Reset primary key to 0 (let local DB assign)
+3. Insert and save the new local ID into the idMap
+
+### Decision: Our Format Matches SDK
+
+Our `BackupPayload` serde structs will use the **exact same field names and entity shapes** as the SDK's `Table*` interfaces. This gives us:
+- Import/export compatibility with SDK wallets
+- Shared serialization code between local file backup, on-chain backup, and future cloud sync
+- The ability to act as a `StorageProvider` for SDK-compatible sync clients
+
+### Cloud Sync Cost Estimate
+
+| Scale | Infrastructure | Monthly Cost |
+|-------|---------------|-------------|
+| <100 users | Single VPS + SQLite | ~$5/mo |
+| 100-1000 users | VPS + PostgreSQL | ~$15-30/mo |
+| 1000+ users | Managed DB + load balancer | ~$50-100/mo |
+
+---
+
+## 14. External Wallet Recovery — Centbee (Deferred)
+
+### Background
+
+Centbee BSV wallet is **closing April 1, 2026**. Self-custodial wallet; users can recover funds independently with seed phrase + PIN.
+
+### Derivation Scheme
+
+| Property | Value |
+|----------|-------|
+| Mnemonic | 12 words, BIP39 standard |
+| PIN | 4-digit, used as **BIP39 passphrase** (not separate encryption) |
+| Seed | `PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" + PIN, 2048)` |
+| Receive path | `m/44'/0/0/{index}` |
+| Change path | `m/44'/0/1/{index}` |
+| Hardened levels | Only purpose `44'`; coin type `0` and account `0` are **normal** |
+| Address format | P2PKH mainnet |
+
+**Critical**: Wrong PIN → completely different addresses (PIN is baked into seed derivation).
+
+### Recovery Implementation (when scheduled)
+
+1. UI: "Recover from Centbee" button with mnemonic + PIN inputs
+2. `mnemonic.to_seed(pin_string)` — PIN as BIP39 passphrase
+3. Scan receive `m/44'/0/0/{i}` and change `m/44'/0/1/{i}` up to gap limit
+4. Sweep all found UTXOs to user's Hodos BRC-42 address
+5. Edge case: if no funds found, warn that PIN may be incorrect
+
+### Sources
+
+- Recovery tutorial by "Truth Machine" (Medium)
+- BSV Hub "Mnemonic to BRC-100" tool
+- BSV Wallet Derivation Paths reference (juniper.nz)
+- ElectrumSV Issue #59
+
+---
+
 *End of backup and recovery outline. All transition plan dependencies are resolved — implementation can begin at any time.*

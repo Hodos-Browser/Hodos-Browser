@@ -462,6 +462,69 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
+    /// Upsert a received UTXO with explicit derivation method (recovery flow)
+    ///
+    /// Unlike `upsert_received_utxo` which hard-codes BRC-42 derivation for all
+    /// index >= 0 outputs, this variant accepts the derivation method explicitly.
+    /// BIP32-recovered outputs need `derivation_prefix = "bip32"` so that
+    /// `derive_key_for_output()` routes to `derive_private_key_bip32()` when spending.
+    ///
+    /// # Arguments
+    /// * `derivation_method` - "BIP32" or "BRC-42"
+    /// * `address_index` - The HD address index (-1 for master, 0+ for derived)
+    pub fn upsert_received_utxo_with_derivation(
+        &self,
+        user_id: i64,
+        txid: &str,
+        vout: u32,
+        satoshis: i64,
+        script_hex: &str,
+        address_index: i32,
+        derivation_method: &str,
+    ) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let locking_script = hex::decode(script_hex).ok();
+
+        let (derivation_prefix, derivation_suffix): (Option<&str>, Option<String>) = if address_index == -1 {
+            (None, None) // Master pubkey — no derivation
+        } else if derivation_method == "BIP32" {
+            (Some("bip32"), Some(address_index.to_string()))
+        } else {
+            // BRC-42 (default)
+            (Some("2-receive address"), Some(address_index.to_string()))
+        };
+
+        let rows_affected = self.conn.execute(
+            "INSERT OR IGNORE INTO outputs (
+                user_id, txid, vout, satoshis, locking_script,
+                derivation_prefix, derivation_suffix,
+                spendable, change, provided_by, purpose, type, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9)",
+            rusqlite::params![
+                user_id,
+                txid,
+                vout as i32,
+                satoshis,
+                locking_script,
+                derivation_prefix,
+                derivation_suffix,
+                now,
+                now,
+            ],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ✅ Inserted recovered output {}:{} ({} sats, method={}, idx={})",
+                  &txid[..std::cmp::min(16, txid.len())], vout, satoshis, derivation_method, address_index);
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Update output txid after signing (Phase 4C dual-write)
     ///
     /// When a transaction is signed, the txid changes. This updates

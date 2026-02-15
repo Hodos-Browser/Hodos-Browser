@@ -15,7 +15,7 @@
 //!
 //! TODO (Recovery Sprint): Full recovery endpoint, database import, gap limit scanning
 
-use crate::database::{WalletDatabase, WalletRepository};
+use crate::database::WalletDatabase;
 use rusqlite::Result;
 use log::info;
 use bip39::{Mnemonic, Language};
@@ -39,14 +39,10 @@ use crate::utxo_fetcher::fetch_utxos_for_address;
 /// New outputs use BRC-42 self-derivation instead. This function is preserved
 /// for backward compatibility with pre-BRC-42 addresses.
 pub fn derive_private_key_bip32(db: &WalletDatabase, index: u32) -> Result<Vec<u8>> {
-    let wallet_repo = WalletRepository::new(db.connection());
-    let wallet = wallet_repo.get_primary_wallet()?
-        .ok_or_else(|| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
-            Some("No wallet found in database".to_string())
-        ))?;
+    // Use cached (decrypted) mnemonic — returns error if wallet is locked
+    let mnemonic_str = db.get_cached_mnemonic()?;
 
-    let mnemonic = Mnemonic::parse_in(Language::English, &wallet.mnemonic)
+    let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_str)
         .map_err(|e| rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
             Some(format!("Invalid mnemonic: {}", e))
@@ -112,6 +108,7 @@ pub struct RecoveredAddress {
     pub derivation_method: String, // "BIP32" or "BRC-42"
     pub has_utxos: bool,
     pub balance: i64,
+    pub utxos: Vec<crate::utxo_fetcher::UTXO>,
 }
 
 /// Recover wallet from mnemonic
@@ -122,16 +119,16 @@ pub struct RecoveredAddress {
 /// 3. Uses gap limit to determine when to stop
 /// 4. Returns discovered addresses and UTXOs (does not save to database yet)
 ///
+/// No DB parameter — this function only does network calls (safe across .await).
+///
 /// # Arguments
 /// * `options` - Recovery options (mnemonic, gap limit, etc.)
-/// * `_db` - Database connection (reserved for future use)
 ///
 /// # Returns
 /// * `Ok(RecoveryResult)` if recovery succeeded
 /// * `Err` if recovery failed
 pub async fn recover_wallet_from_mnemonic(
     options: RecoveryOptions,
-    _db: &WalletDatabase,
 ) -> Result<RecoveryResult> {
     info!("🔍 Starting wallet recovery from mnemonic...");
     info!("   Gap limit: {}", options.gap_limit);
@@ -210,8 +207,9 @@ pub async fn recover_wallet_from_mnemonic(
             match fetch_utxos_for_address(&addr.address, current_index as i32).await {
                 Ok(utxos) if !utxos.is_empty() => {
                     let address_balance = utxos.iter().map(|u| u.satoshis).sum();
+                    let utxo_count = utxos.len() as u32;
                     info!("   ✅ Found {} UTXO(s) on BIP32 address {} ({} satoshis)",
-                          utxos.len(), addr.address, address_balance);
+                          utxo_count, addr.address, address_balance);
                     found_utxos = true;
                     recovered_address = Some(RecoveredAddress {
                         index: current_index,
@@ -220,8 +218,9 @@ pub async fn recover_wallet_from_mnemonic(
                         derivation_method: "BIP32".to_string(),
                         has_utxos: true,
                         balance: address_balance,
+                        utxos,
                     });
-                    total_utxos += utxos.len() as u32;
+                    total_utxos += utxo_count;
                     total_balance += address_balance;
                 }
                 Ok(_) => {
@@ -237,28 +236,30 @@ pub async fn recover_wallet_from_mnemonic(
         if !found_utxos {
             if let Some(ref addr) = brc42_address {
                 match fetch_utxos_for_address(&addr.address, current_index as i32).await {
-                Ok(utxos) if !utxos.is_empty() => {
-                    let address_balance = utxos.iter().map(|u| u.satoshis).sum();
-                    info!("   ✅ Found {} UTXO(s) on BRC-42 address {} ({} satoshis)",
-                          utxos.len(), addr.address, address_balance);
-                    found_utxos = true;
-                    recovered_address = Some(RecoveredAddress {
-                        index: current_index,
-                        address: addr.address.clone(),
-                        public_key: addr.public_key.clone(),
-                        derivation_method: "BRC-42".to_string(),
-                        has_utxos: true,
-                        balance: address_balance,
-                    });
-                    total_utxos += utxos.len() as u32;
-                    total_balance += address_balance;
-                }
+                    Ok(utxos) if !utxos.is_empty() => {
+                        let address_balance = utxos.iter().map(|u| u.satoshis).sum();
+                        let utxo_count = utxos.len() as u32;
+                        info!("   ✅ Found {} UTXO(s) on BRC-42 address {} ({} satoshis)",
+                              utxo_count, addr.address, address_balance);
+                        found_utxos = true;
+                        recovered_address = Some(RecoveredAddress {
+                            index: current_index,
+                            address: addr.address.clone(),
+                            public_key: addr.public_key.clone(),
+                            derivation_method: "BRC-42".to_string(),
+                            has_utxos: true,
+                            balance: address_balance,
+                            utxos,
+                        });
+                        total_utxos += utxo_count;
+                        total_balance += address_balance;
+                    }
                     Ok(_) => {
                         // No UTXOs, continue
                     }
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to fetch UTXOs for BRC-42 address {}: {}", addr.address, e);
-                }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to fetch UTXOs for BRC-42 address {}: {}", addr.address, e);
+                    }
                 }
             }
         }

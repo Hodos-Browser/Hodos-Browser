@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
     Box,
     Toolbar,
@@ -49,6 +49,26 @@ const MainBrowserView: React.FC = () => {
 
     // Keep localStorage balance/price cache warm for wallet overlay
     useBackgroundBalancePoller();
+
+    // Keep wallet-exists cache in sync so the overlay opens instantly with correct state.
+    // Runs once on mount — if wallet.db was deleted, clears the stale cache before
+    // the user ever opens the wallet panel.
+    useEffect(() => {
+        fetch('http://localhost:3301/wallet/status')
+            .then(r => r.json())
+            .then(data => {
+                if (data.exists) {
+                    localStorage.setItem('hodos_wallet_exists', 'true');
+                } else {
+                    localStorage.removeItem('hodos_wallet_exists');
+                }
+                // Sync locked state so wallet overlay can render instantly
+                localStorage.setItem('hodos_wallet_locked', data.locked ? 'true' : 'false');
+            })
+            .catch(() => {
+                // Server not reachable — leave cache as-is (overlay will retry)
+            });
+    }, []);
 
     // Tab management
     const {

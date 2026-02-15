@@ -6,38 +6,28 @@
 use rusqlite::Result;
 use bip39::{Mnemonic, Language};
 use bip32::XPrv;
-use super::{WalletDatabase, WalletRepository};
+use super::WalletDatabase;
 
 /// Get the master private key from the database wallet
 ///
-/// This derives the master private key (m) from the mnemonic stored in the database.
-/// Used for BRC-42/BRC-84 key derivation and authentication.
+/// Uses the cached (decrypted) mnemonic. Returns SQLITE_AUTH error if locked.
 pub fn get_master_private_key_from_db(db: &WalletDatabase) -> Result<Vec<u8>> {
-    let wallet_repo = WalletRepository::new(db.connection());
-    let wallet = wallet_repo.get_primary_wallet()?
-        .ok_or_else(|| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
-            Some("No wallet found in database".to_string())
-        ))?;
+    let mnemonic_str = db.get_cached_mnemonic()?;
 
-    // Parse mnemonic
-    let mnemonic = Mnemonic::parse_in(Language::English, &wallet.mnemonic)
+    let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_str)
         .map_err(|e| rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
             Some(format!("Invalid mnemonic: {}", e))
         ))?;
 
-    // Generate seed from mnemonic (no password)
     let seed = mnemonic.to_seed("");
 
-    // Create BIP32 master key from seed
     let master_key = XPrv::new(&seed)
         .map_err(|e| rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
             Some(format!("Failed to create master key: {}", e))
         ))?;
 
-    // Extract 32-byte master private key
     Ok(master_key.private_key().to_bytes().to_vec())
 }
 

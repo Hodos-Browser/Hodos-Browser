@@ -10,6 +10,8 @@ use log::{info, warn, error};
 pub struct WalletDatabase {
     conn: Connection,
     db_path: PathBuf,
+    /// Cached plaintext mnemonic. None = locked (PIN not entered yet).
+    cached_mnemonic: Option<String>,
 }
 
 impl WalletDatabase {
@@ -73,6 +75,7 @@ impl WalletDatabase {
         let db = WalletDatabase {
             conn,
             db_path: db_path.clone(),
+            cached_mnemonic: None,
         };
 
         // Run migrations
@@ -96,13 +99,73 @@ impl WalletDatabase {
         &self.conn
     }
 
+    // ── PIN / mnemonic cache methods ──
+
+    /// Check if the wallet uses PIN protection (has an encrypted mnemonic)
+    pub fn is_pin_protected(&self) -> bool {
+        use super::WalletRepository;
+        let wallet_repo = WalletRepository::new(&self.conn);
+        wallet_repo.get_primary_wallet()
+            .ok()
+            .flatten()
+            .map(|w| w.pin_salt.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Check if the wallet is currently unlocked (mnemonic cached in memory)
+    pub fn is_unlocked(&self) -> bool {
+        self.cached_mnemonic.is_some()
+    }
+
+    /// Unlock the wallet by decrypting the mnemonic with the user's PIN.
+    /// Caches the plaintext mnemonic in memory for the session.
+    pub fn unlock(&mut self, pin: &str) -> Result<()> {
+        use super::WalletRepository;
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let wallet = wallet_repo.get_primary_wallet()?
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+                Some("No wallet found".to_string())
+            ))?;
+
+        let salt_hex = wallet.pin_salt.as_ref()
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("Wallet is not PIN-protected".to_string())
+            ))?;
+
+        let mnemonic = crate::crypto::pin::decrypt_mnemonic(&wallet.mnemonic, pin, salt_hex)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+                Some(e)
+            ))?;
+
+        self.cached_mnemonic = Some(mnemonic);
+        Ok(())
+    }
+
+    /// Cache the plaintext mnemonic directly (used after create/recover when mnemonic is known)
+    pub fn cache_mnemonic(&mut self, mnemonic: String) {
+        self.cached_mnemonic = Some(mnemonic);
+    }
+
+    /// Get the cached plaintext mnemonic. Returns error if wallet is locked.
+    pub fn get_cached_mnemonic(&self) -> Result<&str> {
+        self.cached_mnemonic.as_deref()
+            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+                Some("Wallet is locked. Enter PIN to unlock.".to_string())
+            ))
+    }
+
     /// Create a new wallet with its first address
     ///
     /// This generates a mnemonic, creates the wallet in the database,
     /// derives the first address using BRC-42, and saves it to the database.
+    /// If `pin` is provided, the mnemonic is encrypted before storage.
     ///
     /// Returns: (wallet_id, mnemonic_phrase, first_address)
-    pub fn create_wallet_with_first_address(&self) -> Result<(i64, String, String)> {
+    pub fn create_wallet_with_first_address(&mut self, pin: Option<&str>) -> Result<(i64, String, String)> {
         use super::{WalletRepository, AddressRepository, UserRepository};
         use crate::crypto::brc42::derive_child_public_key;
         use bip39::{Mnemonic, Language};
@@ -121,8 +184,9 @@ impl WalletDatabase {
         let address_repo = AddressRepository::new(&self.conn);
         let user_repo = UserRepository::new(&self.conn);
 
-        // 1. Create wallet (generates mnemonic)
-        let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet()?;
+        // 1. Create wallet (generates mnemonic, encrypts if PIN provided)
+        let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet(pin)?;
+        self.cached_mnemonic = Some(mnemonic_phrase.clone());
 
         // 2. Parse mnemonic and derive master keys (needed for user creation)
         let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_phrase)
@@ -239,6 +303,134 @@ impl WalletDatabase {
 
         info!("   ✅ Wallet created successfully with first address and master address");
         Ok((wallet_id, mnemonic_phrase, address))
+    }
+
+    /// Create a wallet from an existing mnemonic with first address (recovery flow)
+    ///
+    /// Mirrors `create_wallet_with_first_address()` but uses the provided mnemonic
+    /// instead of generating a new one. Creates: wallet -> master keys -> user ->
+    /// default basket -> first BRC-42 address (index 0) -> master pubkey address (index -1).
+    ///
+    /// Returns: (wallet_id, user_id, first_address, master_pubkey_hex)
+    pub fn create_wallet_from_existing_mnemonic(&mut self, mnemonic_phrase: &str, pin: Option<&str>) -> Result<(i64, i64, String, String)> {
+        use super::{WalletRepository, AddressRepository, UserRepository, BasketRepository};
+        use crate::crypto::brc42::derive_child_public_key;
+        use bip39::{Mnemonic, Language};
+        use bip32::XPrv;
+        use secp256k1::{Secp256k1, SecretKey, PublicKey};
+        use sha2::{Sha256, Digest};
+        use ripemd::Ripemd160;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use hex;
+        use bs58;
+
+        info!("🔑 Creating wallet from existing mnemonic with first address...");
+
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let address_repo = AddressRepository::new(&self.conn);
+        let user_repo = UserRepository::new(&self.conn);
+
+        // 1. Create wallet from existing mnemonic (validates + inserts with backed_up=true)
+        let (wallet_id, mnemonic_str) = wallet_repo.create_wallet_with_mnemonic(mnemonic_phrase, pin)?;
+        self.cached_mnemonic = Some(mnemonic_str.clone());
+
+        // 2. Parse mnemonic and derive master keys
+        let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_str)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid mnemonic: {}", e))
+            ))?;
+
+        let seed = mnemonic.to_seed("");
+        let master_key = XPrv::new(&seed)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Failed to create master key: {}", e))
+            ))?;
+
+        let master_privkey = master_key.private_key().to_bytes();
+
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&master_privkey)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Invalid private key: {}", e))
+            ))?;
+        let master_pubkey = PublicKey::from_secret_key(&secp, &secret_key).serialize().to_vec();
+
+        // 3. Create default user
+        let identity_key_hex = hex::encode(&master_pubkey);
+        let user_id = user_repo.create(&identity_key_hex)?;
+        info!("   ✅ Default user created with ID: {}", user_id);
+
+        // 4. Create "default" basket
+        let basket_repo = BasketRepository::new(&self.conn);
+        basket_repo.find_or_insert("default", user_id)?;
+        info!("   ✅ Created 'default' basket for change outputs");
+
+        // 5. Derive first BRC-42 address (index 0)
+        let invoice_number = "2-receive address-0";
+        let derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, invoice_number)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 derivation failed: {}", e))
+            ))?;
+
+        let sha_hash = Sha256::digest(&derived_pubkey);
+        let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+        let mut addr_bytes = vec![0x00];
+        addr_bytes.extend_from_slice(pubkey_hash.as_slice());
+        let checksum_full = Sha256::digest(&Sha256::digest(&addr_bytes));
+        addr_bytes.extend_from_slice(&checksum_full[0..4]);
+        let address = bs58::encode(&addr_bytes).into_string();
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: 0,
+            address: address.clone(),
+            public_key: hex::encode(&derived_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: true,
+            created_at,
+        };
+        address_repo.create(&address_model)?;
+        info!("   ✅ First BRC-42 address: {}", address);
+
+        // 6. Create master pubkey address (index -1)
+        let master_sha_hash = Sha256::digest(&master_pubkey);
+        let master_pubkey_hash = Ripemd160::digest(&master_sha_hash);
+
+        let mut master_addr_bytes = vec![0x00];
+        master_addr_bytes.extend_from_slice(master_pubkey_hash.as_slice());
+        let master_checksum_full = Sha256::digest(&Sha256::digest(&master_addr_bytes));
+        master_addr_bytes.extend_from_slice(&master_checksum_full[0..4]);
+        let master_address = bs58::encode(&master_addr_bytes).into_string();
+
+        let master_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -1,
+            address: master_address,
+            public_key: hex::encode(&master_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: true,
+            created_at,
+        };
+        address_repo.create(&master_address_model)?;
+        info!("   ✅ Master pubkey address stored with index -1");
+
+        let master_pubkey_hex = hex::encode(&master_pubkey);
+        info!("   ✅ Wallet recovery: DB records created successfully");
+        Ok((wallet_id, user_id, address, master_pubkey_hex))
     }
 
     /// Ensure the master pubkey address exists in the database
@@ -381,6 +573,13 @@ impl WalletDatabase {
             migrations::create_schema_v1(&self.conn)?;
             self.conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
             info!("   ✅ Schema V1 applied");
+        }
+
+        if current_version < 2 {
+            info!("   Applying migration V2 (PIN support)...");
+            migrations::migrate_v1_to_v2(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])?;
+            info!("   ✅ Schema V2 applied");
         }
 
         Ok(())

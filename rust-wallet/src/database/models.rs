@@ -8,7 +8,8 @@
 #[derive(Debug, Clone)]
 pub struct Wallet {
     pub id: Option<i64>,  // None for new wallets, Some(id) for existing
-    pub mnemonic: String,
+    pub mnemonic: String,  // Plaintext (legacy) or hex-encoded encrypted
+    pub pin_salt: Option<String>,  // hex(salt_16); None = no PIN (legacy), Some = PIN-protected
     pub current_index: i32,
     pub backed_up: bool,
     pub created_at: i64,  // Unix timestamp

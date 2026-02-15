@@ -21,6 +21,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS wallets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mnemonic TEXT NOT NULL,
+            pin_salt TEXT,
             current_index INTEGER NOT NULL DEFAULT 0,
             backed_up INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
@@ -457,5 +458,25 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
     ")?;
 
     info!("   ✅ Consolidated schema V1 created successfully");
+    Ok(())
+}
+
+/// Migrate V1 → V2: Add pin_salt column to wallets table
+pub fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    // V1 fresh DBs already have pin_salt — only ALTER for pre-V2 existing DBs
+    let has_pin_salt: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(wallets)")?;
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "pin_salt")
+    };
+    if has_pin_salt {
+        info!("   pin_salt column already exists — skipping ALTER");
+    } else {
+        info!("   Adding pin_salt column to wallets...");
+        conn.execute("ALTER TABLE wallets ADD COLUMN pin_salt TEXT", [])?;
+    }
+    info!("   ✅ V2 migration applied (PIN support)");
     Ok(())
 }

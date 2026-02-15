@@ -8,6 +8,7 @@
 #include "include/cef_request_handler.h"
 #include "include/cef_resource_request_handler.h"
 #include "include/cef_context_menu_handler.h"
+#include "include/cef_dialog_handler.h"
 #include "include/cef_keyboard_handler.h"
 
 // Forward declarations to avoid circular dependency
@@ -20,6 +21,7 @@ class SimpleHandler : public CefClient,
                       public CefLoadHandler,
                       public CefRequestHandler,
                       public CefContextMenuHandler,
+                      public CefDialogHandler,
                       public CefKeyboardHandler {
 public:
     explicit SimpleHandler(const std::string& role);
@@ -30,6 +32,7 @@ public:
     CefRefPtr<CefLoadHandler> GetLoadHandler() override;
     CefRefPtr<CefRequestHandler> GetRequestHandler() override;
     CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override;
+    CefRefPtr<CefDialogHandler> GetDialogHandler() override;
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
     static CefRefPtr<CefBrowser> header_browser_;
@@ -122,6 +125,16 @@ public:
                              CefRefPtr<CefContextMenuParams> params,
                              int command_id,
                              EventFlags event_flags) override;
+
+    // CefDialogHandler methods
+    bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                      FileDialogMode mode,
+                      const CefString& title,
+                      const CefString& default_file_path,
+                      const std::vector<CefString>& accept_filters,
+                      const std::vector<CefString>& accept_extensions,
+                      const std::vector<CefString>& accept_descriptions,
+                      CefRefPtr<CefFileDialogCallback> callback) override;
 
     // CefKeyboardHandler methods
     bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser,

@@ -3134,8 +3134,31 @@ CefRefPtr<CefContextMenuHandler> SimpleHandler::GetContextMenuHandler() {
     return this;
 }
 
+CefRefPtr<CefDialogHandler> SimpleHandler::GetDialogHandler() {
+    return this;
+}
+
 CefRefPtr<CefKeyboardHandler> SimpleHandler::GetKeyboardHandler() {
     return this;
+}
+
+bool SimpleHandler::OnFileDialog(CefRefPtr<CefBrowser> browser,
+                                  FileDialogMode mode,
+                                  const CefString& title,
+                                  const CefString& default_file_path,
+                                  const std::vector<CefString>& accept_filters,
+                                  const std::vector<CefString>& accept_extensions,
+                                  const std::vector<CefString>& accept_descriptions,
+                                  CefRefPtr<CefFileDialogCallback> callback) {
+    // Set the file dialog guard to prevent WM_ACTIVATEAPP from closing overlays
+    // while the native file dialog is open (it temporarily steals window activation).
+    extern bool g_file_dialog_active;
+    g_file_dialog_active = true;
+    LOG_DEBUG_BROWSER("📂 File dialog requested - setting guard flag");
+
+    // Return false to let CEF show the default native file dialog.
+    // The guard flag will be cleared when the app regains focus (WM_ACTIVATEAPP wParam=TRUE).
+    return false;
 }
 
 bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,

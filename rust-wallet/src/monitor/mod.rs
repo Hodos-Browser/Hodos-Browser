@@ -26,10 +26,14 @@ pub mod task_purge;
 pub mod task_sync_pending;
 
 use actix_web::web;
-use log::{info, error, debug};
+use log::{info, warn, error, debug};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
+
+/// Prevents duplicate Monitor loops (e.g., wallet_create + wallet_recover race)
+static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Task interval configuration (in seconds)
 struct TaskSchedule {
@@ -77,8 +81,15 @@ impl Monitor {
         }
     }
 
-    /// Start the monitor as a background tokio task
+    /// Start the monitor as a background tokio task.
+    ///
+    /// Uses an AtomicBool to prevent duplicate Monitor loops.
+    /// Safe to call multiple times — second call is a no-op.
     pub fn start(state: web::Data<AppState>) {
+        if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
+            warn!("Monitor::start() called but Monitor is already running — skipping");
+            return;
+        }
         let monitor = Self::new(state);
         tokio::spawn(async move {
             monitor.run().await;
