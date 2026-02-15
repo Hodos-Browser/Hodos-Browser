@@ -60,6 +60,33 @@ When dark mode is designed, create a dark palette variant in this document.
 
 ---
 
+## Typography
+
+### Brand Typeface
+
+| Use | Font | Weight | Notes |
+|-----|------|--------|-------|
+| **"HODOS BROWSER"** wordmark | Founders Grotesk | Semibold (600) | All-caps. Used in splash screens, about pages, and anywhere the full product name appears as a display element |
+| **"HODOS WALLET"** wordmark | Founders Grotesk | Regular (400) | All-caps. Used in wallet headers, overlay titles |
+
+**Founders Grotesk** is the brand typeface for product names only. It is NOT used for body text, labels, or UI elements.
+
+### UI Typeface
+
+| Use | Font | Weight | Notes |
+|-----|------|--------|-------|
+| **Body text** | Inter | Regular (400) | Primary UI font for all content, labels, descriptions |
+| **Headings / buttons** | Inter | Semibold (600) – Bold (700) | Section headers, button labels, emphasis |
+| **Monospace (addresses, txids)** | Courier New / monospace | Regular (400) | Code displays, blockchain data |
+
+**Inter** is the UI typeface. It ships with the frontend (`font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`). All form labels, balance text, button labels, and body copy use Inter.
+
+### Founders Grotesk Availability
+
+Founders Grotesk is a commercial typeface by Klim Type Foundry. For development and testing, the font files must be self-hosted in `frontend/public/fonts/`. It is NOT available via Google Fonts. If the font is not loaded, the browser falls back to the Inter/system font stack — the wordmark renders correctly but without the brand typeface.
+
+---
+
 ## Logos
 
 - **Location:** `frontend/public/` only.

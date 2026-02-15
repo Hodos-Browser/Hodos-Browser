@@ -1,17 +1,17 @@
-/* Wallet Panel Color Scheme - Dark Green & Gold */
+/* Wallet Panel Color Scheme - Black & Gold */
 :root {
   /* Primary Colors */
-  --wallet-dark-green: #2d5016;
-  --wallet-dark-green-hover: #3a641e;
+  --wallet-primary: #000000;
+  --wallet-primary-hover: #111111;
   --wallet-subdued-gold: #f5f1e8;
   --wallet-gold-accent: #d4c4a8;
 
   /* Supporting Colors */
-  --wallet-text-dark: #1a2e0a;
+  --wallet-text-dark: #111111;
   --wallet-text-light: #f5f1e8;
   --wallet-border-light: #e8dcc0;
-  --wallet-shadow: rgba(45, 80, 22, 0.15);
-  --wallet-shadow-hover: rgba(45, 80, 22, 0.25);
+  --wallet-shadow: rgba(0, 0, 0, 0.15);
+  --wallet-shadow-hover: rgba(0, 0, 0, 0.25);
 }
 
 /* Main Wallet Panel Layout */
@@ -25,7 +25,7 @@
 
 /* Wallet Header */
 .wallet-header {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   padding: 20px 24px;
   border-bottom: 2px solid var(--wallet-gold-accent);
@@ -80,7 +80,7 @@
 
 /* Balance Display */
 .balance-display {
-  background: linear-gradient(135deg, var(--wallet-dark-green) 0%, var(--wallet-dark-green-hover) 100%);
+  background: linear-gradient(135deg, var(--wallet-primary) 0%, var(--wallet-primary-hover) 100%);
   border: 2px solid var(--wallet-gold-accent);
   border-radius: 16px;
   padding: 24px;
@@ -233,13 +233,13 @@
 }
 
 .receive-button {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border: 2px solid var(--wallet-gold-accent);
 }
 
 .receive-button:hover:not(:disabled) {
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
   transform: translateY(-2px);
   box-shadow: 0 4px 12px var(--wallet-shadow-hover);
   border-color: var(--wallet-text-light);
@@ -248,7 +248,7 @@
 .receive-button:active:not(:disabled) {
   transform: scale(0.95) translateY(0);
   box-shadow: 0 2px 6px var(--wallet-shadow);
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
 }
 
 /* Receive button click animation - keep active state during processing */
@@ -273,14 +273,14 @@
 .send-button {
   background: var(--wallet-subdued-gold); /* Changed to lighter white */
   color: var(--wallet-text-dark);
-  border: 2px solid var(--wallet-dark-green);
+  border: 2px solid var(--wallet-primary);
 }
 
 .send-button:hover {
   background: var(--wallet-text-light);
   transform: translateY(-2px);
   box-shadow: 0 4px 12px var(--wallet-shadow-hover);
-  border-color: var(--wallet-dark-green);
+  border-color: var(--wallet-primary);
 }
 
 .send-button:active {
@@ -291,7 +291,7 @@
 
 /* Send button active state when form is open */
 .send-button.active {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border-color: var(--wallet-gold-accent);
   box-shadow: 0 0 0 3px rgba(212, 196, 168, 0.3);
@@ -363,7 +363,7 @@
 
 .form-group input:focus {
   outline: none;
-  border-color: var(--wallet-dark-green);
+  border-color: var(--wallet-primary);
   background: var(--wallet-text-light);
   box-shadow: 0 0 0 3px rgba(45, 80, 22, 0.1);
 }
@@ -376,7 +376,7 @@
 .max-button {
   padding: 14px 16px;
   background: var(--wallet-gold-accent);
-  border: 2px solid var(--wallet-dark-green);
+  border: 2px solid var(--wallet-primary);
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
@@ -400,7 +400,7 @@
 
 .submit-button {
   padding: 16px 32px;
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   border: 2px solid var(--wallet-gold-accent);
   border-radius: 10px;
   font-size: 16px;
@@ -415,7 +415,7 @@
 }
 
 .submit-button:hover:not(:disabled) {
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
   transform: translateY(-2px);
   box-shadow: 0 4px 12px var(--wallet-shadow-hover);
 }
@@ -451,12 +451,12 @@
 
 .fee-presets button:hover:not(:disabled) {
   background: var(--wallet-gold-accent);
-  border-color: var(--wallet-dark-green);
+  border-color: var(--wallet-primary);
 }
 
 .fee-presets button.active {
-  background: var(--wallet-dark-green);
-  border-color: var(--wallet-dark-green);
+  background: var(--wallet-primary);
+  border-color: var(--wallet-primary);
   color: var(--wallet-text-light);
 }
 
@@ -487,7 +487,7 @@
 
 /* Success Messages */
 .success-message {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   padding: 16px;
   border-radius: 8px;
@@ -543,7 +543,7 @@
 
 .receive-address-container p {
   margin: 0 0 20px 0;
-  color: var(--wallet-dark-green);
+  color: var(--wallet-primary);
   font-size: 14px;
   font-weight: 600;
 }
@@ -558,7 +558,7 @@
 }
 
 .address-display code {
-  color: var(--wallet-dark-green);
+  color: var(--wallet-primary);
   font-family: 'Courier New', monospace;
   font-size: 12px;
   line-height: 1.4;
@@ -566,7 +566,7 @@
 }
 
 .copy-button {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border: 2px solid var(--wallet-gold-accent);
   padding: 10px 20px;
@@ -581,7 +581,7 @@
 }
 
 .copy-button:hover {
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
   transform: translateY(-1px);
 }
 
@@ -599,7 +599,7 @@
 @keyframes copyFeedback {
   0% {
     transform: scale(1);
-    background: var(--wallet-dark-green);
+    background: var(--wallet-primary);
   }
   50% {
     transform: scale(0.9);
@@ -607,14 +607,14 @@
   }
   100% {
     transform: scale(1);
-    background: var(--wallet-dark-green);
+    background: var(--wallet-primary);
   }
 }
 
 .close-button {
   background: var(--wallet-gold-accent);
   color: var(--wallet-text-dark);
-  border: 2px solid var(--wallet-dark-green);
+  border: 2px solid var(--wallet-primary);
   padding: 10px 20px;
   border-radius: 6px;
   cursor: pointer;
@@ -659,12 +659,12 @@
 
 .copy-link-button:active {
   transform: scale(0.95);
-  background-color: var(--wallet-dark-green);
+  background-color: var(--wallet-primary);
   color: var(--wallet-text-light);
 }
 
 .address-copied-message {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   padding: 12px 16px;
   border-radius: 8px;
@@ -702,7 +702,7 @@
 .nav-grid-button {
   padding: 16px 12px;
   background: var(--wallet-subdued-gold);
-  border: 2px solid var(--wallet-dark-green);
+  border: 2px solid var(--wallet-primary);
   border-radius: 8px;
   font-size: 14px;
   font-weight: 600;
@@ -722,7 +722,7 @@
 
 .nav-grid-button:active {
   transform: scale(0.95);
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border-color: var(--wallet-gold-accent);
   box-shadow: 0 1px 4px var(--wallet-shadow);
@@ -739,7 +739,7 @@
   }
   50% {
     transform: scale(0.92);
-    background: var(--wallet-dark-green);
+    background: var(--wallet-primary);
     color: var(--wallet-text-light);
   }
   100% {
@@ -814,9 +814,13 @@
 
 .wallet-panel-light {
   background: #ffffff;
-  border: 1px solid #e0e0e0;
+  border: 1px solid #c0c0c0;
   border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  box-shadow:
+    0 0 0 1px rgba(192, 192, 192, 0.6),
+    0 0 3px 1px rgba(169, 169, 169, 0.4),
+    0 0 8px 3px rgba(120, 120, 120, 0.25),
+    0 0 16px 6px rgba(60, 60, 60, 0.15);
   padding: 16px;
   width: auto;
   min-width: 300px;
@@ -857,7 +861,7 @@
 
 /* Balance Display - Light */
 .balance-display-light {
-  background: linear-gradient(135deg, var(--wallet-dark-green) 0%, var(--wallet-dark-green-hover) 100%);
+  background: linear-gradient(135deg, var(--wallet-primary) 0%, var(--wallet-primary-hover) 100%);
   border-radius: 10px;
   padding: 14px;
   margin-bottom: 12px;
@@ -869,6 +873,39 @@
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.balance-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.balance-logo {
+  width: 28px;
+  height: 28px;
+}
+
+.balance-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+
+.brand-hodos {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--wallet-gold-accent);
+  letter-spacing: 1.5px;
+}
+
+.brand-wallet {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--wallet-gold-accent);
+  letter-spacing: 1.5px;
 }
 
 .balance-title {
@@ -902,6 +939,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding-left: 16px;
 }
 
 .balance-primary-light {
@@ -955,13 +993,13 @@
 }
 
 .receive-button-light {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border: 2px solid var(--wallet-gold-accent);
 }
 
 .receive-button-light:hover:not(:disabled) {
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
   transform: translateY(-1px);
   box-shadow: 0 2px 8px var(--wallet-shadow);
 }
@@ -981,7 +1019,7 @@
 .send-button-light {
   background: var(--wallet-subdued-gold);
   color: var(--wallet-text-dark);
-  border: 2px solid var(--wallet-dark-green);
+  border: 2px solid var(--wallet-primary);
 }
 
 .send-button-light:hover {
@@ -991,7 +1029,7 @@
 }
 
 .send-button-light.active {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border-color: var(--wallet-gold-accent);
 }
@@ -1058,7 +1096,7 @@
 .receive-address-container-light p {
   margin: 0 0 10px 0;
   font-size: 12px;
-  color: var(--wallet-dark-green);
+  color: var(--wallet-primary);
   font-weight: 500;
 }
 
@@ -1074,7 +1112,7 @@
 .address-display-light code {
   font-family: 'Courier New', monospace;
   font-size: 11px;
-  color: var(--wallet-dark-green);
+  color: var(--wallet-primary);
   line-height: 1.4;
 }
 
@@ -1095,13 +1133,13 @@
 }
 
 .copy-button-light {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border: 1px solid var(--wallet-gold-accent);
 }
 
 .copy-button-light:hover {
-  background: var(--wallet-dark-green-hover);
+  background: var(--wallet-primary-hover);
 }
 
 .copy-button-light.clicked {
@@ -1121,7 +1159,7 @@
 
 /* Success/Error Messages - Light */
 .success-message-light {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   padding: 14px;
   border-radius: 8px;
@@ -1198,7 +1236,7 @@
 }
 
 .copy-link-button-light.clicked {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
 }
 
@@ -1214,7 +1252,7 @@
 }
 
 .address-copied-message-light {
-  background: var(--wallet-dark-green);
+  background: var(--wallet-primary);
   color: var(--wallet-text-light);
   padding: 10px 14px;
   border-radius: 6px;
