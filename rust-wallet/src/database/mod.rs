@@ -26,11 +26,14 @@ pub mod tx_label_repo;
 pub mod commission_repo;
 pub mod settings_repo;
 pub mod sync_state_repo;
+pub mod domain_permission_repo;
 
 pub use connection::WalletDatabase;
 pub use models::{Wallet, User, Address, Output, ParentTransaction, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
 // Phase 5 models
 pub use models::{TxLabel, TxLabelMap, Commission, Setting, SyncState};
+// Phase 2.1 models
+pub use models::{DomainPermission, CertFieldPermission};
 pub use wallet_repo::WalletRepository;
 pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;
@@ -51,3 +54,4 @@ pub use tx_label_repo::TxLabelRepository;
 pub use commission_repo::CommissionRepository;
 pub use settings_repo::SettingsRepository;
 pub use sync_state_repo::SyncStateRepository;
+pub use domain_permission_repo::DomainPermissionRepository;

@@ -582,6 +582,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V2 applied");
         }
 
+        if current_version < 3 {
+            info!("   Applying migration V3 (domain permissions)...");
+            migrations::migrate_v2_to_v3(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (3)", [])?;
+            info!("   ✅ Schema V3 applied");
+        }
+
         Ok(())
     }
 

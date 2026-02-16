@@ -1,11 +1,11 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useTransaction } from '../hooks/useTransaction';
-import { getCachedPrice } from '../services/balanceCache';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
 
 interface TransactionFormProps {
   onTransactionCreated: (result: TransactionResponse) => void;
   balance: number;
+  bsvPrice: number;
   isLoading?: boolean;
   error?: string | null;
 }
@@ -15,11 +15,11 @@ type AmountInputMode = 'bsv' | 'usd';
 export const TransactionForm: React.FC<TransactionFormProps> = ({
   onTransactionCreated,
   balance,
+  bsvPrice,
   isLoading = false,
   error
 }) => {
   const { sendTransaction } = useTransaction();
-  // Private key is handled by the Go daemon using the identity file
   // Note: feeRate is hardcoded to '5' (medium) for simplicity in the light wallet
   const [formData, setFormData] = useState<TransactionData>({
     recipient: '',
@@ -30,59 +30,8 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   const [errors, setErrors] = useState<Partial<TransactionData>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // USD conversion state — seed price from localStorage cache if available
+  // USD conversion state — price comes from parent via props (backend-sourced)
   const [amountInputMode, setAmountInputMode] = useState<AmountInputMode>('bsv');
-  const [bsvPrice, setBsvPrice] = useState<number>(() => getCachedPrice()?.price ?? 0);
-  const [isFetchingPrice, setIsFetchingPrice] = useState(false);
-
-  // Fetch BSV price when switching to USD mode
-  const fetchBsvPrice = useCallback(async (): Promise<number> => {
-    if (bsvPrice > 0) {
-      return bsvPrice; // Use cached price if available
-    }
-
-    setIsFetchingPrice(true);
-    try {
-      console.log('🔍 Fetching BSV price for USD conversion...');
-      const response = await fetch('https://min-api.cryptocompare.com/data/price?fsym=BSV&tsyms=USD', {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        mode: 'cors'
-      });
-
-      if (!response.ok) {
-        throw new Error(`Price API failed with status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const price = parseFloat(data.USD);
-
-      if (!price || price <= 0) {
-        throw new Error('Invalid price data received');
-      }
-
-      setBsvPrice(price);
-      console.log(`💰 BSV Price: $${price}`);
-      return price;
-    } catch (err) {
-      console.error('❌ Failed to fetch BSV price:', err);
-      throw err;
-    } finally {
-      setIsFetchingPrice(false);
-    }
-  }, [bsvPrice]);
-
-  // Fetch price when switching to USD mode
-  useEffect(() => {
-    if (amountInputMode === 'usd' && bsvPrice === 0) {
-      fetchBsvPrice().catch(err => {
-        console.error('Failed to fetch price:', err);
-      });
-    }
-  }, [amountInputMode, bsvPrice, fetchBsvPrice]);
 
   // Convert USD to satoshis
   const convertUsdToSatoshis = useCallback((usdAmount: number, price: number): number => {
@@ -165,18 +114,8 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     }
   }, [errors]);
 
-  const handleAmountModeToggle = useCallback(async () => {
+  const handleAmountModeToggle = useCallback(() => {
     const newMode = amountInputMode === 'bsv' ? 'usd' : 'bsv';
-
-    // If switching to USD, fetch price if needed
-    if (newMode === 'usd' && bsvPrice === 0) {
-      try {
-        await fetchBsvPrice();
-      } catch (err) {
-        console.error('Failed to fetch price:', err);
-        // Still allow switching, but validation will fail
-      }
-    }
 
     // Convert current amount when switching modes
     if (formData.amount) {
@@ -196,7 +135,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     }
 
     setAmountInputMode(newMode);
-  }, [amountInputMode, bsvPrice, formData.amount, fetchBsvPrice, convertSatoshisToUsd, convertUsdToSatoshis]);
+  }, [amountInputMode, bsvPrice, formData.amount, convertSatoshisToUsd, convertUsdToSatoshis]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -316,10 +255,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
               type="button"
               className={`amount-mode-toggle ${amountInputMode === 'usd' ? 'usd-active' : ''}`}
               onClick={handleAmountModeToggle}
-              disabled={isSubmitting || isLoading || isFetchingPrice}
+              disabled={isSubmitting || isLoading}
               title={`Switch to ${amountInputMode === 'bsv' ? 'USD' : 'BSV'} input`}
             >
-              {isFetchingPrice ? '⏳' : amountInputMode === 'bsv' ? '💵 USD' : '₿ BSV'}
+              {amountInputMode === 'bsv' ? '💵 USD' : '₿ BSV'}
             </button>
           </div>
           <div className="amount-input-container">

@@ -9,7 +9,7 @@ import '../../components/TransactionComponents.css';
 import '../../components/WalletPanel.css';
 
 const WalletPanel = () => {
-  const { balance, usdValue, isLoading, isRefreshing, refreshBalance } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -252,6 +252,7 @@ const WalletPanel = () => {
               <TransactionForm
                 onTransactionCreated={handleSendSubmit}
                 balance={balance}
+                bsvPrice={bsvPrice}
               />
             </div>
           )}

@@ -455,6 +455,41 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         -- sync_states
         CREATE INDEX IF NOT EXISTS idx_sync_states_user_id ON sync_states(user_id);
         CREATE INDEX IF NOT EXISTS idx_sync_states_ref_num ON sync_states(ref_num);
+
+        -- =====================================================================
+        -- Domain permissions (Phase 2.1)
+        -- =====================================================================
+
+        CREATE TABLE IF NOT EXISTS domain_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            domain TEXT NOT NULL,
+            trust_level TEXT NOT NULL DEFAULT 'unknown',
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 5,
+            per_day_limit_cents INTEGER NOT NULL DEFAULT 50,
+            daily_spent_cents INTEGER NOT NULL DEFAULT 0,
+            daily_reset_at INTEGER NOT NULL DEFAULT 0,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(userId),
+            UNIQUE(user_id, domain)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_domain_permissions_domain ON domain_permissions(domain);
+        CREATE INDEX IF NOT EXISTS idx_domain_permissions_user_id ON domain_permissions(user_id);
+
+        CREATE TABLE IF NOT EXISTS cert_field_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            cert_type TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE,
+            UNIQUE(domain_permission_id, cert_type, field_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cert_field_perms_domain ON cert_field_permissions(domain_permission_id);
     ")?;
 
     info!("   ✅ Consolidated schema V1 created successfully");
@@ -478,5 +513,46 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE wallets ADD COLUMN pin_salt TEXT", [])?;
     }
     info!("   ✅ V2 migration applied (PIN support)");
+    Ok(())
+}
+
+/// Migrate V2 → V3: Add domain_permissions and cert_field_permissions tables
+pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    info!("   Adding domain_permissions and cert_field_permissions tables...");
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS domain_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            domain TEXT NOT NULL,
+            trust_level TEXT NOT NULL DEFAULT 'unknown',
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 5,
+            per_day_limit_cents INTEGER NOT NULL DEFAULT 50,
+            daily_spent_cents INTEGER NOT NULL DEFAULT 0,
+            daily_reset_at INTEGER NOT NULL DEFAULT 0,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(userId),
+            UNIQUE(user_id, domain)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_domain_permissions_domain ON domain_permissions(domain);
+        CREATE INDEX IF NOT EXISTS idx_domain_permissions_user_id ON domain_permissions(user_id);
+
+        CREATE TABLE IF NOT EXISTS cert_field_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            cert_type TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE,
+            UNIQUE(domain_permission_id, cert_type, field_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cert_field_perms_domain ON cert_field_permissions(domain_permission_id);
+    ")?;
+
+    info!("   ✅ V3 migration applied (domain permissions)");
     Ok(())
 }

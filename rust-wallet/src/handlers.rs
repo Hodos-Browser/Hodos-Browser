@@ -1860,16 +1860,21 @@ pub async fn wallet_unlock(
 
 // Wallet balance endpoint
 //
-// Pure DB/cache read — never does API calls. UTXO syncing is the
-// responsibility of POST /wallet/sync (called by frontend or manually).
+// Returns balance (from cache/DB) + BSV/USD price (from price cache).
+// The price fetch is async but cached with 5-min TTL so it's fast on most calls.
+// UTXO syncing is the responsibility of POST /wallet/sync.
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
-    // Check cache first (fast path)
+    // Fetch BSV/USD price (async, cached with 5-min TTL)
+    let bsv_usd_price = state.price_cache.get_price().await;
+
+    // Check balance cache first (fast path)
     if let Some(cached_balance) = state.balance_cache.get() {
-        log::info!("   ✅ Using cached balance: {} satoshis", cached_balance);
+        log::info!("   ✅ Using cached balance: {} satoshis, price: ${:.2}", cached_balance, bsv_usd_price);
         return HttpResponse::Ok().json(serde_json::json!({
-            "balance": cached_balance
+            "balance": cached_balance,
+            "bsvPrice": bsv_usd_price
         }));
     }
 
@@ -1895,12 +1900,14 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
             if let Some(stale) = state.balance_cache.get_or_stale() {
                 log::info!("   ⏳ DB busy, returning last known balance: {} satoshis", stale);
                 return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": stale
+                    "balance": stale,
+                    "bsvPrice": bsv_usd_price
                 }));
             } else {
                 log::warn!("   ⏳ DB busy, no cached balance available");
                 return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": 0
+                    "balance": 0,
+                    "bsvPrice": bsv_usd_price
                 }));
             }
         }
@@ -1908,10 +1915,11 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
 
     // Cache the calculated balance
     state.balance_cache.set(balance);
-    log::info!("   ✅ Balance: {} satoshis", balance);
+    log::info!("   ✅ Balance: {} satoshis, price: ${:.2}", balance, bsv_usd_price);
 
     HttpResponse::Ok().json(serde_json::json!({
-        "balance": balance
+        "balance": balance,
+        "bsvPrice": bsv_usd_price
     }))
 }
 
@@ -8141,7 +8149,7 @@ pub async fn check_domain(
     }))
 }
 
-// Add domain to whitelist
+// Add domain to whitelist (legacy — dual-writes to JSON + DB)
 pub async fn add_domain(
     state: web::Data<AppState>,
     req: web::Json<AddDomainRequest>,
@@ -8156,18 +8164,371 @@ pub async fn add_domain(
         }));
     }
 
-    match state.whitelist.add_to_whitelist(req.domain.clone(), req.is_permanent) {
-        Ok(_) => {
+    // 1. Write to JSON whitelist (C++ reads this)
+    if let Err(e) = state.whitelist.add_to_whitelist(req.domain.clone(), req.is_permanent) {
+        log::error!("   Failed to add domain to JSON whitelist: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to add domain to whitelist: {}", e)
+        }));
+    }
+
+    // 2. Also write to DB (source of truth going forward)
+    {
+        let db = state.database.lock().unwrap();
+        let repo = crate::database::DomainPermissionRepository::new(db.connection());
+        let perm = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
+        let mut perm = perm;
+        perm.trust_level = "connected".to_string();
+        if let Err(e) = repo.upsert(&perm) {
+            log::warn!("   Failed to dual-write domain permission to DB: {}", e);
+            // Non-fatal — JSON whitelist already updated
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "message": "Domain added to whitelist",
+        "domain": req.domain
+    }))
+}
+
+// ============================================================================
+// Domain Permission Endpoints (Phase 2.1)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDomainPermissionRequest {
+    pub domain: String,
+    pub trust_level: Option<String>,
+    pub per_tx_limit_cents: Option<i64>,
+    pub per_day_limit_cents: Option<i64>,
+    pub rate_limit_per_min: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveCertFieldsRequest {
+    pub domain: String,
+    pub cert_type: String,
+    pub fields: Vec<String>,
+    pub remember: bool,
+}
+
+/// GET /domain/permissions?domain=example.com
+pub async fn get_domain_permission(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "domain parameter is required"
+            }));
+        }
+    };
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(perm)) => HttpResponse::Ok().json(serde_json::json!({
+            "id": perm.id,
+            "domain": perm.domain,
+            "trustLevel": perm.trust_level,
+            "perTxLimitCents": perm.per_tx_limit_cents,
+            "perDayLimitCents": perm.per_day_limit_cents,
+            "dailySpentCents": perm.daily_spent_cents,
+            "dailyResetAt": perm.daily_reset_at,
+            "rateLimitPerMin": perm.rate_limit_per_min,
+            "createdAt": perm.created_at,
+            "updatedAt": perm.updated_at,
+        })),
+        Ok(None) => HttpResponse::Ok().json(serde_json::json!({
+            "domain": domain,
+            "trustLevel": "unknown",
+            "found": false,
+        })),
+        Err(e) => {
+            log::error!("Failed to get domain permission: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
+}
+
+/// POST /domain/permissions
+pub async fn set_domain_permission(
+    state: web::Data<AppState>,
+    req: web::Json<SetDomainPermissionRequest>,
+) -> HttpResponse {
+    log::info!("📋 POST /domain/permissions domain={}", req.domain);
+
+    if req.domain.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain is required"
+        }));
+    }
+
+    // Validate trust_level if provided
+    if let Some(ref tl) = req.trust_level {
+        if !["blocked", "unknown", "connected", "trusted"].contains(&tl.as_str()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "trust_level must be one of: blocked, unknown, connected, trusted"
+            }));
+        }
+    }
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    let mut perm = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
+    if let Some(ref tl) = req.trust_level {
+        perm.trust_level = tl.clone();
+    }
+    if let Some(v) = req.per_tx_limit_cents {
+        perm.per_tx_limit_cents = v;
+    }
+    if let Some(v) = req.per_day_limit_cents {
+        perm.per_day_limit_cents = v;
+    }
+    if let Some(v) = req.rate_limit_per_min {
+        perm.rate_limit_per_min = v;
+    }
+
+    match repo.upsert(&perm) {
+        Ok(id) => {
+            // Re-read for full response
+            match repo.get_by_domain(state.current_user_id, &req.domain) {
+                Ok(Some(saved)) => HttpResponse::Ok().json(serde_json::json!({
+                    "id": saved.id,
+                    "domain": saved.domain,
+                    "trustLevel": saved.trust_level,
+                    "perTxLimitCents": saved.per_tx_limit_cents,
+                    "perDayLimitCents": saved.per_day_limit_cents,
+                    "dailySpentCents": saved.daily_spent_cents,
+                    "rateLimitPerMin": saved.rate_limit_per_min,
+                    "createdAt": saved.created_at,
+                    "updatedAt": saved.updated_at,
+                })),
+                _ => HttpResponse::Ok().json(serde_json::json!({ "id": id })),
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to set domain permission: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
+}
+
+/// DELETE /domain/permissions?domain=example.com
+pub async fn delete_domain_permission(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "domain parameter is required"
+            }));
+        }
+    };
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(perm)) => {
+            if let Some(id) = perm.id {
+                if let Err(e) = repo.delete(id) {
+                    log::error!("Failed to delete domain permission: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Database error: {}", e)
+                    }));
+                }
+            }
             HttpResponse::Ok().json(serde_json::json!({
-                "success": true,
-                "message": "Domain added to whitelist",
-                "domain": req.domain
+                "deleted": true,
+                "domain": domain,
+            }))
+        }
+        Ok(None) => HttpResponse::Ok().json(serde_json::json!({
+            "deleted": false,
+            "domain": domain,
+            "message": "No permission record found for this domain",
+        })),
+        Err(e) => {
+            log::error!("Failed to look up domain permission: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
+}
+
+/// GET /domain/permissions/all
+pub async fn list_domain_permissions(
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    match repo.list_all(state.current_user_id) {
+        Ok(perms) => {
+            let items: Vec<serde_json::Value> = perms.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "domain": p.domain,
+                "trustLevel": p.trust_level,
+                "perTxLimitCents": p.per_tx_limit_cents,
+                "perDayLimitCents": p.per_day_limit_cents,
+                "dailySpentCents": p.daily_spent_cents,
+                "rateLimitPerMin": p.rate_limit_per_min,
+                "createdAt": p.created_at,
+                "updatedAt": p.updated_at,
+            })).collect();
+            HttpResponse::Ok().json(serde_json::json!({
+                "permissions": items,
+                "count": items.len(),
             }))
         }
         Err(e) => {
-            log::error!("   Failed to add domain to whitelist: {}", e);
+            log::error!("Failed to list domain permissions: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to add domain to whitelist: {}", e)
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
+}
+
+/// GET /domain/permissions/certificate?domain=example.com&cert_type=...
+pub async fn check_cert_permissions(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "domain parameter is required"
+            }));
+        }
+    };
+    let cert_type = match query.get("cert_type") {
+        Some(ct) => ct,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "cert_type parameter is required"
+            }));
+        }
+    };
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    // Find the domain permission first
+    let perm = match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "approvedFields": [],
+                "certType": cert_type,
+                "domain": domain,
+                "found": false,
+            }));
+        }
+        Err(e) => {
+            log::error!("Failed to get domain permission: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    match repo.get_approved_fields(perm.id.unwrap(), cert_type) {
+        Ok(fields) => HttpResponse::Ok().json(serde_json::json!({
+            "approvedFields": fields,
+            "certType": cert_type,
+            "domain": domain,
+        })),
+        Err(e) => {
+            log::error!("Failed to get cert field permissions: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    }
+}
+
+/// POST /domain/permissions/certificate
+pub async fn approve_cert_fields(
+    state: web::Data<AppState>,
+    req: web::Json<ApproveCertFieldsRequest>,
+) -> HttpResponse {
+    log::info!("📋 POST /domain/permissions/certificate domain={} cert_type={} fields={:?}",
+        req.domain, req.cert_type, req.fields);
+
+    if req.domain.is_empty() || req.cert_type.is_empty() || req.fields.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain, cert_type, and fields are required"
+        }));
+    }
+
+    if !req.remember {
+        // "this time only" — don't persist
+        return HttpResponse::Ok().json(serde_json::json!({
+            "approved": true,
+            "fieldsStored": 0,
+            "message": "Approved for this request only (not persisted)",
+        }));
+    }
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    // Ensure domain permission exists (create if needed)
+    let perm_id = {
+        let existing = repo.get_by_domain(state.current_user_id, &req.domain);
+        match existing {
+            Ok(Some(p)) => p.id.unwrap(),
+            Ok(None) => {
+                // Auto-create with "connected" trust since they're interacting
+                let mut perm = crate::database::DomainPermission::defaults(
+                    state.current_user_id, &req.domain,
+                );
+                perm.trust_level = "connected".to_string();
+                match repo.upsert(&perm) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::error!("Failed to create domain permission: {}", e);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": format!("Database error: {}", e)
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to look up domain permission: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        }
+    };
+
+    let field_refs: Vec<&str> = req.fields.iter().map(|s| s.as_str()).collect();
+    match repo.approve_fields(perm_id, &req.cert_type, &field_refs) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "approved": true,
+            "fieldsStored": req.fields.len(),
+        })),
+        Err(e) => {
+            log::error!("Failed to approve cert fields: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
             }))
         }
     }

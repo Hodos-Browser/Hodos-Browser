@@ -52,6 +52,10 @@ pub struct BackupPayload {
     pub sync_states: Vec<BackupSyncState>,
     pub parent_transactions: Vec<BackupParentTransaction>,
     pub block_headers: Vec<BackupBlockHeader>,
+    #[serde(default)]
+    pub domain_permissions: Vec<BackupDomainPermission>,
+    #[serde(default)]
+    pub cert_field_permissions: Vec<BackupCertFieldPermission>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -319,6 +323,38 @@ pub struct BackupBlockHeader {
     pub height: i64,
     pub header_hex: String,
     pub cached_at: i64,
+}
+
+// ============================================================================
+// Phase 2.1: Domain permission backup structs
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BackupDomainPermission {
+    pub domain: String,
+    #[serde(rename = "trustLevel")]
+    pub trust_level: String,
+    #[serde(rename = "perTxLimitCents")]
+    pub per_tx_limit_cents: i64,
+    #[serde(rename = "perDayLimitCents")]
+    pub per_day_limit_cents: i64,
+    #[serde(rename = "rateLimitPerMin")]
+    pub rate_limit_per_min: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BackupCertFieldPermission {
+    pub domain: String,
+    #[serde(rename = "certType")]
+    pub cert_type: String,
+    #[serde(rename = "fieldName")]
+    pub field_name: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
 }
 
 // ============================================================================
@@ -722,6 +758,40 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
+    // Domain permissions (Phase 2.1)
+    let domain_permissions = {
+        let mut stmt = conn.prepare(
+            "SELECT domain, trust_level, per_tx_limit_cents, per_day_limit_cents, \
+             rate_limit_per_min, created_at, updated_at FROM domain_permissions"
+        )?;
+        let rows = stmt.query_map([], |row| Ok(BackupDomainPermission {
+            domain: row.get(0)?,
+            trust_level: row.get(1)?,
+            per_tx_limit_cents: row.get(2)?,
+            per_day_limit_cents: row.get(3)?,
+            rate_limit_per_min: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        }))?.collect::<Result<Vec<_>>>()?;
+        rows
+    };
+
+    // Cert field permissions (Phase 2.1) — join to get domain name
+    let cert_field_permissions = {
+        let mut stmt = conn.prepare(
+            "SELECT dp.domain, cfp.cert_type, cfp.field_name, cfp.created_at \
+             FROM cert_field_permissions cfp \
+             JOIN domain_permissions dp ON dp.id = cfp.domain_permission_id"
+        )?;
+        let rows = stmt.query_map([], |row| Ok(BackupCertFieldPermission {
+            domain: row.get(0)?,
+            cert_type: row.get(1)?,
+            field_name: row.get(2)?,
+            created_at: row.get(3)?,
+        }))?.collect::<Result<Vec<_>>>()?;
+        rows
+    };
+
     let payload = BackupPayload {
         version: 1,
         identity_key: identity_key.to_string(),
@@ -745,6 +815,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         sync_states,
         parent_transactions,
         block_headers,
+        domain_permissions,
+        cert_field_permissions,
     };
 
     info!("   Collected: {} users, {} addresses, {} txs, {} outputs, {} certs",
@@ -1046,7 +1118,40 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert sync_states: {}", e))?;
     }
 
-    // 15. settings (no FKs)
+    // 15. domain_permissions (FK → users)
+    for dp in &payload.domain_permissions {
+        // Find user_id — default to 1 (single-user wallet)
+        let user_id: i64 = payload.users.first().map(|u| u.user_id).unwrap_or(1);
+        conn.execute(
+            "INSERT OR IGNORE INTO domain_permissions
+             (user_id, domain, trust_level, per_tx_limit_cents, per_day_limit_cents,
+              daily_spent_cents, daily_reset_at, rate_limit_per_min, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8)",
+            rusqlite::params![user_id, dp.domain, dp.trust_level, dp.per_tx_limit_cents,
+                             dp.per_day_limit_cents, dp.rate_limit_per_min,
+                             dp.created_at, dp.updated_at],
+        ).map_err(|e| format!("Insert domain_permissions: {}", e))?;
+    }
+
+    // 16. cert_field_permissions (FK → domain_permissions via domain lookup)
+    for cfp in &payload.cert_field_permissions {
+        // Look up domain_permission_id by domain name
+        let dp_id: Option<i64> = conn.query_row(
+            "SELECT id FROM domain_permissions WHERE domain = ?1 LIMIT 1",
+            rusqlite::params![cfp.domain],
+            |row| row.get(0),
+        ).ok();
+        if let Some(dp_id) = dp_id {
+            conn.execute(
+                "INSERT OR IGNORE INTO cert_field_permissions
+                 (domain_permission_id, cert_type, field_name, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![dp_id, cfp.cert_type, cfp.field_name, cfp.created_at],
+            ).map_err(|e| format!("Insert cert_field_permissions: {}", e))?;
+        }
+    }
+
+    // 17. settings (no FKs)
     for s in &payload.settings {
         conn.execute(
             "INSERT INTO settings (storage_identity_key, storage_name, chain, dbtype, max_output_script, created_at, updated_at) \
@@ -1056,7 +1161,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert settings: {}", e))?;
     }
 
-    // 16. addresses (FK → wallets — wallet was created by caller)
+    // 18. addresses (FK → wallets — wallet was created by caller)
     for a in &payload.addresses {
         conn.execute(
             "INSERT OR IGNORE INTO addresses (id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at) \
@@ -1066,7 +1171,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert addresses: {}", e))?;
     }
 
-    // 17. parent_transactions (no FKs)
+    // 19. parent_transactions (no FKs)
     for pt in &payload.parent_transactions {
         conn.execute(
             "INSERT INTO parent_transactions (id, utxo_id, txid, raw_hex, cached_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1074,7 +1179,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert parent_transactions: {}", e))?;
     }
 
-    // 18. block_headers (no FKs)
+    // 20. block_headers (no FKs)
     for bh in &payload.block_headers {
         conn.execute(
             "INSERT INTO block_headers (id, block_hash, height, header_hex, cached_at) VALUES (?1, ?2, ?3, ?4, ?5)",

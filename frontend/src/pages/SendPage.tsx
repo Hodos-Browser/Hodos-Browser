@@ -7,7 +7,7 @@ import { useBalance } from '../hooks/useBalance';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
 
 export const SendPage: React.FC = () => {
-  const { balance, usdValue, isLoading: balanceLoading, isRefreshing: balanceRefreshing, refreshBalance } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading: balanceLoading, isRefreshing: balanceRefreshing, refreshBalance } = useBalance();
   const {
     transactions,
     isLoading: transactionLoading,
@@ -125,6 +125,7 @@ Status: ${result.status}`);
           <TransactionForm
             onTransactionCreated={handleTransactionCreated}
             balance={balance}
+            bsvPrice={bsvPrice}
             isLoading={transactionLoading}
             error={transactionError}
           />

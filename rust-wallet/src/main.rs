@@ -21,6 +21,7 @@ mod balance_cache;  // In-memory balance cache
 mod backup;  // Database backup and restore utilities
 mod recovery;  // Wallet recovery + BIP32 legacy derivation (also in lib.rs for tests)
 mod fee_rate_cache;  // Dynamic fee rate from ARC policy
+mod price_cache;  // BSV/USD exchange rate cache
 mod monitor;  // Phase 6: Monitor pattern (background task scheduler)
 mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // Certificate management (BRC-52)
@@ -49,6 +50,7 @@ pub struct AppState {
     pub auth_sessions: Arc<AuthSessionManager>,
     pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
     pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
+    pub price_cache: Arc<price_cache::PriceCache>,  // BSV/USD exchange rate (CryptoCompare + CoinGecko)
     pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
     pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
@@ -277,6 +279,10 @@ async fn main() -> std::io::Result<()> {
     let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());
     println!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
 
+    // Initialize BSV/USD price cache (CryptoCompare + CoinGecko fallback)
+    let price_cache = Arc::new(price_cache::PriceCache::new());
+    println!("✅ Price cache initialized (BSV/USD, 5-min TTL)");
+
     // Create shutdown token for graceful shutdown (Phase 8D)
     let shutdown_token = tokio_util::sync::CancellationToken::new();
 
@@ -288,6 +294,7 @@ async fn main() -> std::io::Result<()> {
         auth_sessions,
         balance_cache,
         fee_rate_cache,
+        price_cache,
         utxo_selection_lock: Arc::new(tokio::sync::Mutex::new(())),  // Prevents concurrent UTXO selection
         create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
@@ -462,9 +469,17 @@ async fn main() -> std::io::Result<()> {
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))
 
-            // Domain whitelist endpoints
+            // Domain whitelist endpoints (legacy — C++ uses these)
             .route("/domain/whitelist/check", web::get().to(handlers::check_domain))
             .route("/domain/whitelist/add", web::post().to(handlers::add_domain))
+
+            // Domain permissions endpoints (Phase 2.1)
+            .route("/domain/permissions", web::get().to(handlers::get_domain_permission))
+            .route("/domain/permissions", web::post().to(handlers::set_domain_permission))
+            .route("/domain/permissions", web::delete().to(handlers::delete_domain_permission))
+            .route("/domain/permissions/all", web::get().to(handlers::list_domain_permissions))
+            .route("/domain/permissions/certificate", web::get().to(handlers::check_cert_permissions))
+            .route("/domain/permissions/certificate", web::post().to(handlers::approve_cert_fields))
 
             // BRC-33 Message Relay endpoints
             .route("/sendMessage", web::post().to(handlers::send_message))

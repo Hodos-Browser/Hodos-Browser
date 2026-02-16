@@ -13,7 +13,6 @@ export const calculateUsdValue = (balanceSatoshis: number, bsvPriceUsd: number):
 };
 
 const BALANCE_POLL_MS = 30_000;   // 30s — matches Rust backend cache TTL
-const PRICE_POLL_MS = 300_000;    // 5min — respects external API rate limits
 
 export const useBalance = () => {
   // Seed state from localStorage cache synchronously (instant display)
@@ -35,74 +34,28 @@ export const useBalance = () => {
   // Refs for cleanup
   const mountedRef = useRef(true);
   const balanceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const priceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchBalance = useCallback(async (): Promise<number> => {
+  // Fetch balance + price from backend (single call)
+  const fetchBalance = useCallback(async (): Promise<{ balance: number; price: number }> => {
     if (!window.hodosBrowser?.wallet) {
       throw new Error('Bitcoin Browser wallet not available');
     }
 
     const response = await window.hodosBrowser.wallet.getBalance();
     const bal = response.balance;
+    const price = response.bsvPrice ?? 0;
 
     if (mountedRef.current) {
       setBalance(bal);
+      if (price > 0) {
+        setBsvPrice(price);
+      }
     }
     setCachedBalance(bal);
-    return bal;
-  }, []);
-
-  const fetchUsdPrice = useCallback(async (): Promise<number> => {
-    // Try CryptoCompare first (primary)
-    try {
-      const response = await fetch('https://min-api.cryptocompare.com/data/price?fsym=BSV&tsyms=USD', {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        mode: 'cors'
-      });
-
-      if (!response.ok) {
-        throw new Error(`CryptoCompare API failed with status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const price = parseFloat(data.USD);
-      if (!price || price <= 0) {
-        throw new Error('Invalid price data from CryptoCompare');
-      }
-
-      if (mountedRef.current) {
-        setBsvPrice(price);
-      }
+    if (price > 0) {
       setCachedPrice(price);
-      return price;
-
-    } catch (primaryErr) {
-      console.warn('CryptoCompare failed, trying CoinGecko...', primaryErr);
-
-      // Fallback to CoinGecko
-      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin-sv&vs_currencies=usd', {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        mode: 'cors'
-      });
-
-      if (!response.ok) {
-        throw new Error(`CoinGecko API failed with status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const price = parseFloat(data['bitcoin-sv']?.usd);
-      if (!price || price <= 0) {
-        throw new Error('Invalid price data from CoinGecko');
-      }
-
-      if (mountedRef.current) {
-        setBsvPrice(price);
-      }
-      setCachedPrice(price);
-      return price;
     }
+    return { balance: bal, price };
   }, []);
 
   // Explicit refresh — for refresh button and post-send.
@@ -112,15 +65,13 @@ export const useBalance = () => {
     setError(null);
 
     try {
-      const [balResult, priceResult] = await Promise.all([
-        fetchBalance(),
-        fetchUsdPrice()
-      ]);
+      const { balance: balResult, price: priceResult } = await fetchBalance();
 
       if (mountedRef.current) {
-        const usd = calculateUsdValue(balResult, priceResult);
+        const effectivePrice = priceResult > 0 ? priceResult : bsvPrice;
+        const usd = calculateUsdValue(balResult, effectivePrice);
         setUsdValue(usd);
-        console.log(`Balance: ${balResult} sats, Price: $${priceResult}, USD: $${usd.toFixed(2)}`);
+        console.log(`Balance: ${balResult} sats, Price: $${effectivePrice}, USD: $${usd.toFixed(2)}`);
       }
     } catch (err) {
       if (mountedRef.current) {
@@ -134,54 +85,34 @@ export const useBalance = () => {
         setIsRefreshing(false);
       }
     }
-  }, [fetchBalance, fetchUsdPrice]);
+  }, [fetchBalance, bsvPrice]);
 
-  // On mount: initial refresh + start two independent pollers
+  // On mount: initial refresh + start balance poller
   useEffect(() => {
     mountedRef.current = true;
 
     // Initial refresh (cached data is already displayed, this updates silently)
     const initTimeout = setTimeout(() => refreshBalance(), 100);
 
-    // Balance poller — 30s interval
+    // Balance + price poller — 30s interval (price comes from backend with 5-min TTL)
     balanceIntervalRef.current = setInterval(async () => {
       try {
-        const bal = await fetchBalance();
+        const { balance: bal, price } = await fetchBalance();
         if (mountedRef.current) {
-          // Recalculate USD with latest cached price
-          const cached = getCachedPrice();
-          if (cached) {
-            setUsdValue(calculateUsdValue(bal, cached.price));
-          }
+          const effectivePrice = price > 0 ? price : bsvPrice;
+          setUsdValue(calculateUsdValue(bal, effectivePrice));
         }
       } catch {
         // Silent — pollers should not surface errors
       }
     }, BALANCE_POLL_MS);
 
-    // Price poller — 5min interval
-    priceIntervalRef.current = setInterval(async () => {
-      try {
-        const price = await fetchUsdPrice();
-        if (mountedRef.current) {
-          // Recalculate USD with latest cached balance
-          const cached = getCachedBalance();
-          if (cached) {
-            setUsdValue(calculateUsdValue(cached.balance, price));
-          }
-        }
-      } catch {
-        // Silent
-      }
-    }, PRICE_POLL_MS);
-
     return () => {
       mountedRef.current = false;
       clearTimeout(initTimeout);
       if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
-      if (priceIntervalRef.current) clearInterval(priceIntervalRef.current);
     };
-  }, [refreshBalance, fetchBalance, fetchUsdPrice]);
+  }, [refreshBalance, fetchBalance, bsvPrice]);
 
   return {
     balance,

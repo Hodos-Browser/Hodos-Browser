@@ -226,6 +226,61 @@ pub struct Setting {
     pub updated_at: i64,               // Unix timestamp
 }
 
+// =============================================================================
+// Phase 2.1: Domain Permissions
+// =============================================================================
+
+/// Domain permission model matching the `domain_permissions` table.
+/// Controls what a website domain is allowed to do with the wallet.
+#[derive(Debug, Clone)]
+pub struct DomainPermission {
+    pub id: Option<i64>,
+    pub user_id: i64,
+    pub domain: String,
+    pub trust_level: String,        // "blocked"|"unknown"|"connected"|"trusted"
+    pub per_tx_limit_cents: i64,    // USD cents
+    pub per_day_limit_cents: i64,
+    pub daily_spent_cents: i64,
+    pub daily_reset_at: i64,        // Unix timestamp
+    pub rate_limit_per_min: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl DomainPermission {
+    /// Create a DomainPermission with sensible defaults
+    pub fn defaults(user_id: i64, domain: &str) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        DomainPermission {
+            id: None,
+            user_id,
+            domain: domain.to_string(),
+            trust_level: "unknown".to_string(),
+            per_tx_limit_cents: 5,
+            per_day_limit_cents: 50,
+            daily_spent_cents: 0,
+            daily_reset_at: 0,
+            rate_limit_per_min: 10,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+/// Certificate field permission model matching the `cert_field_permissions` table.
+/// Tracks which certificate fields a domain has been approved to see.
+#[derive(Debug, Clone)]
+pub struct CertFieldPermission {
+    pub id: Option<i64>,
+    pub domain_permission_id: i64,
+    pub cert_type: String,          // base64 certificate type ID
+    pub field_name: String,
+    pub created_at: i64,
+}
+
 /// Sync state model matching the `sync_states` table.
 /// Tracks multi-device synchronization state per user.
 #[derive(Debug, Clone)]
