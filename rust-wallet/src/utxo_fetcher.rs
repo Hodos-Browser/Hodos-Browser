@@ -112,6 +112,37 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Resul
     Err(format!("WhatsOnChain API request failed after {} attempts", MAX_RETRIES + 1))
 }
 
+/// Check if an address has any transaction history on-chain.
+///
+/// Uses WhatsOnChain's history endpoint which returns transactions even if
+/// the address currently has zero balance. This distinguishes "used and spent"
+/// from "never used" — critical for gap limit logic during recovery.
+///
+/// API: https://api.whatsonchain.com/v1/bsv/main/address/{address}/history
+pub async fn address_has_history(address: &str) -> Result<bool, String> {
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/history", address);
+
+    let client = reqwest::Client::new();
+    let response = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => return Err(format!("History API request failed: {}", e)),
+    };
+
+    let status = response.status();
+    if status.is_success() {
+        // Response is a JSON array of tx objects; non-empty means address was used
+        let body = response.text().await.unwrap_or_default();
+        // A used address returns something like [{"tx_hash":"...","height":...}, ...]
+        // An unused address returns [] (empty array)
+        let has_history = body.trim() != "[]" && !body.trim().is_empty();
+        Ok(has_history)
+    } else if status.as_u16() == 404 {
+        Ok(false)
+    } else {
+        Err(format!("History API returned status {}", status))
+    }
+}
+
 /// Generate P2PKH locking script from a Bitcoin address
 ///
 /// Decodes the address and creates: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG

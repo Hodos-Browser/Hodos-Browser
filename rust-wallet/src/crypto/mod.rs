@@ -8,6 +8,7 @@ pub mod brc2;
 pub mod ghash;
 pub mod aesgcm_custom;
 pub mod pin;
+pub mod dpapi;
 
 #[cfg(test)]
 mod aesgcm_custom_test;

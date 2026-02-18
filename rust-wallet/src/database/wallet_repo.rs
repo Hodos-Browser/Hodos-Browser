@@ -20,6 +20,7 @@ impl<'a> WalletRepository<'a> {
 
     /// Create a new wallet with a generated mnemonic
     /// If `pin` is provided, the mnemonic is encrypted before storage.
+    /// Also encrypts with DPAPI for Windows auto-unlock (if available).
     /// Returns the wallet ID and the **plaintext** mnemonic phrase (for display to user).
     pub fn create_wallet(&self, pin: Option<&str>) -> Result<(i64, String)> {
         info!("   Creating new wallet in database...");
@@ -48,17 +49,30 @@ impl<'a> WalletRepository<'a> {
             (mnemonic_phrase.clone(), None)
         };
 
+        // Encrypt with DPAPI for auto-unlock (non-fatal if unavailable)
+        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt(mnemonic_phrase.as_bytes()) {
+            Ok(blob) => {
+                info!("   ✅ DPAPI encryption succeeded ({} bytes)", blob.len());
+                Some(blob)
+            }
+            Err(e) => {
+                info!("   ⚠️  DPAPI encryption unavailable: {} — wallet will require PIN on startup", e);
+                None
+            }
+        };
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
         self.conn.execute(
-            "INSERT INTO wallets (mnemonic, pin_salt, current_index, backed_up, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO wallets (mnemonic, pin_salt, mnemonic_dpapi, current_index, backed_up, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 stored_mnemonic,
                 pin_salt,
+                dpapi_blob,
                 0,
                 false,
                 now,
@@ -67,7 +81,7 @@ impl<'a> WalletRepository<'a> {
         )?;
 
         let wallet_id = self.conn.last_insert_rowid();
-        info!("   ✅ Wallet created with ID: {} (PIN: {})", wallet_id, pin.is_some());
+        info!("   ✅ Wallet created with ID: {} (PIN: {}, DPAPI: {})", wallet_id, pin.is_some(), dpapi_blob.is_some());
 
         Ok((wallet_id, mnemonic_phrase))
     }
@@ -75,7 +89,7 @@ impl<'a> WalletRepository<'a> {
     /// Get wallet by ID
     pub fn get_by_id(&self, wallet_id: i64) -> Result<Option<Wallet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, mnemonic, pin_salt, current_index, backed_up, created_at
+            "SELECT id, mnemonic, pin_salt, mnemonic_dpapi, current_index, backed_up, created_at
              FROM wallets
              WHERE id = ?1"
         )?;
@@ -87,9 +101,10 @@ impl<'a> WalletRepository<'a> {
                     id: Some(row.get(0)?),
                     mnemonic: row.get(1)?,
                     pin_salt: row.get(2)?,
-                    current_index: row.get(3)?,
-                    backed_up: row.get(4)?,
-                    created_at: row.get(5)?,
+                    mnemonic_dpapi: row.get(3)?,
+                    current_index: row.get(4)?,
+                    backed_up: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             },
         );
@@ -105,7 +120,7 @@ impl<'a> WalletRepository<'a> {
     /// In the future, we might support multiple wallets, but for now there's only one
     pub fn get_primary_wallet(&self) -> Result<Option<Wallet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, mnemonic, pin_salt, current_index, backed_up, created_at
+            "SELECT id, mnemonic, pin_salt, mnemonic_dpapi, current_index, backed_up, created_at
              FROM wallets
              ORDER BY id ASC
              LIMIT 1"
@@ -118,9 +133,10 @@ impl<'a> WalletRepository<'a> {
                     id: Some(row.get(0)?),
                     mnemonic: row.get(1)?,
                     pin_salt: row.get(2)?,
-                    current_index: row.get(3)?,
-                    backed_up: row.get(4)?,
-                    created_at: row.get(5)?,
+                    mnemonic_dpapi: row.get(3)?,
+                    current_index: row.get(4)?,
+                    backed_up: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             },
         );
@@ -145,6 +161,7 @@ impl<'a> WalletRepository<'a> {
     ///
     /// Validates the mnemonic, inserts with `backed_up = true` (user already has it).
     /// If `pin` is provided, the mnemonic is encrypted before storage.
+    /// Also encrypts with DPAPI for Windows auto-unlock (if available).
     /// Returns the wallet ID and the **plaintext** mnemonic phrase.
     pub fn create_wallet_with_mnemonic(&self, mnemonic_phrase: &str, pin: Option<&str>) -> Result<(i64, String)> {
         info!("   Creating wallet from existing mnemonic...");
@@ -170,17 +187,30 @@ impl<'a> WalletRepository<'a> {
             (phrase.clone(), None)
         };
 
+        // Encrypt with DPAPI for auto-unlock (non-fatal if unavailable)
+        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt(phrase.as_bytes()) {
+            Ok(blob) => {
+                info!("   ✅ DPAPI encryption succeeded ({} bytes)", blob.len());
+                Some(blob)
+            }
+            Err(e) => {
+                info!("   ⚠️  DPAPI encryption unavailable: {} — wallet will require PIN on startup", e);
+                None
+            }
+        };
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
         self.conn.execute(
-            "INSERT INTO wallets (mnemonic, pin_salt, current_index, backed_up, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO wallets (mnemonic, pin_salt, mnemonic_dpapi, current_index, backed_up, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 stored_mnemonic,
                 pin_salt,
+                dpapi_blob,
                 0,
                 true,
                 now,
@@ -189,7 +219,7 @@ impl<'a> WalletRepository<'a> {
         )?;
 
         let wallet_id = self.conn.last_insert_rowid();
-        info!("   ✅ Wallet created from mnemonic with ID: {} (PIN: {})", wallet_id, pin.is_some());
+        info!("   ✅ Wallet created from mnemonic with ID: {} (PIN: {}, DPAPI: {})", wallet_id, pin.is_some(), dpapi_blob.is_some());
 
         Ok((wallet_id, phrase))
     }

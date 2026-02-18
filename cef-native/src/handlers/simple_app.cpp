@@ -195,7 +195,7 @@ void SimpleApp::OnContextInitialized() {
 
     try {
         int initial_tab_id = TabManager::GetInstance().CreateTab(
-            "https://metanetapps.com/",
+            "https://coingeek.com/",
             g_hwnd,
             0,              // x position
             shellHeight,    // y position (below header)
@@ -772,6 +772,138 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
         std::ofstream debugLog5("debug_output.log", std::ios::app);
         debugLog5 << "❌ Failed to create BRC-100 auth overlay browser" << std::endl;
         debugLog5.close();
+    }
+}
+
+void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams) {
+    LOG_INFO_APP("🔔 Creating notification overlay (type: " + type + ", domain: " + domain + ")");
+
+    extern HWND g_notification_overlay_hwnd;
+
+    // Build URL — preload loads the actual React app (idle state) so JS bundle is warm
+    std::string url = "http://127.0.0.1:5137/brc100-auth?type=idle";
+    std::string queryString = "type=" + type + "&domain=" + domain;
+    if (!extraParams.empty()) queryString += extraParams;
+    if (type != "preload") {
+        url = "http://127.0.0.1:5137/brc100-auth?" + queryString;
+    }
+
+    // Keep-alive: if HWND and browser already exist, use JS injection (instant, no page navigation)
+    CefRefPtr<CefBrowser> existing = SimpleHandler::GetNotificationBrowser();
+    if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd) && existing) {
+        LOG_INFO_APP("🔔 Reusing existing notification overlay (keep-alive, JS injection)");
+
+        // Resize to match current main window
+        RECT mainRect;
+        GetWindowRect(g_hwnd, &mainRect);
+        int width = mainRect.right - mainRect.left;
+        int height = mainRect.bottom - mainRect.top;
+
+        SetWindowPos(g_notification_overlay_hwnd, HWND_TOPMOST,
+            mainRect.left, mainRect.top, width, height,
+            SWP_SHOWWINDOW);
+
+        if (type != "preload") {
+            // Escape single quotes in the query string for JS
+            std::string safeQuery = queryString;
+            size_t pos = 0;
+            while ((pos = safeQuery.find('\'', pos)) != std::string::npos) {
+                safeQuery.replace(pos, 1, "\\'");
+                pos += 2;
+            }
+
+            // Call window.showNotification() — instant React state update, no page load
+            std::string js = "if(window.showNotification){window.showNotification('" + safeQuery + "')}else{window.location.search='?" + safeQuery + "'}";
+            existing->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+        }
+
+        // Notify CEF of potential resize
+        existing->GetHost()->WasResized();
+
+        // Ensure mouse input enabled
+        LONG exStyle = GetWindowLong(g_notification_overlay_hwnd, GWL_EXSTYLE);
+        SetWindowLong(g_notification_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+        InvalidateRect(g_notification_overlay_hwnd, nullptr, TRUE);
+        UpdateWindow(g_notification_overlay_hwnd);
+        return;
+    }
+
+    // First time or stale HWND: clean up and create fresh
+    if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
+        CefRefPtr<CefBrowser> old_browser = SimpleHandler::GetNotificationBrowser();
+        if (old_browser) {
+            old_browser->GetHost()->CloseBrowser(false);
+        }
+        DestroyWindow(g_notification_overlay_hwnd);
+        g_notification_overlay_hwnd = nullptr;
+    }
+
+    // Full-screen overlay matching main window
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    int width = mainRect.right - mainRect.left;
+    int height = mainRect.bottom - mainRect.top;
+
+    DWORD windowStyle = WS_POPUP;
+    if (type != "preload") {
+        windowStyle |= WS_VISIBLE;
+    }
+
+    HWND notif_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFNotificationOverlayWindow",
+        L"Notification Overlay",
+        windowStyle,
+        mainRect.left, mainRect.top, width, height,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!notif_hwnd) {
+        LOG_ERROR_APP("Failed to create notification overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    g_notification_overlay_hwnd = notif_hwnd;
+
+    // Windowless CEF browser with render handler
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(notif_hwnd, "NotificationOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> notif_handler(new SimpleHandler("notification"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(notif_hwnd, width, height);
+    notif_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        notif_handler,
+        url,
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("🔔 Notification overlay browser created (first time)");
+        LONG exStyle = GetWindowLong(notif_hwnd, GWL_EXSTYLE);
+        SetWindowLong(notif_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+        if (type == "preload") {
+            // Pre-created: hide immediately, browser warms up in background
+            ShowWindow(notif_hwnd, SW_HIDE);
+            LOG_INFO_APP("🔔 Notification overlay pre-created (hidden)");
+        } else {
+            InvalidateRect(notif_hwnd, nullptr, TRUE);
+            UpdateWindow(notif_hwnd);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create notification overlay browser");
     }
 }
 #endif // _WIN32

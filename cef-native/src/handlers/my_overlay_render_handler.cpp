@@ -4,7 +4,9 @@
 #include "include/wrapper/cef_helpers.h"
 
 #ifdef _WIN32
-    #define _WIN32_WINNT 0x0601
+    #ifndef _WIN32_WINNT
+        #define _WIN32_WINNT 0x0601
+    #endif
     #include <windows.h>
     #include <dwmapi.h>
 #elif defined(__APPLE__)
@@ -122,11 +124,21 @@ MyOverlayRenderHandler::~MyOverlayRenderHandler() {
 #endif
 
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
+#ifdef _WIN32
+    // Query actual HWND dimensions for correct rendering after resize
+    if (hwnd_) {
+        RECT clientRect;
+        if (GetClientRect(hwnd_, &clientRect)) {
+            int w = clientRect.right - clientRect.left;
+            int h = clientRect.bottom - clientRect.top;
+            if (w > 0 && h > 0) {
+                rect = CefRect(0, 0, w, h);
+                return;
+            }
+        }
+    }
+#endif
     rect = CefRect(0, 0, width_, height_);
-    std::cout << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
-    debugLog.close();
 }
 
 // ============================================================================

@@ -149,6 +149,61 @@ impl WalletDatabase {
         self.cached_mnemonic = Some(mnemonic);
     }
 
+    /// Try to auto-unlock the wallet using Windows DPAPI.
+    /// Returns Ok(true) if successfully unlocked, Ok(false) if DPAPI blob not available,
+    /// Err if DPAPI decryption failed (e.g., different Windows user or DB moved to another machine).
+    pub fn try_dpapi_unlock(&mut self) -> Result<bool> {
+        use super::WalletRepository;
+
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let wallet = match wallet_repo.get_primary_wallet()? {
+            Some(w) => w,
+            None => return Ok(false),
+        };
+
+        let dpapi_blob = match wallet.mnemonic_dpapi {
+            Some(blob) if !blob.is_empty() => blob,
+            _ => return Ok(false),  // No DPAPI blob stored
+        };
+
+        match crate::crypto::dpapi::dpapi_decrypt(&dpapi_blob) {
+            Ok(plaintext_bytes) => {
+                let mnemonic = String::from_utf8(plaintext_bytes)
+                    .map_err(|e| rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                        Some(format!("Invalid UTF-8 in DPAPI-decrypted mnemonic: {}", e))
+                    ))?;
+                self.cached_mnemonic = Some(mnemonic);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+                    Some(format!("DPAPI unlock failed: {}", e))
+                ))
+            }
+        }
+    }
+
+    /// Store a DPAPI-encrypted copy of the mnemonic for an existing wallet.
+    /// Used to backfill DPAPI for wallets created before DPAPI support was added.
+    pub fn store_dpapi_blob(&self, wallet_id: i64, mnemonic: &str) -> Result<()> {
+        match crate::crypto::dpapi::dpapi_encrypt(mnemonic.as_bytes()) {
+            Ok(blob) => {
+                self.conn.execute(
+                    "UPDATE wallets SET mnemonic_dpapi = ?1 WHERE id = ?2",
+                    rusqlite::params![blob, wallet_id],
+                )?;
+                log::info!("   ✅ DPAPI blob stored for wallet {}", wallet_id);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  DPAPI encryption unavailable: {}", e);
+                Ok(()) // Non-fatal — wallet still works with PIN
+            }
+        }
+    }
+
     /// Get the cached plaintext mnemonic. Returns error if wallet is locked.
     pub fn get_cached_mnemonic(&self) -> Result<&str> {
         self.cached_mnemonic.as_deref()
@@ -587,6 +642,13 @@ impl WalletDatabase {
             migrations::migrate_v2_to_v3(&self.conn)?;
             self.conn.execute("INSERT INTO schema_version (version) VALUES (3)", [])?;
             info!("   ✅ Schema V3 applied");
+        }
+
+        if current_version < 4 {
+            info!("   Applying migration V4 (DPAPI auto-unlock)...");
+            migrations::migrate_v3_to_v4(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (4)", [])?;
+            info!("   ✅ Schema V4 applied");
         }
 
         Ok(())

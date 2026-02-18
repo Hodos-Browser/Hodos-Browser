@@ -10,6 +10,7 @@ pub struct Wallet {
     pub id: Option<i64>,  // None for new wallets, Some(id) for existing
     pub mnemonic: String,  // Plaintext (legacy) or hex-encoded encrypted
     pub pin_salt: Option<String>,  // hex(salt_16); None = no PIN (legacy), Some = PIN-protected
+    pub mnemonic_dpapi: Option<Vec<u8>>,  // DPAPI-encrypted mnemonic blob (Windows auto-unlock)
     pub current_index: i32,
     pub backed_up: bool,
     pub created_at: i64,  // Unix timestamp
@@ -232,16 +233,19 @@ pub struct Setting {
 
 /// Domain permission model matching the `domain_permissions` table.
 /// Controls what a website domain is allowed to do with the wallet.
+///
+/// Trust model (Phase 2.3):
+/// - "unknown" (default) → show domain approval notification
+/// - "approved" → check per-domain spending limits; auto-approve within limits
+/// - "blocked" → session-only (C++ memory), not persisted to DB
 #[derive(Debug, Clone)]
 pub struct DomainPermission {
     pub id: Option<i64>,
     pub user_id: i64,
     pub domain: String,
-    pub trust_level: String,        // "blocked"|"unknown"|"connected"|"trusted"
-    pub per_tx_limit_cents: i64,    // USD cents
-    pub per_day_limit_cents: i64,
-    pub daily_spent_cents: i64,
-    pub daily_reset_at: i64,        // Unix timestamp
+    pub trust_level: String,            // "unknown"|"approved"
+    pub per_tx_limit_cents: i64,        // USD cents per transaction
+    pub per_session_limit_cents: i64,   // USD cents per browser session
     pub rate_limit_per_min: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -259,10 +263,8 @@ impl DomainPermission {
             user_id,
             domain: domain.to_string(),
             trust_level: "unknown".to_string(),
-            per_tx_limit_cents: 5,
-            per_day_limit_cents: 50,
-            daily_spent_cents: 0,
-            daily_reset_at: 0,
+            per_tx_limit_cents: 10,
+            per_session_limit_cents: 300,
             rate_limit_per_min: 10,
             created_at: now,
             updated_at: now,

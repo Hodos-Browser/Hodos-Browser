@@ -22,6 +22,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mnemonic TEXT NOT NULL,
             pin_salt TEXT,
+            mnemonic_dpapi BLOB,
             current_index INTEGER NOT NULL DEFAULT 0,
             backed_up INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
@@ -457,7 +458,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sync_states_ref_num ON sync_states(ref_num);
 
         -- =====================================================================
-        -- Domain permissions (Phase 2.1)
+        -- Domain permissions (Phase 2.1, updated Phase 2.3)
         -- =====================================================================
 
         CREATE TABLE IF NOT EXISTS domain_permissions (
@@ -465,10 +466,8 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 5,
-            per_day_limit_cents INTEGER NOT NULL DEFAULT 50,
-            daily_spent_cents INTEGER NOT NULL DEFAULT 0,
-            daily_reset_at INTEGER NOT NULL DEFAULT 0,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
             rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -526,10 +525,8 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 5,
-            per_day_limit_cents INTEGER NOT NULL DEFAULT 50,
-            daily_spent_cents INTEGER NOT NULL DEFAULT 0,
-            daily_reset_at INTEGER NOT NULL DEFAULT 0,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
             rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -554,5 +551,25 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     ")?;
 
     info!("   ✅ V3 migration applied (domain permissions)");
+    Ok(())
+}
+
+/// Migrate V3 → V4: Add mnemonic_dpapi column for Windows DPAPI auto-unlock
+pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    // V1 fresh DBs already have mnemonic_dpapi — only ALTER for pre-V4 existing DBs
+    let has_dpapi: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(wallets)")?;
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "mnemonic_dpapi")
+    };
+    if has_dpapi {
+        info!("   mnemonic_dpapi column already exists — skipping ALTER");
+    } else {
+        info!("   Adding mnemonic_dpapi column to wallets...");
+        conn.execute("ALTER TABLE wallets ADD COLUMN mnemonic_dpapi BLOB", [])?;
+    }
+    info!("   ✅ V4 migration applied (DPAPI auto-unlock)");
     Ok(())
 }

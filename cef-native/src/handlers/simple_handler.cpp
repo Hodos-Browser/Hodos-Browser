@@ -121,6 +121,7 @@ CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::notification_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::omnibox_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::cookie_panel_browser_ = nullptr;
@@ -152,6 +153,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
     return brc100_auth_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetNotificationBrowser() {
+    return notification_browser_;
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
@@ -386,6 +391,18 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
+
+            // Pre-create notification overlay browser (hidden) so first notification is instant
+#ifdef _WIN32
+            CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+                extern void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams);
+                extern HINSTANCE g_hInstance;
+                extern HWND g_notification_overlay_hwnd;
+                if (!g_notification_overlay_hwnd || !IsWindow(g_notification_overlay_hwnd)) {
+                    CreateNotificationOverlay(g_hInstance, "preload", "", "");
+                }
+            }), 2000);
+#endif
         } else if (role_ == "settings") {
             // Inject the hodosBrowser API into settings browser
             LOG_DEBUG_BROWSER("🔧 SETTINGS BROWSER LOADED - Injecting hodosBrowser API");
@@ -409,6 +426,13 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 #else
             // TODO: Implement BRC-100 auth on macOS
 #endif
+        } else if (role_ == "notification") {
+            // Inject the hodosBrowser API into notification overlay browser
+            LOG_DEBUG_BROWSER("🔔 NOTIFICATION BROWSER LOADED - Injecting hodosBrowser API");
+
+            extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
+            InjectHodosBrowserAPI(browser);
+            // No delayed data send needed — notification data comes from URL query params
         } else if (ExtractTabIdFromRole(role_) != -1) {
             // Inject the hodosBrowser API into tab browsers
             LOG_DEBUG_BROWSER("🔧 TAB BROWSER LOADED - Injecting hodosBrowser API for tab " + role_);
@@ -602,6 +626,20 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
 
+    } else if (role_ == "notification") {
+        notification_browser_ = browser;
+        LOG_DEBUG_BROWSER("🔔 Notification browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        browser->GetHost()->SetFocus(true);
+
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+
     } else if (role_ == "settings_menu") {
         settings_menu_browser_ = browser;
         LOG_DEBUG_BROWSER("📋 Settings menu browser initialized.");
@@ -701,6 +739,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
         std::cout << "  → BRC100 auth browser cleanup" << std::endl;
         brc100_auth_browser_ = nullptr;
+    } else if (role_ == "notification" && browser == notification_browser_) {
+        std::cout << "  → Notification browser cleanup" << std::endl;
+        notification_browser_ = nullptr;
     } else if (role_ == "overlay" && browser == overlay_browser_) {
         std::cout << "  → Overlay browser cleanup" << std::endl;
         overlay_browser_ = nullptr;
@@ -1659,9 +1700,29 @@ bool SimpleHandler::OnProcessMessageReceived(
             target_hwnd = g_brc100_auth_overlay_hwnd;
             target_browser = GetBRC100AuthBrowser();
             LOG_DEBUG_BROWSER("✅ Found BRC-100 auth overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
+        } else if (role_ == "notification") {
+            extern HWND g_notification_overlay_hwnd;
+            target_hwnd = g_notification_overlay_hwnd;
+            target_browser = GetNotificationBrowser();
+            LOG_DEBUG_BROWSER("🔔 Found notification overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         }
 
-        if (target_hwnd && IsWindow(target_hwnd)) {
+        // Keep-alive: notification overlay hides instead of destroying
+        if (role_ == "notification") {
+            extern HWND g_notification_overlay_hwnd;
+            if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
+                ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+                // Reset React state to idle (no page navigation, keeps JS bundle warm)
+                CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+                if (notif && notif->GetMainFrame()) {
+                    notif->GetMainFrame()->ExecuteJavaScript(
+                        "window.hideNotification && window.hideNotification()", "", 0);
+                }
+            }
+            extern std::string g_pendingModalDomain;
+            g_pendingModalDomain = "";
+            LOG_DEBUG_BROWSER("🔔 Notification overlay hidden (keep-alive), cleared modal domain");
+        } else if (target_hwnd && IsWindow(target_hwnd)) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
 
             // Close the browser first
@@ -1841,12 +1902,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string method = args->GetString(1).ToString();
             std::string endpoint = args->GetString(2).ToString();
             std::string body = args->GetString(3).ToString();
+            std::string type = (args->GetSize() >= 5) ? args->GetString(4).ToString() : "domain_approval";
 
-            LOG_DEBUG_BROWSER("🔐 Auth request data - Domain: " + domain + ", Method: " + method + ", Endpoint: " + endpoint);
+            LOG_DEBUG_BROWSER("🔐 Auth request data - Domain: " + domain + ", Type: " + type + ", Method: " + method);
 
             // Store auth request data for the overlay to use
-            extern void storePendingAuthRequest(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body);
-            storePendingAuthRequest(domain, method, endpoint, body);
+            extern void storePendingAuthRequest(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body, const std::string& type);
+            storePendingAuthRequest(domain, method, endpoint, body, type);
         }
 
         LOG_DEBUG_BROWSER("🔐 Creating BRC-100 auth overlay with separate process");
@@ -1883,74 +1945,78 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "brc100_auth_response") {
         LOG_DEBUG_BROWSER("🔐 brc100_auth_response message received from role: " + role_);
 
-        // Extract response data from JSON
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        LOG_DEBUG_BROWSER("🔐 Auth response args size: " + std::to_string(args ? args->GetSize() : 0));
         if (args && args->GetSize() > 0) {
             std::string responseJson = args->GetString(0).ToString();
             LOG_DEBUG_BROWSER("🔐 Auth response JSON: " + responseJson);
 
-            // Parse JSON response
             try {
                 nlohmann::json responseData = nlohmann::json::parse(responseJson);
                 bool approved = responseData["approved"];
-                bool whitelist = responseData["whitelist"];
+                bool whitelist = responseData.value("whitelist", false);
+                std::string requestId = responseData.value("requestId", "");
 
-                LOG_DEBUG_BROWSER("🔐 Auth response - Approved: " + std::to_string(approved) + ", Whitelist: " + std::to_string(whitelist));
+                LOG_DEBUG_BROWSER("🔐 Auth response - Approved: " + std::to_string(approved) +
+                    ", Whitelist: " + std::to_string(whitelist) +
+                    ", RequestId: " + requestId);
+
+                // Look up the pending request
+                PendingAuthRequest pendingReq;
+                bool found = false;
+                if (!requestId.empty()) {
+                    found = PendingRequestManager::GetInstance().getRequest(requestId, pendingReq);
+                } else {
+                    // Legacy fallback: find by modal domain
+                    extern std::string g_pendingModalDomain;
+                    requestId = PendingRequestManager::GetInstance().getRequestIdForDomain(g_pendingModalDomain);
+                    if (!requestId.empty()) {
+                        found = PendingRequestManager::GetInstance().getRequest(requestId, pendingReq);
+                    }
+                }
 
                 if (approved) {
-                    // User approved the authentication request
-                    LOG_DEBUG_BROWSER("🔐 User approved auth request, generating authentication response");
+                    LOG_DEBUG_BROWSER("🔐 User approved auth request");
 
-                    // Get the pending auth request data from the HTTP interceptor
-                    if (g_pendingAuthRequest.isValid) {
-                        LOG_DEBUG_BROWSER("🔐 Found pending auth request, generating response for: " + g_pendingAuthRequest.domain);
+                    if (found) {
+                        LOG_DEBUG_BROWSER("🔐 Found pending auth request for: " + pendingReq.domain);
 
                         // Create HTTP request to generate authentication response
                         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-                        cefRequest->SetURL("http://localhost:3301" + g_pendingAuthRequest.endpoint);
-                        cefRequest->SetMethod(g_pendingAuthRequest.method);
+                        cefRequest->SetURL("http://localhost:3301" + pendingReq.endpoint);
+                        cefRequest->SetMethod(pendingReq.method);
                         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
-                        // Set the original request body
-                        if (!g_pendingAuthRequest.body.empty()) {
+                        if (!pendingReq.body.empty()) {
                             CefRefPtr<CefPostData> postData = CefPostData::Create();
                             CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
-                            element->SetToBytes(g_pendingAuthRequest.body.length(), g_pendingAuthRequest.body.c_str());
+                            element->SetToBytes(pendingReq.body.length(), pendingReq.body.c_str());
                             postData->AddElement(element);
                             cefRequest->SetPostData(postData);
                         }
 
-                        // Create a handler to process the authentication response
+                        // Capture requestId for the async callback
+                        std::string capturedRequestId = requestId;
+
                         class AuthResponseHandler : public CefURLRequestClient {
                         public:
-                            AuthResponseHandler(CefRefPtr<CefResourceHandler> originalHandler) : originalHandler_(originalHandler) {}
+                            AuthResponseHandler(const std::string& reqId) : requestId_(reqId) {}
 
                             void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
                                 CefURLRequest::Status status = request->GetRequestStatus();
-                                if (status == UR_SUCCESS) {
+                                if (status == UR_SUCCESS && !responseData_.empty()) {
                                     LOG_DEBUG_BROWSER("🔐 Authentication response generated successfully");
-
-                                    // Send the response back to the original HTTP request
-                                    if (!responseData_.empty()) {
-                                        LOG_DEBUG_BROWSER("🔐 Sending auth response back to original request: " + responseData_);
-
-                                        // Call the handleAuthResponse function in HttpRequestInterceptor
 #ifdef _WIN32
-                                        extern void handleAuthResponse(const std::string& responseData);
-                                        handleAuthResponse(responseData_);
+                                    extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
+                                    handleAuthResponse(requestId_, responseData_);
 #else
-                                        // TODO: macOS HTTP auth response handling
-                                        LOG_WARNING_BROWSER("Warning: handleAuthResponse not implemented on macOS");
+                                    LOG_WARNING_BROWSER("Warning: handleAuthResponse not implemented on macOS");
 #endif
-                                    }
                                 } else {
                                     LOG_DEBUG_BROWSER("🔐 Failed to generate authentication response (status: " + std::to_string(status) + ")");
                                 }
                             }
 
                             void OnDownloadData(CefRefPtr<CefURLRequest> request, const void* data, size_t data_length) override {
-                                // Store the response data
                                 responseData_.append(static_cast<const char*>(data), data_length);
                             }
 
@@ -1959,34 +2025,34 @@ bool SimpleHandler::OnProcessMessageReceived(
                             bool GetAuthCredentials(bool isProxy, const CefString& host, int port, const CefString& realm, const CefString& scheme, CefRefPtr<CefAuthCallback> callback) override { return false; }
 
                         private:
+                            std::string requestId_;
                             std::string responseData_;
-                            CefRefPtr<CefResourceHandler> originalHandler_;
                             IMPLEMENT_REFCOUNTING(AuthResponseHandler);
                             DISALLOW_COPY_AND_ASSIGN(AuthResponseHandler);
                         };
 
-                        // Make the HTTP request to generate the authentication response
                         CefRefPtr<CefURLRequest> authRequest = CefURLRequest::Create(
                             cefRequest,
-                            new AuthResponseHandler(g_pendingAuthRequest.handler),
+                            new AuthResponseHandler(capturedRequestId),
                             nullptr
                         );
 
                         LOG_DEBUG_BROWSER("🔐 Authentication request sent to wallet at localhost:3301");
-
-                        // Don't clear the pending request here - it will be cleared in handleAuthResponse
                     } else {
-                        LOG_DEBUG_BROWSER("🔐 No pending auth request found");
+                        LOG_DEBUG_BROWSER("🔐 No pending auth request found for requestId: " + requestId);
                     }
                 } else {
-                    // User rejected the authentication request
                     LOG_DEBUG_BROWSER("🔐 User rejected auth request");
 
-                    // Send error response back to the original HTTP request so it doesn't hang
-                    extern void handleAuthResponse(const std::string& responseData);
-                    handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
-
-                    // Clear the pending modal domain
+#ifdef _WIN32
+                    if (!requestId.empty()) {
+                        extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
+                        handleAuthResponse(requestId, "{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
+                    } else {
+                        extern void handleAuthResponse(const std::string& responseData);
+                        handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
+                    }
+#endif
                     g_pendingModalDomain = "";
                 }
             } catch (const std::exception& e) {
@@ -1998,36 +2064,66 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "add_domain_to_whitelist") {
-        LOG_DEBUG_BROWSER("🔐 add_domain_to_whitelist message received from role: " + role_);
+    if (message_name == "add_domain_permission") {
+        LOG_DEBUG_BROWSER("🔐 add_domain_permission message received from role: " + role_);
 
-        // Extract domain and permanent flag from JSON
+        // Extract domain from JSON
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         LOG_DEBUG_BROWSER("🔐 Args size: " + std::to_string(args ? args->GetSize() : 0));
         if (args && args->GetSize() > 0) {
-            std::string whitelistJson = args->GetString(0).ToString();
-            LOG_DEBUG_BROWSER("🔐 Whitelist JSON: " + whitelistJson);
+            std::string permJson = args->GetString(0).ToString();
+            LOG_DEBUG_BROWSER("🔐 Permission JSON: " + permJson);
 
             // Parse JSON data
             try {
-                nlohmann::json whitelistData = nlohmann::json::parse(whitelistJson);
-                std::string domain = whitelistData["domain"];
-                bool permanent = whitelistData["permanent"];
+                nlohmann::json permData = nlohmann::json::parse(permJson);
+                std::string domain = permData["domain"];
 
-                LOG_DEBUG_BROWSER("🔐 Adding domain to whitelist - Domain: " + domain + ", Permanent: " + std::to_string(permanent));
+                LOG_DEBUG_BROWSER("🔐 Setting domain permission - Domain: " + domain);
 
-                // Call the domain whitelist API
-                extern void addDomainToWhitelist(const std::string& domain, bool permanent);
-                addDomainToWhitelist(domain, permanent);
+                // Call the domain permission API
+                extern void addDomainPermission(const std::string& domain);
+                addDomainPermission(domain);
             } catch (const std::exception& e) {
-                LOG_DEBUG_BROWSER("🔐 Error parsing whitelist JSON: " + std::string(e.what()));
+                LOG_DEBUG_BROWSER("🔐 Error parsing permission JSON: " + std::string(e.what()));
             }
         } else {
-            LOG_DEBUG_BROWSER("🔐 Invalid arguments for add_domain_to_whitelist");
+            LOG_DEBUG_BROWSER("🔐 Invalid arguments for add_domain_permission");
         }
         return true;
     }
 
+    if (message_name == "add_domain_permission_advanced") {
+        LOG_DEBUG_BROWSER("🔐 add_domain_permission_advanced message received from role: " + role_);
+
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string permJson = args->GetString(0).ToString();
+            LOG_DEBUG_BROWSER("🔐 Advanced permission JSON: " + permJson);
+
+            try {
+                nlohmann::json permData = nlohmann::json::parse(permJson);
+                std::string domain = permData["domain"];
+                int64_t perTxLimitCents = permData.value("perTxLimitCents", (int64_t)10);
+                int64_t perSessionLimitCents = permData.value("perSessionLimitCents", (int64_t)300);
+                int64_t rateLimitPerMin = permData.value("rateLimitPerMin", (int64_t)10);
+
+                LOG_DEBUG_BROWSER("🔐 Setting advanced domain permission - Domain: " + domain +
+                    " tx=" + std::to_string(perTxLimitCents) +
+                    " session=" + std::to_string(perSessionLimitCents) +
+                    " rate=" + std::to_string(rateLimitPerMin));
+
+                extern void addDomainPermissionAdvanced(const std::string& domain,
+                    int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin);
+                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin);
+            } catch (const std::exception& e) {
+                LOG_DEBUG_BROWSER("🔐 Error parsing advanced permission JSON: " + std::string(e.what()));
+            }
+        } else {
+            LOG_DEBUG_BROWSER("🔐 Invalid arguments for add_domain_permission_advanced");
+        }
+        return true;
+    }
 
     if (message_name == "test_settings_message") {
         LOG_DEBUG_BROWSER("🧪 test_settings_message received from role: " + role_);

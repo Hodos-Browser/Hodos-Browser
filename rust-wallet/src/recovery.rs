@@ -274,7 +274,42 @@ pub async fn recover_wallet_from_mnemonic(
             recovered_addresses.push(addr);
             unused_count = 0; // Reset gap limit
         } else {
-            unused_count += 1;
+            // No UTXOs found — check if either address has any transaction history.
+            // An address with history but 0 balance was used and spent (e.g. change
+            // that was later spent). This means there may be more addresses at higher
+            // indices, so we must NOT count it toward the gap limit.
+            let mut has_history = false;
+            if let Some(ref addr) = bip32_address {
+                match crate::utxo_fetcher::address_has_history(&addr.address).await {
+                    Ok(true) => {
+                        info!("   📜 BIP32 address {} has tx history (spent), resetting gap counter", addr.address);
+                        has_history = true;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::warn!("   ⚠️  History check failed for {}: {}", addr.address, e);
+                    }
+                }
+            }
+            if !has_history {
+                if let Some(ref addr) = brc42_address {
+                    match crate::utxo_fetcher::address_has_history(&addr.address).await {
+                        Ok(true) => {
+                            info!("   📜 BRC-42 address {} has tx history (spent), resetting gap counter", addr.address);
+                            has_history = true;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            log::warn!("   ⚠️  History check failed for {}: {}", addr.address, e);
+                        }
+                    }
+                }
+            }
+            if has_history {
+                unused_count = 0; // Reset — this address was used, more may follow
+            } else {
+                unused_count += 1;
+            }
         }
 
         // Check gap limit

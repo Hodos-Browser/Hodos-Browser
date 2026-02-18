@@ -1711,7 +1711,7 @@ pub async fn wallet_status(state: web::Data<AppState>) -> HttpResponse {
     let exists = wallet_repo.get_primary_wallet()
         .map(|opt| opt.is_some())
         .unwrap_or(false);
-    let locked = exists && db.is_pin_protected() && !db.is_unlocked();
+    let locked = exists && !db.is_unlocked();
     drop(db);
 
     log::info!("📋 Wallet status: exists={}, locked={}", exists, locked);
@@ -1822,12 +1822,27 @@ pub async fn wallet_unlock(
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                if err_msg.contains("Wrong PIN") || err_msg.contains("decryption failed") {
+                if err_msg.contains("Wrong PIN") || err_msg.contains("Invalid PIN") || err_msg.contains("decryption failed") {
                     log::warn!("   ❌ Invalid PIN");
                     return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid PIN"}));
                 }
                 log::error!("   ❌ Unlock failed: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+            }
+        }
+
+        // Backfill DPAPI blob so future startups auto-unlock without PIN
+        {
+            use crate::database::WalletRepository;
+            let wallet_repo = WalletRepository::new(db.connection());
+            if let Ok(Some(wallet)) = wallet_repo.get_primary_wallet() {
+                if wallet.mnemonic_dpapi.is_none() {
+                    if let Ok(mnemonic) = db.get_cached_mnemonic() {
+                        let mnemonic_owned = mnemonic.to_string();
+                        let wallet_id = wallet.id.unwrap_or(1);
+                        let _ = db.store_dpapi_blob(wallet_id, &mnemonic_owned);
+                    }
+                }
             }
         }
 
@@ -8119,77 +8134,14 @@ fn extract_raw_tx_from_atomic_beef(atomic_beef_hex: &str) -> Result<String, Stri
     Ok(hex::encode(main_tx))
 }
 
-// Request structure for adding domain to whitelist
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddDomainRequest {
-    pub domain: String,
-    pub is_permanent: bool,
-}
+// ============================================================================
+// BSV Price Endpoint (Phase 2.3)
+// ============================================================================
 
-// Check if domain is whitelisted
-pub async fn check_domain(
-    state: web::Data<AppState>,
-    query: web::Query<std::collections::HashMap<String, String>>,
-) -> HttpResponse {
-    let domain = match query.get("domain") {
-        Some(d) => d,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Domain parameter is required"
-            }));
-        }
-    };
-
-    let is_whitelisted = state.whitelist.is_domain_whitelisted(domain);
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "domain": domain,
-        "whitelisted": is_whitelisted
-    }))
-}
-
-// Add domain to whitelist (legacy — dual-writes to JSON + DB)
-pub async fn add_domain(
-    state: web::Data<AppState>,
-    req: web::Json<AddDomainRequest>,
-) -> HttpResponse {
-    log::info!("📋 /domain/whitelist/add called");
-    log::info!("   Domain: {}", req.domain);
-    log::info!("   Permanent: {}", req.is_permanent);
-
-    if req.domain.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Domain is required"
-        }));
-    }
-
-    // 1. Write to JSON whitelist (C++ reads this)
-    if let Err(e) = state.whitelist.add_to_whitelist(req.domain.clone(), req.is_permanent) {
-        log::error!("   Failed to add domain to JSON whitelist: {}", e);
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to add domain to whitelist: {}", e)
-        }));
-    }
-
-    // 2. Also write to DB (source of truth going forward)
-    {
-        let db = state.database.lock().unwrap();
-        let repo = crate::database::DomainPermissionRepository::new(db.connection());
-        let perm = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
-        let mut perm = perm;
-        perm.trust_level = "connected".to_string();
-        if let Err(e) = repo.upsert(&perm) {
-            log::warn!("   Failed to dual-write domain permission to DB: {}", e);
-            // Non-fatal — JSON whitelist already updated
-        }
-    }
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "message": "Domain added to whitelist",
-        "domain": req.domain
-    }))
+/// GET /wallet/bsv-price — returns cached BSV/USD price for C++ auto-approve engine
+pub async fn get_bsv_price(state: web::Data<AppState>) -> HttpResponse {
+    let price = state.price_cache.get_price().await;
+    HttpResponse::Ok().json(serde_json::json!({ "priceUsd": price }))
 }
 
 // ============================================================================
@@ -8202,7 +8154,7 @@ pub struct SetDomainPermissionRequest {
     pub domain: String,
     pub trust_level: Option<String>,
     pub per_tx_limit_cents: Option<i64>,
-    pub per_day_limit_cents: Option<i64>,
+    pub per_session_limit_cents: Option<i64>,
     pub rate_limit_per_min: Option<i64>,
 }
 
@@ -8237,18 +8189,18 @@ pub async fn get_domain_permission(
             "domain": perm.domain,
             "trustLevel": perm.trust_level,
             "perTxLimitCents": perm.per_tx_limit_cents,
-            "perDayLimitCents": perm.per_day_limit_cents,
-            "dailySpentCents": perm.daily_spent_cents,
-            "dailyResetAt": perm.daily_reset_at,
+            "perSessionLimitCents": perm.per_session_limit_cents,
             "rateLimitPerMin": perm.rate_limit_per_min,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
-        Ok(None) => HttpResponse::Ok().json(serde_json::json!({
-            "domain": domain,
-            "trustLevel": "unknown",
-            "found": false,
-        })),
+        Ok(None) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "domain": domain,
+                "trustLevel": "unknown",
+                "found": false,
+            }))
+        }
         Err(e) => {
             log::error!("Failed to get domain permission: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -8273,9 +8225,9 @@ pub async fn set_domain_permission(
 
     // Validate trust_level if provided
     if let Some(ref tl) = req.trust_level {
-        if !["blocked", "unknown", "connected", "trusted"].contains(&tl.as_str()) {
+        if !["approved", "unknown"].contains(&tl.as_str()) {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "trust_level must be one of: blocked, unknown, connected, trusted"
+                "error": "trust_level must be one of: approved, unknown"
             }));
         }
     }
@@ -8290,8 +8242,8 @@ pub async fn set_domain_permission(
     if let Some(v) = req.per_tx_limit_cents {
         perm.per_tx_limit_cents = v;
     }
-    if let Some(v) = req.per_day_limit_cents {
-        perm.per_day_limit_cents = v;
+    if let Some(v) = req.per_session_limit_cents {
+        perm.per_session_limit_cents = v;
     }
     if let Some(v) = req.rate_limit_per_min {
         perm.rate_limit_per_min = v;
@@ -8306,8 +8258,7 @@ pub async fn set_domain_permission(
                     "domain": saved.domain,
                     "trustLevel": saved.trust_level,
                     "perTxLimitCents": saved.per_tx_limit_cents,
-                    "perDayLimitCents": saved.per_day_limit_cents,
-                    "dailySpentCents": saved.daily_spent_cents,
+                    "perSessionLimitCents": saved.per_session_limit_cents,
                     "rateLimitPerMin": saved.rate_limit_per_min,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
@@ -8384,8 +8335,7 @@ pub async fn list_domain_permissions(
                 "domain": p.domain,
                 "trustLevel": p.trust_level,
                 "perTxLimitCents": p.per_tx_limit_cents,
-                "perDayLimitCents": p.per_day_limit_cents,
-                "dailySpentCents": p.daily_spent_cents,
+                "perSessionLimitCents": p.per_session_limit_cents,
                 "rateLimitPerMin": p.rate_limit_per_min,
                 "createdAt": p.created_at,
                 "updatedAt": p.updated_at,
@@ -10455,10 +10405,10 @@ pub async fn wallet_recover_external(
 
     log::info!("   📊 Found {} UTXOs, total {} sats", scan_result.utxos.len(), scan_result.total_balance);
 
-    // 9. Create Hodos wallet (DB lock) — Centbee PIN is reused as Hodos PIN
+    // 9. Create Hodos wallet (DB lock)
     let (wallet_id, user_id, dest_address) = {
         let mut db = state.database.lock().unwrap();
-        match db.create_wallet_from_existing_mnemonic(&mnemonic_trimmed, Some(&passphrase)) {
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_trimmed, None) {
             Ok((wid, uid, addr, _pubkey)) => (wid, uid, addr),
             Err(e) => {
                 log::error!("   ❌ Failed to create wallet: {}", e);
@@ -11399,7 +11349,7 @@ pub async fn wallet_import(
 ) -> HttpResponse {
     log::info!("   /wallet/import called");
 
-    // 1. Validate PIN format
+    // 1. Validate PIN format if provided
     if let Some(ref pin) = body.pin {
         if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
             return HttpResponse::BadRequest().json(serde_json::json!({"error": "PIN must be exactly 4 digits"}));

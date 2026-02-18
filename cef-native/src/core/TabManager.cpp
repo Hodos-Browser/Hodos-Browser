@@ -1,4 +1,5 @@
 #include "../../include/core/TabManager.h"
+#include "../../include/core/SessionManager.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
 #include "include/wrapper/cef_helpers.h"
@@ -160,6 +161,11 @@ bool TabManager::CloseTab(int tab_id) {
         if (new_active_id != -1) {
             SwitchToTab(new_active_id);
         }
+    }
+
+    // Clear session spending for this tab's browser
+    if (tab.browser) {
+        SessionManager::GetInstance().clearSession(tab.browser->GetIdentifier());
     }
 
     // Request browser to close

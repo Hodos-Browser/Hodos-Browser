@@ -6,7 +6,76 @@
 **Purpose**: Display passive indicator of background wallet/permission activity, allowing users to monitor activity and review/change permissions without constant notifications
 
 **Status**: 📋 Planning Phase (Low Priority - Move to End)
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-16
+
+---
+
+## Pre-Phase 5: Tab Session Infrastructure
+
+**Priority**: Build BEFORE the activity indicator — it is the foundation for per-tab tracking, spending limits, rate limiting, and the activity dashboard.
+
+### What Is a Tab Session?
+
+A tab session = **one tab + one domain**. It starts when a tab first makes a wallet API call to a BRC-100 site, and ends when the tab navigates to a different domain or is closed.
+
+### Why Per-Tab (Not Per-Domain)?
+
+Each tab is its own browsing context. Two tabs open to the same domain could be running different apps (e.g., a todo app and a game, both hosted on metanetapps.com). Per-tab sessions enable:
+
+- **Per-tab spending tracking** — "this tab spent X satoshis"
+- **Per-tab rate limiting** — 10 req/min per tab, not per domain
+- **Per-tab identity** — future: different personas per tab
+- **Activity dashboard granularity** — "tab 3 did 12 requests, tab 5 did 2"
+
+### Same Site in Two Tabs
+
+- **Separate sessions** for tracking (spending, rate limits, request counts)
+- **Shared trust decisions** — "Allow" and "Block" apply to ALL tabs for the same domain. If you approve metanetapps.com in tab 1, tab 2 doesn't ask again. If you block in tab 1, tab 2 is also blocked.
+
+### Proposed Data Model
+
+```cpp
+// C++ SessionManager singleton
+struct TabSession {
+    std::string sessionId;       // unique (e.g., "sess-{tabId}-{timestamp}")
+    int tabId;                   // from TabManager
+    std::string domain;          // extracted from tab's main frame URL
+    std::string trustLevel;      // inherited from DomainPermissionCache on creation
+    int64_t startedAt;           // epoch ms
+    uint64_t spentCents;         // USD cents spent in this session
+    int requestCount;            // total wallet API calls
+    int requestsThisMinute;      // for rate limiting
+};
+```
+
+### Lifecycle
+
+1. **Start**: First wallet API call intercepted for a tab+domain pair → `SessionManager::getOrCreate(tabId, domain)` creates a session, inheriting trust level from `DomainPermissionCache`
+2. **Track**: Each intercepted request increments `requestCount` and `requestsThisMinute`
+3. **End (navigate away)**: Tab URL changes to different domain → session archived/destroyed
+4. **End (tab close)**: `TabManager::CloseTab()` triggers `SessionManager::endSession(tabId)`
+5. **End (browser close)**: All sessions destroyed (in-memory only)
+
+### Existing Infrastructure
+
+- **TabManager** already tracks tabs with `id`, `url`, `browser`, timestamps
+- **HttpRequestInterceptor** receives `CefBrowser` in `GetResourceHandler()` — can map to tab via `browser->GetIdentifier()` and TabManager
+- **DomainPermissionCache** provides the initial trust level for new sessions
+- **SimpleHandler** role string (`tab_3`) identifies the tab in IPC messages
+
+### Integration Points
+
+- `HttpRequestInterceptor::GetResourceHandler()` — look up or create session
+- `AsyncWalletResourceHandler::Open()` — use session for rate limiting, spending checks
+- `TabManager::CloseTab()` — end session
+- `SimpleHandler::OnLoadingStateChange()` — detect domain navigation changes
+- Activity Status Indicator — reads session data for dashboard display
+
+### Open Questions
+
+1. Should session data persist across browser restarts? (Probably no — in-memory only)
+2. Should archived sessions be available for the activity dashboard? (For current session: yes)
+3. How to handle iframes that make wallet calls from a different domain than the tab?
 
 ---
 

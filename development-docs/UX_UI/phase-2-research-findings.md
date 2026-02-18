@@ -1,7 +1,8 @@
 # Phase 2 Research Findings: Domain Permissions & User Notifications
 
 **Date:** 2026-02-15
-**Status:** Design Decisions Made -- Implementation In Progress
+**Updated:** 2026-02-17
+**Status:** Sub-Phases 2.0-2.3 Complete (through 2.3.7 — Payment Notification). DPAPI Auto-Unlock Complete. Certificate Notification (2.3.8) is next.
 
 ---
 
@@ -156,18 +157,18 @@ Web page makes request
   -> Response delivered back to web page
 ```
 
-### Current Problems (Must Fix for Phase 2)
+### Current Problems (Must Fix for Phase 2) — ALL RESOLVED
 
-| Issue | Impact | Fix |
-|-------|--------|-----|
-| **Single global `g_pendingAuthRequest`** | Concurrent requests clobber each other | CR-2.2: Per-request map |
-| **File I/O on every request** | Whitelist read from disk on IO thread | CR-2.4: In-memory cache |
-| **No thread synchronization** | Data race on globals from IO + UI threads | CR-2.3: Mutex |
-| **Modal deduplication buggy** | Second request from same domain silently dropped | CR-2.2 fixes |
-| **POST /domain/whitelist/add missing** | Endpoint doesn't exist in Rust handlers | Phase 2 implements |
-| **Binary permission model** | Whitelisted or not -- no scopes/limits | Phase 2 replaces |
-| **Well-known auth bypasses checks** | Localhost auth redirected before domain verification | Phase 2 fixes |
-| **Wallet HTTP calls on UI thread** | Slow wallet freezes entire browser | CR-2.1: Move to IO thread |
+| Issue | Impact | Fix | Status |
+|-------|--------|-----|--------|
+| **Single global `g_pendingAuthRequest`** | Concurrent requests clobber each other | CR-2.2: `PendingRequestManager` singleton | **FIXED** |
+| **File I/O on every request** | Whitelist read from disk on IO thread | CR-2.4: `DomainPermissionCache` (DB-backed) | **FIXED** |
+| **No thread synchronization** | Data race on globals from IO + UI threads | CR-2.3: Thread-safe map + mutex | **FIXED** |
+| **Modal deduplication buggy** | Second request from same domain silently dropped | Sibling queueing + batch resolve in `handleAuthResponse` | **FIXED** |
+| **POST /domain/whitelist/add missing** | Endpoint doesn't exist in Rust handlers | `add_domain()` handler (dual-write to JSON + DB) | **FIXED** |
+| **Binary permission model** | Whitelisted or not -- no scopes/limits | `domain_permissions` table with trust levels + spending limits | **FIXED** |
+| **Well-known auth bypasses checks** | Localhost auth redirected before domain verification | Internal origins (127.0.0.1/localhost) bypass domain check | **FIXED** |
+| **Wallet HTTP calls on UI thread** | Slow wallet freezes entire browser | `CefURLRequest::Create()` on IO thread directly | **FIXED** |
 
 ### CR-2 Prerequisites (4-5 day effort)
 
@@ -186,13 +187,13 @@ Web page makes request
 - `create_action()` has no permission scope validation
 - Defense-in-depth: should add domain permission check in Rust handlers too
 
-### Existing Domain Whitelist (Rust)
+### Domain Permission System (Updated 2026-02-17)
 
-`domain_whitelist.rs` has `DomainWhitelistManager` with:
-- In-memory `Arc<Mutex<HashMap>>` + JSON file persistence
-- `DomainWhitelistEntry`: domain, added_at, last_used, request_count, is_permanent
-- One-time entry logic: returns false if `!is_permanent && request_count > 0`
-- **No spending limits, no certificate levels, no per-operation scopes**
+**Old system** (`domain_whitelist.rs`): Deleted. `DomainVerifier` class removed from C++.
+
+**Current system** (`domain_permission_repo.rs`): `domain_permissions` table with simplified 2-state trust model (`unknown`/`approved`), USD-based spending limits (per-tx + per-session), rate limiting. `cert_field_permissions` table for certificate field disclosure tracking.
+
+**C++ layer**: `DomainPermissionCache` singleton reads from Rust DB via WinHTTP. Writes via `POST /domain/permissions` (from `DomainPermissionTask` and `AdvancedDomainPermissionTask`). Session-only "blocked" state in C++ memory (clears on restart).
 
 ---
 
@@ -350,13 +351,15 @@ User requested an "Advanced Settings" button in the initial notification allowin
 **Rejected.** Phantom's 2-hour expiry was considered but deemed annoying for users. Trust stays indefinitely once granted by the user. Users can manually revoke trust per-domain in settings. Rate limiting (10 tx/min) provides protection against runaway apps.
 
 ### Decision 3: USD-Based Spending Limits
-**Spending limits defined in USD, not satoshis.** BSV's price volatility and micropayment use cases make fixed satoshi thresholds impractical — what's pennies today could be dollars tomorrow. Backend needs the exchange rate to evaluate limits.
+**Spending limits defined in USD, not satoshis.** BSV's price volatility and micropayment use cases make fixed satoshi thresholds impractical — what's pennies today could be dollars tomorrow. C++ auto-approve engine fetches BSV/USD price from `BSVPriceCache` to convert satoshi amounts to USD cents at evaluation time.
 
-| Limit | Default | User-Adjustable |
-|-------|---------|----------------|
-| Per-tx auto-approve | $0.05 USD | Yes, up to $5.00 |
-| Per-day auto-approve | $0.50 USD | Yes, up to $50.00 |
-| Rate limit | 10 tx/min | Yes, per-domain |
+**Updated 2026-02-17 (implemented):** Changed from per-day to per-session tracking (simpler, no DB state, C++ `SessionManager` handles it). Defaults raised to cover typical micropayment use cases without annoying prompts.
+
+| Limit | Default | User-Adjustable | Stored |
+|-------|---------|----------------|--------|
+| Per-tx auto-approve | $0.10 USD | Yes (warning >$5) | DB: `per_tx_limit_cents = 10` |
+| Per-session auto-approve | $3.00 USD | Yes (warning >$50) | DB: `per_session_limit_cents = 300` |
+| Rate limit | 10 req/min | Yes, per-domain | DB: `rate_limit_per_min = 10` |
 
 ### Decision 4: Exchange Rate Moved to Backend
 **All BSV/USD price fetching centralized in Rust backend** via a new `price_cache.rs` module. Frontend removes all CryptoCompare/CoinGecko calls and gets price from `/wallet/balance` response. This:
@@ -376,50 +379,100 @@ CR-2.2 (per-request map) built as part of the notification system. CR-2.1 (off-t
 
 ## 8. Implementation Sub-Phases
 
-### Sub-Phase 2.0: Price Cache Migration (Current)
-Move BSV/USD exchange rate from frontend to backend.
+### Sub-Phase 2.0: Price Cache Migration — COMPLETE (2026-02-15)
 
-| Step | Description | Files |
-|------|-------------|-------|
-| 2.0.1 | Create `price_cache.rs` (CryptoCompare + CoinGecko fallback, 5-min TTL) | `rust-wallet/src/price_cache.rs` |
-| 2.0.2 | Add `PriceCache` to `AppState` | `rust-wallet/src/main.rs` |
-| 2.0.3 | Include `bsv_usd_price` in `/wallet/balance` response | `rust-wallet/src/handlers.rs` |
-| 2.0.4 | Remove frontend price fetching (3 locations + localStorage) | `frontend/src/hooks/useBalance.ts`, `useBackgroundBalancePoller.ts`, `TransactionForm.tsx`, `balanceCache.ts` |
-| 2.0.5 | Frontend reads price from balance response | Same frontend files |
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.0.1 | Create `price_cache.rs` (CryptoCompare + CoinGecko fallback, 5-min TTL) | Done |
+| 2.0.2 | Add `PriceCache` to `AppState` | Done |
+| 2.0.3 | Include `bsvPrice` in `/wallet/balance` response | Done |
+| 2.0.4 | Remove frontend price fetching (3 locations) | Done |
+| 2.0.5 | Frontend reads price from balance response | Done |
 
-### Sub-Phase 2.1: Domain Permissions DB + Repository
-| Step | Description |
-|------|-------------|
-| 2.1.1 | Add `domain_permissions` table to V1 migration |
-| 2.1.2 | Create `DomainPermissionRepository` with CRUD ops |
-| 2.1.3 | Add REST endpoints: `GET /domain/permissions/check`, `POST /domain/permissions/set` |
-| 2.1.4 | Update backup.rs to include domain_permissions in export/import |
+### Sub-Phase 2.1: Domain Permissions DB + Repository — COMPLETE (2026-02-16)
 
-### Sub-Phase 2.2: CR-2 Interceptor Refactor
-| Step | Description |
-|------|-------------|
-| 2.2.1 | CR-2.1: Move wallet HTTP calls off UI thread |
-| 2.2.2 | CR-2.2 + CR-2.3: Per-request map with mutex (replaces single global) |
-| 2.2.3 | CR-2.4: Move whitelist from JSON file to DB-backed |
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.1.1 | Add `domain_permissions` + `cert_field_permissions` tables (V3 migration, also in V1 for fresh DBs) | Done |
+| 2.1.2 | Create `DomainPermissionRepository` with full CRUD + `check_fields_approved()` | Done |
+| 2.1.3 | 6 REST endpoints: GET/POST/DELETE `/domain/permissions`, GET `/domain/permissions/all`, GET/POST `/domain/permissions/certificate` | Done |
+| 2.1.4 | Backup integration: `BackupDomainPermission` + `BackupCertFieldPermission` in payload | Done |
+| — | Spending limits stored as USD cents (integer). Defaults: $0.05/tx, $0.50/day | Done |
 
-### Sub-Phase 2.3: Notification UI + Permission Flow
-| Step | Description |
-|------|-------------|
-| 2.3.1 | Build `UserNotificationModal` component (payment, certificate, domain variants) |
-| 2.3.2 | Wire C++ → Frontend → C++ message flow |
-| 2.3.3 | Implement auto-approve engine (trust level + USD spending limits) |
-| 2.3.4 | Rate limiting (10 req/min per domain) |
-| 2.3.5 | "Advanced Settings" in first-visit notification |
-| 2.3.6 | "Block This Site" functionality |
+### Sub-Phase 2.2: CR-2 Interceptor Refactor — COMPLETE (2026-02-16)
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.2.1 | `AsyncHTTPClient::parent_` → `CefRefPtr<>` (use-after-free fix) | Done |
+| 2.2.2 | `PendingRequestManager` singleton (per-request map, thread-safe) replaces `g_pendingAuthRequest` | Done |
+| 2.2.3 | `DomainPermissionCache` singleton (WinHTTP → Rust DB backend) replaces `DomainVerifier` (JSON file I/O) | Done |
+| 2.2.4 | `CefURLRequest::Create()` on IO thread directly (removed UI-thread hop) | Done |
+| — | `DomainVerifier` class removed entirely. `domainWhitelist.json` still written (legacy dual-write) but never read by C++. | Note |
+
+### DPAPI Auto-Unlock Sprint — COMPLETE (2026-02-17)
+
+Added between 2.2 and 2.3 to eliminate PIN-on-startup friction.
+
+| Step | Description | Status |
+|------|-------------|--------|
+| — | `crypto/dpapi.rs`: Windows DPAPI FFI (`CryptProtectData`/`CryptUnprotectData`) | Done |
+| — | V4 migration: `mnemonic_dpapi BLOB` column on wallets | Done |
+| — | Wallet creation stores dual-encrypted mnemonic (PIN + DPAPI) | Done |
+| — | Startup: DPAPI auto-unlock → legacy fallback → locked state | Done |
+| — | PIN unlock backfills DPAPI blob for pre-V4 wallets | Done |
+| — | Frontend: fallback PIN prompt when DPAPI fails (edge case) | Done |
+
+### Bug Fix Sprint — COMPLETE (2026-02-17)
+
+First-time user testing revealed 6 bugs in the C++ interceptor layer.
+
+| Fix | Description | Status |
+|-----|-------------|--------|
+| 1 | Cache-set instead of invalidate (modal loop race) | Done |
+| 2+3 | Internal origins (127.0.0.1/localhost) bypass domain check | Done |
+| 4 | Overlay freeze (resolved by fix 1) | Done |
+| 5 | Wallet existence check before BRC-100 (`WalletStatusCache`) | Done |
+| 6 | Homepage URL changed from metanetapps.com to coingeek.com | Done |
+| — | Session block on reject (in-memory "blocked" for rejected domains) | Done |
+| — | Sibling error on reject (all queued sibling requests get error) | Done |
+
+### Sub-Phase 2.3: Auto-Approve Engine, Notifications, Permission Flow — COMPLETE through 2.3.7
+
+**Simplified trust model (2026-02-17):** Collapsed from 4 levels to 2 effective states:
+- **Unknown** (no DB row, or `trust_level = 'unknown'`) → show domain approval notification
+- **Approved** (`trust_level = 'approved'`) → check per-domain spending limits on every payment request
+- **Blocked** (session-only, C++ memory, not persisted) → reject silently until restart
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.3.1 | Domain approval notification overlay (redesigned BRC100AuthOverlayRoot.tsx with black+gold branding) | Done |
+| 2.3.2 | Wire C++ → Frontend → C++ message flow (`CreateNotificationOverlayTask`, `PendingRequestManager`, `handleAuthResponse`) | Done |
+| 2.3.3 | Auto-approve engine in `Open()` — approved domains: non-payment endpoints forwarded immediately; payment endpoints checked against per-tx + per-session limits | Done |
+| 2.3.4 | Rate limiting — `SessionManager` singleton tracks per-browser-session spending + sliding 1-min window. Only counts payment endpoints (createAction, acquireCertificate, sendMessage) | Done |
+| 2.3.5 | "Advanced Settings" — collapsible `DomainPermissionForm` in domain approval overlay. `add_domain_permission_advanced` IPC → `AdvancedDomainPermissionTask` → POST full settings to Rust | Done |
+| 2.3.6 | Session block on reject — domain approval/auth rejections set "blocked" in `DomainPermissionCache` (in-memory). Payment/rate-limit denials are one-time (domain stays "approved") | Done |
+| 2.3.7 | **Payment notification variant** — `payment_confirmation` + `rate_limit_exceeded` notification types. Shows USD+BSV amount, limit explanation, 3 buttons: Deny/Modify Limits/Approve. Spending recorded on successful response (both auto-approve + user-approve paths) | Done |
+| 2.3.8 | **Certificate notification variant** — BRC-52 field disclosure approval (which certificate fields to reveal to a verifier). Requires research into current certificate handling. | TODO |
+
+**Additional 2.3 infrastructure (all Done):**
+- Schema: `per_day_limit_cents` → `per_session_limit_cents`, removed `daily_spent_cents`/`daily_reset_at` (fresh-DB only)
+- `GET /wallet/bsv-price` endpoint (exposes cached BSV/USD price to C++)
+- `BSVPriceCache` C++ singleton (WinHTTP, 5-min TTL)
+- `CreateNotificationOverlay` `extraParams` support (satoshis, cents, limits passed via URL)
+- `DomainPermissionForm.tsx` reusable component (per-tx USD, per-session USD, rate limit, high-limit warning)
+- Recovery gap fix: `address_has_history()` for spent change addresses
+- Notification overlay keep-alive (HWND+browser reused, `SW_HIDE`/`SW_SHOW`)
+- Keyboard handlers (WM_KEYDOWN/WM_KEYUP/WM_CHAR) + double-click (CS_DBLCLKS)
+- JS injection pattern: `window.showNotification()`/`window.hideNotification()` for instant React state updates (no `LoadURL` page navigation)
+- Pre-creation: notification overlay created hidden at startup with React app loaded (JS bundle warm)
 
 ### Sub-Phase 2.4: Defense-in-Depth + Polish
-| Step | Description |
-|------|-------------|
-| 2.4.1 | Rust-side permission checks in `well_known_auth` and `create_action` |
-| 2.4.2 | Session expiry logic (permanent by default, user can set expiry) |
-| 2.4.3 | Daily spending reset |
-| 2.4.4 | Integration testing (concurrent tabs, timeouts, edge cases) |
-| 2.4.5 | Documentation updates |
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.4.1 | Rust-side permission checks in `well_known_auth` and `create_action` (defense-in-depth) | TODO |
+| 2.4.2 | Domain permissions management UI in wallet settings (view, edit, revoke per-domain) | TODO |
+| 2.4.3 | Integration testing (concurrent tabs, timeouts, edge cases) | TODO |
+| 2.4.4 | Documentation updates | TODO |
 
 ---
 
@@ -448,8 +501,9 @@ Move BSV/USD exchange rate from frontend to backend.
 - [phase-2-user-notifications.md](./phase-2-user-notifications.md)
 - [HTTP_INTERCEPTOR_FLOW_GUIDE.md](./HTTP_INTERCEPTOR_FLOW_GUIDE.md)
 - [CEF_REFINEMENT_TRACKER.md](../CEF_REFINEMENT_TRACKER.md)
-- `rust-wallet/src/domain_whitelist.rs`
+- `rust-wallet/src/database/domain_permission_repo.rs`
 - `cef-native/src/core/HttpRequestInterceptor.cpp`
+- `cef-native/src/core/SessionManager.cpp`
 
 ---
 

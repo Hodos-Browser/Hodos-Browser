@@ -32,11 +32,13 @@
     extern HWND g_brc100_auth_overlay_hwnd;
     extern HWND g_settings_menu_overlay_hwnd;
     extern HWND g_omnibox_overlay_hwnd;
+    extern HWND g_notification_overlay_hwnd;
     extern HINSTANCE g_hInstance;
 
     // Windows overlay creation functions
     void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0);
     void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
+    void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
     void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true);
     void ShowOmniboxOverlay();

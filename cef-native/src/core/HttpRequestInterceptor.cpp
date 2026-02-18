@@ -14,14 +14,13 @@
 #include <regex>
 
 #include "../include/core/PendingAuthRequest.h"
+#include "../../include/core/SessionManager.h"
 
 // Forward declaration
 class AsyncWalletResourceHandler;
 
-// Global variable to store pending auth request data
-PendingAuthRequest g_pendingAuthRequest = {"", "", "", "", false, nullptr};
-
-// Global variable to track if a modal is currently pending
+// g_pendingModalDomain kept as a quick-check for the overlay JS — will be
+// removed once the notification UI (Phase 2.3) handles requestIds natively.
 std::string g_pendingModalDomain = "";
 #include <sstream>
 #include <algorithm>
@@ -29,11 +28,17 @@ std::string g_pendingModalDomain = "";
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <set>
 #include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
 #include <iomanip>
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
+#endif
 #include "../../include/core/Logger.h"
 
 // Logging macros for HTTP interceptor
@@ -41,6 +46,341 @@ std::string g_pendingModalDomain = "";
 #define LOG_INFO_HTTP(msg) Logger::Log(msg, 1, 2)
 #define LOG_WARNING_HTTP(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_HTTP(msg) Logger::Log(msg, 3, 2)
+
+// In-memory cache for domain permissions backed by the Rust DB via REST
+class DomainPermissionCache {
+public:
+    struct Permission {
+        std::string trustLevel;         // "blocked"|"unknown"|"approved"
+        int64_t perTxLimitCents = 10;
+        int64_t perSessionLimitCents = 300;
+        int64_t rateLimitPerMin = 10;
+    };
+
+    static DomainPermissionCache& GetInstance() {
+        static DomainPermissionCache instance;
+        return instance;
+    }
+
+    // Lookup: cached first, then fetches from Rust backend synchronously
+    Permission getPermission(const std::string& domain) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = cache_.find(domain);
+            if (it != cache_.end()) {
+                return it->second;
+            }
+        }
+        Permission perm = fetchFromBackend(domain);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cache_[domain] = perm;
+        }
+        return perm;
+    }
+
+    void set(const std::string& domain, const Permission& perm) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_[domain] = perm;
+    }
+
+    void invalidate(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_.erase(domain);
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_.clear();
+    }
+
+private:
+    DomainPermissionCache() = default;
+    DomainPermissionCache(const DomainPermissionCache&) = delete;
+    DomainPermissionCache& operator=(const DomainPermissionCache&) = delete;
+
+    std::mutex mutex_;
+    std::map<std::string, Permission> cache_;
+
+#ifdef _WIN32
+    Permission fetchFromBackend(const std::string& domain) {
+        Permission result;
+        result.trustLevel = "unknown";
+
+        HINTERNET hSession = WinHttpOpen(L"DomainPermissionCache/1.0",
+                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                         WINHTTP_NO_PROXY_NAME,
+                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return result;
+
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+
+        // Build endpoint: /domain/permissions?domain=<url-encoded-domain>
+        std::string endpoint = "/domain/permissions?domain=" + domain;
+        std::wstring wideEndpoint(endpoint.begin(), endpoint.end());
+
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+                                                wideEndpoint.c_str(),
+                                                nullptr,
+                                                WINHTTP_NO_REFERER,
+                                                WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+
+        // Set a short timeout (5 seconds) to not block the IO thread too long
+        DWORD timeout = 5000;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+            !WinHttpReceiveResponse(hRequest, nullptr)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+
+        // Read response body
+        std::string responseBody;
+        DWORD bytesRead = 0;
+        char buffer[4096];
+        do {
+            if (!WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead)) break;
+            responseBody.append(buffer, bytesRead);
+        } while (bytesRead > 0);
+
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+
+        // Parse JSON response
+        try {
+            auto json = nlohmann::json::parse(responseBody);
+            result.trustLevel = json.value("trustLevel", "unknown");
+            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)10);
+            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)300);
+            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)10);
+        } catch (const std::exception& e) {
+            LOG_DEBUG_HTTP("🔒 Failed to parse domain permission response: " + std::string(e.what()));
+        }
+
+        return result;
+    }
+#else
+    Permission fetchFromBackend(const std::string& domain) {
+        // TODO(macOS): Implement using NSURLSession or similar
+        Permission result;
+        result.trustLevel = "unknown";
+        return result;
+    }
+#endif
+};
+
+// Cached wallet existence check — avoids pointless domain approval when no wallet exists
+class WalletStatusCache {
+public:
+    static WalletStatusCache& GetInstance() {
+        static WalletStatusCache instance;
+        return instance;
+    }
+
+    bool walletExists() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto now = std::chrono::steady_clock::now();
+        if (valid_ && (now - lastCheck_) < std::chrono::seconds(30)) {
+            return exists_;
+        }
+        exists_ = fetchWalletStatus();
+        valid_ = true;
+        lastCheck_ = now;
+        return exists_;
+    }
+
+    void invalidate() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        valid_ = false;
+    }
+
+private:
+    WalletStatusCache() = default;
+    WalletStatusCache(const WalletStatusCache&) = delete;
+    WalletStatusCache& operator=(const WalletStatusCache&) = delete;
+
+    std::mutex mutex_;
+    bool exists_ = false;
+    bool valid_ = false;
+    std::chrono::steady_clock::time_point lastCheck_;
+
+#ifdef _WIN32
+    bool fetchWalletStatus() {
+        HINTERNET hSession = WinHttpOpen(L"WalletStatusCache/1.0",
+                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                         WINHTTP_NO_PROXY_NAME,
+                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return false;
+
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+                                                L"/wallet/status",
+                                                nullptr,
+                                                WINHTTP_NO_REFERER,
+                                                WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        DWORD timeout = 5000;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+            !WinHttpReceiveResponse(hRequest, nullptr)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        std::string responseBody;
+        DWORD bytesRead = 0;
+        char buffer[1024];
+        do {
+            if (!WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead)) break;
+            responseBody.append(buffer, bytesRead);
+        } while (bytesRead > 0);
+
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+
+        try {
+            auto json = nlohmann::json::parse(responseBody);
+            return json.value("exists", false);
+        } catch (...) {
+            return false;
+        }
+    }
+#else
+    bool fetchWalletStatus() {
+        return false;
+    }
+#endif
+};
+
+// Cached BSV/USD price from Rust backend — used by auto-approve engine for satoshi→USD conversion
+class BSVPriceCache {
+public:
+    static BSVPriceCache& GetInstance() {
+        static BSVPriceCache instance;
+        return instance;
+    }
+
+    double getPrice() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto now = std::chrono::steady_clock::now();
+        if (valid_ && (now - lastCheck_) < std::chrono::minutes(5)) {
+            return priceUsd_;
+        }
+        priceUsd_ = fetchFromBackend();
+        valid_ = true;
+        lastCheck_ = now;
+        return priceUsd_;
+    }
+
+    void invalidate() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        valid_ = false;
+    }
+
+private:
+    BSVPriceCache() = default;
+    BSVPriceCache(const BSVPriceCache&) = delete;
+    BSVPriceCache& operator=(const BSVPriceCache&) = delete;
+
+    std::mutex mutex_;
+    double priceUsd_ = 0.0;
+    bool valid_ = false;
+    std::chrono::steady_clock::time_point lastCheck_;
+
+#ifdef _WIN32
+    double fetchFromBackend() {
+        HINTERNET hSession = WinHttpOpen(L"BSVPriceCache/1.0",
+                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                         WINHTTP_NO_PROXY_NAME,
+                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return 0.0;
+
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            return 0.0;
+        }
+
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+                                                L"/wallet/bsv-price",
+                                                nullptr,
+                                                WINHTTP_NO_REFERER,
+                                                WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return 0.0;
+        }
+
+        DWORD timeout = 5000;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+            !WinHttpReceiveResponse(hRequest, nullptr)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return 0.0;
+        }
+
+        std::string responseBody;
+        DWORD bytesRead = 0;
+        char buffer[1024];
+        do {
+            if (!WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead)) break;
+            responseBody.append(buffer, bytesRead);
+        } while (bytesRead > 0);
+
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+
+        try {
+            auto json = nlohmann::json::parse(responseBody);
+            return json.value("priceUsd", 0.0);
+        } catch (...) {
+            return 0.0;
+        }
+    }
+#else
+    double fetchFromBackend() {
+        return 0.0;
+    }
+#endif
+};
 
 // Escape string for safe embedding in single-quoted JS string literals.
 // Prevents JS injection when concatenating into ExecuteJavaScript() calls.
@@ -60,122 +400,58 @@ static std::string escapeForJsSingleQuote(const std::string& input) {
     return escaped;
 }
 
-// Domain verification class
-class DomainVerifier {
-private:
-    std::string whitelistFilePath;
-
-public:
-    DomainVerifier() {
-        // Set path to domainWhitelist.json
-        char* homeDir = std::getenv("USERPROFILE");
-        whitelistFilePath = std::string(homeDir) + "\\AppData\\Roaming\\HodosBrowser\\wallet\\domainWhitelist.json";
-    }
-
-    bool isDomainWhitelisted(const std::string& domain) {
-        // Read whitelist file and check domain
-        std::ifstream file(whitelistFilePath);
-        if (!file.is_open()) {
-            std::cout << "🔒 Domain whitelist file not found: " << whitelistFilePath << std::endl;
-            return false;
-        }
-
-        try {
-            nlohmann::json whitelist;
-            file >> whitelist;
-            file.close();
-
-            for (const auto& entry : whitelist) {
-                if (entry["domain"] == domain) {
-                    // Domain is whitelisted - allow it regardless of request count
-                    // (one-time domains should remain approved for the session)
-                    std::cout << "🔒 Domain " << domain << " is whitelisted" << std::endl;
-                    return true;
-                }
-            }
-
-            std::cout << "🔒 Domain " << domain << " is not whitelisted" << std::endl;
-            return false;
-        } catch (const std::exception& e) {
-            std::cout << "🔒 Error reading domain whitelist: " << e.what() << std::endl;
-            file.close();
-            return false;
-        }
-    }
-
-    void addToWhitelist(const std::string& domain, bool isPermanent) {
-        // Read existing whitelist
-        nlohmann::json whitelist = nlohmann::json::array();
-        std::ifstream file(whitelistFilePath);
-        if (file.is_open()) {
-            try {
-                file >> whitelist;
-                file.close();
-            } catch (const std::exception& e) {
-                std::cout << "🔒 Error reading whitelist for update: " << e.what() << std::endl;
-                file.close();
-            }
-        }
-
-        // Add new entry
-        nlohmann::json newEntry;
-        newEntry["domain"] = domain;
-        newEntry["addedAt"] = std::time(nullptr);
-        newEntry["lastUsed"] = std::time(nullptr);
-        newEntry["requestCount"] = 0;
-        newEntry["isPermanent"] = isPermanent;
-
-        whitelist.push_back(newEntry);
-
-        // Write back to file
-        std::ofstream outFile(whitelistFilePath);
-        if (outFile.is_open()) {
-            outFile << whitelist.dump(2);
-            outFile.close();
-            std::cout << "🔒 Added domain " << domain << " to whitelist" << std::endl;
-        } else {
-            std::cout << "🔒 Error writing to whitelist file" << std::endl;
-        }
-    }
-
-    void recordRequest(const std::string& domain) {
-        // Read existing whitelist
-        nlohmann::json whitelist = nlohmann::json::array();
-        std::ifstream file(whitelistFilePath);
-        if (file.is_open()) {
-            try {
-                file >> whitelist;
-                file.close();
-            } catch (const std::exception& e) {
-                std::cout << "🔒 Error reading whitelist for recording: " << e.what() << std::endl;
-                file.close();
-                return;
-            }
-        }
-
-        // Update request count
-        for (auto& entry : whitelist) {
-            if (entry["domain"] == domain) {
-                entry["lastUsed"] = std::time(nullptr);
-                entry["requestCount"] = entry["requestCount"].get<int>() + 1;
-                break;
-            }
-        }
-
-        // Write back to file
-        std::ofstream outFile(whitelistFilePath);
-        if (outFile.is_open()) {
-            outFile << whitelist.dump(2);
-            outFile.close();
-            std::cout << "🔒 Recorded request from domain " << domain << std::endl;
-        } else {
-            std::cout << "🔒 Error writing to whitelist file for recording" << std::endl;
-        }
-    }
-};
+// DomainVerifier (JSON file-based) removed — replaced by DomainPermissionCache (DB-backed)
 
 // Forward declaration
 class AsyncHTTPClient;
+
+// UI-thread task to create a notification overlay (CreateWindowEx requires UI thread)
+class CreateNotificationOverlayTask : public CefTask {
+public:
+    CreateNotificationOverlayTask(const std::string& type, const std::string& domain,
+                                   const std::string& extraParams = "")
+        : type_(type), domain_(domain), extraParams_(extraParams) {}
+    void Execute() override {
+        LOG_DEBUG_HTTP("🔔 CreateNotificationOverlayTask executing for " + type_ + " / " + domain_);
+        g_pendingModalDomain = domain_;
+#ifdef _WIN32
+        extern HINSTANCE g_hInstance;
+        CreateNotificationOverlay(g_hInstance, type_, domain_, extraParams_);
+#endif
+    }
+private:
+    std::string type_;
+    std::string domain_;
+    std::string extraParams_;
+    IMPLEMENT_REFCOUNTING(CreateNotificationOverlayTask);
+    DISALLOW_COPY_AND_ASSIGN(CreateNotificationOverlayTask);
+};
+
+// Thread-safe tracker for no-wallet notifications (separate from PendingRequestManager
+// to avoid stale entries blocking domain_approval after wallet creation)
+class NoWalletNotificationTracker {
+public:
+    static NoWalletNotificationTracker& GetInstance() {
+        static NoWalletNotificationTracker instance;
+        return instance;
+    }
+    bool hasShownForDomain(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return shownDomains_.count(domain) > 0;
+    }
+    void markShown(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shownDomains_.insert(domain);
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shownDomains_.clear();
+    }
+private:
+    NoWalletNotificationTracker() = default;
+    std::mutex mutex_;
+    std::set<std::string> shownDomains_;
+};
 
 
 // Async Resource Handler for managing wallet HTTP requests
@@ -193,58 +469,10 @@ public:
         LOG_DEBUG_HTTP("🌐 Forwarding " + std::to_string(headers.size()) + " original headers");
     }
 
+    // Declared here, implemented out-of-line after StartAsyncHTTPRequestTask is defined
     bool Open(CefRefPtr<CefRequest> request,
               bool& handle_request,
-              CefRefPtr<CefCallback> callback) override {
-        CEF_REQUIRE_IO_THREAD();
-
-        LOG_DEBUG_HTTP("🌐 AsyncWalletResourceHandler::Open called");
-
-        // Check if domain is whitelisted - NO BYPASSES
-        DomainVerifier domainVerifier;
-        if (!domainVerifier.isDomainWhitelisted(requestDomain_)) {
-            // Domain not whitelisted, check if this is a BRC-100 authentication request
-            if (endpoint_.find("/brc100/auth/") != std::string::npos) {
-                // This is a BRC-100 authentication request
-                LOG_DEBUG_HTTP("🔐 BRC-100 auth request from non-whitelisted domain: " + requestDomain_);
-                triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
-
-                // Timeout: auto-reject after 60 seconds if user doesn't respond
-                postAuthTimeout(60000, "{\"error\":\"Authentication approval timeout\",\"status\":\"error\"}");
-
-                // Don't return error response immediately - wait for user response
-                LOG_DEBUG_HTTP("🔐 Waiting for user response to BRC-100 auth request");
-                handle_request = true;
-                return true;
-            } else {
-                // ALL other requests (including wallet endpoints) require whitelist approval
-                LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " not whitelisted for endpoint " + endpoint_ + ", triggering approval modal");
-                triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
-
-                // Timeout: auto-reject after 60 seconds if user doesn't respond
-                postAuthTimeout(60000, "{\"error\":\"Domain approval timeout\",\"status\":\"error\"}");
-
-                // Don't return error response immediately - wait for user response
-                LOG_DEBUG_HTTP("🔐 Waiting for user response to domain approval request");
-                handle_request = true;
-                return true;
-            }
-        }
-
-        // Domain is whitelisted, proceed with request
-        LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is whitelisted, proceeding with request");
-        domainVerifier.recordRequest(requestDomain_);
-
-        handle_request = true;
-
-        // Start async HTTP request to Go daemon
-        LOG_DEBUG_HTTP("🌐 About to start async HTTP request...");
-        startAsyncHTTPRequest();
-        LOG_DEBUG_HTTP("🌐 Async HTTP request started");
-
-        // Don't call callback->Continue() yet - wait for HTTP response
-        return true;
-    }
+              CefRefPtr<CefCallback> callback) override;
 
     void GetResponseHeaders(scoped_refptr<CefResponse> response,
                            int64_t& response_length,
@@ -261,7 +489,13 @@ public:
         response->SetHeaderByName("Access-Control-Allow-Headers", "Content-Type, Authorization", true);
         response->SetHeaderByName("Access-Control-Max-Age", "86400", true);
 
-        response_length = static_cast<int64_t>(responseData_.length());
+        // Use -1 (unknown length) when async response hasn't arrived yet.
+        // Returning 0 makes CEF skip ReadResponse entirely (thinks body is empty).
+        if (requestCompleted_ && !responseData_.empty()) {
+            response_length = static_cast<int64_t>(responseData_.length());
+        } else {
+            response_length = -1;
+        }
     }
 
     bool ReadResponse(void* data_out,
@@ -273,7 +507,8 @@ public:
         LOG_DEBUG_HTTP("🌐 AsyncWalletResourceHandler::ReadResponse called, completed: " + std::to_string(requestCompleted_));
 
         if (!requestCompleted_) {
-            // Store callback for later use
+            // Store callback for later use — Continue() called when response arrives
+            bytes_read = 0;
             readCallback_ = callback;
             return true; // Wait for HTTP response
         }
@@ -365,119 +600,104 @@ public:
         onAuthResponseReceived(errorJson);
     }
 
-    // Trigger domain approval modal using the existing BRC-100 auth modal system
+    // Trigger domain approval notification overlay
     void triggerDomainApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint) {
-        LOG_DEBUG_HTTP("🔒 Triggering domain approval modal for " + domain);
+        LOG_DEBUG_HTTP("🔒 Triggering domain approval for " + domain);
 
-        // Check if a modal is already pending for this domain
-        if (g_pendingModalDomain == domain) {
-            LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + domain + ", skipping duplicate request");
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+
+        // Always add the request — even if modal is already showing, we queue it
+        // so ALL pending requests for this domain get resolved when user approves.
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method, endpoint, "", this);
+
+        if (modalAlreadyShowing) {
+            LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + domain + ", request queued (requestId: " + requestId + ")");
             return;
         }
 
-        // Set pending modal domain
-        g_pendingModalDomain = domain;
-
-        // Store domain approval request data for later message passing (using BRC-100 auth system)
-        g_pendingAuthRequest.domain = domain;
-        g_pendingAuthRequest.method = method;
-        g_pendingAuthRequest.endpoint = endpoint;
-        g_pendingAuthRequest.body = ""; // No body for domain approval
-        g_pendingAuthRequest.isValid = true;
-        g_pendingAuthRequest.handler = this;
-
-        // Send message to frontend to create overlay with domain approval request data
-        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
-        if (header_browser && header_browser->GetMainFrame()) {
-            std::string js = R"(
-                console.log('🔒 Domain approval request received in header browser');
-                // Set the pending BRC-100 auth request data (reusing existing system)
-                window.pendingBRC100AuthRequest = {
-                    domain: ')" + escapeForJsSingleQuote(domain) + R"(',
-                    method: ')" + escapeForJsSingleQuote(method) + R"(',
-                    endpoint: ')" + escapeForJsSingleQuote(endpoint) + R"(',
-                    body: '',
-                    type: 'domain_approval'
-                };
-                console.log('🔒 Set pending BRC-100 auth request for domain approval:', window.pendingBRC100AuthRequest);
-                // Create the settings overlay (which will show the BRC-100 auth modal)
-                if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.show) {
-                    console.log('🔒 Creating overlay for domain approval modal');
-                    window.hodosBrowser.overlay.show();
-                } else {
-                    console.error('🔒 Overlay show function not available');
-                }
-            )";
-            header_browser->GetMainFrame()->ExecuteJavaScript(js, header_browser->GetMainFrame()->GetURL(), 0);
-            LOG_DEBUG_HTTP("🔒 Sent domain approval request to frontend");
-        } else {
-            LOG_DEBUG_HTTP("🔒 Header browser not available for domain approval request");
-        }
-
+        // Post to UI thread — CreateWindowEx requires UI thread
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
         LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + domain + " requesting " + method + " " + endpoint);
     }
 
 
-    // Trigger BRC-100 authentication approval modal
-void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body, CefRefPtr<AsyncWalletResourceHandler> handler) {
-    LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval modal for " + domain);
+    // Trigger BRC-100 authentication approval notification overlay
+    void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body, CefRefPtr<AsyncWalletResourceHandler> handler) {
+        LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval for " + domain);
 
-    // Check if a modal is already pending for this domain
-    if (g_pendingModalDomain == domain) {
-        LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + domain + ", skipping duplicate request");
-        return;
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+
+        // Always add — duplicate requests are queued and resolved together
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method, endpoint, body, handler);
+
+        if (modalAlreadyShowing) {
+            LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + domain + ", request queued (requestId: " + requestId + ")");
+            return;
+        }
+
+        // Post to UI thread — CreateWindowEx requires UI thread
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
+        LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + domain + " requesting " + method + " " + endpoint);
     }
 
-    // Set pending modal domain
-    g_pendingModalDomain = domain;
 
-    // Store auth request data for later message passing
-    g_pendingAuthRequest.domain = domain;
-    g_pendingAuthRequest.method = method;
-    g_pendingAuthRequest.endpoint = endpoint;
-    g_pendingAuthRequest.body = body;
-    g_pendingAuthRequest.isValid = true;
-    g_pendingAuthRequest.handler = handler;
+    // Trigger payment confirmation notification overlay with limit context
+    void triggerPaymentConfirmationModal(const std::string& domain, int64_t satoshis, int64_t cents, double bsvPrice,
+                                          const std::string& exceededLimit, int64_t perTxLimit, int64_t perSessionLimit, int64_t sessionSpent) {
+        LOG_DEBUG_HTTP("💰 Triggering payment confirmation for " + domain + " (" + std::to_string(satoshis) + " sats, " + std::to_string(cents) + " cents, exceeded: " + exceededLimit + ")");
 
-    // Send message to frontend to create overlay with auth request data
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
-    if (header_browser && header_browser->GetMainFrame()) {
-        std::string js = R"(
-            console.log('🔐 BRC-100 auth request received in header browser');
-            // Set the pending auth request data
-            window.pendingBRC100AuthRequest = {
-                domain: ')" + escapeForJsSingleQuote(domain) + R"(',
-                method: ')" + escapeForJsSingleQuote(method) + R"(',
-                endpoint: ')" + escapeForJsSingleQuote(endpoint) + R"(',
-                body: ')" + escapeForJsSingleQuote(body) + R"('
-            };
-            console.log('🔐 Set pending auth request:', window.pendingBRC100AuthRequest);
-            // Create the settings overlay (which will show the BRC-100 auth modal)
-            if (window.hodosBrowser && window.hodosBrowser.overlay && window.hodosBrowser.overlay.show) {
-                console.log('🔐 Creating overlay for BRC-100 auth modal');
-                window.hodosBrowser.overlay.show();
-            } else {
-                console.error('🔐 Overlay show function not available');
+        // Store request in PendingRequestManager with type "payment_confirmation"
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method_, endpoint_, body_, this, "payment_confirmation");
+
+        // Build extra params for overlay URL (includes limit context for frontend)
+        std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                + "&cents=" + std::to_string(cents)
+                                + "&bsvPrice=" + std::to_string(bsvPrice)
+                                + "&exceededLimit=" + exceededLimit
+                                + "&perTxLimit=" + std::to_string(perTxLimit)
+                                + "&perSessionLimit=" + std::to_string(perSessionLimit)
+                                + "&sessionSpent=" + std::to_string(sessionSpent);
+
+        // Post to UI thread — CreateWindowEx requires UI thread
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
+        LOG_DEBUG_HTTP("💰 Payment confirmation notification queued (requestId: " + requestId + ")");
+    }
+
+    // Check if endpoint is a payment-relevant BRC-100 endpoint
+    static bool isPaymentEndpoint(const std::string& endpoint) {
+        return endpoint.find("/createAction") != std::string::npos
+            || endpoint.find("/acquireCertificate") != std::string::npos
+            || endpoint.find("/sendMessage") != std::string::npos;
+    }
+
+    // Parse request body JSON and sum outputs[].satoshis
+    static int64_t extractOutputSatoshis(const std::string& body) {
+        if (body.empty()) return 0;
+        try {
+            auto json = nlohmann::json::parse(body);
+            if (!json.contains("outputs") || !json["outputs"].is_array()) return 0;
+            int64_t total = 0;
+            for (const auto& output : json["outputs"]) {
+                if (output.contains("satoshis") && output["satoshis"].is_number()) {
+                    total += output["satoshis"].get<int64_t>();
+                }
             }
-        )";
-        header_browser->GetMainFrame()->ExecuteJavaScript(js, header_browser->GetMainFrame()->GetURL(), 0);
-        LOG_DEBUG_HTTP("🔐 Sent BRC-100 auth request to frontend");
-    } else {
-        LOG_DEBUG_HTTP("🔐 Header browser not available for BRC-100 auth request");
+            return total;
+        } catch (...) {
+            return 0;
+        }
     }
 
-    LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + domain + " requesting " + method + " " + endpoint);
-}
+    // Public so handleAuthResponse() can forward queued sibling requests
+    void startAsyncHTTPRequest();
 
-
-    // Static method to create CefURLRequest on UI thread (called by URLRequestCreationTask)
-    static void createURLRequestOnUIThread(AsyncWalletResourceHandler* handler,
-                                          CefRefPtr<CefRequest> httpRequest,
-                                          AsyncHTTPClient* client,
-                                          CefRefPtr<CefRequestContext> context);
+    int64_t getPreCalculatedCents() const { return preCalculatedCents_; }
+    int getBrowserId() const { return browser_ ? browser_->GetIdentifier() : 0; }
 
 private:
-    void startAsyncHTTPRequest();
     void postAuthTimeout(int delayMs, const std::string& errorJson);
     void postHttpTimeout();
 
@@ -494,6 +714,9 @@ private:
     bool requestCompleted_;
     std::atomic<bool> httpCompleted_{false};
 
+    // Auto-approve engine: pre-calculated spending for this request
+    int64_t preCalculatedCents_ = 0;
+
     // Browser reference for modal triggering
     CefRefPtr<CefBrowser> browser_;
 
@@ -505,12 +728,182 @@ private:
     DISALLOW_COPY_AND_ASSIGN(AsyncWalletResourceHandler);
 };
 
+// Task to defer CefURLRequest::Create to the next IO event loop iteration.
+// CefURLRequest::Create blocks when called from within a CefResourceHandler::Open()
+// callback on the IO thread (reentrancy issue). Deferring avoids the deadlock.
+class StartAsyncHTTPRequestTask : public CefTask {
+public:
+    explicit StartAsyncHTTPRequestTask(CefRefPtr<AsyncWalletResourceHandler> handler)
+        : handler_(handler) {}
+    void Execute() override {
+        handler_->startAsyncHTTPRequest();
+    }
+private:
+    CefRefPtr<AsyncWalletResourceHandler> handler_;
+    IMPLEMENT_REFCOUNTING(StartAsyncHTTPRequestTask);
+    DISALLOW_COPY_AND_ASSIGN(StartAsyncHTTPRequestTask);
+};
+
+// Task to show no-wallet notification using the notification overlay system.
+// Out-of-line implementation of Open() — must be after StartAsyncHTTPRequestTask
+bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
+                                       bool& handle_request,
+                                       CefRefPtr<CefCallback> callback) {
+    CEF_REQUIRE_IO_THREAD();
+
+    LOG_DEBUG_HTTP("🌐 AsyncWalletResourceHandler::Open called");
+
+    // Internal overlays (wallet panel, settings, etc.) are trusted — skip domain check
+    if (requestDomain_.find("127.0.0.1") == 0 ||
+        requestDomain_.find("localhost") == 0 ||
+        requestDomain_.empty()) {
+        LOG_DEBUG_HTTP("🔒 Internal origin " + requestDomain_ + " — bypassing domain check");
+        handle_request = true;
+        CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+        return true;
+    }
+
+    // No wallet → no point showing domain approval modal; show notification instead
+    if (!WalletStatusCache::GetInstance().walletExists()) {
+        LOG_DEBUG_HTTP("🔒 No wallet exists — rejecting BRC-100 request from " + requestDomain_);
+        onHTTPResponseReceived(
+            R"({"error":"No wallet exists. Please create or recover a wallet first.","code":"NO_WALLET","status":"error"})");
+        // Show once per domain per session (tracked separately from PendingRequestManager
+        // so stale no_wallet entries don't block domain_approval after wallet creation)
+        if (!NoWalletNotificationTracker::GetInstance().hasShownForDomain(requestDomain_)) {
+            NoWalletNotificationTracker::GetInstance().markShown(requestDomain_);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("no_wallet", requestDomain_));
+        }
+        handle_request = true;
+        return true;
+    }
+
+    // Check domain permission from DB-backed cache
+    auto perm = DomainPermissionCache::GetInstance().getPermission(requestDomain_);
+    LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " trust_level: " + perm.trustLevel);
+
+    if (perm.trustLevel == "blocked") {
+        // Silently reject blocked domains
+        LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is blocked, rejecting request");
+        onHTTPResponseReceived("{\"error\":\"Domain blocked\",\"status\":\"error\"}");
+        handle_request = true;
+        return true;
+    }
+
+    if (perm.trustLevel == "unknown") {
+        // Domain has no permission record — needs approval
+        if (endpoint_.find("/brc100/auth/") != std::string::npos) {
+            LOG_DEBUG_HTTP("🔐 BRC-100 auth request from unknown domain: " + requestDomain_);
+            triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
+        } else {
+            LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " unknown, triggering approval modal");
+            triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
+        }
+
+        postAuthTimeout(60000, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
+        handle_request = true;
+        return true;
+    }
+
+    // "approved" — auto-approve engine with spending limits and rate limiting
+    if (perm.trustLevel == "approved") {
+        LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is approved, checking spending limits");
+
+        if (isPaymentEndpoint(endpoint_)) {
+            int browserId = browser_ ? browser_->GetIdentifier() : 0;
+
+            // Ensure session exists for rate limiting and spending tracking
+            SessionManager::GetInstance().getSession(browserId, requestDomain_);
+
+            // Parse outputs and calculate USD cents (needed for all paths)
+            int64_t satoshis = extractOutputSatoshis(body_);
+            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+            int64_t cents = 0;
+            if (bsvPrice > 0 && satoshis > 0) {
+                // satoshis → USD: (satoshis / 100_000_000) * bsvPrice * 100 (for cents)
+                cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+            }
+
+            // Rate limit check — show notification instead of auto-rejecting
+            if (!SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
+                LOG_DEBUG_HTTP("🔒 Rate limit exceeded for " + requestDomain_ + ", showing notification");
+                preCalculatedCents_ = cents;
+
+                std::string requestId = PendingRequestManager::GetInstance().addRequest(
+                    requestDomain_, method_, endpoint_, body_, this, "rate_limit_exceeded");
+
+                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                        + "&cents=" + std::to_string(cents)
+                                        + "&bsvPrice=" + std::to_string(bsvPrice)
+                                        + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents);
+
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", requestDomain_, extraParams));
+                postAuthTimeout(60000, "{\"error\":\"Rate limit approval timeout\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
+            }
+
+            // Check per-tx limit
+            bool withinTxLimit = (cents <= perm.perTxLimitCents);
+
+            // Check per-session cumulative limit
+            int64_t sessionSpent = SessionManager::GetInstance().getSpentCents(browserId, requestDomain_);
+            bool withinSessionLimit = ((sessionSpent + cents) <= perm.perSessionLimitCents);
+
+            LOG_DEBUG_HTTP("💰 Payment: " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
+                + " | tx_limit=" + std::to_string(perm.perTxLimitCents)
+                + " session_spent=" + std::to_string(sessionSpent)
+                + " session_limit=" + std::to_string(perm.perSessionLimitCents));
+
+            if (withinTxLimit && withinSessionLimit) {
+                // Auto-approve: within both limits
+                LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
+                preCalculatedCents_ = cents;
+                SessionManager::GetInstance().incrementRateCounter(browserId);
+                handle_request = true;
+                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+                return true;
+            } else {
+                // Over limit — show payment confirmation with limit context
+                LOG_DEBUG_HTTP("💰 Over limit — showing payment confirmation for " + requestDomain_);
+                preCalculatedCents_ = cents;
+
+                std::string exceeded = "";
+                if (!withinTxLimit && !withinSessionLimit) exceeded = "both";
+                else if (!withinTxLimit) exceeded = "per_tx";
+                else exceeded = "per_session";
+
+                triggerPaymentConfirmationModal(requestDomain_, satoshis, cents, bsvPrice,
+                    exceeded, perm.perTxLimitCents, perm.perSessionLimitCents, sessionSpent);
+                postAuthTimeout(60000, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
+            }
+        }
+
+        // Non-payment endpoint from approved domain — forward immediately
+        LOG_DEBUG_HTTP("🔒 Non-payment endpoint from approved domain " + requestDomain_ + ", forwarding");
+        handle_request = true;
+        CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+        return true;
+    }
+
+    // Fallback: unknown trust level — show domain approval
+    LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " has unrecognized trust level: " + perm.trustLevel + ", triggering approval");
+    triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
+    postAuthTimeout(60000, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
+    handle_request = true;
+    return true;
+}
+
 // Timeout task for delayed execution on UI thread
 class WalletTimeoutTask : public CefTask {
 public:
     enum Type { HTTP_TIMEOUT, AUTH_TIMEOUT };
 
-    WalletTimeoutTask(AsyncWalletResourceHandler* handler, Type type,
+    WalletTimeoutTask(CefRefPtr<AsyncWalletResourceHandler> handler, Type type,
                       const std::string& errorJson)
         : handler_(handler), type_(type), errorJson_(errorJson) {}
 
@@ -540,30 +933,28 @@ void AsyncWalletResourceHandler::postHttpTimeout() {
     CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), 45000);
 }
 
-// Function to store pending auth request data
-void storePendingAuthRequest(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body) {
-    g_pendingAuthRequest.domain = domain;
-    g_pendingAuthRequest.method = method;
-    g_pendingAuthRequest.endpoint = endpoint;
-    g_pendingAuthRequest.body = body;
-    g_pendingAuthRequest.isValid = true;
-    LOG_DEBUG_HTTP("🔐 Stored pending auth request data");
+// Function to store pending auth request data (called from overlay_show_brc100_auth IPC — no handler)
+void storePendingAuthRequest(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body, const std::string& type) {
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        domain, method, endpoint, body, nullptr, type);
+    g_pendingModalDomain = domain;
+    LOG_DEBUG_HTTP("🔐 Stored pending auth request data (requestId: " + requestId + ", type: " + type + ")");
 }
 
-// Handler for domain whitelist requests
-class AsyncDomainWhitelistHandler : public CefURLRequestClient {
+// Handler for domain permission requests
+class AsyncDomainPermissionHandler : public CefURLRequestClient {
 public:
-    explicit AsyncDomainWhitelistHandler(const std::string& domain, bool permanent)
-        : domain_(domain), permanent_(permanent) {}
+    explicit AsyncDomainPermissionHandler(const std::string& domain)
+        : domain_(domain) {}
 
     void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
-        LOG_DEBUG_HTTP("🔐 AsyncDomainWhitelistHandler::OnRequestComplete called for domain: " + domain_);
+        LOG_DEBUG_HTTP("🔐 AsyncDomainPermissionHandler::OnRequestComplete called for domain: " + domain_);
         CefURLRequest::Status status = request->GetRequestStatus();
         LOG_DEBUG_HTTP("🔐 Request status: " + std::to_string(status));
         if (status == UR_SUCCESS) {
-            LOG_DEBUG_HTTP("🔐 Successfully added domain to whitelist: " + domain_);
+            LOG_DEBUG_HTTP("🔐 Successfully set domain permission: " + domain_);
         } else {
-            LOG_DEBUG_HTTP("🔐 Failed to add domain to whitelist: " + domain_ + " (status: " + std::to_string(status) + ")");
+            LOG_DEBUG_HTTP("🔐 Failed to set domain permission: " + domain_ + " (status: " + std::to_string(status) + ")");
         }
     }
 
@@ -586,29 +977,28 @@ public:
 
 private:
     std::string domain_;
-    bool permanent_;
-    IMPLEMENT_REFCOUNTING(AsyncDomainWhitelistHandler);
-    DISALLOW_COPY_AND_ASSIGN(AsyncDomainWhitelistHandler);
+    IMPLEMENT_REFCOUNTING(AsyncDomainPermissionHandler);
+    DISALLOW_COPY_AND_ASSIGN(AsyncDomainPermissionHandler);
 };
 
-// Task class for creating domain whitelist request on UI thread
-class DomainWhitelistTask : public CefTask {
+// Task class for creating domain permission request on UI thread
+class DomainPermissionTask : public CefTask {
 public:
-    DomainWhitelistTask(const std::string& domain, bool permanent)
-        : domain_(domain), permanent_(permanent) {}
+    explicit DomainPermissionTask(const std::string& domain)
+        : domain_(domain) {}
 
     void Execute() override {
-        LOG_DEBUG_HTTP("🔐 DomainWhitelistTask executing on UI thread for domain: " + domain_);
+        LOG_DEBUG_HTTP("🔐 DomainPermissionTask executing on UI thread for domain: " + domain_);
 
         // Create request
         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-        cefRequest->SetURL("http://localhost:3301/domain/whitelist/add");
+        cefRequest->SetURL("http://localhost:3301/domain/permissions");
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
         // Create JSON body
-        std::string jsonBody = "{\"domain\":\"" + domain_ + "\",\"isPermanent\":" + (permanent_ ? "true" : "false") + "}";
-        LOG_DEBUG_HTTP("🔐 Domain whitelist JSON body: " + jsonBody);
+        std::string jsonBody = "{\"domain\":\"" + domain_ + "\",\"trustLevel\":\"approved\"}";
+        LOG_DEBUG_HTTP("🔐 Domain permission JSON body: " + jsonBody);
 
         // Create post data
         CefRefPtr<CefPostData> postData = CefPostData::Create();
@@ -617,68 +1007,217 @@ public:
         postData->AddElement(element);
         cefRequest->SetPostData(postData);
 
-        LOG_DEBUG_HTTP("🔐 About to create CefURLRequest for domain whitelist");
-        // Make HTTP request to add domain to whitelist
+        LOG_DEBUG_HTTP("🔐 About to create CefURLRequest for domain permission");
+        // Make HTTP request to set domain permission
         CefRefPtr<CefURLRequest> request = CefURLRequest::Create(
             cefRequest,
-            new AsyncDomainWhitelistHandler(domain_, permanent_),
+            new AsyncDomainPermissionHandler(domain_),
             nullptr
         );
 
         if (request) {
-            LOG_DEBUG_HTTP("🔐 Domain whitelist request created successfully");
+            LOG_DEBUG_HTTP("🔐 Domain permission request created successfully");
         } else {
-            LOG_DEBUG_HTTP("🔐 Failed to create domain whitelist request");
+            LOG_DEBUG_HTTP("🔐 Failed to create domain permission request");
         }
     }
 
 private:
     std::string domain_;
-    bool permanent_;
-    IMPLEMENT_REFCOUNTING(DomainWhitelistTask);
-    DISALLOW_COPY_AND_ASSIGN(DomainWhitelistTask);
+    IMPLEMENT_REFCOUNTING(DomainPermissionTask);
+    DISALLOW_COPY_AND_ASSIGN(DomainPermissionTask);
 };
 
-// Function to add domain to whitelist
-void addDomainToWhitelist(const std::string& domain, bool permanent) {
-    LOG_DEBUG_HTTP("🔐 Adding domain to whitelist: " + domain + " (permanent: " + std::to_string(permanent) + ")");
+// Task class for creating domain permission with advanced settings (custom limits)
+class AdvancedDomainPermissionTask : public CefTask {
+public:
+    AdvancedDomainPermissionTask(const std::string& domain, int64_t perTxLimitCents,
+                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin)
+        : domain_(domain), perTxLimitCents_(perTxLimitCents),
+          perSessionLimitCents_(perSessionLimitCents), rateLimitPerMin_(rateLimitPerMin) {}
 
-    // Post task to UI thread - CefURLRequest::Create must be called from UI thread
-    CefPostTask(TID_UI, new DomainWhitelistTask(domain, permanent));
-    LOG_DEBUG_HTTP("🔐 Domain whitelist task posted to UI thread");
+    void Execute() override {
+        LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
+
+        CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
+        cefRequest->SetURL("http://localhost:3301/domain/permissions");
+        cefRequest->SetMethod("POST");
+        cefRequest->SetHeaderByName("Content-Type", "application/json", true);
+
+        nlohmann::json body;
+        body["domain"] = domain_;
+        body["trustLevel"] = "approved";
+        body["perTxLimitCents"] = perTxLimitCents_;
+        body["perSessionLimitCents"] = perSessionLimitCents_;
+        body["rateLimitPerMin"] = rateLimitPerMin_;
+        std::string jsonBody = body.dump();
+
+        CefRefPtr<CefPostData> postData = CefPostData::Create();
+        CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
+        element->SetToBytes(jsonBody.length(), jsonBody.c_str());
+        postData->AddElement(element);
+        cefRequest->SetPostData(postData);
+
+        CefRefPtr<CefURLRequest> request = CefURLRequest::Create(
+            cefRequest, new AsyncDomainPermissionHandler(domain_), nullptr);
+
+        if (request) {
+            LOG_DEBUG_HTTP("🔐 Advanced domain permission request created for " + domain_);
+        }
+    }
+
+private:
+    std::string domain_;
+    int64_t perTxLimitCents_;
+    int64_t perSessionLimitCents_;
+    int64_t rateLimitPerMin_;
+    IMPLEMENT_REFCOUNTING(AdvancedDomainPermissionTask);
+    DISALLOW_COPY_AND_ASSIGN(AdvancedDomainPermissionTask);
+};
+
+// Function to add domain permission with advanced settings
+void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCents,
+                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin) {
+    LOG_DEBUG_HTTP("🔐 Adding advanced domain permission: " + domain +
+        " (tx=" + std::to_string(perTxLimitCents) + ", session=" + std::to_string(perSessionLimitCents) +
+        ", rate=" + std::to_string(rateLimitPerMin) + ")");
+
+    // Set cache immediately with full settings
+    DomainPermissionCache::Permission perm;
+    perm.trustLevel = "approved";
+    perm.perTxLimitCents = perTxLimitCents;
+    perm.perSessionLimitCents = perSessionLimitCents;
+    perm.rateLimitPerMin = rateLimitPerMin;
+    DomainPermissionCache::GetInstance().set(domain, perm);
+
+    // Post async DB write
+    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin));
+}
+
+// Function to add domain permission (sets "approved" trust level)
+void addDomainPermission(const std::string& domain) {
+    LOG_DEBUG_HTTP("🔐 Adding domain permission: " + domain);
+
+    // Set the cache immediately so the next request sees "approved" without waiting
+    // for the async DB write to complete (prevents modal loop race condition)
+    DomainPermissionCache::Permission perm;
+    perm.trustLevel = "approved";
+    DomainPermissionCache::GetInstance().set(domain, perm);
+
+    // Post task to UI thread for the async DB write
+    CefPostTask(TID_UI, new DomainPermissionTask(domain));
+    LOG_DEBUG_HTTP("🔐 Domain permission task posted to UI thread");
 }
 
 // Function to handle auth response and send it back to the original request
-void handleAuthResponse(const std::string& responseData) {
-    LOG_DEBUG_HTTP("🔐 handleAuthResponse called with data: " + responseData);
+void handleAuthResponse(const std::string& requestId, const std::string& responseData) {
+    LOG_DEBUG_HTTP("🔐 handleAuthResponse called for requestId: " + requestId);
 
-    // Clear the pending modal domain when user responds
-    g_pendingModalDomain = "";
+    std::string domain;
 
-    if (g_pendingAuthRequest.isValid && g_pendingAuthRequest.handler) {
-        LOG_DEBUG_HTTP("🔐 Found pending auth request, sending response to original handler");
-
-        // Cast the handler to AsyncWalletResourceHandler and call onAuthResponseReceived
-        // We know the type since we stored it ourselves
-        AsyncWalletResourceHandler* walletHandler = static_cast<AsyncWalletResourceHandler*>(g_pendingAuthRequest.handler.get());
-        if (walletHandler) {
-            walletHandler->onAuthResponseReceived(responseData);
-            LOG_DEBUG_HTTP("🔐 Auth response sent to original HTTP request");
+    // 1. Resolve the primary request (the one whose response we have)
+    PendingAuthRequest req;
+    if (PendingRequestManager::GetInstance().popRequest(requestId, req)) {
+        domain = req.domain;
+        if (req.handler) {
+            LOG_DEBUG_HTTP("🔐 Found pending auth request for domain: " + req.domain);
+            AsyncWalletResourceHandler* walletHandler = static_cast<AsyncWalletResourceHandler*>(req.handler.get());
+            if (walletHandler) {
+                // Record spending for user-approved payment confirmations
+                int64_t cents = walletHandler->getPreCalculatedCents();
+                if (cents > 0) {
+                    bool respIsError = false;
+                    try {
+                        auto rj = nlohmann::json::parse(responseData);
+                        respIsError = rj.contains("error");
+                    } catch (...) {}
+                    if (!respIsError) {
+                        int browserId = walletHandler->getBrowserId();
+                        SessionManager::GetInstance().recordSpending(browserId, cents);
+                        LOG_DEBUG_HTTP("💰 Recorded user-approved spending: " + std::to_string(cents) + " cents for browser " + std::to_string(browserId));
+                    }
+                }
+                walletHandler->onAuthResponseReceived(responseData);
+                LOG_DEBUG_HTTP("🔐 Auth response sent to original HTTP request");
+            }
         } else {
-            LOG_DEBUG_HTTP("🔐 Failed to cast handler to AsyncWalletResourceHandler");
+            LOG_DEBUG_HTTP("🔐 Pending request had no handler (overlay-initiated flow)");
         }
-
-        // Clear the pending request
-        g_pendingAuthRequest.isValid = false;
     } else {
-        LOG_DEBUG_HTTP("🔐 No pending auth request or handler found");
+        LOG_DEBUG_HTTP("🔐 No pending auth request found for requestId: " + requestId);
     }
+
+    // Detect whether this is a rejection (error response) or an approval
+    bool isRejection = false;
+    try {
+        auto parsed = nlohmann::json::parse(responseData);
+        isRejection = parsed.contains("error");
+    } catch (...) {}
+
+    // On rejection of a DOMAIN APPROVAL: block domain in-memory for the rest of this session.
+    // Future requests from this domain will be silently rejected (no repeat modals).
+    // Clears on browser restart — domain returns to "unknown".
+    // Payment/rate-limit denials are one-time — domain stays "approved", same checks apply next request.
+    bool isDomainApproval = (req.type == "domain_approval" || req.type == "brc100_auth");
+    if (isRejection && !domain.empty() && isDomainApproval) {
+        DomainPermissionCache::Permission blockedPerm;
+        blockedPerm.trustLevel = "blocked";
+        DomainPermissionCache::GetInstance().set(domain, blockedPerm);
+        LOG_DEBUG_HTTP("🔐 Domain " + domain + " blocked in-memory for this session");
+    }
+
+    // 2. Resolve ALL remaining queued requests for this domain.
+    // These are requests that arrived while the modal was showing.
+    if (!domain.empty()) {
+        auto siblings = PendingRequestManager::GetInstance().popAllForDomain(domain);
+        if (!siblings.empty()) {
+            LOG_DEBUG_HTTP("🔐 Resolving " + std::to_string(siblings.size()) + " queued request(s) for domain: " + domain +
+                           (isRejection ? " (rejected)" : " (approved)"));
+        }
+        for (auto& sibling : siblings) {
+            if (sibling.handler) {
+                AsyncWalletResourceHandler* walletHandler = static_cast<AsyncWalletResourceHandler*>(sibling.handler.get());
+                if (walletHandler) {
+                    if (isRejection) {
+                        // Rejection: send error to all queued siblings (don't forward to Rust)
+                        walletHandler->onAuthResponseReceived(responseData);
+                        LOG_DEBUG_HTTP("🔐 Sent rejection to queued request " + sibling.requestId + " for " + sibling.endpoint);
+                    } else {
+                        // Approval: forward siblings to Rust backend
+                        CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(walletHandler));
+                        LOG_DEBUG_HTTP("🔐 Forwarded queued request " + sibling.requestId + " for " + sibling.endpoint);
+                    }
+                }
+            }
+        }
+    }
+
+    g_pendingModalDomain = "";
+}
+
+// Legacy overload — resolves the requestId from the domain (backward compat for overlay_show_brc100_auth path)
+void handleAuthResponse(const std::string& responseData) {
+    std::string requestId = PendingRequestManager::GetInstance().getRequestIdForDomain(g_pendingModalDomain);
+    if (requestId.empty()) {
+        LOG_DEBUG_HTTP("🔐 handleAuthResponse (legacy): no pending request found for domain: " + g_pendingModalDomain);
+        g_pendingModalDomain = "";
+        return;
+    }
+    handleAuthResponse(requestId, responseData);
 }
 
 // Function to send auth request data to overlay (called after overlay loads)
 void sendAuthRequestDataToOverlay() {
-    if (!g_pendingAuthRequest.isValid) {
+    // Find the pending request for the current modal domain
+    std::string requestId = PendingRequestManager::GetInstance().getRequestIdForDomain(g_pendingModalDomain);
+    if (requestId.empty()) {
         LOG_DEBUG_HTTP("🔐 No pending auth request data to send");
+        return;
+    }
+
+    PendingAuthRequest req;
+    if (!PendingRequestManager::GetInstance().getRequest(requestId, req)) {
+        LOG_DEBUG_HTTP("🔐 Failed to get pending request for requestId: " + requestId);
         return;
     }
 
@@ -686,15 +1225,15 @@ void sendAuthRequestDataToOverlay() {
     if (auth_browser && auth_browser->GetMainFrame()) {
         CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("brc100_auth_request");
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        args->SetString(0, g_pendingAuthRequest.domain);
-        args->SetString(1, g_pendingAuthRequest.method);
-        args->SetString(2, g_pendingAuthRequest.endpoint);
-        args->SetString(3, g_pendingAuthRequest.body);
+        args->SetString(0, req.domain);
+        args->SetString(1, req.method);
+        args->SetString(2, req.endpoint);
+        args->SetString(3, req.body);
+        args->SetString(4, req.requestId);
+        args->SetString(5, req.type);
 
         auth_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
-        LOG_DEBUG_HTTP("🔐 Sent auth request data to overlay");
-
-        // Don't clear the pending request here - it will be cleared after auth response is processed
+        LOG_DEBUG_HTTP("🔐 Sent auth request data to overlay (requestId: " + requestId + ", type: " + req.type + ")");
     } else {
         LOG_DEBUG_HTTP("🔐 Auth browser not available for sending data");
     }
@@ -703,7 +1242,7 @@ void sendAuthRequestDataToOverlay() {
 // Async HTTP Client for handling CEF URL requests
 class AsyncHTTPClient : public CefURLRequestClient {
 public:
-    explicit AsyncHTTPClient(AsyncWalletResourceHandler* parent)
+    explicit AsyncHTTPClient(CefRefPtr<AsyncWalletResourceHandler> parent)
         : parent_(parent), completed_(false) {
         LOG_DEBUG_HTTP("🌐 AsyncHTTPClient constructor called");
     }
@@ -714,8 +1253,24 @@ public:
 
         LOG_DEBUG_HTTP("🌐 AsyncHTTPClient::OnRequestComplete called, response size: " + std::to_string(responseData_.length()));
 
-        // Notify parent handler that HTTP request completed
+        // Record spending on successful auto-approve payment
         if (parent_) {
+            CefURLRequest::Status status = request->GetRequestStatus();
+            int64_t cents = parent_->getPreCalculatedCents();
+            if (status == UR_SUCCESS && cents > 0) {
+                // Check response is not an error
+                bool isError = false;
+                try {
+                    auto rj = nlohmann::json::parse(responseData_);
+                    isError = rj.contains("error");
+                } catch (...) {}
+
+                if (!isError) {
+                    int browserId = parent_->getBrowserId();
+                    SessionManager::GetInstance().recordSpending(browserId, cents);
+                    LOG_DEBUG_HTTP("💰 Recorded spending: " + std::to_string(cents) + " cents for browser " + std::to_string(browserId));
+                }
+            }
             parent_->onHTTPResponseReceived(responseData_);
         }
     }
@@ -744,7 +1299,7 @@ public:
     }
 
 private:
-    AsyncWalletResourceHandler* parent_;
+    CefRefPtr<AsyncWalletResourceHandler> parent_;
     std::mutex mutex_;
     bool completed_;
     std::string responseData_;
@@ -753,54 +1308,26 @@ private:
     DISALLOW_COPY_AND_ASSIGN(AsyncHTTPClient);
 };
 
-// Task class for creating CefURLRequest on UI thread
-class URLRequestCreationTask : public CefTask {
-public:
-    URLRequestCreationTask(AsyncWalletResourceHandler* handler,
-                          CefRefPtr<CefRequest> httpRequest,
-                          AsyncHTTPClient* client,
-                          CefRefPtr<CefRequestContext> context)
-        : handler_(handler), httpRequest_(httpRequest), client_(client), context_(context) {}
-
-    void Execute() override {
-        LOG_DEBUG_HTTP("🌐 URLRequestCreationTask::Execute called on UI thread");
-        AsyncWalletResourceHandler::createURLRequestOnUIThread(handler_, httpRequest_, client_, context_);
-    }
-
-private:
-    AsyncWalletResourceHandler* handler_;
-    CefRefPtr<CefRequest> httpRequest_;
-    AsyncHTTPClient* client_;
-    CefRefPtr<CefRequestContext> context_;
-
-    IMPLEMENT_REFCOUNTING(URLRequestCreationTask);
-    DISALLOW_COPY_AND_ASSIGN(URLRequestCreationTask);
-};
-
 // Implementation of AsyncWalletResourceHandler::startAsyncHTTPRequest
 void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     LOG_DEBUG_HTTP("🌐 Starting async HTTP request to: " + endpoint_);
 
     // Create CEF HTTP request
-    LOG_DEBUG_HTTP("🌐 Creating CEF HTTP request");
     CefRefPtr<CefRequest> httpRequest = CefRequest::Create();
     std::string fullUrl = "http://localhost:3301" + endpoint_;
     httpRequest->SetURL(fullUrl);
     httpRequest->SetMethod(method_);
 
-    LOG_DEBUG_HTTP("🌐 Setting headers for request");
     // Start with standard headers
     CefRequest::HeaderMap headers;
     headers.insert(std::make_pair("Content-Type", "application/json"));
     headers.insert(std::make_pair("Accept", "application/json"));
 
     // Forward original headers (including BRC-31 Authrite headers)
-    LOG_DEBUG_HTTP("🌐 Forwarding " + std::to_string(originalHeaders_.size()) + " original headers");
     for (const auto& header : originalHeaders_) {
         std::string headerName = header.first.ToString();
         std::string headerValue = header.second.ToString();
 
-        // Log BRC-31 authentication headers
         if (headerName.find("x-authrite-") != std::string::npos ||
             headerName.find("X-Authrite-") != std::string::npos ||
             headerName.find("x-bsv-") != std::string::npos ||
@@ -815,7 +1342,6 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
 
     // Set POST body if needed
     if (method_ == "POST" && !body_.empty()) {
-        LOG_DEBUG_HTTP("🌐 Setting POST body");
         CefRefPtr<CefPostData> postData = CefPostData::Create();
         CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
         element->SetToBytes(body_.length(), body_.c_str());
@@ -823,58 +1349,23 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
         httpRequest->SetPostData(postData);
     }
 
-    // Start async request
-    LOG_DEBUG_HTTP("🌐 About to create CefURLRequest");
-    LOG_DEBUG_HTTP("🌐 Creating AsyncHTTPClient");
-    AsyncHTTPClient* client = new AsyncHTTPClient(this);
-    LOG_DEBUG_HTTP("🌐 AsyncHTTPClient created successfully");
-
-    LOG_DEBUG_HTTP("🌐 Getting global request context");
+    CefRefPtr<AsyncHTTPClient> client = new AsyncHTTPClient(this);
     CefRefPtr<CefRequestContext> context = CefRequestContext::GetGlobalContext();
-    LOG_DEBUG_HTTP("🌐 Global request context obtained");
 
-    LOG_DEBUG_HTTP("🌐 About to call CefURLRequest::Create");
-    LOG_DEBUG_HTTP("🌐 HTTP Request URL: " + httpRequest->GetURL().ToString());
-    LOG_DEBUG_HTTP("🌐 HTTP Request Method: " + httpRequest->GetMethod().ToString());
-
-    CefRequest::HeaderMap requestHeaders;
-    httpRequest->GetHeaderMap(requestHeaders);
-    LOG_DEBUG_HTTP("🌐 HTTP Request Headers count: " + std::to_string(requestHeaders.size()));
+    LOG_DEBUG_HTTP("🌐 Creating CefURLRequest for " + method_ + " " + fullUrl);
 
     try {
-        LOG_DEBUG_HTTP("🌐 Inside try block, about to create URL request");
-        LOG_DEBUG_HTTP("🌐 Posting task to UI thread for CefURLRequest creation");
+        // CefURLRequest::Create works on any valid CEF thread including IO
+        urlRequest_ = CefURLRequest::Create(httpRequest, client, context);
+        LOG_DEBUG_HTTP("🌐 CefURLRequest created successfully");
 
-        // Post task to UI thread - CefURLRequest::Create must be called from UI thread
-        // Create a simple task that will call our method
-        CefPostTask(TID_UI, new URLRequestCreationTask(this, httpRequest, client, context));
-        LOG_DEBUG_HTTP("🌐 Task posted to UI thread successfully");
-
-        // Timeout: cancel request after 15 seconds if no response
+        // Timeout: cancel request after 45s if no response
         postHttpTimeout();
 
     } catch (const std::exception& e) {
-        LOG_DEBUG_HTTP("🌐 Exception caught: " + std::string(e.what()));
+        LOG_DEBUG_HTTP("🌐 Exception creating CefURLRequest: " + std::string(e.what()));
     } catch (...) {
-        LOG_DEBUG_HTTP("🌐 Unknown exception caught");
-    }
-}
-
-// Static method to create CefURLRequest on UI thread
-void AsyncWalletResourceHandler::createURLRequestOnUIThread(AsyncWalletResourceHandler* handler,
-                                                           CefRefPtr<CefRequest> httpRequest,
-                                                           AsyncHTTPClient* client,
-                                                           CefRefPtr<CefRequestContext> context) {
-    LOG_DEBUG_HTTP("🌐 createURLRequestOnUIThread called on UI thread");
-
-    try {
-        LOG_DEBUG_HTTP("🌐 Creating CefURLRequest on UI thread");
-        handler->urlRequest_ = CefURLRequest::Create(httpRequest, client, context);
-        LOG_DEBUG_HTTP("🌐 CefURLRequest created successfully on UI thread");
-    } catch (const std::exception& e) {
-        LOG_DEBUG_HTTP("🌐 Exception in UI thread: " + std::string(e.what()));
-    } catch (...) {
-        LOG_DEBUG_HTTP("🌐 Unknown exception in UI thread");
+        LOG_DEBUG_HTTP("🌐 Unknown exception creating CefURLRequest");
     }
 }
 
@@ -985,12 +1476,12 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
         std::string domain = extractDomain(browser, request);
         LOG_DEBUG_HTTP("🌐 Extracted domain for Socket.IO: " + domain);
 
-        // Check whitelist (for logging only - no modal for now)
-        DomainVerifier domainVerifier;
-        if (!domainVerifier.isDomainWhitelisted(domain)) {
-            LOG_DEBUG_HTTP("🔒 Socket.IO connection from non-whitelisted domain: " + domain + " - allowing for now");
+        // Check domain permission (for logging only - no modal for Socket.IO)
+        auto socketPerm = DomainPermissionCache::GetInstance().getPermission(domain);
+        if (socketPerm.trustLevel == "unknown") {
+            LOG_DEBUG_HTTP("🔒 Socket.IO connection from unknown domain: " + domain + " - allowing for now");
         } else {
-            LOG_DEBUG_HTTP("🔒 Socket.IO connection from whitelisted domain: " + domain);
+            LOG_DEBUG_HTTP("🔒 Socket.IO connection from " + socketPerm.trustLevel + " domain: " + domain);
         }
 
         // Create AsyncWalletResourceHandler for Socket.IO requests

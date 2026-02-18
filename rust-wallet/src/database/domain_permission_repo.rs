@@ -33,8 +33,8 @@ impl<'a> DomainPermissionRepository<'a> {
     /// Get permission record for a specific domain and user
     pub fn get_by_domain(&self, user_id: i64, domain: &str) -> Result<Option<DomainPermission>> {
         match self.conn.query_row(
-            "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_day_limit_cents,
-                    daily_spent_cents, daily_reset_at, rate_limit_per_min, created_at, updated_at
+            "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
+                    rate_limit_per_min, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 AND domain = ?2",
             params![user_id, domain],
             |row| Ok(DomainPermission {
@@ -43,12 +43,10 @@ impl<'a> DomainPermissionRepository<'a> {
                 domain: row.get(2)?,
                 trust_level: row.get(3)?,
                 per_tx_limit_cents: row.get(4)?,
-                per_day_limit_cents: row.get(5)?,
-                daily_spent_cents: row.get(6)?,
-                daily_reset_at: row.get(7)?,
-                rate_limit_per_min: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                per_session_limit_cents: row.get(5)?,
+                rate_limit_per_min: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             }),
         ) {
             Ok(perm) => Ok(Some(perm)),
@@ -78,14 +76,14 @@ impl<'a> DomainPermissionRepository<'a> {
                 "UPDATE domain_permissions SET
                     trust_level = ?1,
                     per_tx_limit_cents = ?2,
-                    per_day_limit_cents = ?3,
+                    per_session_limit_cents = ?3,
                     rate_limit_per_min = ?4,
                     updated_at = ?5
                  WHERE id = ?6",
                 params![
                     perm.trust_level,
                     perm.per_tx_limit_cents,
-                    perm.per_day_limit_cents,
+                    perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
                     now,
                     id,
@@ -95,17 +93,15 @@ impl<'a> DomainPermissionRepository<'a> {
         } else {
             self.conn.execute(
                 "INSERT INTO domain_permissions
-                 (user_id, domain, trust_level, per_tx_limit_cents, per_day_limit_cents,
-                  daily_spent_cents, daily_reset_at, rate_limit_per_min, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
+                  rate_limit_per_min, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     perm.user_id,
                     perm.domain,
                     perm.trust_level,
                     perm.per_tx_limit_cents,
-                    perm.per_day_limit_cents,
-                    perm.daily_spent_cents,
-                    perm.daily_reset_at,
+                    perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
                     now,
                     now,
@@ -125,34 +121,11 @@ impl<'a> DomainPermissionRepository<'a> {
         Ok(())
     }
 
-    /// Record spending against a domain's daily limit.
-    /// Caller should call reset_daily_if_expired first.
-    pub fn record_spending(&self, id: i64, amount_cents: i64) -> Result<()> {
-        let now = unix_now();
-        self.conn.execute(
-            "UPDATE domain_permissions SET daily_spent_cents = daily_spent_cents + ?1, updated_at = ?2 WHERE id = ?3",
-            params![amount_cents, now, id],
-        )?;
-        Ok(())
-    }
-
-    /// Reset daily spending counter if the last reset was before today's midnight UTC
-    pub fn reset_daily_if_expired(&self, id: i64) -> Result<()> {
-        let now = unix_now();
-        let today_midnight = now - (now % 86400);
-        self.conn.execute(
-            "UPDATE domain_permissions SET daily_spent_cents = 0, daily_reset_at = ?1
-             WHERE id = ?2 AND daily_reset_at < ?3",
-            params![now, id, today_midnight],
-        )?;
-        Ok(())
-    }
-
     /// List all domain permissions for a user
     pub fn list_all(&self, user_id: i64) -> Result<Vec<DomainPermission>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_day_limit_cents,
-                    daily_spent_cents, daily_reset_at, rate_limit_per_min, created_at, updated_at
+            "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
+                    rate_limit_per_min, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 ORDER BY domain"
         )?;
         let rows = stmt.query_map(params![user_id], |row| Ok(DomainPermission {
@@ -161,12 +134,10 @@ impl<'a> DomainPermissionRepository<'a> {
             domain: row.get(2)?,
             trust_level: row.get(3)?,
             per_tx_limit_cents: row.get(4)?,
-            per_day_limit_cents: row.get(5)?,
-            daily_spent_cents: row.get(6)?,
-            daily_reset_at: row.get(7)?,
-            rate_limit_per_min: row.get(8)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
+            per_session_limit_cents: row.get(5)?,
+            rate_limit_per_min: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         }))?.collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }

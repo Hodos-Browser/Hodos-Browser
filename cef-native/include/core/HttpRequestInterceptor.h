@@ -48,5 +48,6 @@ private:
 };
 
 // Global functions for BRC-100 auth modal
-void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body);
 void sendAuthRequestDataToOverlay();
+void handleAuthResponse(const std::string& requestId, const std::string& responseData);
+void handleAuthResponse(const std::string& responseData);  // legacy overload

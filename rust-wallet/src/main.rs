@@ -9,7 +9,6 @@ mod handlers;
 mod crypto;
 mod transaction;
 mod utxo_fetcher;
-mod domain_whitelist;
 mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
@@ -26,8 +25,6 @@ mod monitor;  // Phase 6: Monitor pattern (background task scheduler)
 mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // Certificate management (BRC-52)
 
-// JSON storage no longer used - all handlers use database
-use domain_whitelist::DomainWhitelistManager;
 use message_relay::MessageStore;
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
@@ -45,7 +42,6 @@ pub struct DerivedKeyInfo {
 // Global app state
 pub struct AppState {
     pub database: Arc<Mutex<WalletDatabase>>,  // Database storage (primary)
-    pub whitelist: Arc<DomainWhitelistManager>,
     pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
     pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
@@ -88,10 +84,6 @@ async fn main() -> std::io::Result<()> {
     // Database is now the primary storage - no JSON files needed
     println!("📁 Wallet directory: {}", wallet_dir.display());
 
-    // Initialize domain whitelist manager
-    let whitelist_manager = Arc::new(DomainWhitelistManager::new());
-    println!("✅ Domain whitelist manager initialized");
-
     // Initialize BRC-33 message relay
     let message_store = MessageStore::new();
     println!("✅ BRC-33 message relay initialized");
@@ -120,14 +112,45 @@ async fn main() -> std::io::Result<()> {
                     println!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
                     println!("   Addresses: {}", wallet.current_index + 1);
 
-                    // PIN-protected vs legacy wallet startup
-                    if wallet.pin_salt.is_some() {
-                        println!("🔒 Wallet is PIN-protected — waiting for unlock via /wallet/unlock");
-                        // Mnemonic is encrypted; defer ensure_master_address_exists to unlock handler
-                    } else {
-                        // Legacy wallet: plaintext mnemonic — cache it for immediate use
-                        println!("🔓 Legacy wallet (no PIN) — auto-caching mnemonic");
-                        db.cache_mnemonic(wallet.mnemonic.clone());
+                    let wallet_id = wallet.id.unwrap();
+                    let has_dpapi = wallet.mnemonic_dpapi.is_some();
+                    let is_pin_protected = wallet.pin_salt.is_some();
+
+                    // Auto-unlock via DPAPI (Windows user account binding)
+                    match db.try_dpapi_unlock() {
+                        Ok(true) => {
+                            println!("🔓 DPAPI auto-unlock succeeded");
+                        }
+                        Ok(false) => {
+                            // No DPAPI blob — legacy wallet or non-Windows
+                            if !is_pin_protected {
+                                // Legacy unencrypted wallet: cache mnemonic directly
+                                println!("🔓 Legacy wallet (no PIN, no DPAPI) — caching plaintext mnemonic");
+                                db.cache_mnemonic(wallet.mnemonic.clone());
+                            } else {
+                                // PIN-protected but no DPAPI blob — backfill if we can unlock
+                                // This case shouldn't happen for new wallets but handles
+                                // wallets created before DPAPI support was added
+                                println!("🔒 PIN-protected wallet without DPAPI blob — wallet locked");
+                                println!("   Use POST /wallet/unlock with PIN to unlock");
+                            }
+                        }
+                        Err(e) => {
+                            // DPAPI blob exists but decryption failed (DB moved to another machine/user)
+                            println!("🔒 DPAPI unlock failed: {} — wallet locked", e);
+                            println!("   Use POST /wallet/unlock with PIN to unlock");
+                        }
+                    }
+
+                    // If wallet was unlocked (via DPAPI or legacy), do startup tasks
+                    if db.is_unlocked() {
+                        // Backfill DPAPI blob for wallets that don't have one yet
+                        if !has_dpapi {
+                            if let Ok(mnemonic) = db.get_cached_mnemonic() {
+                                let mnemonic_owned = mnemonic.to_string();
+                                let _ = db.store_dpapi_blob(wallet_id, &mnemonic_owned);
+                            }
+                        }
 
                         // Ensure master pubkey address exists (needs cached mnemonic)
                         if let Err(e) = db.ensure_master_address_exists() {
@@ -289,7 +312,6 @@ async fn main() -> std::io::Result<()> {
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
-        whitelist: whitelist_manager,
         message_store,
         auth_sessions,
         balance_cache,
@@ -466,12 +488,11 @@ async fn main() -> std::io::Result<()> {
                     .route(web::post().to(handlers::wallet_import))
             )
 
+            // Price endpoint (Phase 2.3 — for C++ auto-approve engine)
+            .route("/wallet/bsv-price", web::get().to(handlers::get_bsv_price))
+
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))
-
-            // Domain whitelist endpoints (legacy — C++ uses these)
-            .route("/domain/whitelist/check", web::get().to(handlers::check_domain))
-            .route("/domain/whitelist/add", web::post().to(handlers::add_domain))
 
             // Domain permissions endpoints (Phase 2.1)
             .route("/domain/permissions", web::get().to(handlers::get_domain_permission))

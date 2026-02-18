@@ -167,6 +167,8 @@ elseif(WIN32)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
+        include/core/SessionManager.h
+        src/core/SessionManager.cpp
         include/core/Tab.h
         include/core/TabManager.h
         src/core/TabManager.cpp

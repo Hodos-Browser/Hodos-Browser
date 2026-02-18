@@ -41,7 +41,8 @@ if (!window.hodosBrowser.overlay?.show) {
         pendingAuth.domain,
         pendingAuth.method,
         pendingAuth.endpoint,
-        pendingAuth.body
+        pendingAuth.body,
+        pendingAuth.type || 'domain_approval'
       ]);
       // Clear the pending request
       (window as any).pendingBRC100AuthRequest = null;

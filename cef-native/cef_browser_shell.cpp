@@ -55,6 +55,7 @@ HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
 HWND g_cookie_panel_overlay_hwnd = nullptr;
+HWND g_notification_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -256,6 +257,12 @@ void ShutdownApplication() {
         g_brc100_auth_overlay_hwnd = nullptr;
     }
 
+    if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
+        LOG_INFO("🔄 Destroying notification overlay window...");
+        DestroyWindow(g_notification_overlay_hwnd);
+        g_notification_overlay_hwnd = nullptr;
+    }
+
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
         LOG_INFO("🔄 Destroying omnibox overlay window...");
         // Remove mouse hook if still installed
@@ -370,6 +377,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     mainRect.left, mainRect.top, width, height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 LOG_DEBUG("🔄 Moved BRC-100 auth overlay to match main window");
+            }
+
+            // Move notification overlay if it exists and is visible
+            if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd) && IsWindowVisible(g_notification_overlay_hwnd)) {
+                SetWindowPos(g_notification_overlay_hwnd, HWND_TOPMOST,
+                    mainRect.left, mainRect.top, width, height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
             // Dismiss omnibox overlay on window move (as per CONTEXT.md decision)
@@ -553,6 +567,17 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     auth_browser->GetHost()->WasResized();
                 }
                 LOG_DEBUG("🔄 Resized BRC-100 auth overlay to match main window");
+            }
+
+            // Resize notification overlay
+            if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd) && IsWindowVisible(g_notification_overlay_hwnd)) {
+                SetWindowPos(g_notification_overlay_hwnd, HWND_TOPMOST,
+                    mainRect.left, mainRect.top, width, height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+                if (notif_browser) {
+                    notif_browser->GetHost()->WasResized();
+                }
             }
 
             // Dismiss omnibox overlay on window resize (as per CONTEXT.md decision)
@@ -998,6 +1023,143 @@ LRESULT CALLBACK BRC100AuthOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         case WM_ACTIVATE:
             LOG_DEBUG("⚡ BRC-100 Auth HWND activated with state: " + std::to_string(LOWORD(wParam)));
             break;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// Notification Overlay Window Procedure (same pattern as BRC-100 auth overlay)
+LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_ACTIVATE;
+
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDBLCLK: {
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 2);
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 2);
+            }
+            return 0;
+        }
+
+        case WM_RBUTTONDOWN: {
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+                notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                notif_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            SetFocus(hwnd);
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYDOWN;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
+                key_event.modifiers = modifiers;
+                notif_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_KEYUP: {
+            SetFocus(hwnd);
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYUP;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
+                key_event.modifiers = modifiers;
+                notif_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_CHAR: {
+            SetFocus(hwnd);
+            CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
+            if (notif_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_CHAR;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= EVENTFLAG_COMMAND_DOWN;
+                key_event.modifiers = modifiers;
+                notif_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
 
         case WM_WINDOWPOSCHANGING:
             break;
@@ -1528,6 +1690,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&brc100AuthOverlayClass)) {
         LOG_DEBUG("❌ Failed to register BRC-100 auth overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Notification overlay window class (full-screen, for all notification types)
+    WNDCLASS notificationOverlayClass = {};
+    notificationOverlayClass.style = CS_DBLCLKS;
+    notificationOverlayClass.lpfnWndProc = NotificationOverlayWndProc;
+    notificationOverlayClass.hInstance = hInstance;
+    notificationOverlayClass.lpszClassName = L"CEFNotificationOverlayWindow";
+
+    if (!RegisterClass(&notificationOverlayClass)) {
+        LOG_DEBUG("Failed to register notification overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     // Register Settings Menu overlay window class (small dropdown)

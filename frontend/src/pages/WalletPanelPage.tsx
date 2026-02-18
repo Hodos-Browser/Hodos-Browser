@@ -88,12 +88,9 @@ export default function WalletPanelPage() {
     return Math.round(iro / dpr);
   }, []);
 
-  // Cache-first init: check both exists and locked from localStorage
+  // Cache-first init: check exists from localStorage
   const cachedExists = localStorage.getItem('hodos_wallet_exists') === 'true';
-  const cachedLocked = localStorage.getItem('hodos_wallet_locked') === 'true';
-  const initialStatus = cachedExists
-    ? (cachedLocked ? 'locked' : 'exists')
-    : 'loading';
+  const initialStatus = cachedExists ? 'exists' : 'loading';
 
   const [walletStatus, setWalletStatus] = useState<'loading' | 'exists' | 'no-wallet' | 'locked'>(
     initialStatus as 'loading' | 'exists' | 'no-wallet' | 'locked'
@@ -129,13 +126,18 @@ export default function WalletPanelPage() {
     certificates: number;
   } | null>(null);
 
-  // PIN state
+  // PIN state (for initial wallet creation/recovery only — not for unlock)
   const [pinStep, setPinStep] = useState<'create' | 'confirm' | null>(null);
   const [pinDigits, setPinDigits] = useState<string[]>(['', '', '', '']);
   const [confirmPinDigits, setConfirmPinDigits] = useState<string[]>(['', '', '', '']);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pendingPin, setPendingPin] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<'create' | 'recover' | 'import' | null>(null);
+
+  // Unlock state (fallback when DPAPI fails — e.g., DB moved to another machine)
+  const [unlockPinDigits, setUnlockPinDigits] = useState<string[]>(['', '', '', '']);
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
 
   // Centbee recovery state
   const [showCentbeeRecovery, setShowCentbeeRecovery] = useState(false);
@@ -153,30 +155,25 @@ export default function WalletPanelPage() {
     message: string;
   } | null>(null);
 
-  // Unlock state (for locked wallet)
-  const [unlockDigits, setUnlockDigits] = useState<string[]>(['', '', '', '']);
-  const [unlocking, setUnlocking] = useState(false);
-  const [unlockError, setUnlockError] = useState<string | null>(null);
-
   useEffect(() => {
-    // If localStorage says wallet exists and not locked, trust it.
-    // If locked, also trust it. Only fetch when no cached state.
-    if (cachedExists && !cachedLocked) return;
+    // If localStorage says wallet exists, trust it and skip the fetch
+    if (cachedExists) return;
 
     fetch('http://localhost:3301/wallet/status')
       .then(r => r.json())
       .then(data => {
-        if (data.exists) {
+        if (data.exists && data.locked) {
           localStorage.setItem('hodos_wallet_exists', 'true');
-          localStorage.setItem('hodos_wallet_locked', data.locked ? 'true' : 'false');
-          setWalletStatus(data.locked ? 'locked' : 'exists');
+          setWalletStatus('locked');
+        } else if (data.exists) {
+          localStorage.setItem('hodos_wallet_exists', 'true');
+          setWalletStatus('exists');
         } else {
           localStorage.removeItem('hodos_wallet_exists');
-          localStorage.setItem('hodos_wallet_locked', 'false');
           setWalletStatus('no-wallet');
         }
       })
-      .catch(() => setWalletStatus(cachedLocked ? 'locked' : 'no-wallet'));
+      .catch(() => setWalletStatus('no-wallet'));
   }, []);
 
   const handleClose = () => {
@@ -193,9 +190,8 @@ export default function WalletPanelPage() {
     }
   };
 
-  // --- PIN Flow ---
+  // --- PIN Flow (used during create, recover, import) ---
 
-  // When user clicks "Create New Wallet", start PIN creation flow
   const handleStartCreate = () => {
     setPendingAction('create');
     setPinStep('create');
@@ -205,7 +201,6 @@ export default function WalletPanelPage() {
     setPendingPin(null);
   };
 
-  // Auto-submit when 4 digits filled (PIN create step)
   const handlePinDigitsChange = useCallback((digits: string[]) => {
     setPinDigits(digits);
     setPinError(null);
@@ -217,7 +212,6 @@ export default function WalletPanelPage() {
     }
   }, []);
 
-  // Auto-submit when 4 digits filled (PIN confirm step)
   const handleConfirmPinDigitsChange = useCallback((digits: string[]) => {
     setConfirmPinDigits(digits);
     setPinError(null);
@@ -231,18 +225,12 @@ export default function WalletPanelPage() {
         setPendingPin(null);
         return;
       }
-      // PINs match — execute the pending action
-      if (pendingAction === 'create') {
-        doCreateWallet(confirmPin);
-      } else if (pendingAction === 'recover') {
-        doRecoverWallet(confirmPin);
-      } else if (pendingAction === 'import') {
-        doImportBackup(confirmPin);
-      }
+      if (pendingAction === 'create') doCreateWallet(confirmPin);
+      else if (pendingAction === 'recover') doRecoverWallet(confirmPin);
+      else if (pendingAction === 'import') doImportBackup(confirmPin);
     }
   }, [pendingPin, pendingAction]);
 
-  // Actually call the create API with PIN
   const doCreateWallet = async (pin: string) => {
     setPinStep(null);
     setCreating(true);
@@ -278,7 +266,7 @@ export default function WalletPanelPage() {
 
   const handleConfirmBackup = () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    localStorage.setItem('hodos_wallet_locked', 'false');
+
     setMnemonic(null);
     setCreating(false);
     setWalletStatus('exists');
@@ -335,8 +323,6 @@ export default function WalletPanelPage() {
       setRecoveryError(`Word ${emptyBoxes + 1} is empty.`);
       return;
     }
-
-    // Words are valid — start PIN creation
     setPendingAction('recover');
     setPinStep('create');
     setPinDigits(['', '', '', '']);
@@ -345,7 +331,6 @@ export default function WalletPanelPage() {
     setPendingPin(null);
   };
 
-  // Actually call the recovery API with PIN
   const doRecoverWallet = async (pin: string) => {
     setPinStep(null);
     setPendingAction(null);
@@ -394,7 +379,7 @@ export default function WalletPanelPage() {
 
   const handleRecoveryComplete = () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    localStorage.setItem('hodos_wallet_locked', 'false');
+
     setRecoveryResult(null);
     setShowRecoveryInput(false);
     setRecoveryWords(Array(12).fill(''));
@@ -439,7 +424,6 @@ export default function WalletPanelPage() {
       setImportError('Backup password must be at least 8 characters.');
       return;
     }
-    // Start PIN creation
     setPendingAction('import');
     setPinStep('create');
     setPinDigits(['', '', '', '']);
@@ -500,47 +484,13 @@ export default function WalletPanelPage() {
 
   const handleImportComplete = () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    localStorage.setItem('hodos_wallet_locked', 'false');
+
     setImportResult(null);
     setShowImportForm(false);
     setImportPassword('');
     setImportBackupText('');
     setImportFile(null);
     setWalletStatus('exists');
-  };
-
-  // --- Unlock Flow ---
-
-  const handleUnlockDigitsChange = useCallback((digits: string[]) => {
-    setUnlockDigits(digits);
-    setUnlockError(null);
-    if (digits.every(d => d !== '')) {
-      doUnlock(digits.join(''));
-    }
-  }, []);
-
-  const doUnlock = async (pin: string) => {
-    setUnlocking(true);
-    setUnlockError(null);
-    try {
-      const res = await fetch('http://localhost:3301/wallet/unlock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        localStorage.setItem('hodos_wallet_locked', 'false');
-        setWalletStatus('exists');
-      } else {
-        setUnlockError(data.error || 'Invalid PIN');
-        setUnlockDigits(['', '', '', '']);
-      }
-    } catch {
-      setUnlockError('Failed to connect to wallet server');
-      setUnlockDigits(['', '', '', '']);
-    }
-    setUnlocking(false);
   };
 
   // --- Centbee Recovery Flow ---
@@ -651,7 +601,7 @@ export default function WalletPanelPage() {
 
   const handleCentbeeComplete = () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    localStorage.setItem('hodos_wallet_locked', 'false');
+
     setCentbeeResult(null);
     setShowCentbeeRecovery(false);
     setCentbeeWords(Array(12).fill(''));
@@ -659,14 +609,14 @@ export default function WalletPanelPage() {
     setWalletStatus('exists');
   };
 
-  // --- PIN creation/confirm screens (shared between create + recovery) ---
+  // --- PIN creation/confirm screens (shared between create, recovery, import) ---
 
   const renderPinCreate = () => (
     <>
       <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F512;</div>
       <h3 style={{ margin: '0 0 8px', color: '#1a2e0a', fontSize: '18px' }}>Create a PIN</h3>
       <p style={{ color: '#555', fontSize: '13px', margin: '0 0 24px' }}>
-        Choose a 4-digit PIN to protect your wallet on this device.
+        Choose a 4-digit PIN to protect your wallet. You'll need this PIN to view your mnemonic or perform sensitive operations.
       </p>
 
       {pinError && (
@@ -678,7 +628,7 @@ export default function WalletPanelPage() {
       <PinInput key="pin-create" digits={pinDigits} onChange={handlePinDigitsChange} />
 
       <p style={{ color: '#888', fontSize: '11px', margin: '16px 0 0', fontStyle: 'italic' }}>
-        This PIN protects access to your wallet on this device. It is not used to derive your keys or addresses.
+        Your wallet will unlock automatically when you start the browser. The PIN is used to encrypt your keys and for sensitive operations.
       </p>
 
       <button
@@ -750,55 +700,6 @@ export default function WalletPanelPage() {
 
   // --- Render functions ---
 
-  const renderLocked = () => (
-    <div style={{
-      background: '#d4c4a8',
-      borderRadius: '12px',
-      width: '380px',
-      maxHeight: '80vh',
-      overflow: 'auto',
-      boxShadow: '0 8px 32px rgba(45, 80, 22, 0.3)',
-      cursor: 'default',
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    }} onClick={e => e.stopPropagation()}>
-      {/* Header */}
-      <div style={{
-        background: '#2d5016',
-        color: '#f5f1e8',
-        padding: '20px 24px',
-        borderRadius: '12px 12px 0 0',
-        borderBottom: '2px solid #d4c4a8',
-      }}>
-        <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 700 }}>Wallet</h2>
-      </div>
-
-      {/* Content */}
-      <div style={{ padding: '32px 24px', textAlign: 'center' }}>
-        <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F510;</div>
-        <h3 style={{ margin: '0 0 8px', color: '#1a2e0a', fontSize: '18px' }}>Wallet Locked</h3>
-        <p style={{ color: '#555', fontSize: '13px', margin: '0 0 24px' }}>
-          Enter your 4-digit PIN to unlock your wallet.
-        </p>
-
-        <PinInput digits={unlockDigits} onChange={handleUnlockDigitsChange} disabled={unlocking} />
-
-        {unlocking && (
-          <p style={{ color: '#1a2e0a', fontSize: '13px', margin: '16px 0 0' }}>Unlocking...</p>
-        )}
-
-        {unlockError && (
-          <p style={{ color: '#c62828', fontSize: '12px', margin: '12px 0 0', fontWeight: 600 }}>
-            {unlockError}
-          </p>
-        )}
-
-        <p style={{ color: '#888', fontSize: '11px', margin: '20px 0 0', fontStyle: 'italic' }}>
-          Forgot your PIN? You can recover your wallet using your mnemonic phrase.
-        </p>
-      </div>
-    </div>
-  );
-
   const renderNoWallet = () => (
     <div style={{
       background: '#d4c4a8',
@@ -823,7 +724,6 @@ export default function WalletPanelPage() {
 
       {/* Content */}
       <div style={{ padding: '32px 24px', textAlign: 'center' }}>
-        {/* PIN creation/confirm overlays (during create or recovery) */}
         {pinStep === 'create' ? renderPinCreate()
         : pinStep === 'confirm' ? renderPinConfirm()
         : recoveryResult ? (
@@ -1231,7 +1131,7 @@ export default function WalletPanelPage() {
                 Migration Notice
               </p>
               <p style={{ color: '#4e342e', fontSize: '12px', margin: 0, lineHeight: '1.5' }}>
-                Your wallet has been migrated to BRC-42 derivation. Your mnemonic is the same &mdash; only the address derivation scheme changed. Your Centbee PIN has been set as your Hodos wallet PIN to protect your keys on this device.
+                Your wallet has been migrated to BRC-42 derivation. Your mnemonic is the same &mdash; only the address derivation scheme changed.
               </p>
             </div>
 
@@ -1317,7 +1217,7 @@ export default function WalletPanelPage() {
             </p>
             <PinInput digits={centbeePinDigits} onChange={d => { setCentbeePinDigits(d); setCentbeeError(null); }} disabled={centbeeRecovering} />
             <p style={{ color: '#888', fontSize: '11px', margin: '8px 0 12px', fontStyle: 'italic' }}>
-              Your Centbee PIN will also be used as your Hodos wallet PIN.
+              This is the PIN you set in Centbee — it's needed to derive your addresses.
             </p>
 
             {centbeeError && (
@@ -1583,6 +1483,65 @@ export default function WalletPanelPage() {
     </div>
   );
 
+  // Handle unlock (fallback when DPAPI fails)
+  const handleUnlock = async () => {
+    const pin = unlockPinDigits.join('');
+    if (pin.length !== 4) return;
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      const res = await fetch('http://localhost:3301/wallet/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setUnlockError(data.error || 'Unlock failed');
+        setUnlockPinDigits(['', '', '', '']);
+        setUnlocking(false);
+        return;
+      }
+      setWalletStatus('exists');
+    } catch (e: any) {
+      setUnlockError(e.message || 'Connection failed');
+      setUnlocking(false);
+    }
+  };
+
+  // Auto-submit unlock when 4 digits entered
+  useEffect(() => {
+    if (walletStatus === 'locked' && unlockPinDigits.every(d => d !== '') && !unlocking) {
+      handleUnlock();
+    }
+  }, [unlockPinDigits, walletStatus]);
+
+  const renderLocked = () => (
+    <div style={{
+      background: '#d4c4a8',
+      borderRadius: '12px',
+      width: '380px',
+      padding: '32px 24px',
+      textAlign: 'center',
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+      cursor: 'default',
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    }} onClick={e => e.stopPropagation()}>
+      <div style={{ fontSize: '32px', marginBottom: '8px' }}>&#x1F512;</div>
+      <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: '#1a2e0a' }}>Wallet Locked</h3>
+      <p style={{ color: '#4a5e3a', fontSize: '13px', margin: '0 0 20px 0', lineHeight: '1.4' }}>
+        Auto-unlock was unavailable. Enter your PIN to unlock.
+      </p>
+      <PinInput digits={unlockPinDigits} onChange={setUnlockPinDigits} disabled={unlocking} />
+      {unlockError && (
+        <p style={{ color: '#b91c1c', fontSize: '13px', marginTop: '12px' }}>{unlockError}</p>
+      )}
+      {unlocking && (
+        <p style={{ color: '#4a5e3a', fontSize: '13px', marginTop: '12px' }}>Unlocking...</p>
+      )}
+    </div>
+  );
+
   const renderLoading = () => (
     <div style={{
       background: '#d4c4a8',
@@ -1622,8 +1581,8 @@ export default function WalletPanelPage() {
       }}
     >
       {walletStatus === 'loading' && renderLoading()}
-      {walletStatus === 'no-wallet' && renderNoWallet()}
       {walletStatus === 'locked' && renderLocked()}
+      {walletStatus === 'no-wallet' && renderNoWallet()}
       {walletStatus === 'exists' && <WalletPanel onClose={handleClose} />}
     </div>
   );

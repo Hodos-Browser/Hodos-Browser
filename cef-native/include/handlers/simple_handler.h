@@ -45,6 +45,7 @@ public:
     static CefRefPtr<CefBrowser> GetWalletBrowser();
     static CefRefPtr<CefBrowser> GetBackupBrowser();
     static CefRefPtr<CefBrowser> GetBRC100AuthBrowser();
+    static CefRefPtr<CefBrowser> GetNotificationBrowser();
     static CefRefPtr<CefBrowser> GetSettingsMenuBrowser();
     static CefRefPtr<CefBrowser> GetOmniboxBrowser();
     static CefRefPtr<CefBrowser> GetCookiePanelBrowser();
@@ -156,6 +157,7 @@ private:
     static CefRefPtr<CefBrowser> wallet_browser_;
     static CefRefPtr<CefBrowser> backup_browser_;
     static CefRefPtr<CefBrowser> brc100_auth_browser_;
+    static CefRefPtr<CefBrowser> notification_browser_;
     static CefRefPtr<CefBrowser> settings_menu_browser_;
     static CefRefPtr<CefBrowser> omnibox_browser_;
     static CefRefPtr<CefBrowser> cookie_panel_browser_;

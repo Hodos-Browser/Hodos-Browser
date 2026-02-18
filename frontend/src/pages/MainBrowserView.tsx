@@ -62,8 +62,7 @@ const MainBrowserView: React.FC = () => {
                 } else {
                     localStorage.removeItem('hodos_wallet_exists');
                 }
-                // Sync locked state so wallet overlay can render instantly
-                localStorage.setItem('hodos_wallet_locked', data.locked ? 'true' : 'false');
+                localStorage.removeItem('hodos_wallet_locked');
             })
             .catch(() => {
                 // Server not reachable — leave cache as-is (overlay will retry)

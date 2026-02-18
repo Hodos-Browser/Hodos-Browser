@@ -336,8 +336,8 @@ pub struct BackupDomainPermission {
     pub trust_level: String,
     #[serde(rename = "perTxLimitCents")]
     pub per_tx_limit_cents: i64,
-    #[serde(rename = "perDayLimitCents")]
-    pub per_day_limit_cents: i64,
+    #[serde(rename = "perSessionLimitCents")]
+    pub per_session_limit_cents: i64,
     #[serde(rename = "rateLimitPerMin")]
     pub rate_limit_per_min: i64,
     #[serde(rename = "createdAt")]
@@ -761,14 +761,14 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Domain permissions (Phase 2.1)
     let domain_permissions = {
         let mut stmt = conn.prepare(
-            "SELECT domain, trust_level, per_tx_limit_cents, per_day_limit_cents, \
+            "SELECT domain, trust_level, per_tx_limit_cents, per_session_limit_cents, \
              rate_limit_per_min, created_at, updated_at FROM domain_permissions"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupDomainPermission {
             domain: row.get(0)?,
             trust_level: row.get(1)?,
             per_tx_limit_cents: row.get(2)?,
-            per_day_limit_cents: row.get(3)?,
+            per_session_limit_cents: row.get(3)?,
             rate_limit_per_min: row.get(4)?,
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
@@ -1124,11 +1124,11 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         let user_id: i64 = payload.users.first().map(|u| u.user_id).unwrap_or(1);
         conn.execute(
             "INSERT OR IGNORE INTO domain_permissions
-             (user_id, domain, trust_level, per_tx_limit_cents, per_day_limit_cents,
-              daily_spent_cents, daily_reset_at, rate_limit_per_min, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8)",
+             (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
+              rate_limit_per_min, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![user_id, dp.domain, dp.trust_level, dp.per_tx_limit_cents,
-                             dp.per_day_limit_cents, dp.rate_limit_per_min,
+                             dp.per_session_limit_cents, dp.rate_limit_per_min,
                              dp.created_at, dp.updated_at],
         ).map_err(|e| format!("Insert domain_permissions: {}", e))?;
     }

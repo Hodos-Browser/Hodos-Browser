@@ -122,22 +122,28 @@ public:
                 LOG_DEBUG_RENDER("Double: " + std::to_string(value));
                 args->SetDouble(i - 1, value);
             } else if (arguments[i]->IsArray()) {
-                // Handle array arguments - extract the first element if it's a string
+                // Expand ALL array elements into the message args list
                 CefRefPtr<CefV8Value> array = arguments[i];
                 std::cout << "Array with length: " << array->GetArrayLength() << std::endl;
                 LOG_DEBUG_RENDER("Array with length: " + std::to_string(array->GetArrayLength()));
-                if (array->GetArrayLength() > 0) {
-                    CefRefPtr<CefV8Value> firstElement = array->GetValue(0);
-                    if (firstElement->IsString()) {
-                        std::string value = firstElement->GetStringValue();
-                        std::cout << "Array[0] String: " << value << std::endl;
-                        LOG_DEBUG_RENDER("Array[0] String: " + value);
-                        args->SetString(i - 1, value);
-                    } else if (firstElement->IsBool()) {
-                        bool value = firstElement->GetBoolValue();
-                        std::cout << "Array[0] Bool: " << (value ? "true" : "false") << std::endl;
-                        LOG_DEBUG_RENDER("Array[0] Bool: " + std::string(value ? "true" : "false"));
-                        args->SetBool(i - 1, value);
+                for (int j = 0; j < array->GetArrayLength(); j++) {
+                    CefRefPtr<CefV8Value> element = array->GetValue(j);
+                    if (element->IsString()) {
+                        std::string value = element->GetStringValue();
+                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] String: " + value);
+                        args->SetString(j, value);
+                    } else if (element->IsBool()) {
+                        bool value = element->GetBoolValue();
+                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] Bool: " + std::string(value ? "true" : "false"));
+                        args->SetBool(j, value);
+                    } else if (element->IsInt()) {
+                        int value = element->GetIntValue();
+                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] Int: " + std::to_string(value));
+                        args->SetInt(j, value);
+                    } else if (element->IsDouble()) {
+                        double value = element->GetDoubleValue();
+                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] Double: " + std::to_string(value));
+                        args->SetDouble(j, value);
                     }
                 }
             } else {
@@ -812,8 +818,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             std::string method = args->GetString(1);
             std::string endpoint = args->GetString(2);
             std::string body = args->GetString(3);
+            std::string notifType = (args->GetSize() >= 6) ? args->GetString(5).ToString() : "domain_approval";
 
-            LOG_DEBUG_RENDER("🔐 BRC-100 auth request received: " + domain + " " + method + " " + endpoint);
+            LOG_DEBUG_RENDER("🔐 BRC-100 auth request received: " + domain + " type=" + notifType);
 
             // Send message to React component
             std::string js = R"(
@@ -824,7 +831,8 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                             domain: ')" + domain + R"(',
                             method: ')" + method + R"(',
                             endpoint: ')" + endpoint + R"(',
-                            body: ')" + body + R"('
+                            body: ')" + body + R"(',
+                            notificationType: ')" + notifType + R"('
                         }
                     }
                 }));
