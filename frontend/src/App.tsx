@@ -8,6 +8,7 @@ import OmniboxOverlayRoot from './pages/OmniboxOverlayRoot';
 import CookiePanelOverlayRoot from './pages/CookiePanelOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
 import HistoryPage from './pages/HistoryPage';
+import CertErrorPage from './pages/CertErrorPage';
 import WalletPanelPage from './pages/WalletPanelPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
 import { brc100 } from './bridge/brc100';
@@ -162,6 +163,7 @@ const App = () => {
         {/* <Route path="/" element={walletExists ? <MainBrowserView /> : <OverlayRoot />} /> */}
         <Route path="/" element={<MainBrowserView />} />
         <Route path="/history" element={<HistoryPage />} />
+        <Route path="/cert-error" element={<CertErrorPage />} />
         <Route path="/wallet-panel" element={<WalletPanelPage />} />
         <Route path="/settings" element={<SettingsOverlayRoot />} />
         <Route path="/wallet" element={<WalletOverlayRoot />} />

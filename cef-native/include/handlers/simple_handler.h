@@ -10,6 +10,7 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_dialog_handler.h"
 #include "include/cef_keyboard_handler.h"
+#include <set>
 
 // Forward declarations to avoid circular dependency
 struct Tab;
@@ -112,6 +113,13 @@ public:
         const CefString& request_initiator,
         bool& disable_default_handling) override;
 
+    // CefRequestHandler - SSL certificate error handling
+    bool OnCertificateError(CefRefPtr<CefBrowser> browser,
+                            cef_errorcode_t cert_error,
+                            const CefString& request_url,
+                            CefRefPtr<CefSSLInfo> ssl_info,
+                            CefRefPtr<CefCallback> callback) override;
+
     void SetRenderHandler(CefRefPtr<CefRenderHandler> handler);
     CefRefPtr<CefRenderHandler> GetRenderHandler() override;
 
@@ -167,6 +175,9 @@ private:
      * @return Tab ID, or -1 if not a tab role
      */
     static int ExtractTabIdFromRole(const std::string& role);
+
+    // Domains user has chosen to proceed past cert errors (session-only)
+    static std::set<std::string> allowed_cert_exceptions_;
 
     IMPLEMENT_REFCOUNTING(SimpleHandler);
 };

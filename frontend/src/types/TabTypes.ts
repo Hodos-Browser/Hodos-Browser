@@ -10,6 +10,7 @@ export interface Tab {
   isActive: boolean;
   isLoading: boolean;
   favicon?: string;
+  hasCertError?: boolean;
 }
 
 export interface TabListResponse {

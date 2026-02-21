@@ -7,6 +7,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_frame.h"
 #include "include/cef_process_message.h"
+#include "include/cef_request_context.h"
 #include <iostream>
 #include <fstream>
 
@@ -107,6 +108,13 @@ void SimpleApp::SetMacOSWindow(void* main_window, void* header_view, void* webvi
 
 void SimpleApp::OnContextInitialized() {
     CEF_REQUIRE_UI_THREAD();
+
+    // Clear any cached SSL certificate exceptions from previous sessions
+    // so OnCertificateError fires fresh every browser launch (session-only exceptions)
+    CefRefPtr<CefRequestContext> ctx = CefRequestContext::GetGlobalContext();
+    if (ctx) {
+        ctx->ClearCertificateExceptions(nullptr);
+    }
 
 #ifdef _WIN32
     std::cout << "✅ OnContextInitialized CALLED (Windows)" << std::endl;

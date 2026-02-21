@@ -202,6 +202,7 @@ void SimpleHandler::NotifyTabListChanged() {
         tab_json["url"] = tab->url;
         tab_json["isActive"] = (tab->id == active_tab_id);
         tab_json["isLoading"] = tab->is_loading;
+        tab_json["hasCertError"] = tab->has_cert_error;
         if (!tab->favicon_url.empty()) {
             tab_json["favicon"] = tab->favicon_url;
         }
@@ -248,8 +249,31 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
     // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
-        TabManager::GetInstance().UpdateTabURL(tab_id, url.ToString());
-        LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url.ToString());
+        std::string url_str = url.ToString();
+        TabManager::GetInstance().UpdateTabURL(tab_id, url_str);
+        LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url_str);
+
+        // Clear cert error flag when navigating away from cert-error page to a real site
+        if (url_str.find("/cert-error") == std::string::npos) {
+            Tab* tab = TabManager::GetInstance().GetTab(tab_id);
+            if (tab && tab->has_cert_error) {
+                // Keep the flag if this domain is in allowed exceptions (user proceeded)
+                std::string domain;
+                size_t scheme_end = url_str.find("://");
+                if (scheme_end != std::string::npos) {
+                    size_t host_start = scheme_end + 3;
+                    size_t host_end = url_str.find('/', host_start);
+                    if (host_end == std::string::npos) host_end = url_str.length();
+                    std::string host_port = url_str.substr(host_start, host_end - host_start);
+                    size_t colon = host_port.find(':');
+                    domain = (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+                }
+                if (allowed_cert_exceptions_.count(domain) == 0) {
+                    tab->has_cert_error = false;
+                    NotifyTabListChanged();
+                }
+            }
+        }
     }
 }
 
@@ -287,13 +311,23 @@ void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
                                 ErrorCode errorCode,
                                 const CefString& errorText,
                                 const CefString& failedUrl) {
+    // Don't display an error for aborted requests (e.g., navigated away, cert error handled)
+    if (errorCode == ERR_ABORTED)
+        return;
+
+    std::string failed_url_str = failedUrl.ToString();
+
+    // Don't process data: URLs to prevent infinite error loops
+    if (failed_url_str.find("data:") == 0)
+        return;
+
     LOG_DEBUG_BROWSER("❌ Load error for role: " + role_);
-    LOG_DEBUG_BROWSER("❌ Load error: " + failedUrl.ToString() + " - " + errorText.ToString());
+    LOG_DEBUG_BROWSER("❌ Load error: " + failed_url_str + " - " + errorText.ToString());
     LOG_DEBUG_BROWSER("❌ Error code: " + std::to_string(errorCode));
 
     if (frame->IsMain()) {
         std::string html = "<html><body><h1>Failed to load</h1><p>URL: " +
-                           failedUrl.ToString() + "</p><p>Error: " +
+                           failed_url_str + "</p><p>Error: " +
                            errorText.ToString() + "</p></body></html>";
 
         std::string encoded_html;
@@ -310,6 +344,93 @@ void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
         std::string data_url = "data:text/html," + encoded_html;
         frame->LoadURL(data_url);
     }
+}
+
+// Static storage for cert exceptions (session-only, shared across all handlers)
+std::set<std::string> SimpleHandler::allowed_cert_exceptions_;
+
+// URL-encode helper for cert error page query parameters
+static std::string certUrlEncode(const std::string& value) {
+    std::string encoded;
+    for (unsigned char c : value) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += c;
+        } else {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%%%02X", c);
+            encoded += buf;
+        }
+    }
+    return encoded;
+}
+
+bool SimpleHandler::OnCertificateError(CefRefPtr<CefBrowser> browser,
+                                       cef_errorcode_t cert_error,
+                                       const CefString& request_url,
+                                       CefRefPtr<CefSSLInfo> ssl_info,
+                                       CefRefPtr<CefCallback> callback) {
+    CEF_REQUIRE_UI_THREAD();
+
+    std::string url = request_url.ToString();
+    LOG_WARNING_BROWSER("🔒 Certificate error on: " + url + " (code: " + std::to_string(cert_error) + ")");
+
+    // Extract domain from URL
+    std::string domain;
+    size_t scheme_end = url.find("://");
+    if (scheme_end != std::string::npos) {
+        size_t host_start = scheme_end + 3;
+        size_t host_end = url.find('/', host_start);
+        if (host_end == std::string::npos) host_end = url.length();
+        // Strip port if present
+        std::string host_port = url.substr(host_start, host_end - host_start);
+        size_t colon = host_port.find(':');
+        domain = (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+    }
+
+    // Check if user already allowed this domain
+    if (allowed_cert_exceptions_.count(domain) > 0) {
+        LOG_INFO_BROWSER("🔒 Cert exception exists for " + domain + " - proceeding");
+        callback->Continue();
+        return true;
+    }
+
+    // Set cert error flag on the tab
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        Tab* tab = TabManager::GetInstance().GetTab(tab_id);
+        if (tab) {
+            tab->has_cert_error = true;
+            NotifyTabListChanged();
+        }
+    }
+
+    // Map error code to human-readable type
+    std::string error_type;
+    switch (cert_error) {
+        case ERR_CERT_COMMON_NAME_INVALID: error_type = "name_mismatch"; break;
+        case ERR_CERT_DATE_INVALID:        error_type = "date_invalid"; break;
+        case ERR_CERT_AUTHORITY_INVALID:    error_type = "authority_invalid"; break;
+        case ERR_CERT_REVOKED:             error_type = "revoked"; break;
+        case ERR_CERT_INVALID:             error_type = "invalid"; break;
+        default:                           error_type = "unknown"; break;
+    }
+
+    // URL-encode the original URL for the query parameter
+    std::string encoded_url = certUrlEncode(url);
+
+    // Navigate to our cert error page (loads in the tab)
+    std::string cert_error_url = "http://127.0.0.1:5137/cert-error?domain=" +
+        certUrlEncode(domain) +
+        "&error=" + error_type +
+        "&url=" + encoded_url +
+        "&code=" + std::to_string(cert_error);
+
+    browser->GetMainFrame()->LoadURL(cert_error_url);
+    LOG_INFO_BROWSER("🔒 Navigating to cert error page for domain: " + domain);
+
+    // Return true - we handled the error (don't show default CEF error page)
+    // The callback is intentionally not called - the original request is cancelled
+    return true;
 }
 
 void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
@@ -954,6 +1075,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             tab_json["url"] = tab->url;
             tab_json["isActive"] = (tab->id == active_tab_id);
             tab_json["isLoading"] = tab->is_loading;
+            tab_json["hasCertError"] = tab->has_cert_error;
             if (!tab->favicon_url.empty()) {
                 tab_json["favicon"] = tab->favicon_url;
             }
@@ -1043,6 +1165,56 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔄 Reload() called on active tab " + std::to_string(active_tab->id));
         } else {
             LOG_WARNING_BROWSER("⚠️ No active tab available for Reload");
+        }
+        return true;
+    }
+
+    // ========== CERTIFICATE ERROR IPC HANDLERS ==========
+
+    if (message_name == "cert_error_proceed") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string original_url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+        LOG_INFO_BROWSER("🔒 cert_error_proceed for URL: " + original_url);
+
+        if (!original_url.empty()) {
+            // Extract domain and add to allowed exceptions
+            std::string domain;
+            size_t scheme_end = original_url.find("://");
+            if (scheme_end != std::string::npos) {
+                size_t host_start = scheme_end + 3;
+                size_t host_end = original_url.find('/', host_start);
+                if (host_end == std::string::npos) host_end = original_url.length();
+                std::string host_port = original_url.substr(host_start, host_end - host_start);
+                size_t colon = host_port.find(':');
+                domain = (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+            }
+            allowed_cert_exceptions_.insert(domain);
+            LOG_INFO_BROWSER("🔒 Added cert exception for domain: " + domain);
+
+            // Navigate the active tab to the original URL
+            // OnCertificateError will fire again but find the exception and call Continue()
+            Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                active_tab->browser->GetMainFrame()->LoadURL(original_url);
+            }
+        }
+        return true;
+    }
+
+    if (message_name == "cert_error_go_back") {
+        LOG_INFO_BROWSER("🔒 cert_error_go_back received");
+
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab) {
+            active_tab->has_cert_error = false;
+            if (active_tab->browser) {
+                if (active_tab->can_go_back) {
+                    active_tab->browser->GoBack();
+                } else {
+                    active_tab->browser->GetMainFrame()->LoadURL("about:blank");
+                }
+            }
+            NotifyTabListChanged();
         }
         return true;
     }

@@ -21,6 +21,9 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import ShieldIcon from '@mui/icons-material/Shield';
 import BlockIcon from '@mui/icons-material/Block';
 import CookieIcon from '@mui/icons-material/Cookie';
+import LockIcon from '@mui/icons-material/Lock';
+import LockOpenIcon from '@mui/icons-material/LockOpen';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
@@ -111,6 +114,25 @@ const MainBrowserView: React.FC = () => {
             return '';
         }
     }, [address]);
+
+    // Derive security state from active tab
+    const activeTab = useMemo(() => tabs.find(t => t.id === activeTabId), [tabs, activeTabId]);
+
+    const securityState = useMemo((): 'secure' | 'insecure' | 'error' | 'none' => {
+        if (activeTab?.hasCertError) return 'error';
+        try {
+            const url = new URL(address);
+            if (url.hostname === '127.0.0.1' || url.hostname === 'localhost' ||
+                url.protocol === 'about:' || url.protocol === 'data:') {
+                return 'none';
+            }
+            if (url.protocol === 'https:') return 'secure';
+            if (url.protocol === 'http:') return 'insecure';
+        } catch {
+            // Invalid URL
+        }
+        return 'none';
+    }, [address, activeTab?.hasCertError]);
 
     // Check if current domain is already blocked
     const isCurrentDomainBlocked = useMemo(() => {
@@ -336,6 +358,30 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Address Bar with Inline Autocomplete */}
                 <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                    {securityState !== 'none' && (
+                        <Box
+                            sx={{
+                                position: 'absolute',
+                                left: 10,
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                zIndex: 1,
+                                pointerEvents: 'none',
+                            }}
+                        >
+                            {securityState === 'secure' && (
+                                <LockIcon sx={{ fontSize: 16, color: '#188038' }} />
+                            )}
+                            {securityState === 'insecure' && (
+                                <LockOpenIcon sx={{ fontSize: 16, color: 'rgba(0,0,0,0.4)' }} />
+                            )}
+                            {securityState === 'error' && (
+                                <ErrorOutlineIcon sx={{ fontSize: 16, color: '#d93025' }} />
+                            )}
+                        </Box>
+                    )}
                     <input
                         ref={addressInputRef}
                         type="text"
@@ -422,7 +468,7 @@ const MainBrowserView: React.FC = () => {
                             width: '98%',
                             height: 36,
                             borderRadius: 20,
-                            paddingLeft: 16,
+                            paddingLeft: securityState !== 'none' ? 30 : 16,
                             paddingRight: 16,
                             backgroundColor: '#f1f3f4',
                             border: '1px solid transparent',

@@ -67,6 +67,9 @@ struct Tab {
     bool can_go_back;
     bool can_go_forward;
 
+    // SSL certificate error state (from OnCertificateError)
+    bool has_cert_error;
+
     // When this tab was created
     std::chrono::system_clock::time_point created_at;
 
@@ -93,6 +96,7 @@ struct Tab {
           is_closing(false),
           can_go_back(false),
           can_go_forward(false),
+          has_cert_error(false),
           created_at(std::chrono::system_clock::now()),
           last_accessed(std::chrono::system_clock::now()) {
     }
@@ -117,6 +121,7 @@ struct Tab {
           is_closing(false),
           can_go_back(false),
           can_go_forward(false),
+          has_cert_error(false),
           created_at(std::chrono::system_clock::now()),
           last_accessed(std::chrono::system_clock::now()) {
     }
