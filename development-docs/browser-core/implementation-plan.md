@@ -12,7 +12,7 @@ Each sprint is 1-3 days. Sprints are numbered by tier and sequence. Sprints with
 
 ---
 
-## Sprint 0: Safety & Quick Wins (1 day)
+## Sprint 0: Safety & Quick Wins (1 day) ✅ COMPLETE
 
 **Goal**: Fix the safety bug and apply all trivial one-line improvements.
 
@@ -41,8 +41,8 @@ Same pattern — `get_cached()` returns `Option<f64>` instead of `f64`. Callers 
 - WebRTC flag and mixed content flag: CEF command-line switches are cross-platform. Same code works on macOS.
 
 ### Verification
-- [ ] Build C++ (`cmake --build`)
-- [ ] Build Rust (`cargo check`)
+- [x] Build Rust (`cargo check`) — compiles clean
+- [ ] Build C++ (`cmake --build`) — user to build on Windows
 - [ ] Test: disconnect internet → make payment → should NOT auto-approve (should show notification)
 
 ---

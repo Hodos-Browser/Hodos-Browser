@@ -62,6 +62,9 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     // Fix first-render black screen issue - disable GPU compositing for reliable rendering
     command_line->AppendSwitch("disable-gpu-compositing");
 
+    // Prevent WebRTC from leaking real IP address via STUN requests
+    command_line->AppendSwitchWithValue("force-webrtc-ip-handling-policy", "default_public_interface_only");
+
     // macOS: Use in-process GPU instead of separate GPU process
     // This avoids GPU process launch failures during development
 #ifdef __APPLE__

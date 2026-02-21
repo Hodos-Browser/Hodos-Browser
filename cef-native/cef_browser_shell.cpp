@@ -1623,7 +1623,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // settings.persist_session_cookies = true;
 
     // Enable CEF's runtime API for JavaScript communication
-    CefString(&settings.javascript_flags).FromASCII("--expose-gc --allow-running-insecure-content");
+    CefString(&settings.javascript_flags).FromASCII("--expose-gc");
 
     // Get the executable path for subprocess
     wchar_t exe_path[MAX_PATH];

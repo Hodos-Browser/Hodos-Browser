@@ -297,7 +297,19 @@ public:
         if (valid_ && (now - lastCheck_) < std::chrono::minutes(5)) {
             return priceUsd_;
         }
-        priceUsd_ = fetchFromBackend();
+        double fetched = fetchFromBackend();
+        if (fetched > 0.0) {
+            priceUsd_ = fetched;
+            lastSuccessfulPrice_ = fetched;
+        } else if (lastSuccessfulPrice_ > 0.0) {
+            // Fetch failed — return last known good price (stale but safe)
+            priceUsd_ = lastSuccessfulPrice_;
+            LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed, using stale price $" + std::to_string(lastSuccessfulPrice_));
+        } else {
+            // Never successfully fetched — sentinel value signals "unknown"
+            priceUsd_ = -1.0;
+            LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed and no stale price available");
+        }
         valid_ = true;
         lastCheck_ = now;
         return priceUsd_;
@@ -314,7 +326,8 @@ private:
     BSVPriceCache& operator=(const BSVPriceCache&) = delete;
 
     std::mutex mutex_;
-    double priceUsd_ = 0.0;
+    double priceUsd_ = -1.0;
+    double lastSuccessfulPrice_ = -1.0;
     bool valid_ = false;
     std::chrono::steady_clock::time_point lastCheck_;
 
@@ -324,12 +337,12 @@ private:
                                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                          WINHTTP_NO_PROXY_NAME,
                                          WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) return 0.0;
+        if (!hSession) return -1.0;
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
-            return 0.0;
+            return -1.0;
         }
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
@@ -340,7 +353,7 @@ private:
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
             WinHttpCloseHandle(hSession);
-            return 0.0;
+            return -1.0;
         }
 
         DWORD timeout = 5000;
@@ -353,7 +366,7 @@ private:
             WinHttpCloseHandle(hRequest);
             WinHttpCloseHandle(hConnect);
             WinHttpCloseHandle(hSession);
-            return 0.0;
+            return -1.0;
         }
 
         std::string responseBody;
@@ -370,14 +383,15 @@ private:
 
         try {
             auto json = nlohmann::json::parse(responseBody);
-            return json.value("priceUsd", 0.0);
+            double price = json.value("priceUsd", -1.0);
+            return price > 0.0 ? price : -1.0;
         } catch (...) {
-            return 0.0;
+            return -1.0;
         }
     }
 #else
     double fetchFromBackend() {
-        return 0.0;
+        return -1.0;
     }
 #endif
 };
@@ -1037,6 +1051,28 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             if (bsvPrice > 0 && satoshis > 0) {
                 // satoshis → USD: (satoshis / 100_000_000) * bsvPrice * 100 (for cents)
                 cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+            }
+
+            // Safety: if price is unknown (never fetched or all fetches failed), require user confirmation
+            if (bsvPrice <= 0 && satoshis > 0) {
+                LOG_DEBUG_HTTP("⚠️ BSV price unavailable — requiring user confirmation for " + requestDomain_);
+                preCalculatedCents_ = 0;
+
+                std::string requestId = PendingRequestManager::GetInstance().addRequest(
+                    requestDomain_, method_, endpoint_, body_, this, "payment_confirmation");
+
+                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                        + "&cents=0"
+                                        + "&bsvPrice=0"
+                                        + "&exceededLimit=price_unavailable"
+                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                        + "&sessionSpent=0";
+
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", requestDomain_, extraParams));
+                postAuthTimeout(60000, "{\"error\":\"Payment approval timeout\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
             }
 
             // Rate limit check — show notification instead of auto-rejecting

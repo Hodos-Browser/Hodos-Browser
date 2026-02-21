@@ -1567,7 +1567,7 @@ int main(int argc, char* argv[]) {
         LOG_INFO("📁 Cache path: " + cache_path);
 
         // Enable JavaScript features
-        CefString(&settings.javascript_flags).FromASCII("--expose-gc --allow-running-insecure-content");
+        CefString(&settings.javascript_flags).FromASCII("--expose-gc");
 
         // Set subprocess path to helper bundle
         // On macOS, helpers are in Contents/Frameworks/HodosBrowser Helper.app/Contents/MacOS/HodosBrowser Helper

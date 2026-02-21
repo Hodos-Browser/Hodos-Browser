@@ -86,7 +86,7 @@ impl PriceCache {
     }
 
     /// Get cached price even if expired (for fallback when APIs fail)
-    fn get_stale(&self) -> Option<f64> {
+    pub fn get_stale(&self) -> Option<f64> {
         let cache = self.cache.read().unwrap();
         cache.as_ref().map(|c| c.usd_price)
     }

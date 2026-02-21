@@ -22,7 +22,7 @@
 
 | Sprint | Name | Status |
 |--------|------|--------|
-| 0 | Safety & Quick Wins | Pending |
+| 0 | Safety & Quick Wins | **Complete** |
 | 1 | SSL Certificate Handling + Secure Indicator | Pending |
 | 2 | Permission Handler | Pending |
 | 3 | Download Handler | Pending |

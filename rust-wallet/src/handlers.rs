@@ -3191,7 +3191,9 @@ pub async fn create_action(
                     .filter_map(|o| o.satoshis)
                     .sum();
                 if total_sats > 0 {
-                    let bsv_price = state.price_cache.get_cached().unwrap_or(0.0);
+                    let bsv_price = state.price_cache.get_cached()
+                        .or_else(|| state.price_cache.get_stale())
+                        .unwrap_or(0.0);
                     if bsv_price > 0.0 {
                         let usd_cents = ((total_sats as f64 / 100_000_000.0) * bsv_price * 100.0) as i64;
                         if usd_cents > perm.per_tx_limit_cents {
@@ -3205,6 +3207,16 @@ pub async fn create_action(
                                 "code": "ERR_SPENDING_LIMIT_EXCEEDED"
                             }));
                         }
+                    } else {
+                        log::warn!(
+                            "🛡️ createAction BLOCKED: no BSV price available for domain '{}', cannot verify spending limit ({} sats)",
+                            perm.domain, total_sats
+                        );
+                        drop(db);
+                        return HttpResponse::Forbidden().json(serde_json::json!({
+                            "error": "Price data unavailable — cannot verify spending limit",
+                            "code": "ERR_PRICE_UNAVAILABLE"
+                        }));
                     }
                 }
             }
