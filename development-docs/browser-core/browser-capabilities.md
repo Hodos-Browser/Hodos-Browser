@@ -106,9 +106,9 @@
 - **Note**: Custom notification overlays exist for wallet operations only
 
 ### Downloads Manager
-- **Status**: No `OnBeforeDownload` or `OnDownloadUpdated` handler
-- **Behavior**: CEF may show system save dialog but no progress UI or history
-- **Fix needed**: Implement `CefDownloadHandler` with progress bar and download list
+- **Status**: COMPLETE (Sprint 3)
+- **Behavior**: Save As dialog on download; progress tracked in overlay panel; pause/resume/cancel; open file/show in folder
+- **Implementation**: `CefDownloadHandler` in SimpleHandler; `DownloadsOverlayRoot.tsx` overlay with keep-alive HWND; download icon in header toolbar with CircularProgress ring; toast notifications on start/complete
 
 ### Print Support
 - **Status**: No `CefPrintHandler` implementation

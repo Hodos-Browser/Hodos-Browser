@@ -37,21 +37,20 @@
 
 ---
 
-### C.1.2 Download Handler — MVP-Blocking
+### C.1.2 Download Handler — COMPLETE
 
-**Current state**: No `CefDownloadHandler`. Downloads may trigger a system save dialog but there's no progress UI, download history, or cancel/pause/resume.
+**Status**: Implemented (Sprint 3, 2026-02-21)
 
-**What's needed**:
-- Implement `CefDownloadHandler` with 3 methods: `CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`
-- `OnBeforeDownload`: Call `callback->Continue("", true)` to show system Save As dialog (simplest MVP approach)
-- `OnDownloadUpdated`: Track progress via `GetPercentComplete()`, `GetReceivedBytes()`, `GetCurrentSpeed()`, `IsComplete()`
-- Downloads panel (React overlay) showing active + completed downloads with progress bars
-- Ctrl+J keyboard shortcut to open downloads panel
-- Cancel/Pause/Resume controls per download
+**Implementation**:
+- `CefDownloadHandler` added to `SimpleHandler` (9th interface): `CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`
+- Save As dialog via `callback->Continue("", true)`. Download only tracked after user saves (empty `full_path` = still in Save As dialog)
+- `DownloadInfo` struct + `std::map<uint32_t, DownloadInfo>` for state tracking. Manual pause tracking via `paused_downloads_` set (CEF 136 has no `IsPaused()`)
+- Download panel overlay (separate HWND): `CreateDownloadPanelOverlay`/`ShowDownloadPanelOverlay`/`HideDownloadPanelOverlay` in `simple_app.cpp`, with `DownloadPanelOverlayWndProc` + global mouse hook for click-outside dismiss
+- React overlay: `DownloadsOverlayRoot.tsx` at `/downloads` route — progress bars, pause/resume/cancel, open file/show in folder, clear completed (auto-closes overlay when empty)
+- Header toolbar: download icon with `CircularProgress` ring (determinate when total bytes known), green on all-complete; toast notifications on download start and completion
+- IPC: `download_state_update`, `download_panel_show/hide`, `download_cancel/pause/resume/open/show_folder/clear_completed/get_state`
 
-**Effort**: Medium (2-3 days)
-**Dependencies**: None
-**Files**: `simple_handler.h/cpp` (add handler), new `DownloadsPanel` React component, IPC messages for download state
+**Files changed**: `simple_handler.h/cpp`, `simple_app.cpp`, `cef_browser_shell.cpp`, `simple_render_process_handler.cpp`, `MainBrowserView.tsx`, `App.tsx`; new: `useDownloads.ts`, `DownloadsOverlayRoot.tsx`
 
 ---
 

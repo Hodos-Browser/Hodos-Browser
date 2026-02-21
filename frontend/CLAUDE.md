@@ -43,6 +43,8 @@ The CEF browser loads from `localhost:5137` during development.
 | File | Identifiers |
 |------|-------------|
 | `src/hooks/useHodosBrowser.ts` | `useHodosBrowser()`, `getIdentity`, `generateAddress`, `navigate`, `markBackedUp` |
+| `src/hooks/useDownloads.ts` | `useDownloads()` hook; `DownloadItem` interface; IPC: `download_state_update`, `download_cancel/pause/resume/open/show_folder/clear_completed/get_state` |
+| `src/pages/DownloadsOverlayRoot.tsx` | Download panel overlay; active/completed list with progress bars; pause/resume/cancel; open/show-in-folder; clear completed (auto-closes overlay) |
 | `src/bridge/initWindowBridge.ts` | `window.hodosBrowser.navigation`, `window.hodosBrowser.overlay`, `cefMessage.send()` |
 | `src/bridge/brc100.ts` | `brc100` object with BRC-100 protocol methods |
 | `src/types/hodosBrowser.d.ts` | TypeScript declarations for `window.hodosBrowser` |

@@ -171,6 +171,19 @@ CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
     return cookie_panel_browser_;
 }
 
+// Download handler static storage
+std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_;
+std::set<uint32_t> SimpleHandler::paused_downloads_;
+CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
+
+CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
+    return this;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
+    return download_panel_browser_;
+}
+
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
     CefRefPtr<CefBrowser> overlay = SimpleHandler::GetOverlayBrowser();
     if (overlay && overlay->GetMainFrame()) {
@@ -795,6 +808,9 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         cookie_panel_browser_ = browser;
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized.");
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+    } else if (role_ == "downloadpanel") {
+        download_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("📥 Download panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         // CRITICAL: Set focus so interactions work
         browser->GetHost()->SetFocus(true);
@@ -884,6 +900,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "cookiepanel" && browser == cookie_panel_browser_) {
         std::cout << "  → Cookie panel overlay browser cleanup" << std::endl;
         cookie_panel_browser_ = nullptr;
+    } else if (role_ == "downloadpanel" && browser == download_panel_browser_) {
+        std::cout << "  → Download panel overlay browser cleanup" << std::endl;
+        download_panel_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -3432,6 +3451,151 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== DOWNLOAD CONTROL MESSAGES ==========
+
+    if (message_name == "download_cancel") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        uint32_t dl_id = 0;
+        try { dl_id = static_cast<uint32_t>(std::stoul(args->GetString(0).ToString())); } catch (...) {}
+        auto it = active_downloads_.find(dl_id);
+        if (it != active_downloads_.end() && it->second.item_callback) {
+            it->second.item_callback->Cancel();
+            LOG_INFO_BROWSER("📥 Download canceled: id=" + std::to_string(dl_id));
+        }
+        return true;
+    }
+
+    if (message_name == "download_pause") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        uint32_t dl_id = 0;
+        try { dl_id = static_cast<uint32_t>(std::stoul(args->GetString(0).ToString())); } catch (...) {}
+        auto it = active_downloads_.find(dl_id);
+        if (it != active_downloads_.end() && it->second.item_callback) {
+            it->second.item_callback->Pause();
+            paused_downloads_.insert(dl_id);
+            it->second.is_paused = true;
+            it->second.is_in_progress = false;
+            NotifyDownloadStateChanged();
+            LOG_INFO_BROWSER("📥 Download paused: id=" + std::to_string(dl_id));
+        }
+        return true;
+    }
+
+    if (message_name == "download_resume") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        uint32_t dl_id = 0;
+        try { dl_id = static_cast<uint32_t>(std::stoul(args->GetString(0).ToString())); } catch (...) {}
+        auto it = active_downloads_.find(dl_id);
+        if (it != active_downloads_.end() && it->second.item_callback) {
+            it->second.item_callback->Resume();
+            paused_downloads_.erase(dl_id);
+            it->second.is_paused = false;
+            it->second.is_in_progress = true;
+            NotifyDownloadStateChanged();
+            LOG_INFO_BROWSER("📥 Download resumed: id=" + std::to_string(dl_id));
+        }
+        return true;
+    }
+
+    if (message_name == "download_open") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        uint32_t dl_id = 0;
+        try { dl_id = static_cast<uint32_t>(std::stoul(args->GetString(0).ToString())); } catch (...) {}
+        auto it = active_downloads_.find(dl_id);
+        if (it != active_downloads_.end() && !it->second.full_path.empty()) {
+#ifdef _WIN32
+            std::wstring wpath(it->second.full_path.begin(), it->second.full_path.end());
+            ShellExecuteW(NULL, L"open", wpath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            LOG_INFO_BROWSER("📥 Opening downloaded file: " + it->second.full_path);
+#elif defined(__APPLE__)
+            // TODO(macOS): NSWorkspace openFile
+            LOG_INFO_BROWSER("📥 download_open not yet implemented on macOS");
+#endif
+        }
+        return true;
+    }
+
+    if (message_name == "download_show_folder") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        uint32_t dl_id = 0;
+        try { dl_id = static_cast<uint32_t>(std::stoul(args->GetString(0).ToString())); } catch (...) {}
+        auto it = active_downloads_.find(dl_id);
+        if (it != active_downloads_.end() && !it->second.full_path.empty()) {
+#ifdef _WIN32
+            // Extract parent directory
+            std::string path = it->second.full_path;
+            size_t last_sep = path.find_last_of("\\/");
+            std::string dir = (last_sep != std::string::npos) ? path.substr(0, last_sep) : path;
+            std::wstring wdir(dir.begin(), dir.end());
+            ShellExecuteW(NULL, L"open", wdir.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            LOG_INFO_BROWSER("📥 Showing folder: " + dir);
+#elif defined(__APPLE__)
+            // TODO(macOS): NSWorkspace selectFile:inFileViewerRootedAtPath:
+            LOG_INFO_BROWSER("📥 download_show_folder not yet implemented on macOS");
+#endif
+        }
+        return true;
+    }
+
+    if (message_name == "download_clear_completed") {
+        auto it = active_downloads_.begin();
+        while (it != active_downloads_.end()) {
+            if (it->second.is_complete || it->second.is_canceled) {
+                it = active_downloads_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        NotifyDownloadStateChanged();
+        LOG_INFO_BROWSER("📥 Cleared completed downloads, remaining: " + std::to_string(active_downloads_.size()));
+        return true;
+    }
+
+    if (message_name == "download_get_state") {
+        NotifyDownloadStateChanged();
+        return true;
+    }
+
+    if (message_name == "download_panel_show") {
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> dp_args = message->GetArgumentList();
+        if (dp_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(dp_args->GetString(0).ToString()); } catch(...) {}
+        }
+
+#ifdef _WIN32
+        extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void ShowDownloadPanelOverlay(int iconRightOffset);
+        extern HWND g_download_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
+            CreateDownloadPanelOverlay(g_hInstance, true, iconRightOffset);
+        } else {
+            ShowDownloadPanelOverlay(iconRightOffset);
+        }
+
+        // Push current state to the overlay
+        NotifyDownloadStateChanged();
+
+        LOG_DEBUG_BROWSER("📥 Download panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+#else
+        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "download_panel_hide") {
+#ifdef _WIN32
+        extern void HideDownloadPanelOverlay();
+        HideDownloadPanelOverlay();
+        LOG_DEBUG_BROWSER("📥 Download panel overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#endif
+        return true;
+    }
+
     return false;
 }
 
@@ -3510,6 +3674,10 @@ CefRefPtr<CefDialogHandler> SimpleHandler::GetDialogHandler() {
 }
 
 CefRefPtr<CefKeyboardHandler> SimpleHandler::GetKeyboardHandler() {
+    return this;
+}
+
+CefRefPtr<CefPermissionHandler> SimpleHandler::GetPermissionHandler() {
     return this;
 }
 
@@ -3671,4 +3839,130 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
 
     // Allow default handling for other commands
     return false;
+}
+
+// ========== DOWNLOAD HANDLER ==========
+
+bool SimpleHandler::CanDownload(CefRefPtr<CefBrowser> browser,
+                                const CefString& url,
+                                const CefString& request_method) {
+    LOG_INFO_BROWSER("📥 Download requested: " + url.ToString());
+    return true;
+}
+
+bool SimpleHandler::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                                     CefRefPtr<CefDownloadItem> download_item,
+                                     const CefString& suggested_name,
+                                     CefRefPtr<CefBeforeDownloadCallback> callback) {
+    CEF_REQUIRE_UI_THREAD();
+    LOG_INFO_BROWSER("📥 OnBeforeDownload: " + suggested_name.ToString() +
+                     " (id: " + std::to_string(download_item->GetId()) + ")");
+    // Show system Save As dialog with empty path (uses suggested name + default directory)
+    callback->Continue("", true);
+    return true;
+}
+
+void SimpleHandler::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefDownloadItem> download_item,
+                                      CefRefPtr<CefDownloadItemCallback> callback) {
+    CEF_REQUIRE_UI_THREAD();
+
+    uint32_t id = download_item->GetId();
+    std::string full_path = download_item->GetFullPath().ToString();
+    bool in_progress = download_item->IsInProgress();
+    bool complete = download_item->IsComplete();
+    bool canceled = download_item->IsCanceled();
+
+    // Don't track downloads until the user has chosen a save location.
+    // CEF fires OnDownloadUpdated while the Save As dialog is still open
+    // (full_path is empty). Also skip if user cancelled the Save As dialog
+    // and we never tracked this item.
+    bool already_tracked = active_downloads_.count(id) > 0;
+    if (full_path.empty() && !already_tracked) {
+        LOG_DEBUG_BROWSER("📥 Skipping download update (no save path yet): id=" + std::to_string(id));
+        return;
+    }
+
+    // CEF 136 has no IsPaused() — track pause state ourselves via paused_downloads_ set
+    bool paused = paused_downloads_.count(id) > 0;
+    // Clear paused flag if download completed or canceled
+    if (complete || canceled) {
+        paused_downloads_.erase(id);
+        paused = false;
+    }
+
+    DownloadInfo info;
+    info.id = id;
+    info.url = download_item->GetURL().ToString();
+    info.filename = download_item->GetSuggestedFileName().ToString();
+    info.full_path = full_path;
+    info.received_bytes = download_item->GetReceivedBytes();
+    info.total_bytes = download_item->GetTotalBytes();
+    info.percent_complete = download_item->GetPercentComplete();
+    info.current_speed = download_item->GetCurrentSpeed();
+    info.is_in_progress = in_progress && !paused;
+    info.is_complete = complete;
+    info.is_canceled = canceled;
+    info.is_paused = paused;
+
+    // Store callback for pause/resume/cancel control (only while download is active)
+    if (in_progress) {
+        info.item_callback = callback;
+    } else {
+        info.item_callback = nullptr;
+    }
+
+    active_downloads_[id] = info;
+
+    LOG_DEBUG_BROWSER("📥 Download update: id=" + std::to_string(id) +
+                      " path=" + full_path +
+                      " progress=" + std::to_string(info.percent_complete) + "%" +
+                      " bytes=" + std::to_string(info.received_bytes) + "/" + std::to_string(info.total_bytes) +
+                      " speed=" + std::to_string(info.current_speed) +
+                      " complete=" + std::to_string(complete) +
+                      " canceled=" + std::to_string(canceled));
+
+    NotifyDownloadStateChanged();
+}
+
+void SimpleHandler::NotifyDownloadStateChanged() {
+    CEF_REQUIRE_UI_THREAD();
+
+    nlohmann::json downloads_array = nlohmann::json::array();
+    for (const auto& pair : active_downloads_) {
+        const DownloadInfo& d = pair.second;
+        nlohmann::json item;
+        item["id"] = d.id;
+        item["url"] = d.url;
+        item["filename"] = d.filename;
+        item["fullPath"] = d.full_path;
+        item["receivedBytes"] = d.received_bytes;
+        item["totalBytes"] = d.total_bytes;
+        item["percentComplete"] = d.percent_complete;
+        item["currentSpeed"] = d.current_speed;
+        item["isInProgress"] = d.is_in_progress;
+        item["isComplete"] = d.is_complete;
+        item["isCanceled"] = d.is_canceled;
+        item["isPaused"] = d.is_paused;
+        downloads_array.push_back(item);
+    }
+
+    std::string json_str = downloads_array.dump();
+
+    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+    if (header) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("download_state_update");
+        msg->GetArgumentList()->SetString(0, json_str);
+        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+    }
+
+    // Also send to download panel overlay browser if it exists
+    CefRefPtr<CefBrowser> dl_panel = SimpleHandler::GetDownloadPanelBrowser();
+    if (dl_panel) {
+        CefRefPtr<CefProcessMessage> msg2 = CefProcessMessage::Create("download_state_update");
+        msg2->GetArgumentList()->SetString(0, json_str);
+        dl_panel->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg2);
+    }
+
+    LOG_DEBUG_BROWSER("📥 Download state sent: " + std::to_string(active_downloads_.size()) + " items");
 }

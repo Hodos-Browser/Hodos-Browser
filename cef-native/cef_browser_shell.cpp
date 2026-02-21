@@ -55,6 +55,7 @@ HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
 HWND g_cookie_panel_overlay_hwnd = nullptr;
+HWND g_download_panel_overlay_hwnd = nullptr;
 HWND g_notification_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
@@ -63,12 +64,14 @@ bool g_file_dialog_active = false;
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
+HHOOK g_download_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
 int g_settings_icon_right_offset = 0;
 int g_cookie_icon_right_offset = 0;
+int g_download_icon_right_offset = 0;
 int g_wallet_icon_right_offset = 0;
 
 // Fullscreen state tracking
@@ -287,6 +290,16 @@ void ShutdownApplication() {
         g_cookie_panel_overlay_hwnd = nullptr;
     }
 
+    if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd)) {
+        LOG_INFO("Destroying download panel overlay window...");
+        if (g_download_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_download_panel_mouse_hook);
+            g_download_panel_mouse_hook = nullptr;
+            LOG_INFO("Download panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_download_panel_overlay_hwnd);
+        g_download_panel_overlay_hwnd = nullptr;
+    }
 
     // Step 3: Destroy main windows (child windows first)
     LOG_INFO("🔄 Destroying main windows...");
@@ -353,6 +366,19 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 int cpY = hdrRect.top + 104;
                 SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
                     cpX, cpY, cpWidth, cpHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+
+            // Move download panel overlay if it exists and is visible (right-side popup)
+            if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int dpWidth = 380;
+                int dpHeight = 400;
+                int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
+                int dpY = hdrRect.top + 104;
+                SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
+                    dpX, dpY, dpWidth, dpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
@@ -526,6 +552,24 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
                 if (cookie_browser) {
                     cookie_browser->GetHost()->WasResized();
+                }
+            }
+
+            // Reposition download panel (right-side popup, right edge under icon)
+            if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int dpWidth = 380;
+                int dpHeight = 400;
+                int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
+                int dpY = hdrRect.top + 104;
+                SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
+                    dpX, dpY, dpWidth, dpHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+                CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+                if (dl_browser) {
+                    dl_browser->GetHost()->WasResized();
                 }
             }
 
@@ -1433,6 +1477,90 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ========== DOWNLOAD PANEL OVERLAY ==========
+
+LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_download_panel_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside download panel overlay bounds - dismissing");
+                    extern void HideDownloadPanelOverlay();
+                    HideDownloadPanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_download_panel_mouse_hook, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_SETCURSOR:
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+            if (dl_browser) {
+                dl_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+            if (dl_browser) {
+                dl_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                dl_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+            if (dl_browser) {
+                dl_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // Lightweight health check — returns true if GET /health responds with "ok".
 // Uses a short 2-second timeout so it fails fast when nothing is listening.
 static bool QuickHealthCheck() {
@@ -1731,6 +1859,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&cookiePanelOverlayClass)) {
         LOG_DEBUG("❌ Failed to register cookie panel overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Download Panel overlay window class
+    WNDCLASS downloadPanelOverlayClass = {};
+    downloadPanelOverlayClass.lpfnWndProc = DownloadPanelOverlayWndProc;
+    downloadPanelOverlayClass.hInstance = hInstance;
+    downloadPanelOverlayClass.lpszClassName = L"CEFDownloadPanelOverlayWindow";
+
+    if (!RegisterClass(&downloadPanelOverlayClass)) {
+        LOG_DEBUG("Failed to register download panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",

@@ -1401,4 +1401,217 @@ void HideCookiePanelOverlay() {
 
     LOG_INFO_APP("✅ Cookie panel overlay hidden");
 }
+
+// ========== DOWNLOAD PANEL OVERLAY ==========
+
+// Forward declaration
+void ShowDownloadPanelOverlay(int iconRightOffset);
+
+void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO_APP("Creating download panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconRightOffset=" +
+                 std::to_string(iconRightOffset) + ")");
+
+    // Store offset globally for WM_SIZE/WM_MOVE repositioning
+    extern int g_download_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_download_icon_right_offset = iconRightOffset;
+    }
+
+    // Keep-alive check: if HWND already exists, conditionally show it
+    extern HWND g_download_panel_overlay_hwnd;
+    if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd)) {
+        LOG_INFO_APP("Download panel overlay already exists");
+        if (showImmediately) {
+            ShowDownloadPanelOverlay(iconRightOffset);
+        }
+        return;
+    }
+
+    // Get main window dimensions
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position - right side panel, right edge aligned under icon
+    int panelWidth = 380;
+    int panelHeight = 400;
+    int overlayX = headerRect.right - iconRightOffset - panelWidth;
+    int overlayY = headerRect.top + 104;
+
+    LOG_INFO_APP("Creating download panel overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
+                 std::to_string(panelHeight));
+
+    // Create HWND for download panel overlay
+    HWND download_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFDownloadPanelOverlayWindow",
+        L"Download Panel Overlay",
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!download_panel_hwnd) {
+        LOG_ERROR_APP("Failed to create download panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position with SWP_NOACTIVATE (conditionally show)
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
+    SetWindowPos(download_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        flags);
+
+    // Store HWND globally
+    g_download_panel_overlay_hwnd = download_panel_hwnd;
+    LOG_INFO_APP("Download panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(download_panel_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
+
+    // Create CEF browser subprocess for download panel overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(download_panel_hwnd, "DownloadPanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> download_panel_handler(new SimpleHandler("downloadpanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(download_panel_hwnd, panelWidth, panelHeight);
+    download_panel_handler->SetRenderHandler(render_handler);
+
+    // Use global context (shared cache/cookies)
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, download_panel_handler,
+        "http://127.0.0.1:5137/downloads",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Download panel overlay browser created with subprocess");
+
+        // If showing immediately, install mouse hook and enable mouse input
+        if (showImmediately) {
+            extern HHOOK g_download_panel_mouse_hook;
+            extern LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+            if (!g_download_panel_mouse_hook) {
+                g_download_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, DownloadPanelMouseHookProc, nullptr, 0);
+                if (g_download_panel_mouse_hook) {
+                    LOG_INFO_APP("Download panel mouse hook installed for click-outside detection");
+                } else {
+                    LOG_WARNING_APP("Failed to install download panel mouse hook. Error: " + std::to_string(GetLastError()));
+                }
+            }
+
+            // Enable mouse input
+            LONG exStyle = GetWindowLong(download_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(download_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create download panel overlay browser");
+    }
+}
+
+void ShowDownloadPanelOverlay(int iconRightOffset) {
+    // Guard: verify HWND exists
+    extern HWND g_download_panel_overlay_hwnd;
+    if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show download panel overlay - HWND does not exist");
+        return;
+    }
+
+    // Update stored offset if provided
+    extern int g_download_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_download_icon_right_offset = iconRightOffset;
+    }
+
+    LOG_INFO_APP("Showing download panel overlay with iconRightOffset=" + std::to_string(g_download_icon_right_offset));
+
+    // Install global mouse hook for click-outside detection
+    extern HHOOK g_download_panel_mouse_hook;
+    extern LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_download_panel_mouse_hook) {
+        g_download_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, DownloadPanelMouseHookProc, nullptr, 0);
+        if (g_download_panel_mouse_hook) {
+            LOG_INFO_APP("Download panel mouse hook installed");
+        } else {
+            LOG_WARNING_APP("Failed to install download panel mouse hook. Error: " + std::to_string(GetLastError()));
+        }
+    }
+
+    extern HWND g_header_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position - right edge aligned under icon
+    int panelWidth = 380;
+    int panelHeight = 400;
+    int overlayX = headerRect.right - g_download_icon_right_offset - panelWidth;
+    int overlayY = headerRect.top + 104;
+
+    // Force position and show with SWP_NOACTIVATE
+    SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    // Remove WS_EX_TRANSPARENT to enable mouse input
+    LONG exStyle = GetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Trigger render update
+    CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+    if (dl_browser && dl_browser->GetHost()) {
+        dl_browser->GetHost()->WasResized();
+        dl_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    LOG_INFO_APP("Download panel overlay shown");
+}
+
+void HideDownloadPanelOverlay() {
+    // Guard: verify HWND exists
+    extern HWND g_download_panel_overlay_hwnd;
+    if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot hide download panel overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("Hiding download panel overlay");
+
+    // Remove global mouse hook
+    extern HHOOK g_download_panel_mouse_hook;
+    if (g_download_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_download_panel_mouse_hook);
+        g_download_panel_mouse_hook = nullptr;
+        LOG_INFO_APP("Download panel mouse hook removed");
+    }
+
+    // Clear focus from download panel browser before hiding
+    CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+    if (dl_browser) {
+        dl_browser->GetHost()->SetFocus(false);
+    }
+
+    // Hide window (keep-alive - don't destroy)
+    ShowWindow(g_download_panel_overlay_hwnd, SW_HIDE);
+
+    // Return focus to header browser
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO_APP("Download panel overlay hidden");
+}
 #endif // _WIN32

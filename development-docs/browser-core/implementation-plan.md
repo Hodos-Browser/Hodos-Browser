@@ -151,68 +151,62 @@ That's the entire implementation for MVP. Chrome's native UI handles the rest.
 
 ---
 
-## Sprint 3: Download Handler (2-3 days)
+## Sprint 3: Download Handler — COMPLETE (2026-02-21)
 
 **Goal**: Users can download files with progress tracking, cancel/pause/resume.
 
-### 3a: CEF Download Handler (Day 1)
+### Implementation Summary
 
-**Add `CefDownloadHandler` to `SimpleHandler`**:
-- `CanDownload` → return `true` (allow all downloads)
-- `OnBeforeDownload` → call `callback->Continue("", true)` for system Save As dialog
-- `OnDownloadUpdated` → track progress, forward state to React via IPC
+**C++ (`simple_handler.h/cpp`)**:
+- `CefDownloadHandler` added as 9th interface on `SimpleHandler`
+- `CanDownload` → returns `true`; `OnBeforeDownload` → `callback->Continue("", true)` (Save As dialog)
+- `OnDownloadUpdated` → tracks state in `std::map<uint32_t, DownloadInfo>`. Skips updates until user saves (empty `full_path` = Save As still open). Manual pause tracking via `paused_downloads_` set (CEF 136 has no `IsPaused()`)
+- `NotifyDownloadStateChanged()` sends JSON state to both header browser and download panel browser via `CefProcessMessage`
+- 10 IPC handlers: `download_panel_show/hide`, `download_cancel/pause/resume/open/show_folder/clear_completed/get_state`
+- `download_open` uses `ShellExecuteW` (Windows), `download_show_folder` opens parent directory
 
-**Download state tracking**: C++ maintains `std::map<int32, DownloadState>` keyed by download ID.
+**C++ overlay (`cef_browser_shell.cpp` + `simple_app.cpp`)**:
+- `g_download_panel_overlay_hwnd` + `g_download_panel_mouse_hook` globals
+- `DownloadPanelOverlayWndProc` (mouse forwarding, `MA_NOACTIVATE`, scroll)
+- `DownloadPanelMouseHookProc` (click-outside dismiss)
+- `CreateDownloadPanelOverlay` / `ShowDownloadPanelOverlay` / `HideDownloadPanelOverlay` in `simple_app.cpp`
+- 380x400 panel, positioned under download icon, keep-alive pattern
+- WM_SIZE and WM_MOVE repositioning, shutdown cleanup
 
-```cpp
-struct DownloadState {
-    int32 id;
-    std::string url;
-    std::string fullPath;
-    int64 receivedBytes;
-    int64 totalBytes;
-    int percentComplete;
-    bool isComplete;
-    bool isCanceled;
-    CefRefPtr<CefDownloadItemCallback> callback; // for cancel/pause/resume
-};
-```
+**Frontend**:
+- `useDownloads.ts` hook — listens for `download_state_update`, exposes control functions
+- `DownloadsOverlayRoot.tsx` — overlay page at `/downloads` route with progress bars, pause/resume/cancel, open/show-in-folder, clear completed (auto-closes overlay when list empty)
+- `MainBrowserView.tsx` — download icon with `CircularProgress` ring (determinate/indeterminate), green when all complete, toast notifications on start/complete
 
-### 3b: Downloads Panel UI (Day 2-3)
-
-**New React overlay**: `DownloadsPanelOverlayRoot.tsx`
-- List of active and recent downloads
-- Each item shows: filename, progress bar, speed, size, cancel/pause/resume buttons
-- Completed items show: filename, size, "Open" and "Show in Folder" buttons
-- Ctrl+J keyboard shortcut to toggle
-
-**IPC messages**:
-- `download_get_all` → returns current download list
-- `download_cancel(id)` → cancel a download
-- `download_pause(id)` → pause
-- `download_resume(id)` → resume
-- `download_open(id)` → open file
-- `download_show_folder(id)` → open containing folder
-
-**Alternative (simpler MVP)**: Skip the overlay entirely. Just use `OnBeforeDownload` with Save As dialog + no progress UI. Users see the system save dialog and the file appears in their Downloads folder. This is what basic browsers do.
-
-**Recommendation**: Implement the simpler MVP first (just Save As). Add the overlay panel as a Tier 1 enhancement.
+**Render process** (`simple_render_process_handler.cpp`):
+- `download_state_update` forwarded to React via `window.dispatchEvent`
 
 ### macOS Notes
-- `CefDownloadHandler` is a CEF API — fully cross-platform. Save As dialog is native on both platforms.
-- If building a downloads overlay HWND: needs `#ifdef _WIN32` for `CreateWindowExW` and `#elif __APPLE__` stub (or macOS NSWindow in `cef_browser_shell_mac.mm`). **Recommendation**: Skip overlay for MVP (Save As only) — avoids platform-specific code entirely.
-- `Ctrl+J` shortcut: define `Cmd+J` variant for macOS in the shortcut handler.
+- `CefDownloadHandler` is fully cross-platform. Save As dialog is native on both platforms.
+- Download overlay HWND uses `#ifdef _WIN32` — needs macOS `NSWindow` stub in `cef_browser_shell_mac.mm`
+- `download_open`/`download_show_folder` use `ShellExecuteW` — need macOS `NSWorkspace` implementation
 
-### Files
-- `simple_handler.h` — Add `CefDownloadHandler`
-- `simple_handler.cpp` — Implement 3 methods
-- (Optional) New download overlay React component + IPC
+### Files Changed
+- `simple_handler.h` — Added `CefDownloadHandler` interface, `DownloadInfo` struct, download map, paused set
+- `simple_handler.cpp` — Handler methods + 10 IPC handlers + `NotifyDownloadStateChanged`
+- `simple_app.cpp` — Create/Show/Hide overlay functions
+- `cef_browser_shell.cpp` — WndProc, mouse hook, window class, shutdown, resize/move
+- `simple_render_process_handler.cpp` — `download_state_update` forwarding
+- `frontend/src/hooks/useDownloads.ts` — NEW
+- `frontend/src/pages/DownloadsOverlayRoot.tsx` — NEW
+- `frontend/src/pages/MainBrowserView.tsx` — Download icon + progress + toasts
+- `frontend/src/App.tsx` — `/downloads` route
 
 ### Verification
-- [ ] Click a download link → Save As dialog appears
-- [ ] File downloads to selected location
-- [ ] Large file download → progress visible (if overlay implemented)
-- [ ] Ctrl+J → downloads panel opens (if overlay implemented)
+- [x] Click a download link → Save As dialog appears
+- [x] File downloads to selected location
+- [x] Download icon appears with circular progress ring after Save
+- [x] Progress accurately reflects download progress
+- [x] Click icon → overlay opens with download details
+- [x] Pause/Resume/Cancel work correctly
+- [x] Completed download → icon turns green, "Open"/"Show in folder" work
+- [x] "Clear completed" removes items and closes overlay
+- [x] Toast notifications on download start and completion
 
 ---
 

@@ -10,7 +10,11 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_dialog_handler.h"
 #include "include/cef_keyboard_handler.h"
+#include "include/cef_permission_handler.h"
+#include "include/cef_download_handler.h"
 #include <set>
+#include <map>
+#include <cstdint>
 
 // Forward declarations to avoid circular dependency
 struct Tab;
@@ -23,7 +27,9 @@ class SimpleHandler : public CefClient,
                       public CefRequestHandler,
                       public CefContextMenuHandler,
                       public CefDialogHandler,
-                      public CefKeyboardHandler {
+                      public CefKeyboardHandler,
+                      public CefPermissionHandler,
+                      public CefDownloadHandler {
 public:
     explicit SimpleHandler(const std::string& role);
 
@@ -35,6 +41,8 @@ public:
     CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override;
     CefRefPtr<CefDialogHandler> GetDialogHandler() override;
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override;
+    CefRefPtr<CefPermissionHandler> GetPermissionHandler() override;
+    CefRefPtr<CefDownloadHandler> GetDownloadHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
     static CefRefPtr<CefBrowser> header_browser_;
     static CefRefPtr<CefBrowser> wallet_panel_browser_;
@@ -50,6 +58,7 @@ public:
     static CefRefPtr<CefBrowser> GetSettingsMenuBrowser();
     static CefRefPtr<CefBrowser> GetOmniboxBrowser();
     static CefRefPtr<CefBrowser> GetCookiePanelBrowser();
+    static CefRefPtr<CefBrowser> GetDownloadPanelBrowser();
     static std::string pending_panel_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
@@ -151,6 +160,38 @@ public:
                        CefEventHandle os_event,
                        bool* is_keyboard_shortcut) override;
 
+    // CefDownloadHandler methods
+    bool CanDownload(CefRefPtr<CefBrowser> browser,
+                     const CefString& url,
+                     const CefString& request_method) override;
+    bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                          CefRefPtr<CefDownloadItem> download_item,
+                          const CefString& suggested_name,
+                          CefRefPtr<CefBeforeDownloadCallback> callback) override;
+    void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefDownloadItem> download_item,
+                           CefRefPtr<CefDownloadItemCallback> callback) override;
+
+    // Download tracking
+    struct DownloadInfo {
+        uint32_t id;
+        std::string url;
+        std::string filename;
+        std::string full_path;
+        int64_t received_bytes;
+        int64_t total_bytes;
+        int percent_complete;
+        int64_t current_speed;
+        bool is_in_progress;
+        bool is_complete;
+        bool is_canceled;
+        bool is_paused;
+        CefRefPtr<CefDownloadItemCallback> item_callback;
+    };
+    static std::map<uint32_t, DownloadInfo> active_downloads_;
+    static std::set<uint32_t> paused_downloads_;
+    static void NotifyDownloadStateChanged();
+
 private:
     std::string role_;
 
@@ -169,6 +210,7 @@ private:
     static CefRefPtr<CefBrowser> settings_menu_browser_;
     static CefRefPtr<CefBrowser> omnibox_browser_;
     static CefRefPtr<CefBrowser> cookie_panel_browser_;
+    static CefRefPtr<CefBrowser> download_panel_browser_;
 
     /**
      * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
     Box,
     Toolbar,
@@ -11,6 +11,7 @@ import {
     Divider,
     Snackbar,
     Alert,
+    CircularProgress,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -24,12 +25,14 @@ import CookieIcon from '@mui/icons-material/Cookie';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import DownloadIcon from '@mui/icons-material/Download';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useCookieBlocking } from '../hooks/useCookieBlocking';
 import { useBackgroundBalancePoller } from '../hooks/useBackgroundBalancePoller';
+import { useDownloads } from '../hooks/useDownloads';
 import { TabBar } from '../components/TabBar';
 import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
@@ -94,6 +97,57 @@ const MainBrowserView: React.FC = () => {
         blockDomain,
         resetBlockedCount,
     } = useCookieBlocking();
+
+    // Downloads — only need icon visibility state; overlay handles controls
+    const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
+
+    // Track download IDs to detect new starts and completions for toast notifications
+    const prevDownloadIdsRef = useRef<Set<number>>(new Set());
+    const prevCompleteIdsRef = useRef<Set<number>>(new Set());
+    const [downloadToast, setDownloadToast] = useState<{ open: boolean; message: string; severity: 'info' | 'success' }>({
+        open: false, message: '', severity: 'info'
+    });
+
+    useEffect(() => {
+        const currentIds = new Set(downloads.map(d => d.id));
+        const currentCompleteIds = new Set(downloads.filter(d => d.isComplete).map(d => d.id));
+
+        // Detect new downloads starting
+        for (const dl of downloads) {
+            if (!prevDownloadIdsRef.current.has(dl.id) && !dl.isComplete && !dl.isCanceled) {
+                const name = dl.filename || 'File';
+                setDownloadToast({ open: true, message: `Downloading "${name}"`, severity: 'info' });
+                break; // Only toast for the first new one
+            }
+        }
+
+        // Detect downloads completing
+        for (const dl of downloads) {
+            if (dl.isComplete && !prevCompleteIdsRef.current.has(dl.id) && prevDownloadIdsRef.current.has(dl.id)) {
+                const name = dl.filename || 'File';
+                setDownloadToast({ open: true, message: `Download complete: "${name}"`, severity: 'success' });
+                break;
+            }
+        }
+
+        prevDownloadIdsRef.current = currentIds;
+        prevCompleteIdsRef.current = currentCompleteIds;
+    }, [downloads]);
+
+    // Compute overall download progress for icon indicator
+    const downloadProgress = useMemo(() => {
+        const active = downloads.filter(d => d.isInProgress || d.isPaused);
+        if (active.length === 0) return null; // no active downloads
+        const totalBytes = active.reduce((sum, d) => sum + d.totalBytes, 0);
+        const receivedBytes = active.reduce((sum, d) => sum + d.receivedBytes, 0);
+        if (totalBytes <= 0) return -1; // indeterminate
+        return Math.round((receivedBytes / totalBytes) * 100);
+    }, [downloads]);
+
+    const allComplete = useMemo(
+        () => hasDownloads && downloads.every(d => d.isComplete || d.isCanceled),
+        [hasDownloads, downloads]
+    );
 
     // Shield menu state
     const [shieldMenuAnchor, setShieldMenuAnchor] = useState<null | HTMLElement>(null);
@@ -479,6 +533,48 @@ const MainBrowserView: React.FC = () => {
                     />
                 </Box>
 
+                {/* Download Button - only shown when downloads exist */}
+                {hasDownloads && (
+                    <IconButton
+                        onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const headerWidth = window.innerWidth;
+                            const iconRightOffset = Math.round(headerWidth - rect.right + rect.width / 2);
+                            window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
+                        }}
+                        size="small"
+                        title="Downloads"
+                        sx={{
+                            flexShrink: 0,
+                            position: 'relative',
+                            color: allComplete ? '#188038' : hasActiveDownloads ? 'primary.main' : 'rgba(0, 0, 0, 0.6)',
+                            '&:hover': {
+                                backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                                color: allComplete ? '#188038' : 'rgba(0, 0, 0, 0.87)',
+                            }
+                        }}
+                    >
+                        <DownloadIcon fontSize="small" />
+                        {/* Circular progress ring around icon when downloading */}
+                        {hasActiveDownloads && (
+                            <CircularProgress
+                                size={28}
+                                thickness={3}
+                                variant={downloadProgress !== null && downloadProgress >= 0 ? 'determinate' : 'indeterminate'}
+                                value={downloadProgress !== null && downloadProgress >= 0 ? downloadProgress : undefined}
+                                sx={{
+                                    position: 'absolute',
+                                    top: '50%',
+                                    left: '50%',
+                                    marginTop: '-14px',
+                                    marginLeft: '-14px',
+                                    color: 'primary.main',
+                                }}
+                            />
+                        )}
+                    </IconButton>
+                )}
+
                 {/* Wallet Button */}
                 <IconButton
                     onClick={(e) => {
@@ -606,6 +702,28 @@ const MainBrowserView: React.FC = () => {
                     sx={{ width: '100%' }}
                 >
                     {toastMessage}
+                </Alert>
+            </Snackbar>
+
+            {/* Toast for download start/complete — positioned at bottom of header */}
+            <Snackbar
+                open={downloadToast.open}
+                autoHideDuration={3000}
+                onClose={() => setDownloadToast(prev => ({ ...prev, open: false }))}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+                sx={{
+                    // Header HWND is small — position at the bottom edge so toast hangs down
+                    '&.MuiSnackbar-root': { bottom: 0 },
+                }}
+            >
+                <Alert
+                    onClose={() => setDownloadToast(prev => ({ ...prev, open: false }))}
+                    severity={downloadToast.severity}
+                    variant="filled"
+                    sx={{ width: '100%', fontSize: '0.8rem' }}
+                    icon={downloadToast.severity === 'info' ? <DownloadIcon fontSize="small" /> : undefined}
+                >
+                    {downloadToast.message}
                 </Alert>
             </Snackbar>
         </Box>

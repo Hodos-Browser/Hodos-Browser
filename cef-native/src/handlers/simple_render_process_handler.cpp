@@ -812,6 +812,25 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        if (message_name == "download_state_update") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string downloadsJson = args->GetString(0);
+
+            LOG_DEBUG_RENDER("📥 Download state update received, dispatching to React");
+
+            std::string escaped = escapeJsonForJs(downloadsJson);
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'download_state_update',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "brc100_auth_request") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string domain = args->GetString(0);

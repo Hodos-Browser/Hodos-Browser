@@ -23,9 +23,9 @@
 | Sprint | Name | Status |
 |--------|------|--------|
 | 0 | Safety & Quick Wins | **Complete** |
-| 1 | SSL Certificate Handling + Secure Indicator | Pending |
+| 1 | SSL Certificate Handling + Secure Indicator | **Complete** |
 | 2 | Permission Handler | Pending |
-| 3 | Download Handler | Pending |
+| 3 | Download Handler | **Complete** |
 | 4 | Find-in-Page | Pending |
 | 5 | Context Menu Enhancement | Pending |
 | 6 | JS Dialog Handler + Keyboard Shortcuts | Pending |
@@ -108,8 +108,8 @@ React → cefMessage.send("command_name", data)
 ### Sprint 2 (Permissions)
 - CEF 136 Chrome bootstrap: returning `false` from `OnShowPermissionPrompt` shows native Chrome permission UI. Test this FIRST before building custom UI.
 
-### Sprint 3 (Downloads)
-- MVP: Just implement `OnBeforeDownload` with `callback->Continue("", true)` for Save As dialog. Skip progress overlay initially.
+### Sprint 3 (Downloads) — COMPLETE
+- Full implementation: `CefDownloadHandler` + overlay panel + progress icon + toast notifications. See `implementation-plan.md` Sprint 3 for details.
 
 ### Sprint 8 (Ad Blocking)
 - `adblock-rust` is a separate crate, NOT in the Rust wallet workspace.

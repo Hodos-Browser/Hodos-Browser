@@ -145,7 +145,7 @@ Document: [mvp-gap-analysis.md](./mvp-gap-analysis.md)
 - [x] Tab management — **Already fully working** (Phase A.4 confirmed)
 - [x] SSL/TLS (x.com and similar sites) — Gap identified: no `OnCertificateError` handler (Tier 0)
 - [x] Permission prompts (camera, mic, geolocation, notifications) — Gap: return `false` for Chrome native UI (Tier 0)
-- [x] Downloads manager — Gap: no `CefDownloadHandler` (Tier 0)
+- [x] Downloads manager — **COMPLETE** (Sprint 3): `CefDownloadHandler` + overlay panel + progress icon
 - [x] Find in page — Gap: no `CefFindHandler` (Tier 1)
 - [x] Print support — **NOT NEEDED** on Windows (CEF handles natively)
 - [x] Context menus — Gap: only 2 items, needs Copy/Paste/Save Image/View Source (Tier 1)

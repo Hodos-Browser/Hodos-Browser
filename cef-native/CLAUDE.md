@@ -61,9 +61,10 @@ cd cef-native/build/bin/Release
 
 | File | Identifiers |
 |------|-------------|
-| `cef_browser_shell.cpp` | `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs, `Logger`, `WndProc` |
+| `cef_browser_shell.cpp` | `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs (incl. `g_download_panel_overlay_hwnd`), `Logger`, `WndProc`, `DownloadPanelOverlayWndProc`, `DownloadPanelMouseHookProc` |
 | `src/handlers/simple_render_process_handler.cpp` | `CefMessageSendHandler`, `escapeJsonForJs`, `OnContextCreated` |
-| `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose` |
+| `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose`, `CefDownloadHandler` (`CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`), `DownloadInfo` struct, `active_downloads_` map, `NotifyDownloadStateChanged` |
+| `src/handlers/simple_app.cpp` | `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` (overlay lifecycle) |
 | `src/core/HttpRequestInterceptor.cpp` | `DomainVerifier`, `AsyncWalletResourceHandler`, `g_pendingAuthRequest`, `isWalletEndpoint` |
 | `src/core/BRC100Bridge.cpp` | `makeHttpRequest` (WinHTTP to localhost:3301) |
 | `src/core/HistoryManager.cpp` | Browser history SQLite database; singleton with `AddVisit`, `GetHistory`, `SearchHistory`, `DeleteHistoryEntry` |

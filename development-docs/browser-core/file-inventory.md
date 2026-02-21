@@ -249,6 +249,8 @@ None of these caches write to disk. `wallet.db` is the sole persistent storage.
 
 **Bookmarks**: `bookmark_add`, `bookmark_get`, `bookmark_update`, `bookmark_remove`, `bookmark_search`, `bookmark_get_all`, `bookmark_is_bookmarked`, `bookmark_get_all_tags`, `bookmark_update_last_accessed`, `bookmark_folder_create`, `bookmark_folder_list`, `bookmark_folder_update`, `bookmark_folder_remove`, `bookmark_folder_get_tree`
 
+**Downloads**: `download_panel_show`, `download_panel_hide`, `download_cancel`, `download_pause`, `download_resume`, `download_open`, `download_show_folder`, `download_clear_completed`, `download_get_state`
+
 **Other**: `toggle_wallet_panel`, `mark_wallet_backed_up`
 
 ### 8.3 React Routes (CEF Subprocess Pages)
@@ -264,6 +266,7 @@ None of these caches write to disk. `wallet.db` is the sole persistent storage.
 | `/brc100-auth` | `BRC100AuthOverlayRoot` | Keep-alive overlay subprocess |
 | `/omnibox` | `OmniboxOverlayRoot` | Overlay subprocess |
 | `/cookie-panel` | `CookiePanelOverlayRoot` | Overlay subprocess |
+| `/downloads` | `DownloadsOverlayRoot` | Keep-alive overlay subprocess |
 
 ---
 
