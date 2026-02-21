@@ -1,222 +1,166 @@
 # HodosBrowser
 
-A custom Web3 browser built on the Chromium Embedded Framework (CEF) with native BitcoinSV wallet for secure authentication, micropayments, and Electronic Data Interchange (EDI- smart contracts).
+A Web3 browser built on CEF (Chromium Embedded Framework) with a native Rust wallet backend for Bitcoin SV authentication, micropayments, and smart contracts.
 
-## ⚡ Current Status - Production Ready (Dec 2025)
-
-**🎉 MAJOR MILESTONE:** BRC-100 Groups A & B complete! Authentication + Full transaction management with real-world testing successful!
-
-### Rust Wallet - ✅ Production Ready
-
-**Complete Features:**
-- ✅ **BRC-100 Groups A & B** - Authentication + Transaction management
-- ✅ **Custom BSV ForkID SIGHASH** - Production-ready signing
-- ✅ **BRC-103/104 Mutual Authentication** - 7 critical breakthroughs
-- ✅ **BRC-29 Payment Protocol** - Privacy-preserving micropayments
-- ✅ **Transaction History** - Full action storage with labels and metadata
-- ✅ **BEEF Phase 2 Parser** - Output ownership detection
-- ✅ **BRC-33 Message Relay** - Peer-to-peer messaging support
-- ✅ **Confirmed Mainnet Transactions** - Real-world validation
-
-**Latest Achievements:**
-- ✅ BRC-29 payments working with ToolBSV and other sites
-- ✅ TSC Merkle proof generation with block height resolution
-- ✅ Atomic BEEF (BRC-95) format implementation
-- ✅ Complete transaction lifecycle (create → sign → broadcast → confirm)
-
-**Storage:** `%APPDATA%/HodosBrowser/wallet/wallet.db` (SQLite database)
+**Status**: Active development (February 2026). BRC-100 Groups A & B complete. Domain permission system, auto-approve engine, DPAPI auto-unlock, mnemonic recovery all shipping. Browser core MVP sprints in progress.
 
 ---
 
-## 🔧 Project Structure
+## Architecture
 
-> Note: `cef-binaries/` and `**/target/` are excluded from Git using `.gitignore`.
-
-## 🚀 Goals
-
-- ✅ CEF shell with secure wallet backend
-- ✅ Process-per-overlay architecture (settings, wallet, backup modals)
-- ✅ Complete identity system with Rust wallet backend
-- ✅ **BRC-100 Groups A & B Complete** - Auth + Transaction management
-- ✅ **Transaction History System** - Full action tracking with labels
-- ✅ **BEEF Phase 2 Parser** - Transaction parsing with output ownership
-- ✅ **BEEF/SPV Integration** - Real blockchain transactions
-- ✅ **Production-Ready Rust Wallet** - 45% of BRC-100 complete (14/31 methods)
-- ✅ Enforce native, secure signing (not in JavaScript)
-- 🧱 Build the UI from scratch using React + Vite
-- 🎯 **Next: Real-world testing** with ToolBSV and Thryll.online
-- ⚙️ Smart contract integration with sCrypt (or custom) and BRC-100/Authrite
-- 🎯 Support micropayments, token gating, and identity-bound access
-
-## 📦 Tech Stack
-
-| Layer | Technology | Status |
-|-------|------------|--------|
-| Browser Shell | C++ / Chromium Embedded Framework | ✅ Process-per-overlay architecture |
-| UI | React + Vite (TypeScript) | ✅ Multiple overlay routes |
-| **Wallet Backend** | **Rust** (Actix-web) | ✅ **Production ready** |
-| Overlay System | **Process-Per-Overlay** | ✅ Isolated CEF subprocesses |
-| **BRC-100 Authentication** | **Rust Implementation** | ✅ **Groups A & B complete** |
-| **Transaction System** | **BSV ForkID SIGHASH** | ✅ **Mainnet confirmed** |
-| **Broadcasting** | **Multi-Miner** | ✅ WhatsOnChain + GorillaPool |
-| Key Derivation | **HD Wallet (BIP44)** | ✅ Production-ready |
-| Identity / Auth | BRC-100 (Authrite Protocol) | ✅ Complete implementation |
-| Blockchain Integration | Bitcoin SV APIs | ✅ Real mainnet integration |
-
-## 🛠️ Setup
-
-### Rust Wallet Backend
-
-```bash
-cd rust-wallet
-cargo build
-cargo run
-# Server starts on http://127.0.0.1:3301
+```
+React Frontend (Port 5137)
+    | window.hodosBrowser.*
+    v
+C++ CEF Shell (CEF 136)
+    | HTTP interception -> localhost:3301
+    v
+Rust Wallet Backend (Port 3301)
+    | Actix-web, SQLite, BRC-100
+    v
+Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 ```
 
+| Layer | Tech | Responsibility |
+|-------|------|----------------|
+| Frontend | React, Vite, TypeScript, MUI | UI, user interactions; never handles keys or signing |
+| CEF Shell | C++17, CEF 136 | Browser engine, V8 injection, HTTP interception, domain permissions, auto-approve engine |
+| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol; private keys never leave this process |
 
-
-### Frontend Development
-
-```bash
-cd frontend
-npm install
-npm run dev
-# Frontend will be available at http://127.0.0.1:5137
-```
-
-### CEF Native Shell
-
-```bash
-cd cef-native/build
-cmake --build . --config Release
-./bin/Release/HodosBrowserShell.exe
-```
-
-See `BUILD_INSTRUCTIONS.md` for detailed build steps.
-
-## 💾 Backup & Recovery
-
-**Current Implementation:**
-- Local file-based backups (SQLite database copy)
-- JSON export for non-sensitive data
-- Recovery from mnemonic (re-derive addresses, re-discover UTXOs from blockchain)
-
-**Future: Online Wallet Backend** (Coordination Required):
-- Cloud-based backup storage for wallet databases
-- User authentication and access control (method TBD)
-- Encrypted backups with user-controlled keys
-- Storage location TBD (coordinated with protocol developers)
-- **Note**: This requires coordination with open source BRC-100 protocol developers to ensure:
-  - Standardized backup format for interoperability
-  - Consistent authentication methods
-  - Unified security practices
-  - User privacy and control
-
-## 📁 Repository Notes
-
-- CEF binaries are local-only and not tracked by Git.
-- The cef-native and cef-binaries/libcef_dll/wrapper layers are independently compiled but logically connected:
-    - The wrapper is built as a standalone static library (libcef_dll_wrapper.lib)
-    - Your native shell links to that static lib manually
-
-    BABBAGE-BROWSER (HodosBrowser)/
-    ├── .vscode/                     → VSCode workspace configs
-    │
-    ├── cef-binaries/               → CEF binaries and libcef_dll wrapper source (not tracked by Git)
-    │   └── libcef_dll/
-    │       └── wrapper/            → Custom-built wrapper compiled to static lib (needs the CMakeList.txt)
-    │
-    ├── cef-native/                 → Native C++ shell for browser logic
-    │   ├── build/                  → Local CMake/MSVC build artifacts
-    │   ├── include/
-    │   │   ├── core/               → Wallet, identity, and navigation headers
-    │   │   └── handlers/           → CEF event hook headers (client, render, etc.)
-    │   ├── src/
-    │   │   ├── core/               → Backend implementations for wallet and identity
-    │   │   └── handlers/           → CEF app/client/render lifecycle implementations
-    │   └── tests/                  → Native shell test harness and main entrypoint
-    │
-    ├── rust-wallet/                → Rust wallet backend (Port 3301) ✅ PRODUCTION READY
-    │   ├── src/
-    │   │   ├── main.rs             → Actix-web HTTP server
-    │   │   ├── handlers.rs         → BRC-100 endpoint handlers (1900+ lines)
-    │   │   ├── json_storage.rs     → Wallet.json management
-    │   │   ├── crypto/             → BRC-42/43 crypto implementations
-    │   │   ├── transaction/        → Transaction types and SIGHASH
-    │   │   │   ├── mod.rs          → Module exports
-    │   │   │   ├── types.rs        → Transaction structures
-    │   │   │   └── sighash.rs      → BSV ForkID SIGHASH implementation
-    │   │   └── utxo_fetcher.rs     → WhatsOnChain UTXO fetching
-    │   ├── Cargo.toml              → Rust dependencies
-    │   └── target/                 → Build artifacts (gitignored)
-    │
-    ├── frontend/                   → React + Vite UI
-    │   ├── public/                 → Static assets served by Vite
-    │   ├── src/
-    │   │   ├── components/panels/  → Wallet UI, tabs, settings panels
-    │   │   ├── hooks/              → Shared logic (e.g. `useHodosBrowser`)
-    │   │   ├── pages/              → Page-level views like Browser and Welcome screens
-    │   │   └── types/              → TypeScript types (identity, API contracts)
-    │   ├── index.html              → App entrypoint (served by Vite)
-    │   └── main.tsx                → React bootstrap
-    │
-    ├── .gitignore
-    ├── README.md
-    ├── BUILD_INSTRUCTIONS.md       → Build instructions for all components
-    ├── DEVELOPER_NOTES.md          → Session notes and implementation details
-    ├── ARCHITECTURE.md             → System architecture documentation
-    ├── API_REFERENCES.md           → API endpoint documentation
-    ├── RUST_TRANSACTION_IMPLEMENTATION_PLAN.md → Rust transaction implementation details
-    ├── RUST_WALLET_SESSION_SUMMARY.md → Latest session summary (Oct 16, 2025)
-    └── vite.config.ts             → Vite config (frontend build + dev server)
-
-## 💡 Project Philosophy
-
-- **Security-first**: Private keys and signing logic never exposed to JS
-- **Native control**: Full backend control over cookie, adds, contract, InterPlanetary File System, and payment enforcement
-- **Web3 reimagined**: Built for real micropayments, not fake dApps
-- **Prioritize user experience**: Clean easy to use and understand
-
-## 🔒 Security Architecture
-
-### Why Native Wallet Backend?
-
-**JavaScript Security Vulnerabilities:**
-- **Process Isolation**: JavaScript runs in the browser's render process, which is inherently less secure than native processes
-- **XSS Attack Surface**: Malicious websites could potentially access wallet functions through cross-site scripting attacks
-- **Extension Interference**: Browser extensions or injected scripts could intercept wallet operations
-- **Memory Exposure**: Private keys stored in JavaScript variables are accessible through console inspection, memory dumps, and developer tools
-
-**Native Backend Benefits:**
-- **Process Separation**: Wallet operations happen in isolated Rust daemon processes, completely separate from web content
-- **Memory Safety**: Rust provides compile-time memory safety guarantees without runtime overhead
-- **Cryptographic Operations**: Custom Rust implementation with BSV ForkID SIGHASH and BRC-100 protocol support
-- **Attack Surface Reduction**: Even if a website compromises the render process, it cannot access the wallet backend
-
-**Architecture Security:**
-- **Controlled Bridge API**: Only safe, high-level functions are exposed through `window.hodosBrowser`
-- **Multi-Process CEF**: Leverages Chromium's natural security boundaries between processes
-- **Rust Process Isolation**: Private keys never leave the isolated Rust wallet process
-- **Real Financial Security**: Built for production use where real money is at stake, with compile-time safety guarantees
-
-## 🧬 BRC-100 Protocol Compatibility
-
-This project is being built to support apps that follow the **BRC-100 authentication and identity standards**, enabling secure, privacy-preserving interaction between wallets and applications. The goal is to ensure seamless compatibility with:
-
-- **Toolio-generated identities and WAB certificates**
-- **MetanetDesktop-style storage and identity detection**: Identity and wallet information will be stored in AppData%/MetanetDesktop/identity.json
-- **BRC-52/103 identity certificates** with selective disclosure
-- **Type-42 key derivation** for encrypted P2P channels
-- **BEEF-formatted atomic transactions** for identity-bound actions
-- **SPV-based identity and transaction verification**
-- **Browser-side API injection for identity access**, e.g.:
-  ```js
-  window.hodosBrowser.identity.get()
-  window.hodosBrowser.brc100.getPublicKey()
-  window.hodosBrowser.brc100.signMessage(...)
-  window.hodosBrowser.brc100.getCertificate()
+**Process-per-overlay**: Settings, Wallet Panel, Backup Modal, BRC-100 Auth, and Notification overlays each run as separate CEF subprocesses with isolated V8 contexts.
 
 ---
 
-This is an early-stage rewrite.
+## Quick Start (Windows)
+
+**Prerequisites**: VS 2022 (MSVC), vcpkg, Rust, Node.js 18+, CEF binaries
+
+All three must be running:
+
+```powershell
+# 1. Rust wallet
+cd rust-wallet && cargo run --release
+# Runs on localhost:3301
+
+# 2. Frontend
+cd frontend && npm install && npm run dev
+# Runs on localhost:5137
+
+# 3. CEF browser
+cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
+```
+
+**Build from source**: See `build-instructions/BUILD_INSTRUCTIONS.md` for first-time setup (CEF binaries, CMake, vcpkg).
+
+---
+
+## What's Working
+
+### Browser
+- Navigation, tabs, cookies, history, bookmarks
+- Process-per-tab isolation
+- HTTP request interception for BRC-100 endpoints
+- Domain permission system with per-site spending limits
+- Auto-approve engine (rate limiting, session tracking, USD conversion)
+- Notification overlay (payment confirmation, certificate disclosure, rate limiting)
+
+### Wallet
+- HD wallet (BIP39 mnemonic, BRC-42 self-derivation, legacy BIP32 recovery)
+- BRC-100 Groups A & B (authentication + transactions)
+- BRC-103/104 mutual authentication
+- BRC-29 payment protocol
+- BRC-33 message relay
+- BEEF/SPV transaction format with merkle proofs
+- PIN encryption (AES-256-GCM, PBKDF2) + DPAPI auto-unlock
+- Mnemonic recovery with blockchain UTXO scanning
+- File-based backup and restore
+- Background monitor (7 tasks: proof acquisition, crash recovery, UTXO sync)
+- BSV/USD price cache (CryptoCompare + CoinGecko fallback)
+
+### What's Next (MVP Roadmap)
+- SSL certificate handling + secure connection indicator
+- Camera/mic/geolocation permission prompts
+- Download handler
+- Find-in-page
+- Context menu enhancement
+- Ad & tracker blocking (adblock-rust FFI)
+- Light wallet polish (QR codes, button states, transaction progress)
+
+See `development-docs/browser-core/implementation-plan.md` for the full sprint plan.
+
+---
+
+## Storage
+
+| Platform | Location |
+|----------|----------|
+| Windows | `%APPDATA%/HodosBrowser/` |
+| macOS | `~/Library/Application Support/HodosBrowser/` |
+
+Wallet DB: `<storage>/wallet/wallet.db` (SQLite). Browser data (history, bookmarks, cookies): `<storage>/Default/`.
+
+---
+
+## Project Structure
+
+```
+HodosBrowser/
+|-- cef-native/              C++ CEF browser shell
+|   |-- src/core/            HTTP interception, domain permissions, session manager
+|   |-- src/handlers/        CEF event handlers (SimpleHandler, render process)
+|   |-- include/core/        PendingRequestManager, SessionManager, BSVPriceCache
+|
+|-- rust-wallet/             Rust wallet backend (Port 3301)
+|   |-- src/handlers.rs      68+ HTTP endpoint handlers
+|   |-- src/crypto/          11 modules: BRC-42/43, DPAPI, PIN, AES-GCM, signing
+|   |-- src/database/        23 files, 18+ repositories (SQLite)
+|   |-- src/monitor/         Background task scheduler (7 tasks)
+|   |-- src/transaction/     BSV ForkID SIGHASH, transaction types
+|   |-- src/price_cache.rs   BSV/USD price with dual-provider fallback
+|   |-- src/recovery.rs      Mnemonic recovery + BIP32 legacy derivation
+|
+|-- frontend/                React + Vite + TypeScript UI
+|   |-- src/components/      Wallet panel, transaction form, domain permissions
+|   |-- src/hooks/           useHodosBrowser, useBalance, useBackgroundBalancePoller
+|   |-- src/pages/           Overlay roots (wallet, settings, BRC100 auth, notification)
+|   |-- src/bridge/          window.hodosBrowser API bridge
+|
+|-- development-docs/        Sprint plans, research, architecture docs
+|   |-- browser-core/        MVP gap analysis + implementation plan
+|   |-- macos-port/          macOS porting plan + build instructions
+|   |-- UX_UI/               Wallet UX phase tracker
+|
+|-- build-instructions/      Platform-specific build guides
+```
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| `CLAUDE.md` | Project context for AI assistants (invariants, key files, architecture) |
+| `PROJECT_OVERVIEW.md` | Comprehensive architecture reference |
+| `THE_WHY.md` | Rationale for Rust, CEF, and native wallet choices |
+| `SECURITY_AND_PROCESS_ISOLATION_ANALYSIS.md` | Process isolation security model |
+| `IMPLEMENTATION_STATUS.md` | Detailed implementation log (all phases) |
+| `development-docs/browser-core/` | MVP sprint plan and gap analysis |
+| `development-docs/macos-port/` | macOS porting plan |
+
+---
+
+## Security
+
+- **Private keys never in JavaScript** — all signing happens in Rust
+- **Process isolation** — wallet runs as separate process from browser
+- **DPAPI encryption** — mnemonic encrypted at OS level (Windows); macOS Keychain planned
+- **PIN encryption** — AES-256-GCM with PBKDF2 (600K iterations)
+- **Domain permissions** — per-site approval with spending limits (USD)
+- **Defense in depth** — C++ auto-approve engine + Rust-side permission checks
+- **Memory safety** — Rust ownership model, no `unsafe` in key-handling code
+
+---
+
+## License
+
+Proprietary. All rights reserved.

@@ -382,6 +382,102 @@ private:
 #endif
 };
 
+// URL-encode a string (for query parameters that may contain +, =, / etc.)
+static std::string urlEncode(const std::string& value) {
+    std::ostringstream encoded;
+    encoded.fill('0');
+    encoded << std::hex;
+    for (unsigned char c : value) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded << c;
+        } else {
+            encoded << '%' << std::setw(2) << std::uppercase << (int)c;
+        }
+    }
+    return encoded.str();
+}
+
+#ifdef _WIN32
+// Fetch approved cert fields from Rust backend (synchronous WinHTTP).
+// Returns set of field names that are already approved for this domain + cert_type.
+static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domain, const std::string& certType) {
+    std::set<std::string> result;
+
+    HINTERNET hSession = WinHttpOpen(L"CertFieldCache/1.0",
+                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME,
+                                     WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return result;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    // Build endpoint with URL-encoded cert_type (base64 may contain +, =, /)
+    std::string endpoint = "/domain/permissions/certificate?domain=" + urlEncode(domain)
+                         + "&cert_type=" + urlEncode(certType);
+    std::wstring wideEndpoint(endpoint.begin(), endpoint.end());
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+                                            wideEndpoint.c_str(),
+                                            nullptr,
+                                            WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    DWORD timeout = 5000;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hRequest, nullptr)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    std::string responseBody;
+    DWORD bytesRead = 0;
+    char buffer[4096];
+    do {
+        if (!WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead)) break;
+        responseBody.append(buffer, bytesRead);
+    } while (bytesRead > 0);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    try {
+        auto json = nlohmann::json::parse(responseBody);
+        if (json.contains("approvedFields") && json["approvedFields"].is_array()) {
+            for (const auto& field : json["approvedFields"]) {
+                if (field.is_string()) {
+                    result.insert(field.get<std::string>());
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_DEBUG_HTTP("📋 Failed to parse cert field permissions response: " + std::string(e.what()));
+    }
+
+    return result;
+}
+#else
+static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domain, const std::string& certType) {
+    // TODO(macOS): Implement using NSURLSession
+    return std::set<std::string>();
+}
+#endif
+
 // Escape string for safe embedding in single-quoted JS string literals.
 // Prevents JS injection when concatenating into ExecuteJavaScript() calls.
 static std::string escapeForJsSingleQuote(const std::string& input) {
@@ -673,6 +769,11 @@ public:
             || endpoint.find("/sendMessage") != std::string::npos;
     }
 
+    // Check if endpoint is proveCertificate (identity field disclosure)
+    static bool isProveCertificateEndpoint(const std::string& endpoint) {
+        return endpoint.find("/proveCertificate") != std::string::npos;
+    }
+
     // Parse request body JSON and sum outputs[].satoshis
     static int64_t extractOutputSatoshis(const std::string& body) {
         if (body.empty()) return 0;
@@ -689,6 +790,85 @@ public:
         } catch (...) {
             return 0;
         }
+    }
+
+    // Parsed certificate disclosure info from proveCertificate request body
+    struct CertDisclosureInfo {
+        std::string certType;
+        std::string certifier;
+        std::vector<std::string> fieldsToReveal;
+        bool valid = false;
+    };
+
+    // Extract certificate disclosure info from proveCertificate request body
+    static CertDisclosureInfo extractCertDisclosureInfo(const std::string& body) {
+        CertDisclosureInfo info;
+        if (body.empty()) return info;
+        try {
+            auto json = nlohmann::json::parse(body);
+
+            // Extract fieldsToReveal array (top-level)
+            if (json.contains("fieldsToReveal") && json["fieldsToReveal"].is_array()) {
+                for (const auto& field : json["fieldsToReveal"]) {
+                    if (field.is_string()) {
+                        info.fieldsToReveal.push_back(field.get<std::string>());
+                    }
+                }
+            }
+
+            // Extract certificate.type and certificate.certifier
+            if (json.contains("certificate") && json["certificate"].is_object()) {
+                auto& cert = json["certificate"];
+                if (cert.contains("type") && cert["type"].is_string()) {
+                    info.certType = cert["type"].get<std::string>();
+                }
+                if (cert.contains("certifier") && cert["certifier"].is_string()) {
+                    info.certifier = cert["certifier"].get<std::string>();
+                }
+            }
+
+            // Also check top-level certType/certifier (alternative JSON shape)
+            if (info.certType.empty() && json.contains("certType") && json["certType"].is_string()) {
+                info.certType = json["certType"].get<std::string>();
+            }
+            if (info.certifier.empty() && json.contains("certifier") && json["certifier"].is_string()) {
+                info.certifier = json["certifier"].get<std::string>();
+            }
+
+            info.valid = !info.fieldsToReveal.empty();
+        } catch (...) {
+            // Parse failure — return invalid info
+        }
+        return info;
+    }
+
+    // Trigger certificate disclosure notification overlay
+    void triggerCertificateDisclosureModal(const std::string& domain, const CertDisclosureInfo& info) {
+        LOG_DEBUG_HTTP("📋 Triggering certificate disclosure for " + domain + " (" + std::to_string(info.fieldsToReveal.size()) + " fields)");
+
+        // Store request in PendingRequestManager with type "certificate_disclosure"
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method_, endpoint_, body_, this, "certificate_disclosure");
+
+        // Build fields comma-separated list
+        std::string fieldsList;
+        for (size_t i = 0; i < info.fieldsToReveal.size(); ++i) {
+            if (i > 0) fieldsList += ",";
+            fieldsList += info.fieldsToReveal[i];
+        }
+
+        // Build extra params for overlay URL
+        std::string extraParams = "&fields=" + fieldsList;
+        if (!info.certType.empty()) {
+            extraParams += "&certType=" + info.certType;
+        }
+        if (!info.certifier.empty()) {
+            extraParams += "&certifier=" + info.certifier;
+        }
+
+        // Post to UI thread
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("certificate_disclosure", domain, extraParams));
+        LOG_DEBUG_HTTP("📋 Certificate disclosure notification queued (requestId: " + requestId + ", fields: " + fieldsList + ")");
     }
 
     // Public so handleAuthResponse() can forward queued sibling requests
@@ -808,6 +988,41 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     // "approved" — auto-approve engine with spending limits and rate limiting
     if (perm.trustLevel == "approved") {
         LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is approved, checking spending limits");
+
+        // Certificate disclosure check — intercept proveCertificate BEFORE the payment check
+        if (isProveCertificateEndpoint(endpoint_)) {
+            auto certInfo = extractCertDisclosureInfo(body_);
+            if (certInfo.valid && !certInfo.certType.empty()) {
+                LOG_DEBUG_HTTP("📋 proveCertificate from " + requestDomain_ + " — checking field permissions");
+
+                // Fetch already-approved fields from DB
+                auto approvedFields = fetchCertFieldsFromBackend(requestDomain_, certInfo.certType);
+
+                // Check if ALL requested fields are approved
+                bool allApproved = true;
+                for (const auto& field : certInfo.fieldsToReveal) {
+                    if (approvedFields.find(field) == approvedFields.end()) {
+                        allApproved = false;
+                        break;
+                    }
+                }
+
+                if (allApproved) {
+                    LOG_DEBUG_HTTP("📋 All cert fields already approved for " + requestDomain_ + ", auto-forwarding");
+                    handle_request = true;
+                    CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+                    return true;
+                } else {
+                    LOG_DEBUG_HTTP("📋 Unapproved cert fields — showing disclosure notification for " + requestDomain_);
+                    triggerCertificateDisclosureModal(requestDomain_, certInfo);
+                    postAuthTimeout(60000, "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}");
+                    handle_request = true;
+                    return true;
+                }
+            }
+            // Invalid or empty fields — fall through to normal forwarding
+            LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
+        }
 
         if (isPaymentEndpoint(endpoint_)) {
             int browserId = browser_ ? browser_->GetIdentifier() : 0;
@@ -929,8 +1144,12 @@ void AsyncWalletResourceHandler::postAuthTimeout(int delayMs, const std::string&
 }
 
 void AsyncWalletResourceHandler::postHttpTimeout() {
-    // 45s timeout — wallet operations (createAction, broadcast) can take 30+ seconds
-    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), 45000);
+    // Recovery scans can take 60+ seconds; use 120s timeout for recover endpoints
+    int timeoutMs = 45000;
+    if (endpoint_.find("/wallet/recover") != std::string::npos) {
+        timeoutMs = 120000;
+    }
+    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), timeoutMs);
 }
 
 // Function to store pending auth request data (called from overlay_show_brc100_auth IPC — no handler)
@@ -1322,6 +1541,11 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     CefRequest::HeaderMap headers;
     headers.insert(std::make_pair("Content-Type", "application/json"));
     headers.insert(std::make_pair("Accept", "application/json"));
+
+    // Pass the requesting domain to Rust for defense-in-depth permission checks
+    if (!requestDomain_.empty()) {
+        headers.insert(std::make_pair("X-Requesting-Domain", requestDomain_));
+    }
 
     // Forward original headers (including BRC-31 Authrite headers)
     for (const auto& header : originalHeaders_) {

@@ -1,3 +1,5 @@
+> **NOTE**: This document was written in December 2025. The feature comparison is still valuable, but implementation priorities have been superseded by `development-docs/browser-core/mvp-gap-analysis.md` and `development-docs/browser-core/implementation-plan.md` (February 2026). Refer to those for the current MVP plan.
+
 # HodosBrowser UX Feature Comparison & Implementation Roadmap
 
 **Document Version**: 1.0

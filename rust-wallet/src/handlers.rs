@@ -434,15 +434,86 @@ pub struct AuthRequest {
     pub initial_nonce: String,
 }
 
+// ============================================================================
+// Defense-in-depth: Rust-side domain permission check
+// ============================================================================
+//
+// The C++ layer (HttpRequestInterceptor) is the primary enforcement point for
+// domain permissions. This Rust-side check is a safety net: if C++ has a bug,
+// bypass, or race condition, Rust still blocks unauthorized requests.
+//
+// Requests without X-Requesting-Domain header are internal (wallet panel UI)
+// and skip this check.
+
+use crate::database::DomainPermissionRepository;
+use crate::database::models::DomainPermission;
+
+/// Check if the requesting domain is approved.
+///
+/// Returns:
+/// - `Ok(None)` — no domain header (internal request), allow through
+/// - `Ok(Some(perm))` — domain is approved, permission record available
+/// - `Err(HttpResponse)` — domain not approved, return this error response
+fn check_domain_approved(
+    http_req: &HttpRequest,
+    db: &rusqlite::Connection,
+    user_id: i64,
+) -> Result<Option<DomainPermission>, HttpResponse> {
+    let domain = match http_req.headers().get("X-Requesting-Domain") {
+        Some(val) => match val.to_str() {
+            Ok(s) if !s.is_empty() => s.to_string(),
+            _ => return Ok(None),
+        },
+        None => return Ok(None), // Internal request — no domain header
+    };
+
+    let repo = DomainPermissionRepository::new(db);
+    match repo.get_by_domain(user_id, &domain) {
+        Ok(Some(perm)) if perm.trust_level == "approved" => {
+            log::debug!("🛡️ Domain '{}' approved (defense-in-depth check passed)", domain);
+            Ok(Some(perm))
+        }
+        Ok(Some(perm)) => {
+            log::warn!("🛡️ Domain '{}' has trust_level='{}' — BLOCKED by Rust safety net", domain, perm.trust_level);
+            Err(HttpResponse::Forbidden().json(serde_json::json!({
+                "error": format!("Domain '{}' is not approved", domain),
+                "code": "ERR_DOMAIN_NOT_APPROVED"
+            })))
+        }
+        Ok(None) => {
+            log::warn!("🛡️ Domain '{}' has no permission record — BLOCKED by Rust safety net", domain);
+            Err(HttpResponse::Forbidden().json(serde_json::json!({
+                "error": format!("Domain '{}' is not approved", domain),
+                "code": "ERR_DOMAIN_NOT_APPROVED"
+            })))
+        }
+        Err(e) => {
+            log::error!("🛡️ Database error checking domain '{}': {}", domain, e);
+            Err(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error checking domain permissions"
+            })))
+        }
+    }
+}
+
 // /.well-known/auth - Babbage authentication
 pub async fn well_known_auth(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     req: web::Json<AuthRequest>,
 ) -> HttpResponse {
     log::info!("🔐 Babbage auth request received");
     log::info!("   Identity key from request: {}", req.identity_key);
     log::info!("   Initial nonce: {}", req.initial_nonce);
     log::info!("   Message type: {}", req.message_type);
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
 
     // Generate our nonce - simple random 32-byte nonce (BRC-103 standard)
     // NOTE: For wallet clients with low session volume, simple random nonces are ideal.
@@ -513,20 +584,29 @@ pub async fn well_known_auth(
         }
     };
 
-    // CRITICAL: TypeScript SDK does Utils.toArray(nonce1_base64 + nonce2_base64, 'base64')
-    // This concatenates the BASE64 STRINGS first, THEN decodes the concatenated string!
-    // NOT: decode(nonce1) + decode(nonce2)
-    let concatenated_nonces_base64 = format!("{}{}", req.initial_nonce, our_nonce);
-
-    let data_to_sign = match general_purpose::STANDARD.decode(&concatenated_nonces_base64) {
+    // FIX for GHSA-vjpq-xx5g-qvmm (CVE-2025-69287): Decode each nonce separately,
+    // then concatenate the byte arrays. The old approach concatenated base64 STRINGS
+    // before decoding, which produced wrong output when padding chars appeared mid-string.
+    let nonce1_bytes = match general_purpose::STANDARD.decode(&req.initial_nonce) {
         Ok(bytes) => bytes,
         Err(e) => {
-            log::error!("   Failed to decode concatenated nonces: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Invalid nonce concatenation: {}", e)
+            log::error!("   Failed to decode initial nonce: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid initial nonce encoding"
             }));
         }
     };
+    let nonce2_bytes = match general_purpose::STANDARD.decode(&our_nonce) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::error!("   Failed to decode our nonce: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal nonce encoding error"
+            }));
+        }
+    };
+    let mut data_to_sign = nonce1_bytes;
+    data_to_sign.extend_from_slice(&nonce2_bytes);
 
     log::info!("   Data to sign ({} bytes from concatenated base64 nonces)", data_to_sign.len());
 
@@ -679,9 +759,18 @@ pub struct CreateHmacResponse {
 // /createHmac - BRC-100 endpoint for creating HMAC
 pub async fn create_hmac(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createHmac called");
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
 
     // Special handling for keyID with invalid Unicode
     let body_str = String::from_utf8_lossy(&body).to_string();
@@ -2473,9 +2562,18 @@ pub struct CreateSignatureResponse {
 // /createSignature - BRC-3 endpoint for creating ECDSA signatures
 pub async fn create_signature(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createSignature called");
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
 
     // Parse JSON body
     let body_str = String::from_utf8_lossy(&body);
@@ -3031,6 +3129,7 @@ pub struct CreateActionResponseOutput {
 // /createAction - Build unsigned transaction
 pub async fn create_action(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createAction called");
@@ -3080,6 +3179,38 @@ pub async fn create_action(
             options.sign_and_process,
             options.no_send,
             options.randomize_outputs);
+    }
+
+    // Defense-in-depth: verify domain is approved + spending limit
+    {
+        let db = state.database.lock().unwrap();
+        match check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            Ok(Some(perm)) => {
+                // Check per-transaction spending limit
+                let total_sats: i64 = req.outputs.iter()
+                    .filter_map(|o| o.satoshis)
+                    .sum();
+                if total_sats > 0 {
+                    let bsv_price = state.price_cache.get_cached().unwrap_or(0.0);
+                    if bsv_price > 0.0 {
+                        let usd_cents = ((total_sats as f64 / 100_000_000.0) * bsv_price * 100.0) as i64;
+                        if usd_cents > perm.per_tx_limit_cents {
+                            log::warn!(
+                                "🛡️ createAction BLOCKED: domain '{}' spending {} cents exceeds per-tx limit of {} cents",
+                                perm.domain, usd_cents, perm.per_tx_limit_cents
+                            );
+                            drop(db);
+                            return HttpResponse::Forbidden().json(serde_json::json!({
+                                "error": format!("Transaction exceeds spending limit for domain '{}'", perm.domain),
+                                "code": "ERR_SPENDING_LIMIT_EXCEEDED"
+                            }));
+                        }
+                    }
+                }
+            }
+            Ok(None) => {} // Internal request — no domain header
+            Err(resp) => return resp,
+        }
     }
 
     // ============================================================
@@ -6627,7 +6758,8 @@ pub async fn process_action(
     };
 
     let create_body = serde_json::to_vec(&create_req).unwrap();
-    let create_response = create_action(state.clone(), web::Bytes::from(create_body)).await;
+    let internal_req = actix_web::test::TestRequest::default().to_http_request();
+    let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
 
     // Extract reference from create response
     let create_json: CreateActionResponse = match create_response.status().is_success() {
@@ -7919,7 +8051,8 @@ pub async fn send_transaction(
         }
     };
 
-    let create_response = create_action(state.clone(), web::Bytes::from(create_body)).await;
+    let internal_req = actix_web::test::TestRequest::default().to_http_request();
+    let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
 
     // Extract the signed transaction from the response
     let (txid, atomic_beef_hex) = match create_response.status().is_success() {
@@ -8445,11 +8578,11 @@ pub async fn approve_cert_fields(
         match existing {
             Ok(Some(p)) => p.id.unwrap(),
             Ok(None) => {
-                // Auto-create with "connected" trust since they're interacting
+                // Auto-create with "approved" trust since they're interacting
                 let mut perm = crate::database::DomainPermission::defaults(
                     state.current_user_id, &req.domain,
                 );
-                perm.trust_level = "connected".to_string();
+                perm.trust_level = "approved".to_string();
                 match repo.upsert(&perm) {
                     Ok(id) => id,
                     Err(e) => {
@@ -10021,6 +10154,51 @@ pub async fn wallet_restore(
 }
 
 // ============================================================================
+// Sync Status (Recovery progress tracking)
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStatus {
+    pub active: bool,
+    pub phase: String,           // "scanning", "saving", "idle"
+    pub addresses_scanned: u32,
+    pub utxos_found: u32,
+    pub total_satoshis: u64,
+    pub error: Option<String>,
+    #[serde(skip)]
+    pub completed_at: Option<std::time::Instant>,
+    pub result_seen: bool,
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        SyncStatus {
+            active: false,
+            phase: "idle".to_string(),
+            addresses_scanned: 0,
+            utxos_found: 0,
+            total_satoshis: 0,
+            error: None,
+            completed_at: None,
+            result_seen: true, // default to true so no stale banner on fresh start
+        }
+    }
+}
+
+/// GET /wallet/sync-status — returns current sync status for frontend polling
+pub async fn get_sync_status(state: web::Data<AppState>) -> HttpResponse {
+    let status = state.sync_status.read().unwrap();
+    HttpResponse::Ok().json(&*status)
+}
+
+/// POST /wallet/sync-status/seen — marks the completion summary as consumed
+pub async fn mark_sync_seen(state: web::Data<AppState>) -> HttpResponse {
+    let mut status = state.sync_status.write().unwrap();
+    status.result_seen = true;
+    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+}
+
+// ============================================================================
 // Recovery Endpoint
 // ============================================================================
 
@@ -10124,6 +10302,21 @@ pub async fn wallet_recover(
         }
     }; // DB lock released
 
+    // Set sync status to active before scan
+    {
+        let mut status = state.sync_status.write().unwrap();
+        *status = SyncStatus {
+            active: true,
+            phase: "scanning".to_string(),
+            addresses_scanned: 0,
+            utxos_found: 0,
+            total_satoshis: 0,
+            error: None,
+            completed_at: None,
+            result_seen: false,
+        };
+    }
+
     // 4. Scan blockchain with NO lock held (network calls)
     let options = crate::recovery::RecoveryOptions {
         mnemonic: mnemonic_trimmed,
@@ -10138,6 +10331,14 @@ pub async fn wallet_recover(
         Ok(r) => r,
         Err(e) => {
             log::warn!("   ⚠️  Blockchain scan failed, but wallet was created: {}", e);
+            // Update sync status with error
+            {
+                let mut status = state.sync_status.write().unwrap();
+                status.active = false;
+                status.phase = "idle".to_string();
+                status.error = Some(format!("Blockchain scan failed: {}", e));
+                status.completed_at = Some(std::time::Instant::now());
+            }
             // Partial success: wallet exists, but no UTXOs found
             // Start Monitor anyway — TaskSyncPending will find UTXOs later
             crate::monitor::Monitor::start(state.clone());
@@ -10233,6 +10434,19 @@ pub async fn wallet_recover(
             Ok(bal) => state.balance_cache.set(bal),
             Err(_) => state.balance_cache.set(result.total_balance),
         }
+    }
+
+    // Update sync status to complete
+    {
+        let mut status = state.sync_status.write().unwrap();
+        status.active = false;
+        status.phase = "idle".to_string();
+        status.addresses_scanned = result.addresses_found;
+        status.utxos_found = result.utxos_found;
+        status.total_satoshis = result.total_balance as u64;
+        status.error = None;
+        status.completed_at = Some(std::time::Instant::now());
+        status.result_seen = false;
     }
 
     log::info!("   ✅ Recovery complete! {} addresses, {} UTXOs, {} sats",

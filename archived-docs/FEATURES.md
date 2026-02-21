@@ -1,6 +1,8 @@
+> **ARCHIVED**: This feature roadmap predates the browser-core audit (Feb 2026) and is significantly stale. For current feature status, see `browser-core/browser-capabilities.md`. For the MVP implementation plan, see `browser-core/implementation-plan.md`.
+
 # Hodos Browser - Feature Roadmap
 
-## 📊 Feature Categories
+## Feature Categories
 
 - **🌐 Browser Features**: Standard browser functionality (tabs, history, bookmarks, cookies, etc.)
 - **💼 Wallet Features**: BSV wallet and BRC-100 protocol functionality

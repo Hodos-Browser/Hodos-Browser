@@ -70,7 +70,7 @@ impl PriceCache {
     }
 
     /// Get cached price if valid (within TTL)
-    fn get_cached(&self) -> Option<f64> {
+    pub fn get_cached(&self) -> Option<f64> {
         let cache = self.cache.read().unwrap();
         if let Some(ref cached) = *cache {
             let now = SystemTime::now()

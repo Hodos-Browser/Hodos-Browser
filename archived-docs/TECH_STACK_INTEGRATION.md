@@ -1,3 +1,5 @@
+> **ARCHIVED**: This document predates Phase 2 (Feb 2026) and contains stale integration descriptions. The CEF deep-dive sections remain useful as reference material. For current architecture, see [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md). For CEF-specific research, see `development-docs/browser-core/01-chrome-brave-research.md`.
+
 # Tech Stack Integration
 
 ## Frontend (React + TypeScript)

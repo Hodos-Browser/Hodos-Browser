@@ -61,7 +61,7 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
    ./HodosBrowserShell.exe
    ```
 
-**Storage**: `%APPDATA%/HodosBrowser/` (root), `%APPDATA%/HodosBrowser/wallet/wallet.db` (SQLite)
+**Storage**: Windows: `%APPDATA%/HodosBrowser/`, macOS: `~/Library/Application Support/HodosBrowser/`. Wallet DB: `<storage>/wallet/wallet.db` (SQLite)
 
 ---
 
@@ -116,6 +116,8 @@ First-time setup (requires CEF binaries already downloaded):
    - C++: `cmake --build . --config Release`
 8. User runs the browser to test - do not attempt to run it
 9. CEF lifecycle & threading rules are fragile — do not change message loop, browser creation timing, or render-process handlers without asking first.
+10. **macOS cross-platform readiness**: All new C++ code must use `#ifdef _WIN32` / `#elif defined(__APPLE__)` platform conditionals. Never use raw WinHTTP for new singletons — use `SyncHttpClient` (or add macOS `#elif` with libcurl). New overlays need a macOS creation function in `cef_browser_shell_mac.mm`. New file paths must use cross-platform resolution, not hardcoded Windows paths.
+11. **Update docs with features**: When completing a sprint or feature that changes architecture, APIs, endpoints, or user-facing behavior, update CLAUDE.md Key Files table and any affected top-level docs. Don't let docs drift.
 
 
 ---
@@ -124,15 +126,20 @@ First-time setup (requires CEF binaries already downloaded):
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | HTTP endpoints: `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, `list_certificates`, `acquire_certificate`, `wallet_sync` |
-| `rust-wallet/src/crypto/` | Modules: `brc42` (`derive_child_private_key`), `brc43` (`InvoiceNumber`), `signing` (`sha256`, `hmac_sha256`), `aesgcm_custom` |
-| `rust-wallet/src/database/` | Repos: `WalletRepository`, `AddressRepository`, `OutputRepository`, `CertificateRepository`, `ProvenTxRepository`; helpers: `get_master_private_key_from_db`, `derive_key_for_output` |
+| `rust-wallet/src/handlers.rs` | 68+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, and more |
+| `rust-wallet/src/crypto/` | 11 modules: `brc42`, `brc43`, `signing`, `aesgcm_custom`, `dpapi` (Windows DPAPI / macOS Keychain stub), `pin` (PBKDF2+AES-GCM), `keys`, `brc2`, `ghash`, plus tests |
+| `rust-wallet/src/database/` | 23 files, 18+ repos: `wallet_repo`, `address_repo`, `output_repo`, `certificate_repo`, `proven_tx_repo`, `domain_permission_repo`, `user_repo`, `settings_repo`, `backup`, `migrations`, `connection`, and more |
 | `rust-wallet/src/recovery.rs` | BIP32 legacy key derivation (`derive_private_key_bip32`), wallet recovery from mnemonic |
+| `rust-wallet/src/price_cache.rs` | BSV/USD price cache (CryptoCompare primary + CoinGecko fallback, 5-min TTL) |
 | `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending` |
-| `cef-native/cef_browser_shell.cpp` | Entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs; class: `Logger` |
+| `cef-native/cef_browser_shell.cpp` | Windows entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs; class: `Logger` |
+| `cef-native/cef_browser_shell_mac.mm` | macOS entry point (1754 lines); NSWindow/NSView hierarchy, 5 overlay types, event forwarding |
+| `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (8 interfaces); IPC dispatch, keyboard shortcuts, context menus. Cross-platform wrapped. |
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs` |
-| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing; classes: `DomainVerifier`, `AsyncWalletResourceHandler`; global: `g_pendingAuthRequest` |
-| `frontend/src/hooks/useHodosBrowser.ts` | React hook: `useHodosBrowser()` with `getIdentity`, `generateAddress`, `navigate`, `markBackedUp` |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`; singleton: `PendingRequestManager` (in PendingAuthRequest.h) |
+| `cef-native/include/core/PendingAuthRequest.h` | `PendingRequestManager` singleton — thread-safe request tracking for auth/domain/payment/cert approvals |
+| `cef-native/include/core/SessionManager.h` | `SessionManager` singleton + `BrowserSession` — per-browser session spending/rate tracking for auto-approve |
+| `frontend/src/hooks/useHodosBrowser.ts` | React hook: `useHodosBrowser()` with `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
 | `frontend/src/bridge/initWindowBridge.ts` | Defines `window.hodosBrowser.navigation`, `window.hodosBrowser.overlay` via `cefMessage.send()` |
 
 ---

@@ -13,7 +13,7 @@ struct PendingAuthRequest {
     std::string method;
     std::string endpoint;
     std::string body;
-    std::string type;  // "domain_approval", "brc100_auth", "no_wallet", "payment_confirmation", "rate_limit_exceeded"
+    std::string type;  // "domain_approval", "brc100_auth", "no_wallet", "payment_confirmation", "rate_limit_exceeded", "certificate_disclosure"
     CefRefPtr<CefResourceHandler> handler;
 };
 

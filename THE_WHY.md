@@ -2,7 +2,7 @@
 
 > **Purpose**: This document articulates the rationale behind our architectural and language decisions, providing research-backed arguments that validate our approach.
 
-**Last Updated**: 2025-01-XX
+**Last Updated**: 2026-02-19
 
 ---
 
@@ -69,6 +69,9 @@ const encryptedKey = encrypt(masterKey);
 - JavaScript's garbage collection makes secure memory clearing impossible
 - Native processes can use secure memory allocation APIs (platform-specific secure heaps)
 
+**Concrete Example (Hodos Browser)**:
+- Our Rust wallet uses **DPAPI** (Windows Data Protection API) to encrypt the mnemonic at the OS level. The mnemonic is decrypted into Rust's process memory only when needed, then used for key derivation. JavaScript has no equivalent — `window.crypto.subtle` can encrypt but can't protect the key in memory from DevTools, extensions, or XSS.
+
 #### 1.3 Cross-Site Scripting (XSS) Attack Surface
 
 **JavaScript's Limitation**: XSS attacks can access wallet functions if the wallet code runs in the same context as web content.
@@ -84,12 +87,15 @@ const encryptedKey = encrypt(masterKey);
 **Our Solution**: Wallet operations don't run in JavaScript at all. They run in a native process that:
 - **Cannot be accessed by XSS attacks** (different process, different security boundary)
 - **Cannot be intercepted by browser extensions** (native process, not JavaScript)
-- **Uses controlled API exposure** (only safe, high-level functions via `window.bitcoinBrowser`)
+- **Uses controlled API exposure** (only safe, high-level functions via `window.hodosBrowser`)
 
 **Research Validation**:
 - XSS attacks are the #1 web vulnerability (see: [OWASP Top 10](https://owasp.org/www-project-top-ten/))
 - Process isolation is the only defense against code injection in the same context
 - Financial applications require defense-in-depth beyond web security best practices
+
+**Concrete Example (Hodos Browser)**:
+- Our **domain permission system** enforces per-domain spending limits in USD. Even if XSS somehow triggered a `createAction` call, the C++ auto-approve engine checks spending limits before forwarding to Rust, and Rust has its own defense-in-depth checks via the `X-Requesting-Domain` header. Three layers of defense — none of which exist in a JavaScript-only wallet.
 
 ### User Experience Benefits
 
@@ -407,7 +413,7 @@ const encryptedKey = encrypt(masterKey);
 
 ### 4.2 Controlled API Exposure
 
-**Our Approach**: Only safe, high-level functions are exposed through `window.bitcoinBrowser`.
+**Our Approach**: Only safe, high-level functions are exposed through `window.hodosBrowser`.
 
 **Why This Matters**:
 - **Principle of Least Privilege**: Only expose what's necessary
@@ -474,5 +480,5 @@ const encryptedKey = encrypt(masterKey);
 
 ---
 
-**Last Updated**: 2025-01-XX
+**Last Updated**: 2026-02-19
 **Status**: Living document - updated as we learn and validate our choices

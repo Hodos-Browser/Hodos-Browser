@@ -1980,6 +1980,22 @@ bool SimpleHandler::OnProcessMessageReceived(
                     if (found) {
                         LOG_DEBUG_BROWSER("🔐 Found pending auth request for: " + pendingReq.domain);
 
+                        // For certificate_disclosure: if user selected a subset of fields,
+                        // modify the request body to only reveal those fields
+                        if (pendingReq.type == "certificate_disclosure" &&
+                            responseData.contains("selectedFields") &&
+                            responseData["selectedFields"].is_array()) {
+                            try {
+                                auto bodyJson = nlohmann::json::parse(pendingReq.body);
+                                bodyJson["fieldsToReveal"] = responseData["selectedFields"];
+                                pendingReq.body = bodyJson.dump();
+                                LOG_DEBUG_BROWSER("📋 Modified proveCertificate body — fieldsToReveal reduced to "
+                                    + std::to_string(responseData["selectedFields"].size()) + " field(s)");
+                            } catch (const std::exception& e) {
+                                LOG_DEBUG_BROWSER("📋 Failed to modify cert body: " + std::string(e.what()));
+                            }
+                        }
+
                         // Create HTTP request to generate authentication response
                         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
                         cefRequest->SetURL("http://localhost:3301" + pendingReq.endpoint);
@@ -2121,6 +2137,93 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
         } else {
             LOG_DEBUG_BROWSER("🔐 Invalid arguments for add_domain_permission_advanced");
+        }
+        return true;
+    }
+
+    if (message_name == "approve_cert_fields") {
+        LOG_DEBUG_BROWSER("📋 approve_cert_fields message received from role: " + role_);
+
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string certJson = args->GetString(0).ToString();
+            LOG_DEBUG_BROWSER("📋 Cert fields JSON: " + certJson);
+
+            try {
+                nlohmann::json certData = nlohmann::json::parse(certJson);
+                std::string domain = certData.value("domain", "");
+                std::string certType = certData.value("certType", "");
+                bool remember = certData.value("remember", true);
+                std::vector<std::string> fields;
+                if (certData.contains("fields") && certData["fields"].is_array()) {
+                    for (const auto& f : certData["fields"]) {
+                        if (f.is_string()) fields.push_back(f.get<std::string>());
+                    }
+                }
+
+                if (remember && !domain.empty() && !certType.empty() && !fields.empty()) {
+                    LOG_DEBUG_BROWSER("📋 Persisting cert field permissions for " + domain + " (" + std::to_string(fields.size()) + " fields)");
+
+                    // Fire-and-forget POST to Rust backend
+                    // Uses CefTask subclass pattern (same as DomainPermissionTask)
+                    class CertFieldPermissionTask : public CefTask {
+                    public:
+                        CertFieldPermissionTask(const std::string& domain, const std::string& certType,
+                                                const std::vector<std::string>& fields)
+                            : domain_(domain), certType_(certType), fields_(fields) {}
+
+                        void Execute() override {
+                            // Build JSON body
+                            nlohmann::json body;
+                            body["domain"] = domain_;
+                            body["cert_type"] = certType_;
+                            body["fields"] = fields_;
+                            body["remember"] = true;
+                            std::string jsonBody = body.dump();
+
+                            CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
+                            cefRequest->SetURL("http://localhost:3301/domain/permissions/certificate");
+                            cefRequest->SetMethod("POST");
+                            cefRequest->SetHeaderByName("Content-Type", "application/json", true);
+
+                            CefRefPtr<CefPostData> postData = CefPostData::Create();
+                            CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
+                            element->SetToBytes(jsonBody.length(), jsonBody.c_str());
+                            postData->AddElement(element);
+                            cefRequest->SetPostData(postData);
+
+                            // Minimal CefURLRequestClient (fire-and-forget)
+                            class CertFieldResponseHandler : public CefURLRequestClient {
+                            public:
+                                void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {}
+                                void OnUploadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
+                                void OnDownloadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
+                                void OnDownloadData(CefRefPtr<CefURLRequest> request, const void* data, size_t data_length) override {}
+                                bool GetAuthCredentials(bool isProxy, const CefString& host, int port,
+                                                        const CefString& realm, const CefString& scheme,
+                                                        CefRefPtr<CefAuthCallback> callback) override { return false; }
+                            private:
+                                IMPLEMENT_REFCOUNTING(CertFieldResponseHandler);
+                            };
+
+                            CefURLRequest::Create(cefRequest, new CertFieldResponseHandler(), nullptr);
+                        }
+                    private:
+                        std::string domain_;
+                        std::string certType_;
+                        std::vector<std::string> fields_;
+                        IMPLEMENT_REFCOUNTING(CertFieldPermissionTask);
+                    };
+
+                    CefPostTask(TID_UI, new CertFieldPermissionTask(domain, certType, fields));
+                } else {
+                    LOG_DEBUG_BROWSER("📋 Cert field approval not persisted (remember=" + std::to_string(remember) + ")");
+                }
+            } catch (const std::exception& e) {
+                LOG_DEBUG_BROWSER("📋 Error parsing cert fields JSON: " + std::string(e.what()));
+            }
+        } else {
+            LOG_DEBUG_BROWSER("📋 Invalid arguments for approve_cert_fields");
         }
         return true;
     }

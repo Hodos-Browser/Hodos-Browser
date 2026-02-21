@@ -1,7 +1,7 @@
 # CEF Refinement — Phase Tracker & Reference Guide
 
 **Created**: 2026-02-11
-**Last Updated**: 2026-02-12
+**Last Updated**: 2026-02-19
 **Purpose**: Phased checklist for stability, security, and architecture improvements to the C++ CEF browser shell, HTTP interceptor, overlay rendering, and C++/Rust communication layer.
 
 **How to use this document**: Each CEF Refinement (CR) phase has a checklist. Check items off as they are implemented. UX_UI phase docs reference this tracker so that pre-phase planning considers the relevant CR prerequisites.
@@ -13,8 +13,8 @@
 | Phase | Name | Scope | Status | UX Dependency |
 |-------|------|-------|--------|---------------|
 | **CR-1** | Critical Stability & Security | JS injection, hangs, buffer overflow, auth fixes | ✅ Complete | Do before or alongside UX Phase 0 |
-| **CR-2** | Interceptor Architecture | Async wallet calls, per-request map, whitelist cache, thread safety | 📋 Planning | Must complete before UX Phase 2 |
-| **CR-3** | Polish & Lifecycle | Overlay lifecycle, weak refs, debug cleanup, error status codes | 📋 Planning | Alongside UX Phase 2–3 |
+| **CR-2** | Interceptor Architecture | Async wallet calls, per-request map, whitelist cache, thread safety | ✅ Complete | Completed during UX Phase 2 |
+| **CR-3** | Polish & Lifecycle | Overlay lifecycle, weak refs, debug cleanup, error status codes | ✅ Mostly Complete | 13/15 done, 2 partial (by design) |
 
 **Status Legend:** 📋 Planning | 🔨 In Progress | ✅ Complete
 
@@ -73,43 +73,25 @@
 
 ### Checklist
 
-- [ ] **CR-2.1 — Move wallet HTTP calls off UI thread** (BLACK SCREEN ROOT CAUSE)
-  - **File**: `simple_handler.cpp` — 7 call sites (lines 1213, 1257, 2190, 2234, 2278, 2365, 2504)
-  - **Problem**: All `WalletService` calls are synchronous on CEF UI thread using WinHTTP. Slow wallet (broadcast timeout, DB lock) freezes entire browser — no painting, no input, all overlays go black.
-  - **Fix**: Move each call to `CefPostTask(TID_IO, ...)` or `std::async`, post response back via `CefPostTask(TID_UI, ...)`.
-  - **Also fix**: `WalletService.cpp` — add `WinHttpSetTimeouts` (15s connect, 30s send/receive).
-  - **Effort**: 2-3 days (7 call sites, each needs async refactor + IPC response routing)
+- [x] **CR-2.1 — Move wallet HTTP calls off UI thread** (BLACK SCREEN ROOT CAUSE) ✅ 2026-02-16
+  - **File**: `HttpRequestInterceptor.cpp` — `AsyncWalletResourceHandler` + `CefURLRequest` on IO thread
+  - **Solution**: All BRC-100 wallet calls now route through async `CefURLRequest` on IO thread via `StartAsyncHTTPRequestTask`. No more WinHTTP on UI thread.
 
-- [ ] **CR-2.2 — Replace `g_pendingAuthRequest` with per-request map**
-  - **Files**: `PendingAuthRequest.h`, `HttpRequestInterceptor.cpp:22-25`, all consumers
-  - **Problem**: Single global struct. Concurrent requests from different tabs clobber each other. Second request silently drops the first.
-  - **Fix**: `std::map<uint64_t, PendingAuthRequest>` keyed by request ID. Update all consumers.
-  - **Effort**: 4-6 hrs
+- [x] **CR-2.2 — Replace `g_pendingAuthRequest` with per-request map** ✅ 2026-02-16
+  - **Files**: `PendingAuthRequest.h` — `PendingRequestManager` singleton with `std::map<std::string, PendingAuthRequest>` keyed by unique requestId (`req-{timestamp}-{counter}`).
+  - **Solution**: Thread-safe map with `addRequest`, `popRequest`, `getRequest`, `hasPendingForDomain`, `getRequestIdForDomain`. All consumers updated.
 
-- [ ] **CR-2.3 — Add mutex on interceptor global state**
-  - **File**: `HttpRequestInterceptor.cpp:22-25`
-  - **Problem**: `g_pendingAuthRequest` and `g_pendingModalDomain` accessed from IO and UI threads with no synchronization. Data race.
-  - **Fix**: `std::mutex` protecting the pending request map, or ensure all access via `CefPostTask` to a single thread.
-  - **Effort**: 1-2 hrs
+- [x] **CR-2.3 — Add mutex on interceptor global state** ✅ 2026-02-16
+  - **Solution**: `std::mutex` + `std::lock_guard` on all `PendingRequestManager` methods. Thread-safe by construction.
 
-- [ ] **CR-2.4 — Cache whitelist in memory**
-  - **File**: `HttpRequestInterceptor.cpp:56-156` (`DomainVerifier`)
-  - **Problem**: `DomainVerifier` reads `domainWhitelist.json` from disk on every intercepted request. Race with Rust-side writes causes "modal shows for whitelisted sites" bug.
-  - **Fix**: Load whitelist into in-memory cache at startup. Update cache when whitelist changes (notification from Rust or file watcher). Eliminate per-request disk I/O.
-  - **Note**: UX Phase 2 may move whitelist to DB entirely, which supersedes this. If Phase 2 is close, a simpler interim fix (add domain to C++ cache immediately on approval, before Rust round-trip) may suffice.
-  - **Effort**: 4-6 hrs
+- [x] **CR-2.4 — Cache whitelist in memory** ✅ 2026-02-16
+  - **Solution**: `DomainVerifier` removed entirely. Replaced by `DomainPermissionCache` singleton — in-memory cache backed by Rust DB via sync WinHTTP with `invalidate(domain)` on permission changes. JSON file eliminated.
 
-- [ ] **CR-2.5 — Fix `requestCompleted_` / `readCallback_` thread race**
-  - **File**: `HttpRequestInterceptor.cpp:250-307`
-  - **Problem**: `onHTTPResponseReceived()` (UI thread) and `ReadResponse()` (IO thread) access shared state with no synchronization. Race can cause response to never be delivered.
-  - **Fix**: Add `std::mutex` or `std::atomic` for `requestCompleted_`, and ensure `readCallback_->Continue()` is always called on the IO thread.
-  - **Effort**: 3-4 hrs
+- [x] **CR-2.5 — Fix `requestCompleted_` / `readCallback_` thread race** ✅ 2026-02-16
+  - **Solution**: `std::atomic<bool> httpCompleted_` with `compare_exchange_strong` in both response and timeout paths. Prevents double `readCallback_->Continue()` crash.
 
-- [ ] **CR-2.6 — Fix raw pointer in `AsyncHTTPClient`**
-  - **File**: `HttpRequestInterceptor.cpp:611`
-  - **Problem**: Raw `AsyncWalletResourceHandler*` bypasses CefRefPtr ref-counting. Use-after-free if handler destroyed before HTTP response.
-  - **Fix**: Store `CefRefPtr<AsyncWalletResourceHandler>` instead of raw pointer.
-  - **Effort**: 1 hr
+- [x] **CR-2.6 — Fix raw pointer in `AsyncHTTPClient`** ✅ 2026-02-16
+  - **Solution**: `CefRefPtr<AsyncWalletResourceHandler> parent_` — prevents use-after-free if handler destroyed before HTTP response.
 
 ---
 
@@ -121,62 +103,35 @@
 
 ### Checklist
 
-- [ ] **CR-3.1 — Move whitelist to DB** (eliminates JSON file)
-  - **Note**: Planned as part of UX Phase 2. Eliminates the C++/Rust dual-system mismatch entirely. C++ queries Rust server (via cached in-memory state) instead of reading a file.
-  - **Effort**: Part of UX Phase 2
+- [x] **CR-3.1 — Move whitelist to DB** (eliminates JSON file) ✅ 2026-02-16
+  - **Solution**: `domain_whitelist.rs` deleted. `domain_permissions` table in SQLite with full CRUD. `DomainPermissionCache` in C++ queries Rust DB. JSON file eliminated entirely.
 
-- [ ] **CR-3.2 — Adopt per-request context struct** (Brave `BraveRequestInfo` pattern)
-  - **Problem**: Request state scattered across globals and handler members.
-  - **Fix**: Bundle domain, method, endpoint, whitelisted status, handler ref into a single struct carried through the request lifecycle. Natural to build as UX Phase 2 adds new notification types.
-  - **Effort**: Medium (part of Phase 2 work)
+- [ ] **CR-3.2 — Adopt per-request context struct** (Brave `BraveRequestInfo` pattern) — PARTIAL
+  - **Status**: State spread across `AsyncWalletResourceHandler` + `SessionManager`. No unified context struct yet, but per-request tracking via `PendingRequestManager` covers most use cases. Revisit if complexity grows.
 
-- [ ] **CR-3.3 — Add weak references for deferred callbacks**
-  - **File**: `HttpRequestInterceptor.cpp` — `URLRequestCreationTask`, `DomainWhitelistTask`
-  - **Problem**: Raw pointers passed between threads. Use-after-free if tab closes while request pending.
-  - **Fix**: Use weak references (`CefRefPtr` + validity check) for deferred callbacks.
-  - **Effort**: 3-4 hrs
+- [x] **CR-3.3 — Add weak references for deferred callbacks** ✅ 2026-02-16
+  - **Solution**: All deferred callbacks use `CefRefPtr` (ref-counted). `URLRequestCreationTask` replaced by `StartAsyncHTTPRequestTask` with proper ref counting.
 
-- [ ] **CR-3.4 — Fix overlay browser lifecycle (close-before-destroy)**
-  - **File**: `cef_browser_shell.cpp:567-572`, `ShutdownApplication()` (lines 187-215)
-  - **Problem**: `CloseBrowser(false)` is async but `DestroyWindow()` called immediately. Leaks browser objects and renderer processes.
-  - **Fix**: Wait for `OnBeforeClose` before destroying HWND, or use `CloseBrowser(true)` for cleanup paths.
-  - **Effort**: 4-6 hrs
+- [x] **CR-3.4 — Fix overlay browser lifecycle (close-before-destroy)** ✅ 2026-02-17
+  - **Solution**: `OnBeforeClose` properly nullifies browser refs. HWND cleanup gated on browser close. Notification overlay uses keep-alive pattern (no destroy/recreate cycle).
 
-- [ ] **CR-3.5 — Remove debug overlay from production**
-  - **File**: `simple_app.cpp:249-348`
-  - **Problem**: `InjectHodosBrowserAPI` creates a visible debug div (z-index 9999, black background) visible to users.
-  - **Fix**: Gate behind a debug flag or remove entirely.
-  - **Effort**: 15 min
+- [x] **CR-3.5 — Remove debug overlay from production** ✅ 2026-02-16
+  - **Solution**: Debug overlay not enabled in production paths.
 
-- [ ] **CR-3.6 — Fix `GetResponseHeaders` always returning 200**
-  - **File**: `HttpRequestInterceptor.cpp:231`
-  - **Problem**: Status hardcoded to 200 even on wallet errors. Websites can't detect errors via HTTP status.
-  - **Fix**: Store actual status from wallet response and return it.
-  - **Effort**: 1-2 hrs
+- [ ] **CR-3.6 — Fix `GetResponseHeaders` always returning 200** — PARTIAL (by design)
+  - **Status**: Hardcoded 200 is intentional — errors are returned in JSON body (BRC-100 convention). Could revisit for HTTP standards compliance but not blocking.
 
-- [ ] **CR-3.7 — Fix settings overlay stale pointer**
-  - **File**: `simple_app.cpp:396-401`
-  - **Problem**: Settings overlay is destroyed and recreated every toggle. Between `DestroyWindow` and new `OnBeforeClose`, `GetSettingsBrowser()` returns stale pointer.
-  - **Fix**: Either adopt keep-alive pattern (like omnibox) or null the browser reference immediately on destroy.
-  - **Effort**: 1-2 hrs
+- [x] **CR-3.7 — Fix settings overlay stale pointer** ✅ 2026-02-17
+  - **Solution**: HWND validity check + explicit `nullptr` on destroy. Keep-alive pattern adopted for notification overlay.
 
-- [ ] **CR-3.8 — Reduce WalletService debug logging I/O**
-  - **File**: `WalletService.cpp` throughout
-  - **Problem**: Opens/closes `debug_output.log` dozens of times per request. Performance drag.
-  - **Fix**: Use a singleton logger or buffer writes.
-  - **Effort**: 1-2 hrs
+- [x] **CR-3.8 — Reduce WalletService debug logging I/O** ✅ 2026-02-12
+  - **Solution**: Singleton `Logger` class with minimal conditional logging.
 
-- [ ] **CR-3.9 — Restrict localhost port redirection**
-  - **File**: `HttpRequestInterceptor.cpp:806-825`
-  - **Problem**: Regex `localhost:\d{4}` redirects any 4-digit port to 3301. Could expose wallet to unintended callers.
-  - **Fix**: Only redirect known BRC-100 convention ports or exact match.
-  - **Effort**: 30 min
+- [x] **CR-3.9 — Restrict localhost port redirection** ✅ 2026-02-16
+  - **Solution**: Only redirects localhost/127.0.0.1 → 3301. External BRC-104 passes through unmodified.
 
-- [ ] **CR-3.10 — macOS OnPaint use-after-free** (macOS only)
-  - **File**: `my_overlay_render_handler.cpp:255-259`
-  - **Problem**: `dispatch_async` captures `CGImageRef` referencing CEF's buffer via non-copying data provider. Potential use-after-free.
-  - **Fix**: Copy buffer data before dispatch_async.
-  - **Effort**: 1 hr
+- [ ] **CR-3.10 — macOS OnPaint use-after-free** (macOS only) — N/A
+  - **Status**: No macOS build in production yet. Will be addressed during macOS sprint.
 
 ---
 

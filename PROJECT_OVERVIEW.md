@@ -1,685 +1,457 @@
-# HodosBrowser Project Overview
+# HodosBrowser — Architecture & Project Overview
 
-## 🚀 **The First CEF-Based Browser with Native BRC-100 Support**
+**Last Updated**: 2026-02-19
+**Status**: Active development. BRC-100 Groups A & B complete. Browser core MVP sprints in progress.
 
-## 🎯 Project Mission
-
-HodosBrowser is a custom Web3 browser built on Chromium Embedded Framework (CEF) focused on the Web3 experience through **native control and seamless user experience**. Unlike traditional Web3 approaches that rely on browser plugins, external wallet tabs, or complex authentication flows, HodosBrowser provides:
-
-- **Native Wallet Integration**: Built-in **production-ready Rust wallet backend** with compile-time memory safety, operating independently of web content and eliminating the need for external plugins
-- **Seamless Authentication**: **Complete BRC-100 standard implementation** enables frictionless authentication and transaction signing without interrupting the user's browsing experience
-- **SPV-Powered Transactions**: **Real blockchain SPV integration** provides fast, secure transaction verification with actual Bitcoin SV network data
-- **Security-First Architecture**: Private keys and signing logic never exposed to JavaScript, ensuring maximum security for real financial transactions
-- **HTTP Request Interception**: **Thread-safe async CEF HTTP client** enables external websites to communicate with the Rust wallet daemon without crashes or security compromises
-- **Unified User Experience**: Clean, intuitive interface that prioritizes user experience over technical complexity, making Bitcoin SV micropayments as simple as traditional web interactions
-
-This approach eliminates the fragmented Web3 experience where users must juggle multiple tabs, plugins, and authentication steps, instead providing a cohesive, secure, and user-friendly environment for Bitcoin SV applications.
-
-## 🔒 Security Architecture & Design Philosophy
-
-### Core Security Principle: Native-First Wallet Operations
-
-**The Problem with JavaScript-Based Wallets:**
-
-Traditional browser wallets face significant security challenges because they operate entirely within the JavaScript environment:
-
-1. **Process Isolation Vulnerabilities**
-   - JavaScript runs in the browser's render process, which is inherently less secure than native processes
-   - The render process is accessible to web content, creating potential attack vectors
-   - Browser extensions and injected scripts can potentially intercept wallet operations
-
-2. **Memory Security Issues**
-   - Private keys stored in JavaScript variables are accessible through:
-     - Browser console inspection
-     - Memory dumps and debugging tools
-     - Developer tools and extensions
-     - Malicious scripts running in the same context
-   - Even with encryption, decryption keys must remain in JavaScript
-
-3. **Cross-Site Scripting (XSS) Attack Surface**
-   - Malicious websites could potentially access wallet functions through XSS attacks
-   - Browser extensions could inject code that accesses wallet data
-   - The JavaScript environment is sandboxed but still accessible to web content
-
-**Our Solution: Rust Wallet Backend with Process Isolation**
-
-1. **Process Separation**
-   - Wallet operations happen in isolated Rust daemon processes, completely separate from web content
-   - CEF's multi-process architecture provides natural security boundaries
-   - Even if a website compromises the render process, it cannot access the wallet backend
-
-2. **Enhanced Memory Protection**
-   - Rust provides compile-time memory safety guarantees without runtime overhead
-   - Zero-cost abstractions ensure secure memory management for private keys
-   - Explicit ownership model allows secure memory clearing (critical for cryptographic operations)
-
-3. **Process-Per-Overlay Architecture**
-   - Each overlay (settings, wallet, backup) runs in its own isolated CEF subprocess
-   - Complete V8 context isolation prevents state pollution between overlays
-   - Dedicated HWND windows with custom message handlers for each overlay type
-   - Mimics Brave Browser's security architecture for maximum isolation
-   - Memory isolation between processes prevents cross-process data access
-
-4. **Cryptographic Library Integration**
-   - Custom Rust implementation with BSV ForkID SIGHASH and BRC-100 protocol support
-   - Hardware security module (HSM) integration capabilities planned for production
-   - Signing operations happen in isolated, controlled Rust daemon environments
-
-5. **Controlled API Exposure**
-   - Only safe, high-level functions are exposed through `window.hodosBrowser`
-   - The bridge API is carefully designed to prevent sensitive data leakage
-   - Process-per-overlay architecture ensures API isolation between different overlay contexts
-   - All cryptographic operations remain in the isolated Rust backend
-
-### Security Architecture Benefits
-
-- **Real Financial Security**: Built for production use where real money is at stake
-- **Regulatory Compliance**: Meets higher security standards required for financial applications
-- **Attack Surface Reduction**: Significantly reduces the attack surface compared to JavaScript-based solutions
-- **Professional Grade**: Suitable for enterprise and institutional use cases
-
-## 🏗️ Technical Architecture
-
-### Multi-Layer Security Model
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    React UI Layer                          │
-│              (TypeScript + Vite)                           │
-│              • Wallet UI Components                        │
-│              • Settings & Configuration                    │
-│              • Navigation Interface                        │
-│              🟡 Future: React Native for mobile            │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                JS ↔ Native Bridge Layer                    │
-│              • window.hodosBrowser API                   │
-│              • Controlled Function Exposure                │
-│              • No Sensitive Data Transfer                  │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Native CEF Shell                            │
-│              • C++ / Chromium Engine                       │
-│              • CEF Event Handlers                          │
-│              • Process Isolation                           │
-│              • HTTP Request Interception                   │
-│              🟡 Future: Consider full Chromium build       │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────┐
-│          Rust Wallet (Port 3301)            │
-│                                             │
-│ • Actix-web HTTP Server                    │
-│ • BRC-100 Authentication (Groups A & B)    │
-│ • BSV ForkID SIGHASH Implementation        │
-│ • Custom Crypto (BRC-42/43)                │
-│ • BRC-103/104 Mutual Authentication        │
-│ • BRC-33 Message Relay                     │
-│ • Transaction History & Action Storage     │
-│ • BEEF Phase 2 Parser                      │
-│ • Mainnet Confirmed Transactions           │
-│                                             │
-│ ✅ PRODUCTION READY                        │
-│ ✅ Database Migration (Complete) │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-
-         wallet.db (SQLite) ✅ Complete
-      (%APPDATA%/HodosBrowser/wallet/)
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│            Identity & Authentication Layer                 │
-│              • BRC-100 Auth Framework                     │
-│              • BRC-42 Key Derivation                      │
-│              • BRC-103/104 Mutual Auth                    │
-│              • HMAC-based Nonce Verification              │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Bitcoin SV Blockchain                        │
-│              • WhatsOnChain API (Primary)                 │
-│              • GorillaPool mAPI (Secondary)               │
-│              • On-chain Transaction Confirmation          │
-│              ✅ Real mainnet transactions confirmed        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## 🗄️ Data Storage Architecture
-
-The browser separates data storage into two domains:
-
-| Domain | Location | Owner | Contents |
-|--------|----------|-------|----------|
-| **Wallet Data** | `%APPDATA%/HodosBrowser/wallet/wallet.db` | Rust | Keys, UTXOs, certificates, transactions |
-| **Browser Data** | `%APPDATA%/HodosBrowser/Default/` | C++ | History (in progress), bookmarks, cookies |
-
-This separation mirrors Chrome's architecture and maintains security isolation between wallet operations and browser data.
-
-**Current Status:**
-- History management: In progress
-- Bookmarks: Planned
-- Cookies: Planned
-- Database encryption: Requires research
-
-## 🪟 HWND System & Window Management Architecture
-
-### Window Hierarchy & Creation Flow
-
-The application creates a sophisticated multi-window system with three main HWNDs:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Main Shell (g_hwnd)                     │
-│              • Parent window for all other HWNDs           │
-│              • Handles window resizing and positioning      │
-│              • Manages overlay window positioning           │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-        ┌─────────────┼─────────────┐
-        │             │             │
-        ▼             ▼             ▼
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│   Header    │ │   WebView   │ │   Overlay   │
-│ (g_header_  │ │ (g_webview_ │ │ (g_overlay_│
-│   hwnd)     │ │   hwnd)     │ │   hwnd)    │
-│             │ │             │ │             │
-│ • React UI  │ │ • Web page  │ │ • Dynamic   │
-│ • Wallet    │ │ • Content   │ │ • Panels    │
-│   buttons   │ │ • Navigation│ │ • Modals    │
-│ • Settings  │ │             │ │ • Overlays  │
-└─────────────┘ └─────────────┘ └─────────────┘
-```
-
-### Window Creation Sequence
-
-1. **Application Startup (WinMain)**
-   - Creates main shell window (`g_hwnd`)
-   - Creates header window (`g_header_hwnd`) - React UI
-   - Creates webview window (`g_webview_hwnd`) - Web content
-   - All three are created immediately and assigned to global variables
-
-2. **Overlay Window Creation (On-Demand)**
-   - `g_overlay_hwnd` is NOT created at startup
-   - Created dynamically when `CreateOverlayBrowserIfNeeded()` is called
-   - Triggered by frontend messages requesting overlay panels
-
-### Window Message Processing
-
-**ShellWindowProc (Main Shell)**
-- Handles `WM_MOVE` and `WM_SIZE` events
-- Automatically repositions overlay window when main window moves/resizes
-- Ensures overlay stays properly positioned relative to main window
-
-**OverlayWndProc (Overlay Window)**
-- Handles mouse activation and focus management
-- Forces overlay to stay on top (`HWND_TOPMOST`)
-- Processes mouse clicks and forwards them to CEF browser
-- Prevents other windows from covering the overlay
-
-### CEF Browser Integration
-
-Each HWND hosts a separate CEF browser instance:
-
-1. **Header Browser** (`SimpleHandler("header")`)
-   - Loads React UI at `http://127.0.0.1:5137`
-   - Handles wallet buttons, settings, navigation
-   - Runs in the header HWND
-
-2. **WebView Browser** (`SimpleHandler("webview")`)
-   - Loads web content (currently `https://metanetapps.com/`)
-   - Handles user browsing and navigation
-   - Runs in the webview HWND
-
-3. **Overlay Browser** (`SimpleHandler("overlay")`)
-   - Loads React overlay UI at `http://127.0.0.1:5137/overlay`
-   - Handles panels, modals, and overlay content
-   - Runs in the overlay HWND (when created)
-
-### Message Passing & Communication Flow
-
-**Frontend → Backend Communication:**
-```
-React Component → window.postMessage → CEF Process Message → OnProcessMessageReceived()
-```
-
-**Backend → Frontend Communication:**
-```
-SimpleHandler → ExecuteJavaScript() → React Component State Update
-```
-
-**Key Message Types:**
-- `"navigate"` - Forward navigation to webview browser
-- `"overlay_open_panel"` - Create overlay HWND and show specific panel
-
-### Overlay Panel System Flow
-
-1. **Panel Request**
-   - Frontend sends `"overlay_open_panel"` message with panel name
-   - Backend receives message in `OnProcessMessageReceived()`
-
-2. **HWND Creation**
-   - Calls `CreateOverlayBrowserIfNeeded()` to create overlay window
-   - Sets up CEF browser with custom render handler
-   - Loads overlay React app
-
-3. **Panel Display**
-   - Executes JavaScript to trigger panel: `window.triggerPanel(panelName)`
-   - React overlay app renders the requested panel
-   - Overlay window becomes visible and interactive
-
-4. **State Management**
-   - Frontend and backend both track overlay open/close state
-   - Messages can be sent to open and close panels
-   - Overlay HWND is created/destroyed as needed
-
-### Render Handler System
-
-**MyOverlayRenderHandler**
-- Custom render handler for overlay window
-- Handles windowless rendering for transparent overlays
-- Manages bitmap creation and layered window updates
-- Processes CEF paint events and updates HWND display
-
-**Key Features:**
-- Layered window support for transparency
-- Custom bitmap management for rendering
-- Mouse event forwarding to CEF browser
-- DWM composition integration
-
-## 🚀 Development Status
-
-This project has achieved major milestones:
-- ✅ **Complete project architecture** implemented and tested
-- ✅ **CEF integration** fully operational with HTTP interception
-- ✅ **React frontend** integrated with native backend
-- ✅ **Rust wallet backend** production-ready with full BRC-100 authentication
-- ✅ **Transaction system** confirmed working on mainnet
-- ✅ **BRC-103/104 authentication** complete (7 critical breakthroughs)
-- ✅ **BRC-33 message relay** implemented and tested
-- ✅ **SQLite database migration** complete with backup/recovery
-- ✅ **UTXO management** with background sync and caching
-- ✅ **BEEF/SPV caching** for fast transaction signing
-- ✅ **Performance optimization** with indexes and in-memory caching
-- ✅ **Real-world testing** successful (ToolBSV, Thoth integration)
-
-## 🎯 Next Steps
-
-### **Database Migration Complete!** 🗄️ ✅
-
-**Status**: All wallet database phases complete (Phases 1-9)
-
-**Achievement**: Successfully migrated from JSON file storage to SQLite database with comprehensive backup/recovery support.
-
-**Completed Features**:
-- ✅ **SQLite Database** - Single-file database at `%APPDATA%/HodosBrowser/wallet/wallet.db`
-- ✅ **UTXO Management** - Background sync, caching, and spending tracking
-- ✅ **BEEF/SPV Caching** - Parent transactions, Merkle proofs, and block headers
-- ✅ **Performance Optimization** - Database indexes and in-memory balance cache
-- ✅ **Backup & Recovery** - File-based backup, JSON export, and recovery from mnemonic
-- ✅ **Schema Ready** - Baskets, certificates, and messages tables ready for future features
-
-**Implementation Guide**: `development-docs/DATABASE_IMPLEMENTATION_GUIDE.md`
-
-**Completed Phases**:
-1. ✅ Database Foundation
-2. ✅ Data Migration (JSON → SQLite)
-3. ✅ Core Functionality Migration
-4. ✅ UTXO Management & Caching
-5. ✅ BEEF/SPV Caching
-6. ✅ Performance Optimization
-7. ✅ Backup & Recovery
-8. ⏳ Browser Database (deferred to separate sprint)
-
-### **BRC-100 Implementation** (After Database Migration)
-
-1. **Complete BRC-100 Implementation**
-   - ✅ **Group A: Authentication** - COMPLETE! (7 critical breakthroughs)
-   - ✅ **Group B: Transactions** - COMPLETE! (BRC-29 payments working)
-   - 🔄 **Group C: Output/UTXO Management** - Database schema ready, implementation after migration
-   - ✅ **BRC-33 Message Relay** - Endpoints implemented, database persistence planned
-
-2. **Frontend Integration**
-   - Transaction UI improvements
-   - Balance display and history
-   - Domain approval modal system
-   - User experience refinements
-   - Basket UI (after database migration)
-
-3. **Testing & Deployment**
-   - Comprehensive security audit
-   - Performance optimization
-   - Production build configuration
-   - Multi-site compatibility testing
+> This document consolidates the former PROJECT_OVERVIEW.md, ARCHITECTURE.md, and WALLET_ARCHITECTURE.md into a single reference.
 
 ---
 
-*This document serves as the primary reference for understanding the project's security architecture and development approach.*
+## Table of Contents
 
-## 🎨 Frontend Architecture & React Application Flow
+1. [Architecture Overview](#1-architecture-overview)
+2. [C++ CEF Shell](#2-c-cef-shell)
+3. [Rust Wallet Backend](#3-rust-wallet-backend)
+4. [React Frontend](#4-react-frontend)
+5. [Communication Patterns](#5-communication-patterns)
+6. [Security Architecture](#6-security-architecture)
+7. [Data Storage](#7-data-storage)
+8. [Background Services](#8-background-services)
+9. [BRC-100 Protocol](#9-brc-100-protocol)
+10. [Development Status](#10-development-status)
 
-### Application Structure Overview
+---
 
-The frontend is a React application built with TypeScript and Vite, designed to work across multiple CEF browser instances:
+## 1. Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    React Application                       │
-│              (Single codebase, multiple instances)        │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-        ┌─────────────┼─────────────┐
-        │             │             │
-        ▼             ▼             ▼
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│   Header    │ │   WebView   │ │   Overlay   │
-│   Instance  │ │   Instance  │ │   Instance  │
-│             │ │             │ │             │
-│ • Main.tsx  │ │ • Main.tsx  │ │ • Main.tsx  │
-│ • App.tsx   │ │ • App.tsx   │ │ • App.tsx   │
-│ • Routes    │ │ • Routes    │ │ • Routes    │
-└─────────────┘ └─────────────┘ └─────────────┘
-```
-
-### Routing & Instance Detection
-
-**Main.tsx - Entry Point**
-- Detects whether running in overlay or header mode via `window.location.pathname`
-- Logs the mode for debugging purposes
-- Initializes React with BrowserRouter for navigation
-
-**App.tsx - Core Logic & State Management**
-- Manages global application state (`walletExists`, `loading`)
-- Handles identity loading and wallet existence checks
-- Routes between `MainBrowserView` and `OverlayRoot` based on wallet state
-- Triggers overlay display when backup modal is needed
-
-### Component Architecture
-
-**Page-Level Components**
-
-1. **MainBrowserView.tsx** - Primary browser interface
-   - Navigation toolbar with address bar
-   - Wallet and settings buttons
-   - Main content area
-   - Triggers overlay panels for wallet/settings
-
-2. **OverlayRoot.tsx** - Overlay content manager
-   - Manages wallet panel and backup modal states
-   - Handles panel triggering from backend messages
-   - Controls overlay visibility and cleanup
-
-**Panel Components**
-
-1. **BackupModal.tsx** - Wallet backup interface
-   - Displays wallet information (address, public/private keys)
-   - Copy-to-clipboard functionality
-   - Confirmation checkbox for backup acknowledgment
-   - Calls backend `markBackedUp()` function
-
-2. **WalletPanelLayout.tsx** - Wallet management interface
-   - Wallet operations and settings
-   - Account information display
-
-3. **SettingsPanelLayout.tsx** - Application settings
-   - Configuration options
-   - User preferences
-
-### State Management & Data Flow
-
-**Identity Management Flow**
-```
-App.tsx useEffect → Check identity.get() → Set walletExists → Route accordingly
-```
-
-**Overlay Panel Flow**
-```
-Button Click → window.hodosBrowser.overlay.show() → Backend creates overlay_hwnd → React renders in overlay
-```
-
-**Backup Modal Flow**
-```
-Identity Check → Show backup modal → User confirms → Call markBackedUp() → Update file → Close modal
-```
-
-### API Integration & Hooks
-
-**useHodosBrowser Hook**
-- `getIdentity()` - Retrieves wallet identity from backend
-- `markBackedUp()` - Updates backend backup status
-- `navigate()` - Sends navigation commands to webview
-
-**Window Bridge Integration**
-- `window.hodosBrowser.identity.*` - Backend identity operations
-- `window.hodosBrowser.overlay.*` - Overlay window management
-- `window.hodosBrowser.navigation.*` - Browser navigation control
-- `window.cefMessage.send()` - Direct CEF message passing
-
-### Type System
-
-**Identity Types**
-- `IdentityData` - Complete wallet information with keys and backup status
-- `BackupCheck` - Simple backup status confirmation
-- `IdentityResult` - Union type for identity operations
-
-**HodosBrowser API Types**
-- Complete type definitions for all backend API functions
-- Overlay management interface types
-- Navigation and message passing types
-
-### Current Implementation Status
-
-**✅ Working Components**
-- Basic React application structure
-- Routing between header and overlay instances
-- Wallet panel overlay system
-- Backup modal UI and form handling
-- Type definitions and API interfaces
-
-**🧱 Partially Implemented**
-- Identity file checking and creation
-- Backend communication for backup status updates
-- Overlay trigger system for backup modal
-
-**❌ Missing/Incomplete**
-- Startup identity check integration
-- Automatic backup modal display on first launch
-- Backend identity file management
-- Proper overlay_hwnd creation for backup modal
-
-### Communication Patterns
-
-**Frontend → Backend**
-1. **Direct API Calls**: `window.hodosBrowser.identity.get()`
-2. **Message Passing**: `window.cefMessage.send('overlay_hide', [])`
-3. **Overlay Triggers**: `window.hodosBrowser.overlay.show()`
-
-**Backend → Frontend**
-1. **JavaScript Execution**: `ExecuteJavaScript()` calls
-2. **Panel Triggers**: `window.triggerPanel(panelName)`
-3. **Message Responses**: Process message callbacks
-
-**State Synchronization**
-- Frontend tracks overlay open/close state
-- Backend manages HWND creation/destruction
-- Both sides coordinate through message passing
-
-## 🔧 Backend Implementation & Core Handlers
-
-### Core Handler Architecture
-
-The backend implements a modular handler system that exposes native functionality to the frontend through V8 JavaScript bindings:
+Three layers with strict separation:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    V8 JavaScript Context                   │
-│              (Frontend React Application)                  │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Handler Execution Layer                      │
-│              • IdentityHandler                             │
-│              • PanelHandler                                │
-│              • NavigationHandler                           │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Core Business Logic                         │
-│              • WalletManager                               │
-│              • File I/O Operations                         │
-│              • Cryptographic Functions                     │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                System Integration                          │
-│              • Process Message Passing                     │
-│              • HWND Management                             │
-│              • CEF Browser Control                         │
-└─────────────────────────────────────────────────────────────┘
+React Frontend (Port 5137)
+    | window.hodosBrowser.*
+    v
+C++ CEF Shell (CEF 136)
+    | HTTP interception -> localhost:3301 for wallet functions
+    v
+Rust Wallet Backend (Port 3301)
+    | Actix-web, SQLite (wallet.db)
+    v
+Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 ```
 
-### Identity Management System
+| Layer | Tech | Responsibility |
+|-------|------|----------------|
+| Frontend | React, Vite, TypeScript, MUI | UI, user interactions; never handles keys or signing |
+| CEF Shell | C++17, CEF 136 | Browser engine, V8 injection, HTTP interception; browser data (history, bookmarks) |
+| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol; private keys never leave this process |
 
-**Rust Wallet Identity Management**
-- **File Location**: `%APPDATA%/HodosBrowser/wallet/wallet.json`
-- **Encryption**: Wallet data encrypted with master key
-- **Key Generation**: HD wallet with BIP44 derivation (secp256k1)
-- **Address Format**: Bitcoin-style Base58Check encoding
+**Process-per-overlay**: Settings, Wallet Panel, Backup Modal, BRC-100 Auth, and Notification overlays each run as separate CEF subprocesses with isolated V8 contexts.
 
-**Identity File Structure**
-```json
-{
-  "publicKey": "hex_encoded_public_key",
-  "address": "base58_encoded_address",
-  "privateKey": "aes_encrypted_private_key",
-  "backedUp": false
-}
+---
+
+## 2. C++ CEF Shell
+
+### 2.1 Process Architecture
+
+The browser runs 9 distinct processes:
+
+```
+Main Browser Process (cef_browser_shell.cpp)
+    |-- Header Browser (React UI at port 5137)
+    |-- WebView Browser (external web content)
+    |-- Settings Overlay (WS_POPUP, own V8)
+    |-- Wallet Overlay (WS_POPUP, own V8)
+    |-- Backup Modal (WS_POPUP, own V8)
+    |-- BRC100 Auth Modal (WS_POPUP, own V8)
+    |-- Notification Overlay (keep-alive HWND, own V8)
+    |-- Rust Wallet Backend (separate process, Port 3301)
 ```
 
-**Key Operations**
-1. **Wallet Creation**: Automatically generates new key pair if none exists
-2. **File Persistence**: Saves encrypted identity to AppData directory
-3. **Backup Status**: Tracks whether user has acknowledged backup
-4. **Key Retrieval**: Decrypts and returns private key when needed
+### 2.2 C++ Singletons
 
-### Handler Implementation Details
+| Singleton | File | Purpose |
+|-----------|------|---------|
+| `DomainPermissionCache` | HttpRequestInterceptor.cpp | In-memory cache of domain trust levels, backed by Rust DB |
+| `PendingRequestManager` | PendingAuthRequest.h | Thread-safe map of pending auth/payment/cert requests |
+| `SessionManager` | SessionManager.h | Per-browser session spending + rate tracking |
+| `BSVPriceCache` | HttpRequestInterceptor.cpp | BSV/USD price for auto-approve (5-min TTL) |
+| `WalletStatusCache` | HttpRequestInterceptor.cpp | Cached wallet exists/locked status |
+| `Logger` | cef_browser_shell.cpp | Singleton file logger |
 
-**IdentityHandler**
-- **Primary Function**: Manages wallet identity operations
-- **Methods Exposed**:
-  - `get()` - Returns decrypted identity JSON
-  - `markBackedUp()` - Updates backup status to true
-- **Auto-Creation**: Creates new wallet if none exists
+### 2.3 SimpleHandler (CEF Client)
 
-**PanelHandler**
-- **Primary Function**: Manages overlay panel display
-- **Methods Exposed**:
-  - `open(panelName)` - Triggers overlay panel creation
-- **Message Flow**: Sends `overlay_open_panel` to browser process
+`simple_handler.cpp` implements 8 CEF handler interfaces:
+- `CefClient`, `CefLifeSpanHandler`, `CefLoadHandler`, `CefDisplayHandler`
+- `CefKeyboardHandler`, `CefContextMenuHandler`, `CefRequestHandler`, `CefResourceRequestHandler`
 
-**NavigationHandler**
-- **Primary Function**: Handles web navigation requests
-- **Methods Exposed**:
-  - `navigate(path)` - Forwards navigation to webview browser
-- **Message Flow**: Sends `navigate` message to browser process
+IPC dispatch: `OnProcessMessageReceived()` handles 30+ message types from React overlays and the header.
 
-### Cryptographic Implementation
+### 2.4 HTTP Interception Flow
 
-**Current Implementation (Temporary)**
-- **Key Derivation**: ECDSA secp256k1 for Bitcoin compatibility
-- **Encryption**: AES-256-CBC with hardcoded key
-- **Hashing**: SHA256 + RIPEMD160 for address generation
-- **Encoding**: Base58Check for address format
-
-**Security Notes**
-- Hardcoded AES key is temporary and will be replaced
-- Private keys are encrypted at rest but decrypted in memory
-- Key generation uses OpenSSL cryptographic libraries
-
-### File System Integration
-
-**AppData Directory Structure**
 ```
-%APPDATA%/HodosBrowser/
-└── wallet/
-    ├── wallet.json          # Wallet data and identity
-    ├── actions.json         # Transaction history
-    └── domainWhitelist.json # Approved domains
+Web request -> OnBeforeResourceLoad (HttpRequestInterceptor.cpp)
+  -> Is it a wallet endpoint? -> AsyncWalletResourceHandler
+    -> Is domain approved? -> DomainPermissionCache check
+      -> Is it a payment endpoint? -> Auto-approve engine
+        -> Check rate limit (SessionManager)
+        -> Parse outputs, convert sats -> USD (BSVPriceCache)
+        -> Check per-tx and per-session limits
+        -> Auto-approve OR show payment confirmation notification
+      -> Forward to Rust (localhost:3301) via CefURLRequest on IO thread
 ```
 
-**Database Operations**
-- **Storage**: SQLite database at `%APPDATA%/HodosBrowser/wallet/wallet.db`
-- **Initialization**: Automatic on first run with schema migrations
-- **Backup**: File-based backup to user-specified location (requires file picker in frontend)
-- **Recovery**: Recovery from mnemonic (re-derives addresses, re-discovers UTXOs)
+### 2.5 Notification Overlay
 
-### Message Passing Architecture
+Keep-alive HWND pattern:
+- HWND created once (pre-warmed during startup), reused via JS injection
+- `window.showNotification(queryString)` for instant React state update
+- `window.hideNotification()` + `SW_HIDE` to dismiss
+- 4 notification types: `domain_approval`, `brc100_auth`, `payment_confirmation`, `certificate_disclosure`
+- Atomic `compare_exchange_strong` on timeout vs response to prevent double-fire crashes
 
-**Frontend → Backend**
-1. **V8 Function Calls**: Direct handler execution
-2. **Parameter Validation**: Type checking and error handling
-3. **Business Logic**: Core functionality execution
+### 2.6 Window Hierarchy (Windows)
 
-**Backend → Frontend**
-1. **Process Messages**: Cross-process communication
-2. **JavaScript Execution**: Dynamic code injection
-3. **State Updates**: Real-time UI synchronization
+```
+Main Shell (g_hwnd)
+    |-- Header (g_header_hwnd) - WS_CHILD, React UI
+    |-- WebView (g_webview_hwnd) - WS_CHILD, web content
+    |-- Settings Overlay (g_settings_overlay_hwnd) - WS_POPUP, layered
+    |-- Wallet Overlay (g_wallet_overlay_hwnd) - WS_POPUP, layered
+    |-- Backup Modal (g_backup_overlay_hwnd) - WS_POPUP, layered
+    |-- BRC100 Auth (g_brc100_auth_overlay_hwnd) - WS_POPUP, layered
+    |-- Notification (g_notification_overlay_hwnd) - WS_POPUP, keep-alive
+```
 
-### Current Implementation Status
+### 2.7 macOS Port
 
-**✅ Fully Implemented (Rust Wallet)**
-- Complete BRC-100 Groups A & B (Authentication + Transactions)
-- HD wallet with BIP44 derivation
-- BSV ForkID SIGHASH transaction signing
-- BRC-103/104 mutual authentication (7 critical breakthroughs)
-- BRC-29 payment protocol support
-- Transaction history and action storage
-- BEEF Phase 2 parsing with output ownership detection
-- BRC-33 message relay endpoints (send/list/acknowledge)
-- Domain whitelisting system
-- Real mainnet transaction confirmations
-- **SQLite Database** - Complete migration from JSON to database
-- **UTXO Management** - Background sync, caching, and spending tracking
-- **BEEF/SPV Caching** - Parent transactions, Merkle proofs, and block headers
-- **Performance Optimization** - Database indexes and in-memory caching
-- **Backup & Recovery** - File-based backup, JSON export, and mnemonic recovery
+`cef_browser_shell_mac.mm` (1754 lines): NSWindow/NSView hierarchy, 5 overlay types, event forwarding. Build system supports macOS via CMake. See `development-docs/macos-port/MAC_PLATFORM_SUPPORT_PLAN.md`.
 
-**🧱 Partially Implemented**
-- Backup modal integration with overlay system (backend complete, frontend file picker needed)
-- Error handling improvements
+---
 
-**❌ Not Yet Implemented**
-- Group C: Output/UTXO management endpoints (database ready, endpoints pending)
-- Group D: Encryption/decryption (BRC-2)
-- Group E: Certificate management (BRC-52) (database schema ready)
-- Hardware security module integration
-- Online wallet backend for cloud-based backups (coordination with protocol developers needed)
-- Browser database (history, bookmarks, cache) - deferred to separate sprint
+## 3. Rust Wallet Backend
 
-### Future Improvements
+### 3.1 AppState (`src/main.rs`)
 
-**Security Enhancements**
-- Hardware security module (HSM) integration
-- Enhanced key storage mechanisms
-- Comprehensive security audit
+Shared state accessible to all HTTP handlers:
 
-**Features**
-- Complete BRC-100 Groups C, D, E
-- Advanced certificate management
-- Enhanced encryption support
-- **Online Wallet Backend** (Future - Coordination Required):
-  - Cloud-based backup storage for wallet databases
-  - User authentication and access control
-  - Encrypted backups with user-controlled keys
-  - Interoperable format for BRC-100 wallet compatibility
-  - **Note**: Requires coordination with open source BRC-100 protocol developers to ensure standardized backup format, authentication methods, and security practices
+| Field | Type | Purpose |
+|-------|------|---------|
+| `database` | `Arc<Mutex<WalletDatabase>>` | SQLite connection (single writer) |
+| `balance_cache` | `BalanceCache` | In-memory balance with instant invalidation |
+| `price_cache` | `Arc<PriceCache>` | BSV/USD price (CryptoCompare + CoinGecko, 5-min TTL) |
+| `fee_rate_cache` | `FeeRateCache` | Cached fee rates from MAPI |
+| `sync_status` | `Arc<RwLock<SyncStatus>>` | Wallet recovery/sync progress |
+| `current_user_id` | `i64` | Active user ID (default: 1) |
+| `shutdown` | `CancellationToken` | Graceful shutdown signal |
+| `auth_sessions` | `Arc<Mutex<HashMap>>` | BRC-103/104 auth session state |
+| `message_store` | `Arc<Mutex<HashMap>>` | BRC-33 in-memory message relay |
+| `pending_transactions` | `Arc<Mutex<HashMap>>` | Two-phase sign: createAction -> signAction |
+
+### 3.2 Database Layer (`src/database/`)
+
+SQLite with WAL mode, foreign keys enabled. Consolidated V1 schema for fresh databases; incremental migrations for existing.
+
+**Repository pattern** (18+ repositories across 23 files):
+
+| Repository | Purpose |
+|------------|---------|
+| `WalletRepository` | Master key storage, HD index, DPAPI blob |
+| `UserRepository` | Identity mapping (pubkey -> userId) |
+| `AddressRepository` | HD address derivation cache |
+| `OutputRepository` | Primary UTXO tracking (spendable/spent_by model) |
+| `TransactionRepository` | Transaction lifecycle |
+| `ProvenTxRepository` | Immutable merkle proof records |
+| `ProvenTxReqRepository` | Proof acquisition lifecycle |
+| `CertificateRepository` | BRC-52 identity certificates |
+| `DomainPermissionRepository` | Per-domain trust levels, spending limits, rate limits |
+| `TagRepository` | Output tagging/basket assignment |
+| `CommissionRepository` | Fee tracking per transaction |
+| `SettingsRepository` | Persistent wallet configuration |
+| `SyncStateRepository` | Multi-device sync state |
+
+### 3.3 Cryptography (`src/crypto/`)
+
+11 modules:
+
+| Module | Purpose |
+|--------|---------|
+| `brc42.rs` | ECDH-based child key derivation (Type-42) |
+| `brc43.rs` | Invoice number format: `{securityLevel}-{protocolID}-{keyID}` |
+| `signing.rs` | SHA-256, HMAC-SHA256, ECDSA signing |
+| `aesgcm_custom.rs` | AES-256-GCM encryption (BRC-2) |
+| `brc2.rs` | BRC-2 encrypt/decrypt with BRC-42 key derivation |
+| `dpapi.rs` | Windows DPAPI encrypt/decrypt (macOS Keychain stub) |
+| `pin.rs` | PIN-based encryption (AES-256-GCM + PBKDF2 600K iterations) |
+| `keys.rs` | Key computation and derivation helpers |
+| `ghash.rs` | GHASH for AES-GCM |
+| `mod.rs` | Key derivation routing, public key computation |
+
+### 3.4 Key Derivation
+
+`derive_key_for_output()` in `database/helpers.rs` is the single entry point for all signing:
+
+| `derivation_prefix` | `derivation_suffix` | `sender_identity_key` | Path |
+|---------------------|---------------------|----------------------|------|
+| `"2-receive address"` | `"{index}"` | `None` | BRC-42 self-derivation (standard) |
+| `"bip32"` | `"{index}"` | `None` | Legacy BIP32 HD (`m/{index}`) |
+| `NULL` | `NULL` | `None` | Master private key directly |
+| any | any | `Some(pubkey)` | BRC-42 counterparty derivation |
+
+### 3.5 Transaction Lifecycle
+
+```
+createAction (build + select UTXOs)
+    -> status: 'unsigned'
+    -> inputs reserved (spent_by set)
+    -> outputs created (spendable=0)
+
+signAction (sign + broadcast)
+    -> status: 'sending' -> 'unproven'
+    -> proven_tx_req created
+    -> Monitor acquires proof -> 'completed'
+
+On failure:
+    -> status: 'failed'
+    -> ghost outputs deleted
+    -> reserved inputs restored (spendable=1)
+    -> balance cache invalidated
+```
+
+### 3.6 Wallet Security
+
+- **DPAPI auto-unlock**: Mnemonic stored twice — PIN-encrypted + DPAPI-encrypted. Startup: try DPAPI first, auto-cache mnemonic on success.
+- **PIN encryption**: AES-256-GCM with PBKDF2 (600K iterations). PIN used during create/recover.
+- **DPAPI backfill**: On PIN unlock, DPAPI blob stored for future auto-unlock.
+- **Legacy wallets**: `pin_salt=NULL` -> plaintext auto-cached. PIN-protected without DPAPI -> locked until PIN.
+
+### 3.7 API Endpoints
+
+68+ handlers in `handlers.rs`. Key groups:
+
+**Wallet Operations**: `health`, `wallet_status`, `wallet_create`, `wallet_recover`, `wallet_unlock`, `wallet_balance`, `wallet_backup`, `wallet_sync`, `wallet_sync_status`, `wallet_bsv_price`
+
+**BRC-100 Protocol**: `well_known_auth`, `get_public_key`, `create_action`, `sign_action`, `create_hmac`, `create_signature`, `verify_hmac`, `verify_signature`, `list_outputs`, `list_certificates`, `acquire_certificate`, `prove_certificate`, `encrypt`, `decrypt`, `send_message`, `list_messages`, `acknowledge_message`
+
+**Domain Permissions**: `get_domain_permission`, `add_domain_permission`, `delete_domain_permission`, `get_all_domain_permissions`, `get_cert_field_permissions`, `approve_cert_fields`
+
+**Internal**: `send_transaction` (wallet panel send), `generate_address`
+
+---
+
+## 4. React Frontend
+
+### 4.1 Application Structure
+
+Single React codebase, multiple CEF instances. Route determines context:
+
+| Route | Context | Purpose |
+|-------|---------|---------|
+| `/` | Header browser | Navigation toolbar, wallet/settings buttons |
+| `/wallet` | Wallet overlay | Balance, send/receive, transaction history |
+| `/settings` | Settings overlay | Browser and wallet settings |
+| `/backup` | Backup modal | Mnemonic backup, file backup |
+| `/brc100auth` | BRC100 auth overlay | Domain approval, auth approval, payment confirmation, cert disclosure |
+| `/notification` | Notification overlay | Keep-alive overlay for payment/cert/rate notifications |
+
+### 4.2 Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| `MainBrowserView.tsx` | Header with navigation bar, wallet/settings buttons |
+| `WalletPanel.tsx` | Balance display, send/receive tabs, sync status |
+| `TransactionForm.tsx` | Send form with BSV/USD conversion, validation |
+| `DomainPermissionsTab.tsx` | Manage approved sites (edit limits, revoke) |
+| `DomainPermissionForm.tsx` | Per-tx/per-session spending limits, rate limits |
+| `BRC100AuthOverlayRoot.tsx` | Domain approval, auth, payment confirmation, cert disclosure |
+
+### 4.3 Hooks
+
+| Hook | Purpose |
+|------|---------|
+| `useHodosBrowser()` | `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
+| `useBalance()` | Fetches balance + BSV price from Rust backend |
+| `useBackgroundBalancePoller()` | Polls balance every 30s for auto-refresh |
+
+### 4.4 Bridge (`initWindowBridge.ts`)
+
+Defines `window.hodosBrowser.navigation` and `window.hodosBrowser.overlay` via `cefMessage.send()`.
+
+---
+
+## 5. Communication Patterns
+
+### 5.1 Three Communication Paths
+
+| Pattern | Direction | Mechanism | Used For |
+|---------|-----------|-----------|----------|
+| **CefURLRequest** (async) | C++ -> Rust | HTTP on IO thread | BRC-100 wallet endpoints (payment, auth, signing) |
+| **WinHTTP** (sync) | C++ -> Rust | Synchronous HTTP | Domain permission lookups, price cache, wallet status |
+| **Direct fetch** | React -> Rust | Frontend HTTP | Wallet panel operations (balance, send, backup) |
+
+### 5.2 IPC (C++ <-> React)
+
+```
+React -> cefMessage.send("command", data)
+  -> CefProcessMessage to browser process
+    -> simple_handler.cpp OnProcessMessageReceived
+      -> dispatch by message name
+```
+
+30+ IPC message types including: `navigate`, `overlay_show_*`, `overlay_close`, `brc100_auth_response`, `add_domain_permission`, `approve_cert_fields`, `tab_create`, `bookmark_add`.
+
+---
+
+## 6. Security Architecture
+
+### 6.1 Process Isolation
+
+- **Header browser**: Trusted React UI, isolated from web content
+- **WebView browser**: Untrusted web content, HTTP interception active
+- **Overlays**: Each in own process with own V8 context
+- **Rust wallet**: Separate process, only accessible via localhost HTTP
+- **Tab isolation**: Process-per-tab via CEF (Chromium's security model)
+
+### 6.2 Domain Permission System
+
+Two effective trust levels: **unknown** (show approval overlay) and **approved** (check spending limits).
+
+Per-domain controls:
+- Per-transaction spending limit (USD cents, default $0.10)
+- Per-session spending limit (USD cents, default $3.00)
+- Rate limiting (requests per minute, default 10)
+- Certificate field disclosure tracking
+
+### 6.3 Defense in Depth
+
+1. **C++ layer**: DomainPermissionCache checks domain status before forwarding
+2. **C++ auto-approve engine**: Rate limits, spending limits, payment confirmation notifications
+3. **Rust layer**: `check_domain_approved()` validates `X-Requesting-Domain` header
+4. **Rust spending check**: `create_action` verifies per-tx limit via price cache
+
+### 6.4 Key Security Properties
+
+1. Private keys never in JavaScript — all signing in Rust
+2. DPAPI/Keychain encryption for mnemonic at rest
+3. PIN encryption (AES-256-GCM + PBKDF2) as second layer
+4. Parameterized SQL — no string interpolation
+5. App-scoped identity keys — BRC-103/104 prevents cross-app tracking
+6. Atomic timeout handling — `compare_exchange_strong` prevents double-fire crashes
+
+---
+
+## 7. Data Storage
+
+### 7.1 File System Layout
+
+| Platform | Root | Wallet DB | Browser Data |
+|----------|------|-----------|--------------|
+| Windows | `%APPDATA%/HodosBrowser/` | `wallet/wallet.db` | `Default/` (history, bookmarks, cookies) |
+| macOS | `~/Library/Application Support/HodosBrowser/` | `wallet/wallet.db` | `Default/` |
+
+### 7.2 Database Schema (Consolidated V1)
+
+All 24 incremental migrations collapsed into single `create_schema_v1()` for fresh databases. Existing databases migrate incrementally.
+
+**Active tables**: wallets, users, addresses, transactions, outputs, parent_transactions, block_headers, proven_txs, proven_tx_reqs, output_baskets, output_tags, output_tag_map, certificates, certificate_fields, commissions, settings, sync_states, monitor_events, transaction_inputs, transaction_outputs, domain_permissions, cert_field_permissions
+
+### 7.3 Browser Data (C++ Layer)
+
+History and bookmarks managed by C++ singletons (`HistoryManager`, `BookmarkManager`) with their own SQLite databases in `Default/`. Cookies managed by CEF's built-in cookie manager.
+
+---
+
+## 8. Background Services
+
+### 8.1 Monitor Pattern
+
+The Monitor (`src/monitor/mod.rs`) runs as a single tokio task with a 30-second tick loop:
+
+| Task | Interval | Purpose |
+|------|----------|---------|
+| TaskCheckForProofs | 60s | Acquire merkle proofs (ARC -> WoC fallback) |
+| TaskSendWaiting | 120s | Crash recovery for stuck `sending` txs |
+| TaskFailAbandoned | 300s | Fail stuck unsigned/unprocessed txs |
+| TaskUnFail | 300s | Recover false failures (6-hour window) |
+| TaskReviewStatus | 60s | Status consistency across tables |
+| TaskPurge | 3600s | Cleanup old events and proof requests |
+| TaskSyncPending | 30s | UTXO sync for pending addresses |
+
+Uses `CancellationToken` for graceful shutdown and `try_lock()` to avoid blocking user requests.
+
+### 8.2 UTXO Synchronization
+
+Two mechanisms:
+1. **Periodic (TaskSyncPending)**: Checks addresses with `pending_utxo_check=1` every 30s
+2. **On-demand (`POST /wallet/sync`)**: Frontend trigger, supports `?full=true` for all addresses
+
+### 8.3 Price & Fee Caching
+
+- **PriceCache** (Rust): CryptoCompare primary + CoinGecko fallback, 5-min TTL, thread-safe via `RwLock`
+- **BSVPriceCache** (C++): WinHTTP to `/wallet/bsv-price`, 5-min TTL, used by auto-approve engine
+- **FeeRateCache** (Rust): MAPI fee rates with TTL
+
+---
+
+## 9. BRC-100 Protocol
+
+### 9.1 Implementation Status
+
+| Group | Status | Description |
+|-------|--------|-------------|
+| **A: Authentication** | Complete | BRC-103/104 mutual auth, key derivation |
+| **B: Transactions** | Complete | createAction, signAction, BRC-29 payments, BEEF/SPV |
+| **C: Output Management** | Partial | listOutputs, baskets, tags |
+| **D: Encryption** | Partial | BRC-2 AES-256-GCM encrypt/decrypt |
+| **E: Certificates** | Partial | Schema ready, acquireCertificate, proveCertificate |
+| **BRC-33 Messages** | Complete | sendMessage, listMessages, acknowledgeMessage |
+
+### 9.2 Authentication Flow (BRC-104)
+
+```
+1. Client POST /.well-known/auth {initialNonce, identityKey}
+2. Server: BRC-42 key derivation (ECDH shared secret -> HMAC -> child key)
+3. Server: Sign concatenated nonces with derived key
+4. Response: {version, nonce, yourNonce, signature}
+```
+
+### 9.3 BEEF/SPV
+
+Transactions broadcast in BEEF (Background Evaluation Extended Format):
+- `beef.rs`: Parser, TSC proof <-> BUMP conversion
+- `beef_helpers.rs`: Recursive ancestry chain building
+- `parent_transactions` table: Raw tx cache
+- `proven_txs` table: Immutable merkle proof records
+
+---
+
+## 10. Development Status
+
+### Completed
+- BRC-100 Groups A & B (authentication + transactions)
+- Database migration consolidation (V1 schema)
+- DPAPI auto-unlock + PIN encryption
+- Domain permission system + auto-approve engine
+- Notification overlay (keep-alive, 4 types)
+- Mnemonic recovery + Centbee sweep
+- Defense-in-depth (C++ + Rust permission checks)
+- Price cache migration (frontend -> backend)
+- Branding/CSS (black + gold theme)
+
+### In Progress (Browser Core MVP)
+- SSL certificate handling + secure connection indicator
+- Permission prompts (camera, mic, geolocation)
+- Download handler
+- Find-in-page, context menus, keyboard shortcuts
+- Ad & tracker blocking (adblock-rust FFI)
+- Light wallet polish
+
+### Future
+- macOS port (5-7 day sprint, see `development-docs/macos-port/`)
+- Full wallet view (transaction history, output browser)
+- Activity status indicator
+- Settings persistence + profile import
+- Certificate testing (needs certifier service)
+
+---
+
+*This document is maintained alongside the codebase. See `CLAUDE.md` for AI assistant context and invariants.*

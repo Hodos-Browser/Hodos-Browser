@@ -35,6 +35,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [sessionSpent, setSessionSpent] = useState<number>(0);
   const [rateLimit, setRateLimit] = useState<number>(10);
 
+  // Certificate disclosure params
+  const [certFields, setCertFields] = useState<string[]>([]);
+  const [selectedFields, setSelectedFields] = useState<string[]>([]);
+  const [certType, setCertType] = useState<string>('');
+  const [certifier, setCertifier] = useState<string>('');
+  const [rememberFields, setRememberFields] = useState<boolean>(true);
+
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
     const params = new URLSearchParams(queryString);
@@ -78,6 +85,22 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
     const rateLimitParam = params.get('rateLimit');
     if (rateLimitParam) setRateLimit(parseInt(rateLimitParam));
+
+    // Certificate disclosure params
+    const fieldsParam = params.get('fields');
+    if (fieldsParam) {
+      const fields = fieldsParam.split(',').filter(f => f.length > 0);
+      setCertFields(fields);
+      setSelectedFields([...fields]); // All selected by default
+    } else {
+      setCertFields([]);
+      setSelectedFields([]);
+    }
+    const certTypeParam = params.get('certType');
+    setCertType(certTypeParam || '');
+    const certifierParam = params.get('certifier');
+    setCertifier(certifierParam || '');
+    setRememberFields(true);
   };
 
   useEffect(() => {
@@ -240,6 +263,69 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     } catch (error) {
       console.error('Error modifying limits:', error);
     }
+  };
+
+  // ── Certificate Disclosure: Share (selected fields only) ──
+  const handleCertApprove = () => {
+    if (selectedFields.length === 0) return; // Nothing selected
+    try {
+      if (window.cefMessage) {
+        // Persist field approval if "Remember" is checked
+        if (rememberFields && selectedFields.length > 0 && certType) {
+          window.cefMessage.send('approve_cert_fields', [
+            JSON.stringify({
+              domain: notificationDomain,
+              certType: certType,
+              fields: selectedFields,
+              remember: true,
+            }),
+          ]);
+        }
+        // Forward the proveCertificate request to Rust with only selected fields
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: true, selectedFields }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error approving cert disclosure:', error);
+    }
+  };
+
+  // ── Certificate Disclosure: Deny ──
+  const handleCertDeny = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: false }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error denying cert disclosure:', error);
+    }
+  };
+
+  // Toggle a field in the selected set
+  const toggleField = (field: string) => {
+    setSelectedFields(prev =>
+      prev.includes(field)
+        ? prev.filter(f => f !== field)
+        : [...prev, field]
+    );
+  };
+
+  // Format field name for display: underscores → spaces, capitalize first letter
+  const formatFieldName = (field: string): string => {
+    return field
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  };
+
+  // Truncate certifier pubkey for display
+  const truncatePubkey = (key: string): string => {
+    if (key.length <= 16) return key;
+    return key.slice(0, 8) + '...' + key.slice(-8);
   };
 
   // ── No Wallet: Set Up ──
@@ -579,6 +665,140 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               </div>
             </>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Certificate disclosure notification ──
+  if (notificationType === 'certificate_disclosure') {
+    return (
+      <div style={overlayBackdrop}>
+        <div style={cardStyle}>
+          {/* Domain avatar + title */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
+            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
+                {cleanDomain}
+              </div>
+              <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
+                is requesting identity verification
+              </div>
+            </div>
+          </div>
+
+          {/* Fields being requested — individually selectable */}
+          <div style={{
+            background: COLORS.subduedGold,
+            borderRadius: '10px',
+            padding: '14px 16px',
+            marginBottom: '18px',
+          }}>
+            <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textDark, marginBottom: '10px' }}>
+              Select which fields to share:
+            </div>
+            {certFields.map((field, idx) => (
+              <label
+                key={idx}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  fontSize: '13px',
+                  color: '#333333',
+                  lineHeight: 1.5,
+                  marginBottom: '8px',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedFields.includes(field)}
+                  onChange={() => toggleField(field)}
+                  style={{
+                    accentColor: COLORS.primary,
+                    width: '16px',
+                    height: '16px',
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                />
+                <span>{formatFieldName(field)}</span>
+              </label>
+            ))}
+          </div>
+
+          {/* Certifier info */}
+          {certifier && (
+            <div style={{
+              fontSize: '12px',
+              color: COLORS.textMuted,
+              lineHeight: 1.5,
+              marginBottom: '14px',
+            }}>
+              Verified by:{' '}
+              <span style={{
+                fontFamily: 'monospace',
+                fontSize: '11px',
+                background: '#f0f0f0',
+                padding: '2px 6px',
+                borderRadius: '4px',
+              }}>
+                {truncatePubkey(certifier)}
+              </span>
+            </div>
+          )}
+
+          {/* Remember checkbox */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textMuted,
+            cursor: 'pointer',
+            marginBottom: '22px',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={rememberFields}
+              onChange={(e) => setRememberFields(e.target.checked)}
+              style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+            />
+            Remember for this site
+          </label>
+
+          {/* Buttons */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+            <button
+              onClick={handleCertDeny}
+              onMouseEnter={() => setHoveredButton('secondary')}
+              onMouseLeave={() => setHoveredButton(null)}
+              style={secondaryButton}
+            >
+              Deny
+            </button>
+            <button
+              onClick={handleCertApprove}
+              disabled={selectedFields.length === 0}
+              onMouseEnter={() => setHoveredButton('primary')}
+              onMouseLeave={() => setHoveredButton(null)}
+              style={{
+                ...primaryButton,
+                opacity: selectedFields.length === 0 ? 0.4 : 1,
+                cursor: selectedFields.length === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {selectedFields.length === certFields.length
+                ? 'Share All'
+                : selectedFields.length > 0
+                  ? `Share ${selectedFields.length} of ${certFields.length}`
+                  : 'Share'}
+            </button>
+          </div>
         </div>
       </div>
     );

@@ -52,6 +52,7 @@ pub struct AppState {
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
     pub current_user_id: i64,  // Default user ID for all operations (multi-user foundation, Phase 3)
     pub shutdown: tokio_util::sync::CancellationToken,  // Graceful shutdown signal (Phase 8D)
+    pub sync_status: Arc<std::sync::RwLock<handlers::SyncStatus>>,  // Recovery sync progress
 }
 
 #[actix_web::main]
@@ -322,6 +323,7 @@ async fn main() -> std::io::Result<()> {
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
         current_user_id,  // Multi-user foundation (Phase 3)
         shutdown: shutdown_token.clone(),  // Graceful shutdown signal (Phase 8D)
+        sync_status: Arc::new(std::sync::RwLock::new(handlers::SyncStatus::default())),
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");
@@ -490,6 +492,10 @@ async fn main() -> std::io::Result<()> {
 
             // Price endpoint (Phase 2.3 — for C++ auto-approve engine)
             .route("/wallet/bsv-price", web::get().to(handlers::get_bsv_price))
+
+            // Sync status endpoints (recovery progress tracking)
+            .route("/wallet/sync-status", web::get().to(handlers::get_sync_status))
+            .route("/wallet/sync-status/seen", web::post().to(handlers::mark_sync_seen))
 
             // Transaction endpoints
             .route("/transaction/send", web::post().to(handlers::send_transaction))

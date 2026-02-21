@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
 import { TransactionForm } from './TransactionForm';
@@ -8,12 +8,22 @@ import type { TransactionResponse } from '../types/transaction';
 import './TransactionComponents.css';
 import './WalletPanel.css';
 
+interface SyncStatusData {
+  active: boolean;
+  phase: string;
+  addresses_scanned: number;
+  utxos_found: number;
+  total_satoshis: number;
+  result_seen: boolean;
+  error: string | null;
+}
+
 interface WalletPanelProps {
   onClose?: () => void;
 }
 
 export default function WalletPanel({ onClose }: WalletPanelProps) {
-  const { balance, usdValue, isLoading, isRefreshing, refreshBalance } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -25,6 +35,60 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [clickedButtons, setClickedButtons] = useState<Set<string>>(new Set());
   const [copyAgainClicked, setCopyAgainClicked] = useState(false);
   const [copyLinkClicked, setCopyLinkClicked] = useState(false);
+
+  // Sync status state
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Fetch sync status on mount
+  useEffect(() => {
+    const fetchStatus = () => {
+      fetch('http://localhost:3301/wallet/sync-status')
+        .then(r => r.json())
+        .then((data: SyncStatusData) => setSyncStatus(data))
+        .catch(() => {});
+    };
+    fetchStatus();
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Poll every 3s while sync is active
+  useEffect(() => {
+    if (syncStatus?.active) {
+      if (!pollRef.current) {
+        pollRef.current = setInterval(() => {
+          fetch('http://localhost:3301/wallet/sync-status')
+            .then(r => r.json())
+            .then((data: SyncStatusData) => {
+              setSyncStatus(data);
+              // When sync completes, refresh balance and stop polling
+              if (!data.active) {
+                refreshBalance();
+                if (pollRef.current) {
+                  clearInterval(pollRef.current);
+                  pollRef.current = null;
+                }
+              }
+            })
+            .catch(() => {});
+        }, 3000);
+      }
+    } else {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+  }, [syncStatus?.active]);
+
+  const handleDismissSyncSummary = () => {
+    fetch('http://localhost:3301/wallet/sync-status/seen', { method: 'POST' })
+      .then(() => setSyncStatus(prev => prev ? { ...prev, result_seen: true } : null))
+      .catch(() => {});
+  };
 
   const handleSendClick = () => {
     // Clear all other display states first
@@ -119,6 +183,13 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     }
   };
 
+  const handleManageSites = () => {
+    console.log('Manage Sites clicked - opening wallet page with Approved Sites tab');
+    if (window.cefMessage) {
+      window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet?tab=4');
+    }
+  };
+
   return (
     <div className="wallet-panel-light" onClick={(e) => e.stopPropagation()}>
       {/* Balance Display */}
@@ -175,6 +246,44 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       </div>
 
+      {/* Sync Status Banner */}
+      {syncStatus?.active && (
+        <div className="sync-banner-light sync-active">
+          <div className="sync-banner-header">
+            <div className="sync-spinner" />
+            <strong>Syncing with blockchain...</strong>
+          </div>
+          <p className="sync-banner-detail">
+            {syncStatus.addresses_scanned > 0 || syncStatus.utxos_found > 0
+              ? `Found ${syncStatus.addresses_scanned} addresses, ${syncStatus.utxos_found} UTXOs so far...`
+              : 'Scanning addresses...'}
+          </p>
+          <p className="sync-banner-hint">You can close this panel and browse — sync continues in the background.</p>
+        </div>
+      )}
+
+      {syncStatus && !syncStatus.active && !syncStatus.result_seen && syncStatus.utxos_found > 0 && (
+        <div className="sync-banner-light sync-complete">
+          <strong>Sync Complete</strong>
+          <p className="sync-banner-detail">
+            Found {syncStatus.utxos_found} UTXOs totaling {(syncStatus.total_satoshis / 100000000).toFixed(8)} BSV
+          </p>
+          <button className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
+            Continue to wallet
+          </button>
+        </div>
+      )}
+
+      {syncStatus && !syncStatus.active && !syncStatus.result_seen && syncStatus.error && (
+        <div className="sync-banner-light sync-error">
+          <strong>Sync completed with error</strong>
+          <p className="sync-banner-detail">{syncStatus.error}</p>
+          <button className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Action Buttons */}
       <div className="wallet-actions-light">
         <button
@@ -198,6 +307,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           <TransactionForm
             onTransactionCreated={handleSendSubmit}
             balance={balance}
+            bsvPrice={bsvPrice}
           />
         )}
 
@@ -311,6 +421,23 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       >
         Advanced
       </Button>
+      <button
+        onClick={handleManageSites}
+        style={{
+          background: 'none',
+          border: 'none',
+          color: '#666',
+          fontSize: '11px',
+          cursor: 'pointer',
+          padding: '6px 0 2px',
+          width: '100%',
+          textAlign: 'center',
+          textDecoration: 'underline',
+          fontFamily: 'inherit',
+        }}
+      >
+        Manage approved sites
+      </button>
     </div>
   );
 }

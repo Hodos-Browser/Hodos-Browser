@@ -21,6 +21,7 @@ import {
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import DomainPermissionsTab from '../components/DomainPermissionsTab';
 
 interface Certificate {
   type: string;
@@ -94,7 +95,12 @@ function TabPanel(props: TabPanelProps) {
 }
 
 const WalletOverlayRoot: React.FC = () => {
-  const [tabValue, setTabValue] = useState(0);
+  const getInitialTab = () => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = parseInt(params.get('tab') || '0', 10);
+    return tab >= 0 && tab <= 4 ? tab : 0;
+  };
+  const [tabValue, setTabValue] = useState(getInitialTab);
 
   // Export backup state
   const [showExportForm, setShowExportForm] = useState(false);
@@ -407,6 +413,7 @@ const WalletOverlayRoot: React.FC = () => {
           <Tab label="Addresses" />
           <Tab label="UTXOs" />
           <Tab label="Certificates" />
+          <Tab label="Approved Sites" />
         </Tabs>
         <Button
           variant="outlined"
@@ -759,6 +766,11 @@ const WalletOverlayRoot: React.FC = () => {
               </TableContainer>
             </>
           )}
+        </TabPanel>
+
+        {/* Approved Sites Tab */}
+        <TabPanel value={tabValue} index={4}>
+          <DomainPermissionsTab />
         </TabPanel>
       </Box>
     </Box>

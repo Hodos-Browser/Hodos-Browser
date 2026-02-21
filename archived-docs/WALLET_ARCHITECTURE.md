@@ -1,3 +1,5 @@
+> **ARCHIVED**: This document has been consolidated into [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md) (Section 3: Rust Wallet Backend). The content below is preserved for historical reference but may be stale.
+
 # Wallet Architecture
 
 ## Overview

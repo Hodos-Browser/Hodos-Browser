@@ -1,8 +1,8 @@
 # Phase 2 Research Findings: Domain Permissions & User Notifications
 
 **Date:** 2026-02-15
-**Updated:** 2026-02-17
-**Status:** Sub-Phases 2.0-2.3 Complete (through 2.3.7 — Payment Notification). DPAPI Auto-Unlock Complete. Certificate Notification (2.3.8) is next.
+**Updated:** 2026-02-18
+**Status:** Sub-Phases 2.0-2.4 Complete. DPAPI Auto-Unlock Complete. 2.3.8 Certificate Disclosure, 2.4.1 BRC-104 Nonce Fix, 2.4.1b Rust Defense-in-Depth, 2.4.2 Domain Permissions UI, 2.4.4 Docs all done.
 
 ---
 

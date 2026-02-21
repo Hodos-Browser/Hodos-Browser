@@ -1,3 +1,5 @@
+> **ARCHIVED**: This document has been consolidated into [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md) (February 2026). The content below is preserved for historical reference but may be stale.
+
 +----------------------------+
 |        React UI Layer     |
 |  - Panels / Pages / Hooks |

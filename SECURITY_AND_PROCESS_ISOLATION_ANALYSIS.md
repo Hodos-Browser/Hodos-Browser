@@ -1,13 +1,13 @@
 # Security & Process Isolation Analysis
 
-**Date**: October 9, 2025
+**Date**: October 9, 2025 (Updated: February 19, 2026)
 **Focus**: Current security model and process isolation architecture
 
 ## 🔐 Current Process Architecture
 
 ### Process Map
 
-Your browser currently runs **8 distinct processes**:
+Your browser currently runs **9 distinct processes**:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -31,7 +31,7 @@ Your browser currently runs **8 distinct processes**:
 │ - Navigation controls              │    │ - Web content from internet     │
 │ - Wallet/Settings buttons          │    │ - HTTP interception active      │
 │ - Own V8 context                   │    │ - Domain whitelisting applied   │
-│ - bitcoinBrowser API injected      │    │ - bitcoinBrowser API injected   │
+│ - hodosBrowser API injected      │    │ - hodosBrowser API injected   │
 │ - WS_CHILD window                  │    │ - WS_CHILD window               │
 └────────────────────────────────────┘    └─────────────────────────────────┘
                               │
@@ -49,14 +49,29 @@ Your browser currently runs **8 distinct processes**:
 │ WS_POPUP      │    │ WS_POPUP      │    │ WS_POPUP      │   │ WS_POPUP       │
 │ Layered       │    │ Layered       │    │ Layered       │   │ Layered        │
 └───────────────┘    └───────────────┘    └───────────────┘   └────────────────┘
+                                                                      │
+                                                            ┌────────────────┐
+                                                            │ PROCESS 8:     │
+                                                            │ Notification   │
+                                                            │ Overlay        │
+                                                            │                │
+                                                            │ Role:          │
+                                                            │ "notification" │
+                                                            │                │
+                                                            │ Own V8         │
+                                                            │ Keep-alive     │
+                                                            │ HWND (reused)  │
+                                                            └────────────────┘
 
 ┌────────────────────────────────────────────────────────────┐
-│ PROCESS 8: Go Wallet Daemon (Separate Executable)         │
+│ PROCESS 9: Rust Wallet Backend (Separate Process)          │
 │ - HD wallet management                                     │
 │ - Transaction creation/signing/broadcasting                │
 │ - UTXO management                                          │
 │ - BRC100 authentication                                    │
-│ - HTTP API server (localhost:8080)                         │
+│ - Domain permission enforcement                            │
+│ - HTTP API server (localhost:3301)                          │
+│ - DPAPI-encrypted mnemonic storage                         │
 │ - Runs independently, started by C++                       │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -81,7 +96,7 @@ Your browser currently runs **8 distinct processes**:
 - ✅ Fresh V8 context prevents state pollution
 - ✅ Independent lifecycle (can close without affecting others)
 
-**Go Daemon:**
+**Rust Wallet:**
 - ✅ Separate process = can't be directly memory-exploited from web
 - ✅ Only accessible via HTTP localhost API
 - ✅ Domain whitelisting enforced
@@ -109,10 +124,10 @@ Your browser currently runs **8 distinct processes**:
 
 **Separation:**
 - CEF browsers: JavaScript execution environment
-- Go daemon: Wallet operations
+- Rust wallet backend: Wallet operations
 
 **Communication:**
-- ✅ Only HTTP requests to localhost:8080
+- ✅ Only HTTP requests to localhost:3301
 - ✅ All requests intercepted by HttpRequestInterceptor
 - ✅ Domain whitelisting enforced before allowing request
 - ✅ User approval required for sensitive operations
@@ -147,7 +162,7 @@ Your browser currently runs **8 distinct processes**:
 **What You Have:**
 - ✅ UI in separate process from web content
 - ✅ Each overlay in own process
-- ✅ Wallet operations in Go daemon
+- ✅ Wallet operations in Rust wallet
 - ✅ No shared memory between security boundaries
 
 **Attack Surface:**
@@ -161,7 +176,7 @@ Your browser currently runs **8 distinct processes**:
 - ✅ All HTTP requests go through CEF interceptor
 - ✅ Domain whitelisting before processing
 - ✅ User approval for new domains
-- ✅ Wallet endpoints only accessible from whitelisted domains
+- ✅ Wallet endpoints only accessible from approved domains
 
 **Code Location:**
 ```cpp
@@ -177,7 +192,7 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 ### 3. API Injection Control ✅
 
 **What You Have:**
-- ✅ `bitcoinBrowser` API only injected into specific browsers
+- ✅ `hodosBrowser` API only injected into specific browsers
 - ✅ Each browser gets fresh injection
 - ✅ No global shared API object
 - ✅ API scoped to browser's V8 context
@@ -188,18 +203,18 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 // Called independently for each browser in OnLoadingStateChange
 ```
 
-### 4. Domain Whitelisting ✅
+### 4. Domain Permission System ✅
 
 **What You Have:**
-- ✅ Persistent domain whitelist (domainWhitelist.json)
+- ✅ Persistent domain permissions (domain_permissions table (SQLite))
 - ✅ Check before processing wallet requests
 - ✅ User approval modal for new domains
 - ✅ Domain extracted from main frame URL
 
 **Code Location:**
 ```cpp
-// cef-native/src/core/HttpRequestInterceptor.cpp
-// go-wallet/domain_whitelist.go
+// cef-native/src/core/HttpRequestInterceptor.cpp (DomainPermissionCache)
+// rust-wallet/src/database/domain_permission_repo.rs
 ```
 
 ## ⚠️ Current Security Gaps
@@ -224,7 +239,7 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 
 **Recommendation:**
 - Consider adding CSP headers in HTTP interceptor
-- Block inline scripts on whitelisted domains
+- Block inline scripts on approved domains
 - Restrict external script sources
 
 ### 3. No Request Size Limits ⚠️
@@ -282,12 +297,12 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
                         ▼
               ┌──────────────────┐
               │ HTTP Interceptor │
-              │ Domain Whitelist │
+              │ Domain Permissions │
               └──────────────────┘
                         │
                         ▼
               ┌──────────────────┐
-              │   Go Daemon      │
+              │   Rust Wallet      │
               │   Wallet Ops     │
               └──────────────────┘
 ```
@@ -319,8 +334,8 @@ Before implementing tabs, ensure:
 **Strengths:**
 - ✅ Process isolation between UI and web content
 - ✅ Each overlay in separate process
-- ✅ Wallet in separate Go daemon
-- ✅ HTTP interception with domain whitelisting
+- ✅ Wallet in separate Rust wallet backend
+- ✅ HTTP interception with domain permission checking
 - ✅ No shared memory between security boundaries
 
 **For Tabs:**
