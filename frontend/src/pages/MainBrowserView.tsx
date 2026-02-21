@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
     Box,
     Toolbar,
@@ -34,6 +34,7 @@ import { useCookieBlocking } from '../hooks/useCookieBlocking';
 import { useBackgroundBalancePoller } from '../hooks/useBackgroundBalancePoller';
 import { useDownloads } from '../hooks/useDownloads';
 import { TabBar } from '../components/TabBar';
+import FindBar from '../components/FindBar';
 import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
 
 
@@ -107,6 +108,40 @@ const MainBrowserView: React.FC = () => {
     const [downloadToast, setDownloadToast] = useState<{ open: boolean; message: string; severity: 'info' | 'success' }>({
         open: false, message: '', severity: 'info'
     });
+
+    // Find-in-page state
+    const [findBarVisible, setFindBarVisible] = useState(false);
+    const [findResult, setFindResult] = useState<{ count: number; activeMatch: number } | null>(null);
+
+    // Listen for find_show and find_result IPC events
+    useEffect(() => {
+        const handleMessage = (event: MessageEvent) => {
+            if (event.data?.type === 'find_show') {
+                setFindBarVisible(true);
+                setFindResult(null);
+            } else if (event.data?.type === 'find_result') {
+                try {
+                    const data = typeof event.data.data === 'string'
+                        ? JSON.parse(event.data.data)
+                        : event.data.data;
+                    // Update on every result (not just finalUpdate) for responsiveness
+                    setFindResult({
+                        count: data.count,
+                        activeMatch: data.activeMatchOrdinal,
+                    });
+                } catch {
+                    // Ignore parse errors
+                }
+            }
+        };
+        window.addEventListener('message', handleMessage);
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
+
+    const handleFindBarClose = useCallback(() => {
+        setFindBarVisible(false);
+        setFindResult(null);
+    }, []);
 
     useEffect(() => {
         const currentIds = new Set(downloads.map(d => d.id));
@@ -290,6 +325,10 @@ const MainBrowserView: React.FC = () => {
         onSwitchToTab: switchToTabByIndex,
         onFocusAddressBar: () => {}, // TODO: Implement address bar focus functionality
         onReload: reload,
+        onFindInPage: () => {
+            setFindBarVisible(true);
+            setFindResult(null);
+        },
     });
 
     const handleNavigate = (input: string) => {
@@ -330,6 +369,7 @@ const MainBrowserView: React.FC = () => {
     return (
         <Box
             sx={{
+                position: 'relative',
                 width: 'calc(100% + 16px)',
                 height: 'calc(100% + 16px)',
                 display: 'flex',
@@ -686,6 +726,14 @@ const MainBrowserView: React.FC = () => {
                 >
                     <SettingsIcon fontSize="small" />
                 </IconButton>
+
+                {/* Find Bar - inline in toolbar */}
+                {findBarVisible && (
+                    <FindBar
+                        onClose={handleFindBarClose}
+                        findResult={findResult}
+                    />
+                )}
             </Toolbar>
 
             {/* Toast for quick-block */}

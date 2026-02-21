@@ -812,6 +812,37 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== FIND IN PAGE ==========
+        if (message_name == "find_show") {
+            LOG_DEBUG_RENDER("🔍 find_show received, dispatching to React");
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: { type: 'find_show' }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        if (message_name == "find_result") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string resultJson = args->GetString(0);
+
+            LOG_DEBUG_RENDER("🔍 find_result received, dispatching to React");
+
+            std::string escaped = escapeJsonForJs(resultJson);
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'find_result',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "download_state_update") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string downloadsJson = args->GetString(0);

@@ -210,40 +210,49 @@ That's the entire implementation for MVP. Chrome's native UI handles the rest.
 
 ---
 
-## Sprint 4: Find-in-Page (1-2 days)
+## Sprint 4: Find-in-Page (1-2 days) ✅ COMPLETE
 
 **Goal**: Ctrl+F opens a find bar with match count, prev/next navigation.
 
-### Implementation
+### Implementation (Actual)
 
-**Find bar approach**: Lightweight HWND or React component rendered at the top of the browser content area.
+**CEF 136 Find API non-functional**: `CefBrowserHost::Find()` calls succeed but `GetFindHandler()` is never queried by CEF internals, and `OnFindResult` never fires. This was verified after a full wrapper rebuild (stale CMakeCache was pointing to old machine path for 5 months — see working-notes.md #7). CefFindHandler interface left in SimpleHandler but unused. Possibly a CEF 136 regression or windowed-mode limitation — needs investigation with cefclient sample app.
 
-**Recommended**: React component in `MainBrowserView.tsx` — positioned absolutely above the webview. Simpler than a new HWND, shares existing IPC infrastructure.
+**JavaScript `window.find()` fallback**: Used Chromium's built-in (non-standard) `window.find()` API instead.
 
-**State flow**:
-1. Ctrl+F → `MainBrowserView` shows find bar (text input + "X of Y" + prev/next/close)
-2. User types → debounced IPC `find_text(query, forward, matchCase)` → C++ calls `browser->GetHost()->Find()`
-3. C++ `OnFindResult` callback → IPC `find_result(count, activeMatch)` → React updates "X of Y"
-4. Prev/Next buttons → IPC `find_text` with `findNext=true`
-5. Close/Escape → IPC `find_stop` → C++ calls `browser->GetHost()->StopFinding(true)`
+**Find bar**: React `FindBar.tsx` component rendered as inline flex item inside `<Toolbar>` in MainBrowserView.
+
+**State flow** (actual):
+1. Ctrl+F in tab → `OnPreKeyEvent` sends `find_show` to header browser → React shows FindBar
+2. Ctrl+F in header → `useKeyboardShortcuts` shows FindBar directly
+3. User types → IPC `find_text` → C++ injects JavaScript into active tab:
+   - Injects `::selection { background: #FFFF00 !important; }` CSS (selection renders grey when tab unfocused)
+   - Counts matches via `window.find()` loop with `wrapAround=false` (prevents infinite loop)
+   - Navigates with `window.find()` using `wrapAround=true` for cycling
+   - Tracks ordinal with simple counter (increment/decrement with wrap)
+   - Sends `find_result_js` via cefMessage back to C++
+4. C++ forwards `find_result_js` as `find_result` to header browser → render process → React updates "X of Y"
+5. Close/Escape → IPC `find_stop` → C++ clears selection, removes injected CSS, deletes state variables
 
 ### macOS Notes
-- `CefFindHandler` and `CefBrowserHost::Find()` are cross-platform CEF APIs.
+- `window.find()` is a Chromium built-in — works cross-platform.
 - Find bar is a React component — fully cross-platform, no platform code needed.
-- `Ctrl+F` shortcut: define `Cmd+F` variant for macOS.
+- `Ctrl+F` shortcut: `#ifdef __APPLE__` → `EVENTFLAG_COMMAND_DOWN` / `#else` → `EVENTFLAG_CONTROL_DOWN`.
 
-### Files
-- `simple_handler.h` — Add `CefFindHandler`
-- `simple_handler.cpp` — Implement `OnFindResult`, add IPC handlers for find_text/find_stop
-- `frontend/src/components/MainBrowserView.tsx` — Add find bar component
-- `frontend/src/components/FindBar.tsx` — New component
+### Files Changed
+- `simple_handler.h` — Added `CefFindHandler` (10th interface, unused by CEF but kept)
+- `simple_handler.cpp` — `OnPreKeyEvent` Ctrl+F, `find_text` JS injection, `find_result_js` forwarding, `find_stop` cleanup
+- `simple_render_process_handler.cpp` — Forward `find_show` and `find_result` to React
+- `frontend/src/components/FindBar.tsx` — New component (inline in Toolbar)
+- `frontend/src/pages/MainBrowserView.tsx` — FindBar state + event listeners
+- `frontend/src/hooks/useKeyboardShortcuts.ts` — Added `onFindInPage` handler
 
 ### Verification
-- [ ] Ctrl+F → find bar appears
-- [ ] Type text → matches highlighted, count shown
-- [ ] Enter/Next → cycles through matches
-- [ ] Shift+Enter/Prev → cycles backward
-- [ ] Escape → find bar closes, highlights cleared
+- [x] Ctrl+F → find bar appears in toolbar
+- [x] Type text → matches highlighted yellow on page, "X of Y" shown
+- [x] Enter/Next → cycles forward through matches
+- [x] Shift+Enter/Prev → cycles backward
+- [x] Escape → find bar closes, highlights cleared
 
 ---
 
@@ -591,7 +600,7 @@ Week 1:
   Sprint 3: Download Handler ................. 2-3 days [PARALLEL START]
 
 Week 2:
-  Sprint 4: Find-in-Page .................... 1-2 days [after Sprint 0]
+  Sprint 4: Find-in-Page .................... 1-2 days [after Sprint 0] ✅ COMPLETE
   Sprint 5: Context Menus ................... 1 day    [after Sprint 0]
   Sprint 6: JS Dialogs + Shortcuts .......... 0.5 day  [after Sprint 3,4]
   Sprint 7: Light Wallet Polish .............. 2-3 days [PARALLEL]

@@ -180,6 +180,11 @@ CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
     return this;
 }
 
+CefRefPtr<CefFindHandler> SimpleHandler::GetFindHandler() {
+    LOG_DEBUG_BROWSER("🔍 GetFindHandler() called for role: " + role_);
+    return this;
+}
+
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
     return download_panel_browser_;
 }
@@ -3585,6 +3590,152 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== FIND IN PAGE (JavaScript-based) ==========
+    // CEF's CefBrowserHost::Find() / OnFindResult API does not callback in this
+    // build (GetFindHandler never queried). Use window.find() + JS match counting.
+
+    if (message_name == "find_text") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 4) {
+            std::string query = args->GetString(0).ToString();
+            bool forward = args->GetBool(1);
+            bool matchCase = args->GetBool(2);
+            bool findNext = args->GetBool(3);
+
+            LOG_DEBUG_BROWSER("🔍 find_text: query='" + query + "' forward=" + std::to_string(forward) +
+                              " findNext=" + std::to_string(findNext));
+
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                CefRefPtr<CefFrame> frame = active_tab->browser->GetMainFrame();
+                if (frame) {
+                    if (query.empty()) {
+                        // Clear selection/highlights
+                        frame->ExecuteJavaScript(
+                            "window.getSelection().removeAllRanges();",
+                            frame->GetURL(), 0);
+                    } else {
+                        // Escape query for embedding in JS string literal
+                        std::string escaped;
+                        for (char c : query) {
+                            if (c == '\\') escaped += "\\\\";
+                            else if (c == '\'') escaped += "\\'";
+                            else if (c == '\n') escaped += "\\n";
+                            else if (c == '\r') escaped += "\\r";
+                            else escaped += c;
+                        }
+
+                        // JavaScript find-in-page implementation:
+                        // 1. Inject CSS for yellow selection highlight
+                        // 2. Count matches with wrapAround=FALSE (stops at document end)
+                        // 3. Navigate with window.find() using wrapAround=true
+                        std::string js = "(function() {"
+                            "var q = '" + escaped + "';"
+                            "var cs = " + (matchCase ? "true" : "false") + ";"
+                            "var bk = " + (forward ? "false" : "true") + ";"
+                            "var fn = " + (findNext ? "true" : "false") + ";"
+
+                            // Inject yellow highlight CSS once
+                            "if (!document.__hodosFindStyle) {"
+                            "  var s = document.createElement('style');"
+                            "  s.textContent = '::selection { background: #FFFF00 !important; color: #000 !important; }';"
+                            "  document.head.appendChild(s);"
+                            "  document.__hodosFindStyle = s;"
+                            "}"
+
+                            // New search: count matches and go to first
+                            "if (!fn) {"
+                            // Count by walking forward with wrapAround=FALSE
+                            "  window.getSelection().removeAllRanges();"
+                            "  window.getSelection().collapse(document.body, 0);"
+                            "  var c = 0;"
+                            "  while (window.find(q, cs, false, false, false, true, false)) {"
+                            "    c++;"
+                            "    if (c > 10000) break;"
+                            "  }"
+                            "  window.__hodosFindCount = c;"
+                            // Navigate to first match
+                            "  window.getSelection().removeAllRanges();"
+                            "  window.getSelection().collapse(document.body, 0);"
+                            "  if (c > 0) {"
+                            "    window.find(q, cs, false, false, false, true, false);"
+                            "    window.__hodosFindOrdinal = 1;"
+                            "  } else {"
+                            "    window.__hodosFindOrdinal = 0;"
+                            "  }"
+                            "} else {"
+                            // findNext: navigate forward/backward with wrapAround=true
+                            "  var found = window.find(q, cs, bk, true, false, true, false);"
+                            "  if (found && window.__hodosFindCount > 0) {"
+                            "    if (bk) {"
+                            "      window.__hodosFindOrdinal--;"
+                            "      if (window.__hodosFindOrdinal < 1) window.__hodosFindOrdinal = window.__hodosFindCount;"
+                            "    } else {"
+                            "      window.__hodosFindOrdinal++;"
+                            "      if (window.__hodosFindOrdinal > window.__hodosFindCount) window.__hodosFindOrdinal = 1;"
+                            "    }"
+                            "  }"
+                            "}"
+
+                            "var cnt = window.__hodosFindCount || 0;"
+                            "var ord = window.__hodosFindOrdinal || 0;"
+                            "if (window.cefMessage) {"
+                            "  window.cefMessage.send('find_result_js', [cnt, ord]);"
+                            "}"
+                            "})();";
+                        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // Handle find results from tab's JavaScript (forwarded from tab browser)
+    if (message_name == "find_result_js") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 2) {
+            int count = args->GetInt(0);
+            int ordinal = args->GetInt(1);
+            LOG_DEBUG_BROWSER("🔍 find_result_js: count=" + std::to_string(count) +
+                              " ordinal=" + std::to_string(ordinal));
+
+            // Forward to header browser as find_result
+            nlohmann::json result;
+            result["count"] = count;
+            result["activeMatchOrdinal"] = ordinal;
+            result["finalUpdate"] = true;
+            std::string json_str = result.dump();
+
+            CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+            if (header) {
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("find_result");
+                msg->GetArgumentList()->SetString(0, json_str);
+                header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+            }
+        }
+        return true;
+    }
+
+    if (message_name == "find_stop") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            CefRefPtr<CefFrame> frame = active_tab->browser->GetMainFrame();
+            if (frame) {
+                frame->ExecuteJavaScript(
+                    "window.getSelection().removeAllRanges();"
+                    "if (document.__hodosFindStyle) {"
+                    "  document.__hodosFindStyle.remove();"
+                    "  document.__hodosFindStyle = null;"
+                    "}"
+                    "delete window.__hodosFindCount;"
+                    "delete window.__hodosFindOrdinal;",
+                    frame->GetURL(), 0);
+            }
+        }
+        return true;
+    }
+
     if (message_name == "download_panel_hide") {
 #ifdef _WIN32
         extern void HideDownloadPanelOverlay();
@@ -3716,6 +3867,27 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
         if (event.windows_key_code == 123) {
             ShowOrFocusDevTools(browser);
             return true; // Consume the event
+        }
+
+        // Ctrl+F / Cmd+F - Find in Page (tab browsers only)
+        if (event.windows_key_code == 'F' && role_.find("tab_") == 0) {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                // Send find_show to header browser so React can show the find bar
+                CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+                if (header) {
+                    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("find_show");
+                    header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                }
+                // Move CEF focus to header browser so keyboard input reaches the find bar
+                if (header) {
+                    header->GetHost()->SetFocus(true);
+                }
+                return true;
+            }
         }
 
         // Check for 'I' key shortcuts
@@ -3965,4 +4137,38 @@ void SimpleHandler::NotifyDownloadStateChanged() {
     }
 
     LOG_DEBUG_BROWSER("📥 Download state sent: " + std::to_string(active_downloads_.size()) + " items");
+}
+
+// ========== FIND HANDLER ==========
+
+void SimpleHandler::OnFindResult(CefRefPtr<CefBrowser> browser,
+                                  int identifier,
+                                  int count,
+                                  const CefRect& selectionRect,
+                                  int activeMatchOrdinal,
+                                  bool finalUpdate) {
+    CEF_REQUIRE_UI_THREAD();
+
+    LOG_INFO_BROWSER("🔍 OnFindResult: count=" + std::to_string(count) +
+                      " activeMatch=" + std::to_string(activeMatchOrdinal) +
+                      " final=" + std::to_string(finalUpdate) +
+                      " browser=" + std::to_string(browser->GetIdentifier()));
+
+    // Build JSON with find result data
+    nlohmann::json result;
+    result["count"] = count;
+    result["activeMatchOrdinal"] = activeMatchOrdinal;
+    result["finalUpdate"] = finalUpdate;
+
+    std::string json_str = result.dump();
+
+    // Send find_result to header browser (React find bar lives there)
+    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+    if (header) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("find_result");
+        msg->GetArgumentList()->SetString(0, json_str);
+        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+    } else {
+        LOG_WARNING_BROWSER("🔍 OnFindResult: header browser is null!");
+    }
 }

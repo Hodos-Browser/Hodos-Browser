@@ -134,7 +134,7 @@ First-time setup (requires CEF binaries already downloaded):
 | `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending` |
 | `cef-native/cef_browser_shell.cpp` | Windows entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs (incl. `g_download_panel_overlay_hwnd`); class: `Logger`; overlay functions: `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` |
 | `cef-native/cef_browser_shell_mac.mm` | macOS entry point (1754 lines); NSWindow/NSView hierarchy, 5 overlay types, event forwarding |
-| `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (9 interfaces incl. CefDownloadHandler); IPC dispatch, keyboard shortcuts, context menus, download tracking. Cross-platform wrapped. |
+| `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (10 interfaces incl. CefDownloadHandler, CefFindHandler); IPC dispatch, keyboard shortcuts (Ctrl+F), context menus, download tracking, find-in-page (JS `window.find()` — CEF Find API non-functional in CEF 136). Cross-platform wrapped. |
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs` |
 | `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`; singleton: `PendingRequestManager` (in PendingAuthRequest.h) |
 | `cef-native/include/core/PendingAuthRequest.h` | `PendingRequestManager` singleton — thread-safe request tracking for auth/domain/payment/cert approvals |
@@ -142,6 +142,7 @@ First-time setup (requires CEF binaries already downloaded):
 | `frontend/src/hooks/useHodosBrowser.ts` | React hook: `useHodosBrowser()` with `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
 | `frontend/src/hooks/useDownloads.ts` | React hook for download state; listens for `download_state_update` IPC; exposes control functions (cancel, pause, resume, open, showInFolder, clearCompleted) |
 | `frontend/src/pages/DownloadsOverlayRoot.tsx` | Download panel overlay page; lists active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder |
+| `frontend/src/components/FindBar.tsx` | Find-in-page bar component; Ctrl+F triggered; sends `find_text`/`find_stop` IPC; displays "X of Y" match count |
 | `frontend/src/bridge/initWindowBridge.ts` | Defines `window.hodosBrowser.navigation`, `window.hodosBrowser.overlay` via `cefMessage.send()` |
 
 ---

@@ -26,7 +26,7 @@
 | 1 | SSL Certificate Handling + Secure Indicator | **Complete** |
 | 2 | Permission Handler | Pending |
 | 3 | Download Handler | **Complete** |
-| 4 | Find-in-Page | Pending |
+| 4 | Find-in-Page | **Complete** |
 | 5 | Context Menu Enhancement | Pending |
 | 6 | JS Dialog Handler + Keyboard Shortcuts | Pending |
 | 7 | Light Wallet Polish | Pending |

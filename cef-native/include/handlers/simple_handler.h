@@ -12,6 +12,7 @@
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_permission_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_find_handler.h"
 #include <set>
 #include <map>
 #include <cstdint>
@@ -29,7 +30,8 @@ class SimpleHandler : public CefClient,
                       public CefDialogHandler,
                       public CefKeyboardHandler,
                       public CefPermissionHandler,
-                      public CefDownloadHandler {
+                      public CefDownloadHandler,
+                      public CefFindHandler {
 public:
     explicit SimpleHandler(const std::string& role);
 
@@ -43,6 +45,7 @@ public:
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override;
     CefRefPtr<CefPermissionHandler> GetPermissionHandler() override;
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override;
+    CefRefPtr<CefFindHandler> GetFindHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
     static CefRefPtr<CefBrowser> header_browser_;
     static CefRefPtr<CefBrowser> wallet_panel_browser_;
@@ -171,6 +174,14 @@ public:
     void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
                            CefRefPtr<CefDownloadItem> download_item,
                            CefRefPtr<CefDownloadItemCallback> callback) override;
+
+    // CefFindHandler methods
+    void OnFindResult(CefRefPtr<CefBrowser> browser,
+                      int identifier,
+                      int count,
+                      const CefRect& selectionRect,
+                      int activeMatchOrdinal,
+                      bool finalUpdate) override;
 
     // Download tracking
     struct DownloadInfo {

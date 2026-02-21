@@ -87,4 +87,24 @@
 
 ---
 
+## 7. CEF Wrapper (`libcef_dll_wrapper`) — Rebuild & macOS Readiness
+
+**Discovered**: Sprint 4 (Find-in-Page) — `CefBrowserHost::Find()` silently no-ops, `GetFindHandler()` never called
+
+**Root Cause**: The wrapper's `CMakeCache.txt` contained a stale path (`D:\BSVProjects\Browser-Project\Babbage-Browser\...`) from a previous machine/location. All wrapper rebuilds silently output to the old (nonexistent) path, so the `.lib` hadn't been updated in 5 months. Fresh `cmake` reconfigure fixed it — all 175 source files now compile correctly (60 cpptoc + 70 ctocpp + 15 views ctocpp + 7 views cpptoc + base/wrapper/utils).
+
+**CEF Find() API still non-functional**: Even after the wrapper rebuild, `CefBrowserHost::Find()` does not trigger `GetFindHandler()` or `OnFindResult` callbacks. The reason is unknown — possibly a CEF 136 regression or windowed-mode limitation. Sprint 4 was completed using a JavaScript-based fallback (`window.find()` + DOM counting).
+
+**Action items**:
+- [ ] **Investigate CEF Find() API**: Test with the cefclient sample app to determine if this is a CEF 136 bug or specific to our setup. If cefclient's find works, diff their handler registration against ours.
+- [ ] **Wrapper CMakeLists.txt — macOS readiness**: Current `wrapper/CMakeLists.txt` is Windows-only (`MSVC_RUNTIME_LIBRARY`, `WIN32_LEAN_AND_MEAN`, `NOMINMAX`). Needs platform conditionals:
+  - Wrap `MSVC_RUNTIME_LIBRARY` in `if(MSVC)`
+  - Wrap `WIN32_LEAN_AND_MEAN`/`NOMINMAX` in `if(WIN32)`
+  - Add macOS deployment target (`-mmacosx-version-min=10.15`)
+- [ ] **macOS wrapper rebuild required**: The wrapper MUST be rebuilt on macOS (static `.a` is platform-specific). The wrapper source is pure C++ and compiles cleanly cross-platform.
+- [ ] **macOS wrapper path**: Main `cef-native/CMakeLists.txt` already has separate paths (Windows: `cef-binaries/libcef_dll/wrapper/build/Release/`, macOS: `cef-binaries/build/libcef_dll_wrapper/`). Verify these are correct when setting up macOS.
+- [ ] **Never let CMakeCache go stale again**: If the project is moved/cloned to a new location, the wrapper CMakeCache must be deleted and reconfigured. Add this to onboarding/setup docs.
+
+---
+
 *Add new items below as they come up during sprints.*

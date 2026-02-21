@@ -12,6 +12,9 @@ export interface KeyboardShortcutHandlers {
   onFocusAddressBar?: () => void;
   onReload?: () => void;
 
+  // Find
+  onFindInPage?: () => void;
+
   // Browser
   onToggleDevTools?: () => void;
 }
@@ -77,6 +80,15 @@ export const useKeyboardShortcuts = (handlers: KeyboardShortcutHandlers) => {
       if ((ctrl && e.key === 'r') || e.key === 'F5') {
         e.preventDefault();
         handlers.onReload?.();
+        return;
+      }
+
+      // Find Shortcuts
+
+      // Ctrl+F / Cmd+F - Find in Page
+      if (ctrl && !shift && e.key === 'f') {
+        e.preventDefault();
+        handlers.onFindInPage?.();
         return;
       }
 
