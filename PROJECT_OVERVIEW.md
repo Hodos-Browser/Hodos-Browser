@@ -439,12 +439,14 @@ Transactions broadcast in BEEF (Background Evaluation Extended Format):
 - Defense-in-depth (C++ + Rust permission checks)
 - Price cache migration (frontend -> backend)
 - Branding/CSS (black + gold theme)
+- SSL certificate handling + secure connection indicator
+- Download handler (progress, pause/resume/cancel, overlay panel)
+- Find-in-page (Ctrl+F, JS `window.find()` fallback)
+- Context menus (5 context types, custom command IDs)
 
 ### In Progress (Browser Core MVP)
-- SSL certificate handling + secure connection indicator
 - Permission prompts (camera, mic, geolocation)
-- Download handler
-- Find-in-page, context menus, keyboard shortcuts
+- JS dialog handler + keyboard shortcuts
 - Ad & tracker blocking (adblock-rust FFI)
 - Light wallet polish
 

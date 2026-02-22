@@ -63,6 +63,10 @@ cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
 - Domain permission system with per-site spending limits
 - Auto-approve engine (rate limiting, session tracking, USD conversion)
 - Notification overlay (payment confirmation, certificate disclosure, rate limiting)
+- SSL certificate handling + secure connection indicator (padlock)
+- Download handler with progress tracking, pause/resume/cancel
+- Find-in-page (Ctrl+F) with match count and yellow highlight
+- Context menus (Back/Forward/Reload, Copy/Cut/Paste, Save Image, Open in New Tab, View Source)
 
 ### Wallet
 - HD wallet (BIP39 mnemonic, BRC-42 self-derivation, legacy BIP32 recovery)
@@ -78,13 +82,12 @@ cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
 - BSV/USD price cache (CryptoCompare + CoinGecko fallback)
 
 ### What's Next (MVP Roadmap)
-- SSL certificate handling + secure connection indicator
 - Camera/mic/geolocation permission prompts
-- Download handler
-- Find-in-page
-- Context menu enhancement
+- JS dialog handler (alert/confirm/prompt) + keyboard shortcuts
 - Ad & tracker blocking (adblock-rust FFI)
 - Light wallet polish (QR codes, button states, transaction progress)
+- Settings persistence + profile import
+- Third-party cookie blocking + fingerprinting protection
 
 See `development-docs/browser-core/implementation-plan.md` for the full sprint plan.
 
