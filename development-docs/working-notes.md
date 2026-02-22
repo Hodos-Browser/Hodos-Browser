@@ -107,4 +107,21 @@
 
 ---
 
+## 8. CEF Built-In Menu Command IDs — Auto-Disable Quirk
+
+**Discovered**: Sprint 5 (Context Menu Enhancement)
+
+**Problem**: When building a custom context menu by calling `model->Clear()` then re-adding items using CEF's built-in command IDs (`MENU_ID_BACK`, `MENU_ID_COPY`, `MENU_ID_PASTE`, `MENU_ID_SELECT_ALL`, etc. from `cef_types.h`), CEF's internal command state manager auto-disables them. All items appear greyed out and unclickable, even though they were explicitly added.
+
+**Root Cause**: CEF ties its built-in menu IDs to internal "command updater" infrastructure inherited from Chromium. This infrastructure manages enabled/disabled state based on browser state (e.g., clipboard contents, selection, navigation history). When the menu model is cleared and rebuilt, the state tracking gets out of sync — it sees the IDs but doesn't recognize them as freshly-added, so it applies stale disabled state.
+
+**Fix**: Use custom command IDs in the `MENU_ID_USER_FIRST` (26500+) range for ALL menu items and handle every command manually in `OnContextMenuCommand`. Navigation: `browser->GoBack()`, `browser->GoForward()`, `browser->Reload()`. Editing: `frame->ExecuteJavaScript("document.execCommand('copy')")`, etc. This gives us full control and avoids CEF's internal state management entirely.
+
+**Impact on future work**:
+- If we upgrade CEF binaries or build from source, this behavior may or may not change — worth re-testing with newer CEF versions.
+- If CEF ever fixes this (or if we find a different `model->Clear()` alternative), we could switch back to built-in IDs to get automatic state management for free.
+- The cefclient sample app does NOT call `model->Clear()` — it appends to the default menu, which is why their built-in IDs work. Our approach (full custom menu) is fundamentally different.
+
+---
+
 *Add new items below as they come up during sprints.*

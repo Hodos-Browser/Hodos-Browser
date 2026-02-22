@@ -80,9 +80,12 @@ Main Browser Process (cef_browser_shell.cpp)
 
 ### 2.3 SimpleHandler (CEF Client)
 
-`simple_handler.cpp` implements 8 CEF handler interfaces:
+`simple_handler.cpp` implements 10 CEF handler interfaces:
 - `CefClient`, `CefLifeSpanHandler`, `CefLoadHandler`, `CefDisplayHandler`
 - `CefKeyboardHandler`, `CefContextMenuHandler`, `CefRequestHandler`, `CefResourceRequestHandler`
+- `CefDownloadHandler`, `CefFindHandler`
+
+Context menus: 5 context types (page, selection, link, image, editable). All custom command IDs in `MENU_ID_USER_FIRST` range — CEF built-in IDs auto-disable after `model->Clear()`.
 
 IPC dispatch: `OnProcessMessageReceived()` handles 30+ message types from React overlays and the header.
 

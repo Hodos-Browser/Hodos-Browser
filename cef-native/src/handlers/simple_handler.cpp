@@ -3946,17 +3946,152 @@ CefRefPtr<CefRenderHandler> SimpleHandler::GetRenderHandler() {
     return render_handler_;
 }
 
+// All custom context menu command IDs (MENU_ID_USER_FIRST = 26500)
+// We use custom IDs for everything because CEF auto-disables built-in IDs
+// when the menu is cleared and rebuilt.
+static const int MENU_ID_DEV_TOOLS_INSPECT     = MENU_ID_USER_FIRST + 1;
+static const int MENU_ID_OPEN_LINK_NEW_TAB     = MENU_ID_USER_FIRST + 2;
+static const int MENU_ID_COPY_LINK_ADDRESS      = MENU_ID_USER_FIRST + 3;
+static const int MENU_ID_SAVE_IMAGE_AS          = MENU_ID_USER_FIRST + 4;
+static const int MENU_ID_COPY_IMAGE_URL         = MENU_ID_USER_FIRST + 5;
+static const int MENU_ID_OPEN_IMAGE_NEW_TAB     = MENU_ID_USER_FIRST + 6;
+static const int MENU_ID_CUSTOM_BACK            = MENU_ID_USER_FIRST + 10;
+static const int MENU_ID_CUSTOM_FORWARD         = MENU_ID_USER_FIRST + 11;
+static const int MENU_ID_CUSTOM_RELOAD          = MENU_ID_USER_FIRST + 12;
+static const int MENU_ID_CUSTOM_UNDO            = MENU_ID_USER_FIRST + 13;
+static const int MENU_ID_CUSTOM_REDO            = MENU_ID_USER_FIRST + 14;
+static const int MENU_ID_CUSTOM_CUT             = MENU_ID_USER_FIRST + 15;
+static const int MENU_ID_CUSTOM_COPY            = MENU_ID_USER_FIRST + 16;
+static const int MENU_ID_CUSTOM_PASTE           = MENU_ID_USER_FIRST + 17;
+static const int MENU_ID_CUSTOM_DELETE          = MENU_ID_USER_FIRST + 18;
+static const int MENU_ID_CUSTOM_SELECT_ALL      = MENU_ID_USER_FIRST + 19;
+static const int MENU_ID_CUSTOM_VIEW_SOURCE     = MENU_ID_USER_FIRST + 20;
+
 void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
                                         CefRefPtr<CefContextMenuParams> params,
                                         CefRefPtr<CefMenuModel> model) {
-    // Enable DevTools for all windows
-    // Add Inspect Element option - use custom menu ID
-    const int MENU_ID_DEV_TOOLS_INSPECT = MENU_ID_USER_FIRST + 1;
-    model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
-    model->AddSeparator();
+    // Clear default Chromium context menu — we build our own
+    model->Clear();
 
-    LOG_DEBUG_BROWSER("🔧 Context menu enabled - DevTools available");
+    // Only show full context menu for tab browsers (web content)
+    bool isTab = (role_.find("tab_") == 0);
+
+    if (!isTab) {
+        // For header, overlays, etc. — just show Inspect
+        model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
+        return;
+    }
+
+    // Detect context from CefContextMenuParams
+    cef_context_menu_type_flags_t flags = static_cast<cef_context_menu_type_flags_t>(params->GetTypeFlags());
+    bool hasLink = (flags & CM_TYPEFLAG_LINK) != 0;
+    bool hasSelection = (flags & CM_TYPEFLAG_SELECTION) != 0;
+    bool isEditable = (flags & CM_TYPEFLAG_EDITABLE) != 0;
+    bool hasMedia = (flags & CM_TYPEFLAG_MEDIA) != 0;
+    bool isImage = hasMedia && (params->GetMediaType() == CM_MEDIATYPE_IMAGE);
+
+    // --- Link context ---
+    if (hasLink) {
+        model->AddItem(MENU_ID_OPEN_LINK_NEW_TAB, "Open Link in New Tab");
+        model->AddItem(MENU_ID_COPY_LINK_ADDRESS, "Copy Link Address");
+        model->AddSeparator();
+    }
+
+    // --- Image context ---
+    if (isImage) {
+        model->AddItem(MENU_ID_SAVE_IMAGE_AS, "Save Image As...");
+        model->AddItem(MENU_ID_COPY_IMAGE_URL, "Copy Image Address");
+        model->AddItem(MENU_ID_OPEN_IMAGE_NEW_TAB, "Open Image in New Tab");
+        model->AddSeparator();
+    }
+
+    // --- Editable field context (input, textarea, contenteditable) ---
+    if (isEditable) {
+        model->AddItem(MENU_ID_CUSTOM_UNDO, "Undo");
+        model->AddItem(MENU_ID_CUSTOM_REDO, "Redo");
+        model->AddSeparator();
+        model->AddItem(MENU_ID_CUSTOM_CUT, "Cut");
+        model->AddItem(MENU_ID_CUSTOM_COPY, "Copy");
+        model->AddItem(MENU_ID_CUSTOM_PASTE, "Paste");
+        model->AddItem(MENU_ID_CUSTOM_DELETE, "Delete");
+        model->AddSeparator();
+        model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
+    }
+    // --- Text selection context (non-editable) ---
+    else if (hasSelection) {
+        model->AddItem(MENU_ID_CUSTOM_COPY, "Copy");
+        model->AddSeparator();
+        model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
+    }
+    // --- Plain page context (no selection, no link, no image) ---
+    else if (!hasLink && !isImage) {
+        model->AddItem(MENU_ID_CUSTOM_BACK, "Back");
+        model->AddItem(MENU_ID_CUSTOM_FORWARD, "Forward");
+        model->AddItem(MENU_ID_CUSTOM_RELOAD, "Reload");
+        model->AddSeparator();
+        model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
+        model->AddItem(MENU_ID_CUSTOM_VIEW_SOURCE, "View Page Source");
+    }
+
+    // --- Always add Inspect at the bottom ---
+    model->AddSeparator();
+    model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
+
+    // Enable/disable Back and Forward based on navigation state
+    if (model->GetIndexOf(MENU_ID_CUSTOM_BACK) != -1) {
+        model->SetEnabled(MENU_ID_CUSTOM_BACK, browser->CanGoBack());
+    }
+    if (model->GetIndexOf(MENU_ID_CUSTOM_FORWARD) != -1) {
+        model->SetEnabled(MENU_ID_CUSTOM_FORWARD, browser->CanGoForward());
+    }
+
+    LOG_DEBUG_BROWSER("Context menu built - flags: " + std::to_string(flags) +
+                      " link:" + std::to_string(hasLink) +
+                      " sel:" + std::to_string(hasSelection) +
+                      " edit:" + std::to_string(isEditable) +
+                      " img:" + std::to_string(isImage));
+}
+
+/// Helper: create a new tab with the given URL (cross-platform)
+static void CreateNewTabWithUrl(const std::string& url) {
+#ifdef _WIN32
+    extern HWND g_hwnd;
+    RECT rect;
+    GetClientRect(g_hwnd, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+    int tabHeight = height - shellHeight;
+    TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+#else
+    extern void* g_webview_view;
+    ViewDimensions dims = GetViewDimensions(g_webview_view);
+    TabManager::GetInstance().CreateTab(url, g_webview_view, 0, 0, dims.width, dims.height);
+#endif
+}
+
+/// Helper: copy a string to the OS clipboard (cross-platform)
+static void CopyTextToClipboard(const std::string& text) {
+#ifdef _WIN32
+    if (OpenClipboard(nullptr)) {
+        EmptyClipboard();
+        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+        if (hGlob) {
+            memcpy(GlobalLock(hGlob), text.c_str(), text.size() + 1);
+            GlobalUnlock(hGlob);
+            SetClipboardData(CF_TEXT, hGlob);
+        }
+        CloseClipboard();
+    }
+#elif defined(__APPLE__)
+    // macOS: Use pipe to pbcopy (avoids shell escaping / injection issues)
+    FILE* pipe = popen("pbcopy", "w");
+    if (pipe) {
+        fwrite(text.c_str(), 1, text.size(), pipe);
+        pclose(pipe);
+    }
+#endif
 }
 
 bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
@@ -3964,52 +4099,121 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
                                          CefRefPtr<CefContextMenuParams> params,
                                          int command_id,
                                          EventFlags event_flags) {
-    // Log all context menu commands for debugging
-    LOG_DEBUG_BROWSER("🔘 Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
+    LOG_DEBUG_BROWSER("Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
 
-    // Handle DevTools for all windows
-    if (command_id == (MENU_ID_USER_FIRST + 1)) {
-        // Open DevTools using helper
+    // --- Inspect Element (all windows) ---
+    if (command_id == MENU_ID_DEV_TOOLS_INSPECT) {
         ShowOrFocusDevTools(browser);
-        LOG_DEBUG_BROWSER("🔧 DevTools opened via context menu");
         return true;
     }
 
-    // Intercept "Open link in new tab" command (Chromium internal command ID: 50100)
-    // This is called when user right-clicks and selects "Open in new tab"
-    // OnBeforePopup is NOT called for this action, so we handle it here
-    if (command_id == 50100 && role_.find("tab_") == 0) {
+    // --- Open Link in New Tab ---
+    if (command_id == MENU_ID_OPEN_LINK_NEW_TAB || command_id == 50100) {
         std::string link_url = params->GetLinkUrl().ToString();
-
         if (!link_url.empty()) {
-            LOG_DEBUG_BROWSER("📑 Intercepting 'Open in new tab' command, creating tab for: " + link_url);
-
-#ifdef _WIN32
-            // Get main window dimensions
-            extern HWND g_hwnd;
-            RECT rect;
-            GetClientRect(g_hwnd, &rect);
-            int width = rect.right - rect.left;
-            int height = rect.bottom - rect.top;
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
-            int tabHeight = height - shellHeight;
-
-            // Create new tab with the link URL
-            TabManager::GetInstance().CreateTab(link_url, g_hwnd, 0, shellHeight, width, tabHeight);
-
-            // Return true to prevent default behavior (opening in separate window)
+            LOG_DEBUG_BROWSER("Opening link in new tab: " + link_url);
+            CreateNewTabWithUrl(link_url);
             return true;
-#else
-            // TODO(macOS): Implement "Open in new tab" handling for macOS
-            LOG_DEBUG_BROWSER("⚠️ 'Open in new tab' not implemented on macOS");
-            return false;
-#endif
-        } else {
-            LOG_DEBUG_BROWSER("⚠️ Command 50100 called but no link URL available");
         }
+        return false;
     }
 
-    // Allow default handling for other commands
+    // --- Copy Link Address ---
+    if (command_id == MENU_ID_COPY_LINK_ADDRESS) {
+        std::string link_url = params->GetLinkUrl().ToString();
+        if (!link_url.empty()) {
+            CopyTextToClipboard(link_url);
+            LOG_DEBUG_BROWSER("Copied link address: " + link_url);
+        }
+        return true;
+    }
+
+    // --- Save Image As (triggers download handler) ---
+    if (command_id == MENU_ID_SAVE_IMAGE_AS) {
+        std::string src_url = params->GetSourceUrl().ToString();
+        if (!src_url.empty()) {
+            browser->GetHost()->StartDownload(src_url);
+            LOG_DEBUG_BROWSER("Starting image download: " + src_url);
+        }
+        return true;
+    }
+
+    // --- Copy Image Address ---
+    if (command_id == MENU_ID_COPY_IMAGE_URL) {
+        std::string src_url = params->GetSourceUrl().ToString();
+        if (!src_url.empty()) {
+            CopyTextToClipboard(src_url);
+            LOG_DEBUG_BROWSER("Copied image address: " + src_url);
+        }
+        return true;
+    }
+
+    // --- Open Image in New Tab ---
+    if (command_id == MENU_ID_OPEN_IMAGE_NEW_TAB) {
+        std::string src_url = params->GetSourceUrl().ToString();
+        if (!src_url.empty()) {
+            LOG_DEBUG_BROWSER("Opening image in new tab: " + src_url);
+            CreateNewTabWithUrl(src_url);
+        }
+        return true;
+    }
+
+    // --- View Page Source (open view-source: URL in new tab) ---
+    if (command_id == MENU_ID_CUSTOM_VIEW_SOURCE) {
+        std::string current_url = browser->GetMainFrame()->GetURL().ToString();
+        if (!current_url.empty()) {
+            std::string source_url = "view-source:" + current_url;
+            LOG_DEBUG_BROWSER("Opening page source in new tab: " + source_url);
+            CreateNewTabWithUrl(source_url);
+        }
+        return true;
+    }
+
+    // --- Navigation commands ---
+    if (command_id == MENU_ID_CUSTOM_BACK) {
+        browser->GoBack();
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_FORWARD) {
+        browser->GoForward();
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_RELOAD) {
+        browser->Reload();
+        return true;
+    }
+
+    // --- Editing commands (executed via JavaScript in the focused frame) ---
+    if (command_id == MENU_ID_CUSTOM_UNDO) {
+        frame->ExecuteJavaScript("document.execCommand('undo')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_REDO) {
+        frame->ExecuteJavaScript("document.execCommand('redo')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_CUT) {
+        frame->ExecuteJavaScript("document.execCommand('cut')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_COPY) {
+        frame->ExecuteJavaScript("document.execCommand('copy')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_PASTE) {
+        frame->ExecuteJavaScript("document.execCommand('paste')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_DELETE) {
+        frame->ExecuteJavaScript("document.execCommand('delete')", frame->GetURL(), 0);
+        return true;
+    }
+    if (command_id == MENU_ID_CUSTOM_SELECT_ALL) {
+        frame->ExecuteJavaScript("document.execCommand('selectAll')", frame->GetURL(), 0);
+        return true;
+    }
+
+    // Allow default handling for any unrecognized commands
     return false;
 }
 

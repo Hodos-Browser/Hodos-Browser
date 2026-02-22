@@ -256,42 +256,58 @@ That's the entire implementation for MVP. Chrome's native UI handles the rest.
 
 ---
 
-## Sprint 5: Context Menu Enhancement (1 day)
+## Sprint 5: Context Menu Enhancement (1 day) ✅ COMPLETE
 
 **Goal**: Right-click menu has all standard browser actions.
 
-### Implementation
+### Implementation (Actual)
 
-Extend existing `OnBeforeContextMenu` and `OnContextMenuCommand` in `simple_handler.cpp`.
+Rebuilt `OnBeforeContextMenu` to detect context via `CefContextMenuParams::GetTypeFlags()` flags (`CM_TYPEFLAG_LINK`, `CM_TYPEFLAG_SELECTION`, `CM_TYPEFLAG_EDITABLE`, `CM_TYPEFLAG_MEDIA` + `CM_MEDIATYPE_IMAGE`) and construct context-appropriate menus. Cleared default Chromium menu (`model->Clear()`) for full control. Non-tab browsers (header, overlays) get only "Inspect Element".
 
-**Menu items by context**:
+**Menu items by context (actual)**:
 
 | Context | Items |
 |---------|-------|
-| Page (no selection) | Back, Forward, Reload, Separator, Select All, View Page Source, Inspect |
-| Text selected | Copy, Cut (if editable), Separator, Select All, Inspect |
+| Page (no selection) | Back, Forward, Reload, Separator, Select All, View Page Source, Separator, Inspect |
+| Text selected | Copy, Separator, Select All, Separator, Inspect |
 | Link | Open Link in New Tab, Copy Link Address, Separator, Inspect |
-| Image | Save Image As, Copy Image, Open Image in New Tab, Separator, Inspect |
-| Editable field | Cut, Copy, Paste, Separator, Select All, Inspect |
+| Image | Save Image As, Copy Image Address, Open Image in New Tab, Separator, Inspect |
+| Editable field | Undo, Redo, Separator, Cut, Copy, Paste, Delete, Separator, Select All, Separator, Inspect |
+| Link + Image (combined) | Link items, Image items, Separator, Inspect |
 
-**Custom command IDs**: Extend existing range (50100+). Use `CefBrowserHost::GetNavigationEntryCount()` to enable/disable Back/Forward.
+**Custom command IDs**: ALL menu items use `MENU_ID_USER_FIRST` range (26500+). 11 custom IDs: `+1` Inspect, `+2` Open Link New Tab, `+3` Copy Link Address, `+4` Save Image As, `+5` Copy Image URL, `+6` Open Image New Tab, `+10` Back, `+11` Forward, `+12` Reload, `+13`-`+19` Undo/Redo/Cut/Copy/Paste/Delete/Select All, `+20` View Source. **CEF built-in IDs intentionally avoided** — see working-notes.md #8 for the quirk where `model->Clear()` + built-in IDs causes CEF's internal command updater to auto-disable all items.
 
-**Copy/Cut/Paste**: Call `frame->ExecuteCommand("Copy")`, `frame->ExecuteCommand("Cut")`, `frame->ExecuteCommand("Paste")`.
+**All commands handled manually in `OnContextMenuCommand`**: Navigation via `browser->GoBack()`/`GoForward()`/`Reload()`. Editing via `frame->ExecuteJavaScript("document.execCommand('copy')")` etc. This gives full control and avoids CEF's internal state management.
+
+**Helpers added**:
+- `CreateNewTabWithUrl(url)` — cross-platform tab creation (extracts shared logic from duplicated `tab_create` / command-50100 patterns)
+- `CopyTextToClipboard(text)` — Windows: `OpenClipboard`/`SetClipboardData(CF_TEXT)`. macOS: pipe to `pbcopy` (safe from injection — uses `popen`/`fwrite`, not shell escaping)
+
+**Back/Forward enablement**: `model->SetEnabled(MENU_ID_CUSTOM_BACK, browser->CanGoBack())` — greyed out when no history.
+
+**Save Image As**: `browser->GetHost()->StartDownload(sourceUrl)` triggers existing `CefDownloadHandler` (Sprint 3) — Save As dialog and progress tracking come for free.
+
+**View Page Source**: Opens `view-source:` + current URL in a new tab via `CreateNewTabWithUrl()`.
+
+**Chromium command 50100**: Still intercepted (merged with `MENU_ID_OPEN_LINK_NEW_TAB`) for compatibility if CEF ever injects its own "Open in new tab" item.
 
 ### macOS Notes
 - Context menu APIs (`OnBeforeContextMenu`, `OnContextMenuCommand`) are cross-platform CEF.
-- `frame->ExecuteCommand("Copy")` etc. are cross-platform.
-- No platform-specific code needed.
+- `CreateNewTabWithUrl` uses `#ifdef _WIN32` / `#else` with existing `g_webview_view` + `GetViewDimensions()` pattern.
+- `CopyTextToClipboard` uses `popen("pbcopy", "w")` on macOS — safe, no shell escaping.
+- All commands handled manually — fully cross-platform (no CEF built-in ID dependency).
 
-### Files
-- `simple_handler.cpp` — Extend `OnBeforeContextMenu` + `OnContextMenuCommand`
+### Files Changed
+- `simple_handler.cpp` — Rebuilt `OnBeforeContextMenu` (context-aware menu building), rebuilt `OnContextMenuCommand` (17 custom handlers), added `CreateNewTabWithUrl()` and `CopyTextToClipboard()` helpers, added 11 named command ID constants
 
 ### Verification
-- [ ] Right-click on text → Copy works
-- [ ] Right-click on link → "Open in New Tab" and "Copy Link Address" work
-- [ ] Right-click on image → "Save Image As" triggers download
-- [ ] Right-click in text field → Cut/Copy/Paste work
-- [ ] "View Page Source" opens `view-source:` URL in new tab
+- [x] Right-click on text → Copy works
+- [x] Right-click on link → "Open in New Tab" and "Copy Link Address" work
+- [x] Right-click on image → "Save Image As" triggers download
+- [x] Right-click in text field → Cut/Copy/Paste work
+- [x] "View Page Source" opens `view-source:` URL in new tab
+- [x] Right-click on empty page → Back/Forward greyed when no history
+- [x] Right-click in header/overlay → only "Inspect Element" shown
 
 ---
 

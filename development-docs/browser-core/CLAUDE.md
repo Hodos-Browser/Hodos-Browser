@@ -27,7 +27,7 @@
 | 2 | Permission Handler | Pending |
 | 3 | Download Handler | **Complete** |
 | 4 | Find-in-Page | **Complete** |
-| 5 | Context Menu Enhancement | Pending |
+| 5 | Context Menu Enhancement | **Complete** |
 | 6 | JS Dialog Handler + Keyboard Shortcuts | Pending |
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking | Pending |
@@ -110,6 +110,11 @@ React → cefMessage.send("command_name", data)
 
 ### Sprint 3 (Downloads) — COMPLETE
 - Full implementation: `CefDownloadHandler` + overlay panel + progress icon + toast notifications. See `implementation-plan.md` Sprint 3 for details.
+
+### Sprint 5 (Context Menus) — COMPLETE
+- **All custom IDs**: CEF built-in menu IDs (`MENU_ID_BACK`, `MENU_ID_COPY`, etc.) auto-disable when used after `model->Clear()`. All 11 commands use `MENU_ID_USER_FIRST` range instead. See working-notes.md #8.
+- Editing commands use `frame->ExecuteJavaScript("document.execCommand('copy')")` etc.
+- `CreateNewTabWithUrl()` and `CopyTextToClipboard()` helpers added (cross-platform).
 
 ### Sprint 8 (Ad Blocking)
 - `adblock-rust` is a separate crate, NOT in the Rust wallet workspace.
