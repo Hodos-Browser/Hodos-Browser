@@ -28,7 +28,7 @@
 | 3 | Download Handler | **Complete** |
 | 4 | Find-in-Page | **Complete** |
 | 5 | Context Menu Enhancement | **Complete** |
-| 6 | JS Dialog Handler + Keyboard Shortcuts | Pending |
+| 6 | JS Dialog Handler + Keyboard Shortcuts | **Complete** |
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking | Pending |
 | 9 | Settings Persistence + Profile Import | Pending |
@@ -64,7 +64,7 @@ Every sprint MUST follow these rules to avoid accumulating macOS debt:
 ## Key Architecture Patterns for This Sprint
 
 ### SimpleHandler is the Hub
-`simple_handler.cpp` already implements 8 CEF handler interfaces. New handlers (CefDownloadHandler, CefPermissionHandler, CefFindHandler, CefJsDialogHandler) are added here by:
+`simple_handler.cpp` implements 11 CEF handler interfaces (CefClient + 10 handlers). New handlers are added here by:
 1. Adding `public CefXxxHandler` to the class declaration in `simple_handler.h`
 2. Adding `GetXxxHandler() override { return this; }` method
 3. Implementing the handler methods
@@ -115,6 +115,12 @@ React → cefMessage.send("command_name", data)
 - **All custom IDs**: CEF built-in menu IDs (`MENU_ID_BACK`, `MENU_ID_COPY`, etc.) auto-disable when used after `model->Clear()`. All 11 commands use `MENU_ID_USER_FIRST` range instead. See working-notes.md #8.
 - Editing commands use `frame->ExecuteJavaScript("document.execCommand('copy')")` etc.
 - `CreateNewTabWithUrl()` and `CopyTextToClipboard()` helpers added (cross-platform).
+
+### Sprint 6 (JS Dialog + Shortcuts) — COMPLETE
+- Chrome bootstrap handles `alert()`, `confirm()`, `prompt()` natively — no custom `OnJSDialog` needed.
+- `OnBeforeUnloadDialog` added: auto-allows navigation (suppresses malicious beforeunload traps).
+- 5 new keyboard shortcuts: Ctrl+H (history tab), Ctrl+J (download panel), Ctrl+D (bookmark), Alt+Left/Right (back/forward). All cross-platform with `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN`.
+- Many shortcuts already work natively (Ctrl+P print, zoom, DevTools) — only intercepted the ones that opened `chrome://` pages in separate windows.
 
 ### Sprint 8 (Ad Blocking)
 - `adblock-rust` is a separate crate, NOT in the Rust wallet workspace.

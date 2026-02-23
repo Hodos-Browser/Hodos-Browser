@@ -311,54 +311,49 @@ Rebuilt `OnBeforeContextMenu` to detect context via `CefContextMenuParams::GetTy
 
 ---
 
-## Sprint 6: JS Dialog Handler + Keyboard Shortcuts (0.5 day)
+## Sprint 6: JS Dialog Handler + Keyboard Shortcuts (0.5 day) — COMPLETE
 
 **Goal**: JavaScript alert/confirm/prompt work properly. Additional keyboard shortcuts.
 
-### 6a: JS Dialog Handler
+### 6a: JS Dialog Handler — Complete
 
-**Test first**: Chrome bootstrap may already handle `alert()`, `confirm()`, `prompt()` natively. If so, no implementation needed.
+**Tested**: Chrome bootstrap already handles `alert()`, `confirm()`, `prompt()` natively — no custom `OnJSDialog` needed.
 
-If needed: Add `CefJsDialogHandler` to `SimpleHandler`, return `false` from `OnJSDialog` for default handling.
+Added `CefJSDialogHandler` interface to `SimpleHandler` for `OnBeforeUnloadDialog` only:
+- Auto-allows navigation away (`callback->Continue(true, "")`) to suppress malicious beforeunload traps
+- `GetJSDialogHandler()` returns `this`; no `OnJSDialog` override (Chrome bootstrap handles it)
 
-Add `OnBeforeUnloadDialog` to suppress malicious "are you sure you want to leave?" traps — return `true` with `callback->Continue(true, "")` to always allow navigation.
+### 6b: Keyboard Shortcuts — Complete
 
-### 6b: Keyboard Shortcuts
+**Already working natively** (Chrome bootstrap, no custom code needed):
+- Ctrl+P (print), Ctrl+±/0 (zoom), Ctrl+scroll (zoom), DevTools (F12, Ctrl+Shift+I)
 
-Add to existing `OnPreKeyEvent` / `OnKeyEvent` in `simple_handler.cpp`:
+**Intercepted to prevent chrome:// pages opening in separate windows**:
 
-| Shortcut | Action | IPC/Call |
-|----------|--------|----------|
-| Ctrl+F | Show find bar | IPC `find_show` |
-| Ctrl+J | Show downloads | IPC `downloads_show` |
-| Ctrl+H | Open history tab | IPC `tab_create` with `/history` URL |
-| Ctrl+D | Bookmark current page | IPC `bookmark_add` with current URL/title |
-| Ctrl+P | Print | `browser->GetHost()->Print()` |
-| Ctrl++ | Zoom in | `browser->GetHost()->SetZoomLevel(current + 0.5)` |
-| Ctrl+- | Zoom out | `browser->GetHost()->SetZoomLevel(current - 0.5)` |
-| Ctrl+0 | Reset zoom | `browser->GetHost()->SetZoomLevel(0.0)` |
-| Alt+Left | Back | `browser->GoBack()` |
-| Alt+Right | Forward | `browser->GoForward()` |
+| Shortcut | Action | Implementation |
+|----------|--------|----------------|
+| Ctrl+H / Cmd+H | Open history in new tab | `CreateNewTabWithUrl("http://127.0.0.1:5137/history")` |
+| Ctrl+J / Cmd+J | Show download panel | Extern `ShowDownloadPanelOverlay()` (reuses existing overlay) |
+| Ctrl+D / Cmd+D | Bookmark current page | `BookmarkManager::GetInstance().AddBookmark()` via `TabManager::GetActiveTab()` |
+| Alt+Left | Navigate back | `activeTab->browser->GoBack()` |
+| Alt+Right | Navigate forward | `activeTab->browser->GoForward()` |
 
-### macOS Notes
-- `CefJsDialogHandler` is cross-platform CEF.
-- **Keyboard shortcuts are the main platform concern here**: Every `Ctrl+X` shortcut must also handle `Cmd+X` on macOS. Use platform detection in the key event handler:
-  ```cpp
-  #ifdef __APPLE__
-  bool isModifier = event.modifiers & EVENTFLAG_COMMAND_DOWN;
-  #else
-  bool isModifier = event.modifiers & EVENTFLAG_CONTROL_DOWN;
-  #endif
-  ```
-- `browser->GetHost()->Print()` and zoom methods are cross-platform.
+All shortcuts use `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN` vs `EVENTFLAG_CONTROL_DOWN` for cross-platform. Arrow key codes use hex literals (0x25/0x27) instead of `VK_LEFT`/`VK_RIGHT` for macOS compatibility.
 
-### Files
-- `simple_handler.h/cpp` — Add `CefJsDialogHandler` (if needed), extend key handling
+### Files Changed
+- `simple_handler.h` — Added `CefJSDialogHandler` interface, `GetJSDialogHandler()`, `OnBeforeUnloadDialog` declaration
+- `simple_handler.cpp` — `GetJSDialogHandler()`, `OnBeforeUnloadDialog` implementation, 5 new shortcuts in `OnPreKeyEvent`
 
 ### Verification
-- [ ] `alert("test")` → dialog appears
-- [ ] `confirm("ok?")` → dialog with OK/Cancel
-- [ ] Each new keyboard shortcut works
+- [x] `alert("test")` → dialog appears (Chrome bootstrap)
+- [x] `confirm("ok?")` → dialog with OK/Cancel (Chrome bootstrap)
+- [x] `prompt("name?")` → input dialog (Chrome bootstrap)
+- [x] beforeunload traps suppressed (auto-allow navigation)
+- [x] Ctrl+H opens history in new tab (not chrome://history in separate window)
+- [x] Ctrl+J opens download panel overlay (not chrome://downloads in separate window)
+- [x] Ctrl+D bookmarks current page via BookmarkManager
+- [x] Alt+Left/Right navigate back/forward
+- [x] Existing shortcuts still work (F12, Ctrl+F, Ctrl+Shift+I, Ctrl+P, zoom)
 
 ---
 

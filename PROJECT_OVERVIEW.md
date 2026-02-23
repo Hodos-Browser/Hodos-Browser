@@ -80,10 +80,10 @@ Main Browser Process (cef_browser_shell.cpp)
 
 ### 2.3 SimpleHandler (CEF Client)
 
-`simple_handler.cpp` implements 10 CEF handler interfaces:
+`simple_handler.cpp` implements 11 CEF handler interfaces:
 - `CefClient`, `CefLifeSpanHandler`, `CefLoadHandler`, `CefDisplayHandler`
 - `CefKeyboardHandler`, `CefContextMenuHandler`, `CefRequestHandler`, `CefResourceRequestHandler`
-- `CefDownloadHandler`, `CefFindHandler`
+- `CefDownloadHandler`, `CefFindHandler`, `CefJSDialogHandler`
 
 Context menus: 5 context types (page, selection, link, image, editable). All custom command IDs in `MENU_ID_USER_FIRST` range — CEF built-in IDs auto-disable after `model->Clear()`.
 
@@ -443,10 +443,11 @@ Transactions broadcast in BEEF (Background Evaluation Extended Format):
 - Download handler (progress, pause/resume/cancel, overlay panel)
 - Find-in-page (Ctrl+F, JS `window.find()` fallback)
 - Context menus (5 context types, custom command IDs)
+- JS dialog handling (beforeunload trap suppression, native alert/confirm/prompt)
+- Keyboard shortcuts (Ctrl+H history, Ctrl+J downloads, Ctrl+D bookmark, Alt+Left/Right nav)
 
 ### In Progress (Browser Core MVP)
 - Permission prompts (camera, mic, geolocation)
-- JS dialog handler + keyboard shortcuts
 - Ad & tracker blocking (adblock-rust FFI)
 - Light wallet polish
 

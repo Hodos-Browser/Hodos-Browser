@@ -124,4 +124,19 @@
 
 ---
 
+## 9. Dev Environment vs Production / Multi-Instance Behavior
+
+**Discovered**: Sprint 6 — user noticed Ctrl+H and Ctrl+J open separate Chromium windows (chrome://history, chrome://downloads) rather than our custom UI. DevTools also opens in a separate window.
+
+**Questions to investigate**:
+- **Separate windows**: Chromium's built-in shortcuts (Ctrl+H, Ctrl+J, Ctrl+D) open `chrome://` pages in new Chromium windows because we don't intercept them. We need to intercept these in `OnPreKeyEvent` and route to our own UI. DevTools opening in a separate window is normal CEF behavior (not a dev-only thing).
+- **Multiple instances**: Can the user run multiple instances of HodosBrowserShell.exe simultaneously? CEF uses a `cache_path` for the profile — if two instances share the same path, the second instance may fail or corrupt data (SQLite locking on wallet.db, CEF cookie DB conflicts). Need to either: (a) detect and block second instance (single-instance lock file/mutex), or (b) support multiple profiles with separate data directories.
+- **Dev vs production differences**: In production, the browser won't connect to `localhost:5137` (frontend dev server). Instead, the React build will be served from bundled files (or an embedded server). Need to decide: embed static files via `CefRegisterSchemeHandlerFactory` (custom scheme), or bundle a lightweight HTTP server? This affects how `http://127.0.0.1:5137/history` URLs work in production.
+- **Installation considerations**: See working-notes.md #3 (installer format, code signing) and #4 (auto-update). Additionally: how do we handle CEF subprocess executables in the installer? CEF requires specific helper processes alongside the main exe.
+- **Default browser registration**: Should we register as a default browser candidate? What system hooks are needed (Windows: registry entries, protocol handlers)?
+
+**Priority**: Post-MVP, but worth keeping in mind during development to avoid assumptions that break in production.
+
+---
+
 *Add new items below as they come up during sprints.*

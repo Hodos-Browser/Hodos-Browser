@@ -13,6 +13,7 @@
 #include "include/cef_permission_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_find_handler.h"
+#include "include/cef_jsdialog_handler.h"
 #include <set>
 #include <map>
 #include <cstdint>
@@ -31,7 +32,8 @@ class SimpleHandler : public CefClient,
                       public CefKeyboardHandler,
                       public CefPermissionHandler,
                       public CefDownloadHandler,
-                      public CefFindHandler {
+                      public CefFindHandler,
+                      public CefJSDialogHandler {
 public:
     explicit SimpleHandler(const std::string& role);
 
@@ -46,6 +48,7 @@ public:
     CefRefPtr<CefPermissionHandler> GetPermissionHandler() override;
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override;
     CefRefPtr<CefFindHandler> GetFindHandler() override;
+    CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
     static CefRefPtr<CefBrowser> header_browser_;
     static CefRefPtr<CefBrowser> wallet_panel_browser_;
@@ -182,6 +185,12 @@ public:
                       const CefRect& selectionRect,
                       int activeMatchOrdinal,
                       bool finalUpdate) override;
+
+    // CefJSDialogHandler methods
+    bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                              const CefString& message_text,
+                              bool is_reload,
+                              CefRefPtr<CefJSDialogCallback> callback) override;
 
     // Download tracking
     struct DownloadInfo {

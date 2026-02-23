@@ -185,6 +185,10 @@ CefRefPtr<CefFindHandler> SimpleHandler::GetFindHandler() {
     return this;
 }
 
+CefRefPtr<CefJSDialogHandler> SimpleHandler::GetJSDialogHandler() {
+    return this;
+}
+
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
     return download_panel_browser_;
 }
@@ -3851,6 +3855,9 @@ bool SimpleHandler::OnFileDialog(CefRefPtr<CefBrowser> browser,
     return false;
 }
 
+// Forward declaration — defined in context menu section below
+static void CreateNewTabWithUrl(const std::string& url);
+
 bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                                   const CefKeyEvent& event,
                                   CefEventHandle os_event,
@@ -3906,6 +3913,85 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 return true; // Consume the event
             }
 #endif
+        }
+
+        // Ctrl+H / Cmd+H — Open history in new tab (intercept chrome://history)
+        if (event.windows_key_code == 'H') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+H: Opening history in new tab");
+                CreateNewTabWithUrl("http://127.0.0.1:5137/history");
+                SimpleHandler::NotifyTabListChanged();
+                return true;
+            }
+        }
+
+        // Ctrl+J / Cmd+J — Show download panel (intercept chrome://downloads)
+        if (event.windows_key_code == 'J') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+J: Showing download panel");
+#ifdef _WIN32
+                extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+                extern void ShowDownloadPanelOverlay(int iconRightOffset);
+                extern HWND g_download_panel_overlay_hwnd;
+                extern HINSTANCE g_hInstance;
+
+                if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
+                    CreateDownloadPanelOverlay(g_hInstance, true, 0);
+                } else {
+                    ShowDownloadPanelOverlay(0);
+                }
+                NotifyDownloadStateChanged();
+#endif
+                return true;
+            }
+        }
+
+        // Ctrl+D / Cmd+D — Bookmark current page
+        if (event.windows_key_code == 'D') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                Tab* activeTab = TabManager::GetInstance().GetActiveTab();
+                if (activeTab && !activeTab->url.empty()) {
+                    LOG_INFO_BROWSER("⌨️ Ctrl+D: Bookmarking " + activeTab->url);
+                    std::vector<std::string> emptyTags;
+                    BookmarkManager::GetInstance().AddBookmark(
+                        activeTab->url, activeTab->title, -1, emptyTags);
+                }
+                return true;
+            }
+        }
+
+        // Alt+Left — Navigate back (active tab)
+        // 0x25 = VK_LEFT (cross-platform: CEF uses Windows key codes on all platforms)
+        if (event.windows_key_code == 0x25 && (event.modifiers & EVENTFLAG_ALT_DOWN)) {
+            Tab* activeTab = TabManager::GetInstance().GetActiveTab();
+            if (activeTab && activeTab->browser && activeTab->can_go_back) {
+                LOG_DEBUG_BROWSER("⌨️ Alt+Left: GoBack");
+                activeTab->browser->GoBack();
+            }
+            return true;
+        }
+
+        // Alt+Right — Navigate forward (active tab)
+        // 0x27 = VK_RIGHT (cross-platform: CEF uses Windows key codes on all platforms)
+        if (event.windows_key_code == 0x27 && (event.modifiers & EVENTFLAG_ALT_DOWN)) {
+            Tab* activeTab = TabManager::GetInstance().GetActiveTab();
+            if (activeTab && activeTab->browser && activeTab->can_go_forward) {
+                LOG_DEBUG_BROWSER("⌨️ Alt+Right: GoForward");
+                activeTab->browser->GoForward();
+            }
+            return true;
         }
     }
 
@@ -4375,4 +4461,21 @@ void SimpleHandler::OnFindResult(CefRefPtr<CefBrowser> browser,
     } else {
         LOG_WARNING_BROWSER("🔍 OnFindResult: header browser is null!");
     }
+}
+
+// ========== JS DIALOG HANDLER ==========
+
+bool SimpleHandler::OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                                          const CefString& message_text,
+                                          bool is_reload,
+                                          CefRefPtr<CefJSDialogCallback> callback) {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Auto-allow navigation away from pages with beforeunload handlers.
+    // This prevents malicious sites from trapping users with repeated
+    // "Are you sure you want to leave?" dialogs.
+    // Chrome's native dialog handling covers legitimate alert/confirm/prompt.
+    LOG_DEBUG_BROWSER("🔒 OnBeforeUnloadDialog: auto-allowing navigation (suppressing beforeunload trap)");
+    callback->Continue(true, CefString());
+    return true;
 }

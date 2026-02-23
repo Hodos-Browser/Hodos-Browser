@@ -67,6 +67,8 @@ cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
 - Download handler with progress tracking, pause/resume/cancel
 - Find-in-page (Ctrl+F) with match count and yellow highlight
 - Context menus (Back/Forward/Reload, Copy/Cut/Paste, Save Image, Open in New Tab, View Source)
+- JS dialog handling (beforeunload trap suppression)
+- Keyboard shortcuts (Ctrl+H/J/D, Alt+Left/Right back/forward)
 
 ### Wallet
 - HD wallet (BIP39 mnemonic, BRC-42 self-derivation, legacy BIP32 recovery)
@@ -83,7 +85,6 @@ cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
 
 ### What's Next (MVP Roadmap)
 - Camera/mic/geolocation permission prompts
-- JS dialog handler (alert/confirm/prompt) + keyboard shortcuts
 - Ad & tracker blocking (adblock-rust FFI)
 - Light wallet polish (QR codes, button states, transaction progress)
 - Settings persistence + profile import
