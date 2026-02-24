@@ -30,7 +30,7 @@
 | 5 | Context Menu Enhancement | **Complete** |
 | 6 | JS Dialog Handler + Keyboard Shortcuts | **Complete** |
 | 7 | Light Wallet Polish | Pending |
-| 8 | Ad & Tracker Blocking | Pending |
+| 8 | Ad & Tracker Blocking | **Complete** (8a-8f) |
 | 9 | Settings Persistence + Profile Import | Pending |
 | 10 | Third-Party Cookie Blocking + Fingerprinting | Pending |
 
@@ -122,11 +122,24 @@ React → cefMessage.send("command_name", data)
 - 5 new keyboard shortcuts: Ctrl+H (history tab), Ctrl+J (download panel), Ctrl+D (bookmark), Alt+Left/Right (back/forward). All cross-platform with `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN`.
 - Many shortcuts already work natively (Ctrl+P print, zoom, DevTools) — only intercepted the ones that opened `chrome://` pages in separate windows.
 
-### Sprint 8 (Ad Blocking)
-- `adblock-rust` is a separate crate, NOT in the Rust wallet workspace.
-- FFI static library linked into C++ — NOT HTTP to Rust.
+### Sprint 8 (Ad Blocking) — COMPLETE
+- `adblock-engine/` is a **separate Rust project** at repo root (NOT in `rust-wallet`). Runs on **port 3302**.
+- **Crate pinning**: `adblock = "=0.10.3"` (0.10.4+ needs unstable Rust feature), `rmp = "=0.8.14"`, `default-features = false` (keeps `Send+Sync` by disabling `unsync-regex-caching`). Serialization uses `.serialize()` not `.serialize_raw()`.
+- C++ starts it via `StartAdblockServer()` (same `CreateProcessA` + Job Object pattern as the wallet).
+- C++ calls `POST localhost:3302/check` via sync WinHTTP with `AdblockCache` singleton (per-URL result cache + per-browser blocked count tracking).
+- Hook point: `GetResourceRequestHandler()` in `simple_handler.cpp`, BEFORE wallet interception check.
+- **Per-site toggle (8c)**: `adblock_enabled` column in `domain_permissions` table (migration V5). C++ checks `DomainPermissionCache` before adblock check. Frontend shield icon (`SecurityIcon`) with blocked count badge + dropdown toggle.
+- IPC: `adblock_get_blocked_count`, `adblock_reset_blocked_count`, `adblock_site_toggle` → renderer response handlers.
+- Rust endpoints: `GET/POST /adblock/site-toggle` on port 3301 (wallet backend manages DB).
+- **8d (COMPLETE)**: Filter list auto-update — background tokio task every 6 hours, parses `! Expires:` headers from filter lists, `needs_update()` check, `rebuild_engine()` hot-swap under `RwLock`. Engine version counter in `/check` + `/status` responses; C++ `AdblockCache` detects version change on cache-miss calls and invalidates URL cache.
+- **8e (COMPLETE)**: Three-layer ad blocking:
+  - **Cosmetic CSS filtering**: Hostname-specific + generic selectors injected via IPC. Two-phase: Phase 1 on page load, Phase 2 after DOM class/ID collection.
+  - **Scriptlet injection**: uBlock scriptlets.js (pinned to v1.48.4) + 6 bundled extra scriptlets. Pre-cached via `OnBeforeBrowse` (timing fix), injected in `OnContextCreated` before page JS, fallback in `OnLoadingStateChange`.
+  - **CefResponseFilter** (`AdblockResponseFilter`): Network-level YouTube ad blocking. Buffers YouTube API JSON and main-frame HTML responses, renames ad-configuration keys (`adPlacements` → `adPlacements_`, etc.). Primary YouTube ad blocking mechanism — no timing issues since it runs before JS sees the data.
+- **8f (COMPLETE)**: Unified Privacy Shield Panel — single shield icon merging adblock + cookie blocking. OSR overlay panel with master toggle, individual toggles, blocked counts. Known UI polish issues deferred to `ux-ui-cleanup.md`.
 - Filter lists stored in `%APPDATA%/HodosBrowser/adblock/`.
-- Hook point: `OnBeforeResourceLoad` in `HttpRequestInterceptor.cpp`, BEFORE wallet interception check.
+- Non-critical: if engine fails to start, browsing works without ad blocking.
+- **Performance note**: CefResponseFilter buffering adds YouTube page load latency. Optimization opportunities tracked in `ux-ui-cleanup.md`.
 
 ---
 
@@ -136,7 +149,7 @@ React → cefMessage.send("command_name", data)
 |------|---------|
 | `simple_handler.h` | 1, 2, 3, 4, 6 |
 | `simple_handler.cpp` | 1, 2, 3, 4, 5, 6 |
-| `HttpRequestInterceptor.cpp` | 0, 8, 10 |
+| `HttpRequestInterceptor.cpp` | 0, 8, 8c, 10 |
 | `cef_browser_shell.cpp` | 0, 1, 6, 9 |
 | `simple_render_process_handler.cpp` | 10 |
 | `frontend/src/components/MainBrowserView.tsx` | 1, 4 |

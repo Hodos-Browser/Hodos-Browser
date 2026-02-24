@@ -128,6 +128,13 @@ public:
         const CefString& request_initiator,
         bool& disable_default_handling) override;
 
+    // CefRequestHandler - Early navigation hook for scriptlet pre-caching
+    bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefRequest> request,
+                        bool user_gesture,
+                        bool is_redirect) override;
+
     // CefRequestHandler - SSL certificate error handling
     bool OnCertificateError(CefRefPtr<CefBrowser> browser,
                             cef_errorcode_t cert_error,
@@ -237,6 +244,9 @@ private:
      * @return Tab ID, or -1 if not a tab role
      */
     static int ExtractTabIdFromRole(const std::string& role);
+
+    // Cosmetic filtering dedup: last URL we injected cosmetic rules for (per-handler instance)
+    std::string last_cosmetic_url_;
 
     // Domains user has chosen to proceed past cert errors (session-only)
     static std::set<std::string> allowed_cert_exceptions_;

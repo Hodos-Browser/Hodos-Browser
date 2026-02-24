@@ -651,6 +651,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V4 applied");
         }
 
+        if current_version < 5 {
+            info!("   Applying migration V5 (per-site ad blocking toggle)...");
+            migrations::migrate_v4_to_v5(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (5)", [])?;
+            info!("   ✅ Schema V5 applied");
+        }
+
         Ok(())
     }
 

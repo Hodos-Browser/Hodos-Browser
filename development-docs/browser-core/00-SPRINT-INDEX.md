@@ -21,6 +21,22 @@ Assess what we have, identify gaps, research how Chrome and Brave handle core br
 | **C** | Gap Analysis & Prioritization | ✅ Complete | What's missing for MVP, ordered priority list |
 | **D** | Implementation Planning | ✅ Complete | Break into sprint-sized chunks with dependencies |
 
+## Implementation Sprints
+
+| Sprint | Name | Status |
+|--------|------|--------|
+| 0 | Safety & Quick Wins | ✅ Complete |
+| 1 | SSL Certificate Handling + Secure Indicator | ✅ Complete |
+| 2 | Permission Handler | Pending |
+| 3 | Download Handler | ✅ Complete |
+| 4 | Find-in-Page | ✅ Complete |
+| 5 | Context Menu Enhancement | ✅ Complete |
+| 6 | JS Dialog Handler + Keyboard Shortcuts | ✅ Complete |
+| 7 | Light Wallet Polish | Pending |
+| 8 | Ad & Tracker Blocking (8a-8f) | ✅ Complete |
+| 9 | Settings Persistence + Profile Import | Pending |
+| 10 | Third-Party Cookie Blocking + Fingerprinting | Pending |
+
 ---
 
 ## Phase A: Audit & Inventory

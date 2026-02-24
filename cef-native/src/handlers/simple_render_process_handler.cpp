@@ -21,6 +21,15 @@
 
 #include "../../include/core/Logger.h"
 
+#include <unordered_map>
+#include <mutex>
+
+// Static cache for pre-loaded cosmetic scriptlets (8e-2).
+// Browser process sends scriptlets via IPC before page loads;
+// OnContextCreated injects them synchronously before page JS runs.
+static std::mutex s_scriptCacheMutex;
+static std::unordered_map<std::string, std::string> s_scriptCache; // URL → scriptlet JS
+
 // Convenience macros for easier logging
 #define LOG_DEBUG_RENDER(msg) Logger::Log(msg, 0, 1)
 #define LOG_INFO_RENDER(msg) Logger::Log(msg, 1, 1)
@@ -549,8 +558,21 @@ void SimpleRenderProcessHandler::OnContextCreated(
     LOG_DEBUG_RENDER("🔧 RENDER PROCESS HANDLER IS WORKING!");
     LOG_DEBUG_RENDER("🔧 THIS IS THE RENDER PROCESS HANDLER!");
 
-    // Check if this is an overlay browser (any browser that's not the main root browser)
+    // 8e-2: Inject pre-cached scriptlets IMMEDIATELY — before any page JS runs.
+    // This is the earliest possible injection point in CEF.
     std::string url = frame->GetURL().ToString();
+    if (!url.empty() && url.find("127.0.0.1") == std::string::npos) {
+        std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+        auto it = s_scriptCache.find(url);
+        if (it != s_scriptCache.end() && !it->second.empty()) {
+            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + url +
+                " (" + std::to_string(it->second.size()) + " chars)");
+            frame->ExecuteJavaScript(it->second, url, 0);
+            s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
+        }
+    }
+
+    // Check if this is an overlay browser (any browser that's not the main root browser)
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
     bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
     bool isOmniboxOverlay = (url.find("/omnibox") != std::string::npos);
@@ -859,6 +881,76 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                 }));
             )";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        // ========== COSMETIC FILTERING (Sprint 8e) ==========
+
+        // 8e-2: Pre-cache scriptlets for early injection in OnContextCreated
+        if (message_name == "preload_cosmetic_script") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string url = args->GetString(0);
+            std::string script = args->GetString(1);
+
+            if (!url.empty() && !script.empty()) {
+                std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+                s_scriptCache[url] = script;
+                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + url +
+                    " (" + std::to_string(script.size()) + " chars)");
+            }
+            return true;
+        }
+
+        if (message_name == "inject_cosmetic_css") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string selectors = args->GetString(0);
+
+            if (!selectors.empty()) {
+                LOG_DEBUG_RENDER("🎨 Injecting cosmetic CSS (" + std::to_string(selectors.size()) + " chars)");
+
+                // Escape selectors for safe JS string embedding
+                std::string escaped;
+                escaped.reserve(selectors.size() + 64);
+                for (char c : selectors) {
+                    switch (c) {
+                        case '\\': escaped += "\\\\"; break;
+                        case '\'': escaped += "\\'"; break;
+                        case '\n': escaped += "\\n"; break;
+                        case '\r': escaped += "\\r"; break;
+                        default: escaped += c; break;
+                    }
+                }
+
+                // Inject or append to <style> tag to hide matched elements
+                std::string js = R"(
+                    (function() {
+                        var rule = ')" + escaped + R"( { display: none !important; }';
+                        var existing = document.getElementById('hodos-cosmetic-css');
+                        if (existing) {
+                            existing.textContent += '\n' + rule;
+                        } else {
+                            var style = document.createElement('style');
+                            style.id = 'hodos-cosmetic-css';
+                            style.textContent = rule;
+                            (document.head || document.documentElement).appendChild(style);
+                        }
+                    })();
+                )";
+                frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            }
+            return true;
+        }
+
+        if (message_name == "inject_cosmetic_script") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string script = args->GetString(0);
+
+            if (!script.empty()) {
+                LOG_DEBUG_RENDER("💉 Injecting cosmetic scriptlets (" + std::to_string(script.size()) + " chars)");
+
+                // Execute scriptlets directly — they are self-contained JS from adblock engine
+                frame->ExecuteJavaScript(script, "about:blank", 0);
+            }
             return true;
         }
 
@@ -1599,6 +1691,44 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0).ToString();
         std::string escaped = escapeJsonForJs(responseJson);
         std::string js = "if (window.onCookieResetBlockedCountResponse) { window.onCookieResetBlockedCountResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "cookie_check_site_allowed_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onCookieCheckSiteAllowedResponse) { window.onCookieCheckSiteAllowedResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    // ========== ADBLOCK RESPONSE HANDLERS (Sprint 8c) ==========
+
+    if (message_name == "adblock_blocked_count_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockBlockedCountResponse) { window.onAdblockBlockedCountResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "adblock_reset_blocked_count_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockResetBlockedCountResponse) { window.onAdblockResetBlockedCountResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "adblock_site_toggle_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockSiteToggleResponse) { window.onAdblockSiteToggleResponse(JSON.parse('" + escaped + "')); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
         return true;
     }

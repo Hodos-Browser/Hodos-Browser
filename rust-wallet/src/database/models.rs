@@ -247,6 +247,7 @@ pub struct DomainPermission {
     pub per_tx_limit_cents: i64,        // USD cents per transaction
     pub per_session_limit_cents: i64,   // USD cents per browser session
     pub rate_limit_per_min: i64,
+    pub adblock_enabled: bool,          // Ad blocking enabled for this domain (default true)
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -266,6 +267,7 @@ impl DomainPermission {
             per_tx_limit_cents: 10,
             per_session_limit_cents: 300,
             rate_limit_per_min: 10,
+            adblock_enabled: true,
             created_at: now,
             updated_at: now,
         }

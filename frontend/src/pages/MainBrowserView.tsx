@@ -4,11 +4,6 @@ import {
     Toolbar,
     IconButton,
     Badge,
-    Menu,
-    MenuItem,
-    ListItemIcon,
-    ListItemText,
-    Divider,
     Snackbar,
     Alert,
     CircularProgress,
@@ -19,18 +14,17 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import HistoryIcon from '@mui/icons-material/History';
 import SettingsIcon from '@mui/icons-material/Settings';
-import ShieldIcon from '@mui/icons-material/Shield';
-import BlockIcon from '@mui/icons-material/Block';
-import CookieIcon from '@mui/icons-material/Cookie';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import DownloadIcon from '@mui/icons-material/Download';
+import SecurityIcon from '@mui/icons-material/Security';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useCookieBlocking } from '../hooks/useCookieBlocking';
+import { useAdblock } from '../hooks/useAdblock';
 import { useBackgroundBalancePoller } from '../hooks/useBackgroundBalancePoller';
 import { useDownloads } from '../hooks/useDownloads';
 import { TabBar } from '../components/TabBar';
@@ -90,14 +84,45 @@ const MainBrowserView: React.FC = () => {
         closeActiveTab,
     } = useTabManager();
 
-    // Cookie blocking
+    // Cookie blocking (badge count + polling)
     const {
         blockedCount,
-        blockedDomains,
         fetchBlockedCount,
-        blockDomain,
         resetBlockedCount,
     } = useCookieBlocking();
+
+    // Ad blocking (badge count + site check)
+    const {
+        blockedCount: adblockBlockedCount,
+        resetBlockedCount: resetAdblockCount,
+        checkSiteAdblock,
+    } = useAdblock();
+
+    // Shield badge — show dot only when count is actively increasing, fade after settling
+    const totalBlocked = adblockBlockedCount + blockedCount;
+    const [shieldDotVisible, setShieldDotVisible] = useState(false);
+    const prevTotalRef = useRef(0);
+    const shieldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        if (totalBlocked > prevTotalRef.current && totalBlocked > 0) {
+            // Count increased — show dot
+            setShieldDotVisible(true);
+            // Reset hide timer
+            if (shieldTimerRef.current) clearTimeout(shieldTimerRef.current);
+            shieldTimerRef.current = setTimeout(() => {
+                setShieldDotVisible(false);
+            }, 5000);
+        } else if (totalBlocked === 0) {
+            // Counts reset (navigation) — hide immediately
+            setShieldDotVisible(false);
+            if (shieldTimerRef.current) {
+                clearTimeout(shieldTimerRef.current);
+                shieldTimerRef.current = null;
+            }
+        }
+        prevTotalRef.current = totalBlocked;
+    }, [totalBlocked]);
 
     // Downloads — only need icon visibility state; overlay handles controls
     const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
@@ -184,10 +209,7 @@ const MainBrowserView: React.FC = () => {
         [hasDownloads, downloads]
     );
 
-    // Shield menu state
-    const [shieldMenuAnchor, setShieldMenuAnchor] = useState<null | HTMLElement>(null);
-
-    // Toast state
+    // Toast state (for misc actions)
     const [toastOpen, setToastOpen] = useState(false);
     const [toastMessage, setToastMessage] = useState('');
 
@@ -203,6 +225,13 @@ const MainBrowserView: React.FC = () => {
             return '';
         }
     }, [address]);
+
+    // Check adblock site toggle when domain changes
+    useEffect(() => {
+        if (currentDomain) {
+            checkSiteAdblock(currentDomain);
+        }
+    }, [currentDomain, checkSiteAdblock]);
 
     // Derive security state from active tab
     const activeTab = useMemo(() => tabs.find(t => t.id === activeTabId), [tabs, activeTabId]);
@@ -222,12 +251,6 @@ const MainBrowserView: React.FC = () => {
         }
         return 'none';
     }, [address, activeTab?.hasCertError]);
-
-    // Check if current domain is already blocked
-    const isCurrentDomainBlocked = useMemo(() => {
-        if (!currentDomain) return true; // Disable if no valid domain
-        return blockedDomains.some((d) => d.domain === currentDomain);
-    }, [currentDomain, blockedDomains]);
 
     // Poll for blocked count every 3 seconds
     React.useEffect(() => {
@@ -258,15 +281,14 @@ const MainBrowserView: React.FC = () => {
         }
     }, [activeTabId, tabs, isEditingAddress]);
 
-    // Reset blocked count on navigation (when active tab URL changes)
+    // Reset blocked counts on navigation (when active tab URL changes)
     React.useEffect(() => {
         const activeTab = tabs.find(t => t.id === activeTabId);
         if (activeTab?.url) {
-            resetBlockedCount().catch(() => {
-                // Silently ignore reset errors
-            });
+            resetBlockedCount().catch(() => {});
+            resetAdblockCount().catch(() => {});
         }
-    }, [activeTabId, tabs, resetBlockedCount]);
+    }, [activeTabId, tabs, resetBlockedCount, resetAdblockCount]);
 
     // Listen for autocomplete suggestions from omnibox overlay
     React.useEffect(() => {
@@ -341,28 +363,6 @@ const MainBrowserView: React.FC = () => {
             // It's a search query - search Google
             const searchUrl = toGoogleSearchUrl(input);
             navigate(searchUrl);
-        }
-    };
-
-    const handleQuickBlock = async () => {
-        setShieldMenuAnchor(null);
-        if (!currentDomain) return;
-        try {
-            await blockDomain(currentDomain, false);
-            setToastMessage(`Blocked: ${currentDomain}`);
-            setToastOpen(true);
-        } catch {
-            setToastMessage('Failed to block domain');
-            setToastOpen(true);
-        }
-    };
-
-    const handleViewCookies = () => {
-        setShieldMenuAnchor(null);
-        if (window.cefMessage) {
-            window.cefMessage.send('cookie_panel_show', '0');
-        } else {
-            console.error('window.cefMessage not available');
         }
     };
 
@@ -654,55 +654,41 @@ const MainBrowserView: React.FC = () => {
                     <HistoryIcon fontSize="small" />
                 </IconButton>
 
-                {/* Shield Badge - Cookie Blocking */}
+                {/* Privacy Shield - unified ad + cookie blocking panel */}
                 <IconButton
                     onClick={(e) => {
-                        console.log('Shield clicked - sending cookie_panel_show');
                         const rect = e.currentTarget.getBoundingClientRect();
                         const dpr = window.devicePixelRatio || 1;
                         const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
                         if (window.cefMessage) {
-                            window.cefMessage.send('cookie_panel_show', iconRightOffset.toString());
+                            window.cefMessage.send('cookie_panel_show', [iconRightOffset.toString(), currentDomain]);
                         }
                     }}
                     size="small"
-                    title="Cookie blocking"
+                    title="Privacy Shield"
                     sx={{
                         flexShrink: 0,
-                        color: blockedCount > 0 ? 'primary.main' : 'rgba(0, 0, 0, 0.6)',
+                        color: 'rgba(0, 0, 0, 0.6)',
                         '&:hover': {
                             backgroundColor: 'rgba(0, 0, 0, 0.04)',
                         }
                     }}
                 >
                     <Badge
-                        badgeContent={blockedCount}
-                        color="error"
-                        max={99}
-                        invisible={blockedCount === 0}
-                        sx={{ '& .MuiBadge-badge': { fontSize: '0.65rem', minWidth: 16, height: 16 } }}
+                        variant="dot"
+                        invisible={!shieldDotVisible}
+                        sx={{
+                            '& .MuiBadge-badge': {
+                                backgroundColor: '#188038',
+                                minWidth: 8,
+                                height: 8,
+                                borderRadius: '50%',
+                            }
+                        }}
                     >
-                        <ShieldIcon fontSize="small" />
+                        <SecurityIcon fontSize="small" />
                     </Badge>
                 </IconButton>
-                <Menu
-                    anchorEl={shieldMenuAnchor}
-                    open={Boolean(shieldMenuAnchor)}
-                    onClose={() => setShieldMenuAnchor(null)}
-                >
-                    <MenuItem onClick={handleQuickBlock} disabled={isCurrentDomainBlocked}>
-                        <ListItemIcon><BlockIcon fontSize="small" /></ListItemIcon>
-                        <ListItemText>{currentDomain ? `Block ${currentDomain}` : 'No domain to block'}</ListItemText>
-                    </MenuItem>
-                    <MenuItem onClick={handleViewCookies}>
-                        <ListItemIcon><CookieIcon fontSize="small" /></ListItemIcon>
-                        <ListItemText>View Cookies</ListItemText>
-                    </MenuItem>
-                    <Divider />
-                    <MenuItem disabled>
-                        <ListItemText>Blocked: {blockedCount} cookies</ListItemText>
-                    </MenuItem>
-                </Menu>
 
                 {/* Settings Button */}
                 <IconButton

@@ -6,6 +6,7 @@
 #ifdef _WIN32
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
+    #include "../../include/core/AdblockCache.h"
     #include <windows.h>
 #endif
 
@@ -469,6 +470,33 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     LOG_DEBUG_BROWSER("📡 Loading state for role " + role_ + ": " + (isLoading ? "loading..." : "done"));
 
+    // Reset adblock blocked count and cosmetic dedup when starting a new page load (tabs only)
+#ifdef _WIN32
+    if (isLoading && tab_id != -1) {
+        AdblockCache::GetInstance().resetBlockedCount(browser->GetIdentifier());
+        last_cosmetic_url_.clear();
+
+        // 8e-2: Pre-fetch scriptlets for the new URL and send to renderer BEFORE page JS runs.
+        // OnContextCreated (renderer) will inject them synchronously.
+        CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
+        if (mainFrame && mainFrame->IsValid() && g_adblockServerRunning) {
+            std::string navUrl = mainFrame->GetURL().ToString();
+            if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
+                auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl);
+                if (!cosmetic.injectedScript.empty()) {
+                    LOG_INFO_BROWSER("💉 Pre-caching scriptlets for " + navUrl +
+                        " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
+                    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("preload_cosmetic_script");
+                    CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                    args->SetString(0, navUrl);
+                    args->SetString(1, cosmetic.injectedScript);
+                    mainFrame->SendProcessMessage(PID_RENDERER, msg);
+                }
+            }
+        }
+    }
+#endif
+
     // Track history when page finishes loading (for tabs - both platforms)
     if (!isLoading && tab_id != -1) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
@@ -582,6 +610,87 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
+
+            // Cosmetic filtering: fetch CSS selectors + scriptlets and inject into tab (Sprint 8e)
+#ifdef _WIN32
+            {
+                CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
+                if (mainFrame && mainFrame->IsValid()) {
+                    std::string pageUrl = mainFrame->GetURL().ToString();
+
+                    // Dedup: skip if we already injected for this exact URL
+                    if (pageUrl == last_cosmetic_url_) {
+                        // Already processed — skip redundant cosmetic injection
+                    } else if (!shouldSkipAdblockCheck(pageUrl) && g_adblockServerRunning) {
+                        last_cosmetic_url_ = pageUrl;
+                        // Fetch cosmetic resources from adblock engine
+                        auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(pageUrl);
+
+                        LOG_DEBUG_BROWSER("🎨 Cosmetic P1: css=" + std::to_string(cosmetic.cssSelectors.size()) +
+                            " script=" + std::to_string(cosmetic.injectedScript.size()) +
+                            " generichide=" + std::to_string(cosmetic.generichide) + " url=" + pageUrl);
+
+                        if (!cosmetic.cssSelectors.empty()) {
+                            CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("inject_cosmetic_css");
+                            CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                            args->SetString(0, cosmetic.cssSelectors);
+                            mainFrame->SendProcessMessage(PID_RENDERER, msg);
+                        }
+
+                        if (!cosmetic.injectedScript.empty()) {
+                            LOG_INFO_BROWSER("💉 Injecting scriptlets for " + pageUrl +
+                                " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
+
+                            // Send scriptlets to renderer via IPC for injection
+                            CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("inject_cosmetic_script");
+                            CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                            args->SetString(0, cosmetic.injectedScript);
+                            mainFrame->SendProcessMessage(PID_RENDERER, msg);
+                        }
+
+                        // Phase 2: Inject JS to collect DOM class names and IDs,
+                        // then query engine for generic cosmetic selectors
+                        if (!cosmetic.generichide) {
+                            std::string collectJs = R"JS(
+                                (function() {
+                                    function collectAndSend() {
+                                        var classes = new Set();
+                                        var ids = new Set();
+                                        var elems = document.querySelectorAll('[class],[id]');
+                                        for (var i = 0; i < elems.length; i++) {
+                                            var el = elems[i];
+                                            if (el.id) ids.add(el.id);
+                                            if (el.classList) {
+                                                for (var j = 0; j < el.classList.length; j++) {
+                                                    classes.add(el.classList[j]);
+                                                }
+                                            }
+                                        }
+                                        if (classes.size > 0 || ids.size > 0) {
+                                            window.cefMessage.send('cosmetic_class_id_query',
+                                                JSON.stringify({
+                                                    url: window.location.href,
+                                                    classes: Array.from(classes),
+                                                    ids: Array.from(ids)
+                                                })
+                                            );
+                                        }
+                                    }
+                                    if (document.readyState === 'loading') {
+                                        document.addEventListener('DOMContentLoaded', collectAndSend);
+                                    } else {
+                                        collectAndSend();
+                                    }
+                                })();
+                            )JS";
+                            mainFrame->ExecuteJavaScript(collectJs, mainFrame->GetURL(), 0);
+                        }
+                    }
+                } else {
+                    LOG_INFO_BROWSER("🎨 Cosmetic skip: mainFrame null or invalid for tab " + role_);
+                }
+            }
+#endif
         }
 
         // Overlay-specific logic
@@ -1313,11 +1422,15 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_panel_show") {
-        // Parse icon right offset from args (physical pixels from right edge of header)
+        // Parse icon right offset and domain from args
         int iconRightOffset = 0;
+        std::string shieldDomain;
         CefRefPtr<CefListValue> cp_args = message->GetArgumentList();
         if (cp_args->GetSize() > 0) {
             try { iconRightOffset = std::stoi(cp_args->GetString(0).ToString()); } catch(...) {}
+        }
+        if (cp_args->GetSize() > 1) {
+            shieldDomain = cp_args->GetString(1).ToString();
         }
 
 #ifdef _WIN32
@@ -1333,9 +1446,28 @@ bool SimpleHandler::OnProcessMessageReceived(
             ShowCookiePanelOverlay(iconRightOffset);
         }
 
-        LOG_DEBUG_BROWSER("Cookie panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+        // Inject domain into overlay via JS callback (keep-alive pattern)
+        if (!shieldDomain.empty()) {
+            CefRefPtr<CefBrowser> cookie_browser = GetCookiePanelBrowser();
+            if (cookie_browser && cookie_browser->GetMainFrame()) {
+                // Escape domain for safe JS injection
+                std::string escapedDomain = shieldDomain;
+                // Simple escape: replace backslash and single quote
+                for (size_t i = 0; i < escapedDomain.size(); ++i) {
+                    if (escapedDomain[i] == '\\' || escapedDomain[i] == '\'') {
+                        escapedDomain.insert(i, "\\");
+                        ++i;
+                    }
+                }
+                std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); }";
+                cookie_browser->GetMainFrame()->ExecuteJavaScript(js, cookie_browser->GetMainFrame()->GetURL(), 0);
+                LOG_DEBUG_BROWSER("Injected domain into privacy shield overlay: " + shieldDomain);
+            }
+        }
+
+        LOG_DEBUG_BROWSER("Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #else
-        LOG_DEBUG_BROWSER("Cookie panel not implemented on macOS");
+        LOG_DEBUG_BROWSER("Privacy shield not implemented on macOS");
 #endif
         return true;
     }
@@ -3125,7 +3257,12 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_get_blocked_count") {
-        int browser_id = browser->GetIdentifier();
+        // Use active TAB's browser ID, not header browser's ID
+        int browser_id = 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            browser_id = active_tab->browser->GetIdentifier();
+        }
         int count = CookieBlockManager::GetInstance().GetBlockedCountForBrowser(browser_id);
 
         nlohmann::json response;
@@ -3151,6 +3288,191 @@ bool SimpleHandler::OnProcessMessageReceived(
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
+
+    if (message_name == "cookie_check_site_allowed") {
+        CefRefPtr<CefListValue> csa_args = message->GetArgumentList();
+        std::string domain = (csa_args->GetSize() > 0) ? csa_args->GetString(0).ToString() : "";
+
+        bool allowed = false;
+        if (!domain.empty()) {
+            allowed = CookieBlockManager::GetInstance().IsThirdPartyAllowed(domain);
+        }
+
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["allowed"] = allowed;
+        std::string json_str = response.dump();
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_check_site_allowed_response");
+        responseMsg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    // ========== ADBLOCK MESSAGES (Sprint 8c) ==========
+
+#ifdef _WIN32
+    if (message_name == "adblock_get_blocked_count") {
+        // Use active TAB's browser ID, not header browser's ID
+        int browser_id = 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            browser_id = active_tab->browser->GetIdentifier();
+        }
+        int count = AdblockCache::GetInstance().getBlockedCount(browser_id);
+
+        nlohmann::json response;
+        response["count"] = count;
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_blocked_count_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "adblock_reset_blocked_count") {
+        // Use active TAB's browser ID
+        int browser_id = 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            browser_id = active_tab->browser->GetIdentifier();
+        }
+        AdblockCache::GetInstance().resetBlockedCount(browser_id);
+
+        nlohmann::json response;
+        response["success"] = true;
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_reset_blocked_count_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        return true;
+    }
+
+    if (message_name == "adblock_site_toggle") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        std::string enabledStr = args->GetString(1).ToString();
+        bool enabled = (enabledStr == "true" || enabledStr == "1");
+
+        LOG_DEBUG_BROWSER("🛡️ Adblock site toggle: " + domain + " → " + (enabled ? "ON" : "OFF"));
+
+        // POST to Rust backend
+        class AdblockToggleTask : public CefTask {
+        public:
+            std::string domain_;
+            bool enabled_;
+            CefRefPtr<CefBrowser> browser_;
+
+            AdblockToggleTask(const std::string& domain, bool enabled, CefRefPtr<CefBrowser> browser)
+                : domain_(domain), enabled_(enabled), browser_(browser) {}
+
+            void Execute() override {
+                // POST to /adblock/site-toggle on Rust backend
+                HINTERNET hSession = WinHttpOpen(L"AdblockToggle/1.0",
+                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                if (!hSession) return;
+
+                DWORD timeout = 5000;
+                WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+                WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+
+                HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+                if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+
+                HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/adblock/site-toggle",
+                    nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+                if (!hRequest) {
+                    WinHttpCloseHandle(hConnect);
+                    WinHttpCloseHandle(hSession);
+                    return;
+                }
+
+                std::string body = "{\"domain\":\"" + domain_ + "\",\"enabled\":" + (enabled_ ? "true" : "false") + "}";
+                LPCWSTR contentType = L"Content-Type: application/json";
+                WinHttpSendRequest(hRequest, contentType, -1L,
+                    (LPVOID)body.c_str(), (DWORD)body.size(), (DWORD)body.size(), 0);
+                WinHttpReceiveResponse(hRequest, nullptr);
+
+                WinHttpCloseHandle(hRequest);
+                WinHttpCloseHandle(hConnect);
+                WinHttpCloseHandle(hSession);
+
+                // Invalidate caches
+                AdblockCache::GetInstance().invalidateSiteToggle(domain_);
+                AdblockCache::GetInstance().clearAll();
+
+                // Send response back to renderer
+                nlohmann::json response;
+                response["domain"] = domain_;
+                response["adblockEnabled"] = enabled_;
+                response["success"] = true;
+
+                CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_site_toggle_response");
+                responseMsg->GetArgumentList()->SetString(0, response.dump());
+                if (browser_ && browser_->GetMainFrame()) {
+                    browser_->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+                }
+            }
+
+            IMPLEMENT_REFCOUNTING(AdblockToggleTask);
+        };
+
+        CefPostTask(TID_IO, new AdblockToggleTask(domain, enabled, browser));
+        return true;
+    }
+#endif
+
+    // ========== COSMETIC FILTERING PHASE 2 (Sprint 8e) ==========
+
+#ifdef _WIN32
+    if (message_name == "cosmetic_class_id_query") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string dataJson = args->GetString(0).ToString();
+
+        // Parse JSON: {"url":"...","classes":[...],"ids":[...]}
+        try {
+            auto data = nlohmann::json::parse(dataJson);
+            std::string url = data.value("url", "");
+            std::vector<std::string> classes;
+            std::vector<std::string> ids;
+
+            if (data.contains("classes") && data["classes"].is_array()) {
+                for (const auto& c : data["classes"]) {
+                    if (c.is_string()) classes.push_back(c.get<std::string>());
+                }
+            }
+            if (data.contains("ids") && data["ids"].is_array()) {
+                for (const auto& id : data["ids"]) {
+                    if (id.is_string()) ids.push_back(id.get<std::string>());
+                }
+            }
+
+            if (!url.empty() && (!classes.empty() || !ids.empty())) {
+                std::string selectors = AdblockCache::GetInstance().fetchHiddenIdSelectors(url, classes, ids);
+
+                if (!selectors.empty()) {
+                    LOG_DEBUG_BROWSER("🎨 P2: " + std::to_string(selectors.size()) + " chars generic CSS for " + url);
+
+                    // Send selectors back to the tab browser's renderer for injection
+                    // The message came from a tab browser, so find its frame
+                    auto* activeTab = TabManager::GetInstance().GetActiveTab();
+                    if (activeTab && activeTab->browser) {
+                        CefRefPtr<CefFrame> tabFrame = activeTab->browser->GetMainFrame();
+                        if (tabFrame && tabFrame->IsValid()) {
+                            CefRefPtr<CefProcessMessage> cssMsg = CefProcessMessage::Create("inject_cosmetic_css");
+                            cssMsg->GetArgumentList()->SetString(0, selectors);
+                            tabFrame->SendProcessMessage(PID_RENDERER, cssMsg);
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR_BROWSER("🎨 Phase 2: JSON parse error: " + std::string(e.what()));
+        }
+        return true;
+    }
+#endif
 
     // ========== BOOKMARK MESSAGES ==========
 
@@ -3758,8 +4080,149 @@ CefRefPtr<CefRequestHandler> SimpleHandler::GetRequestHandler() {
     return this;
 }
 
+// OnBeforeBrowse fires on the UI thread BEFORE the renderer creates a new V8
+// context, so we can pre-cache scriptlets for the navigation target URL.
+// When the renderer's OnContextCreated fires, it checks s_scriptCache and
+// injects the scripts synchronously before any page JS runs.
+// This complements the existing OnLoadingStateChange pre-cache (which often
+// fails for initial navigations because mainFrame->GetURL() returns empty).
+bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                                    CefRefPtr<CefFrame> frame,
+                                    CefRefPtr<CefRequest> request,
+                                    bool user_gesture,
+                                    bool is_redirect) {
+    CEF_REQUIRE_UI_THREAD();
+
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id == -1) return false;  // Only pre-cache for tab browsers
+
+#ifdef _WIN32
+    if (g_adblockServerRunning && frame->IsMain()) {
+        std::string navUrl = request->GetURL().ToString();
+        if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
+            auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl);
+            if (!cosmetic.injectedScript.empty()) {
+                LOG_INFO_BROWSER("💉 OnBeforeBrowse: pre-caching scriptlets for " + navUrl +
+                    " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("preload_cosmetic_script");
+                CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                args->SetString(0, navUrl);
+                args->SetString(1, cosmetic.injectedScript);
+                frame->SendProcessMessage(PID_RENDERER, msg);
+            }
+        }
+    }
+#endif
+
+    return false;  // Never cancel navigation
+}
+
+// ============================================================================
+// AdblockResponseFilter — strips ad-related JSON keys from YouTube responses
+// ============================================================================
+//
+// Applied to YouTube API (application/json) and HTML (text/html) responses.
+// Buffers the complete response body, renames ad-configuration keys
+// (e.g. "adPlacements" → "adPlacements_"), then outputs the modified data.
+// YouTube's player JS looks for the original key names and doesn't find them,
+// so ads never load.
+//
+// This operates at the network level (CefResponseFilter runs in the browser
+// process IO thread, before any renderer/JavaScript sees the data), solving
+// the scriptlet injection timing problem where scriptlets injected via
+// OnLoadingStateChange arrive after YouTube's inline scripts have already
+// processed ad configuration from ytInitialPlayerResponse.
+#ifdef _WIN32
+class AdblockResponseFilter : public CefResponseFilter {
+public:
+    AdblockResponseFilter() = default;
+
+    bool InitFilter() override { return true; }
+
+    FilterStatus Filter(void* data_in,
+                        size_t data_in_size,
+                        size_t& data_in_read,
+                        void* data_out,
+                        size_t data_out_size,
+                        size_t& data_out_written) override {
+        // Always consume all available input
+        data_in_read = data_in_size;
+
+        if (data_in_size > 0) {
+            // Accumulate response body — produce no output yet
+            buffer_.append(static_cast<const char*>(data_in), data_in_size);
+            data_out_written = 0;
+            return RESPONSE_FILTER_NEED_MORE_DATA;
+        }
+
+        // data_in_size == 0 → entire response body received
+        if (!processed_) {
+            processBuffer();
+            processed_ = true;
+            write_offset_ = 0;
+        }
+
+        // Stream processed output back to CEF
+        size_t remaining = buffer_.size() - write_offset_;
+        size_t to_write = (remaining < data_out_size) ? remaining : data_out_size;
+        if (to_write > 0) {
+            memcpy(data_out, buffer_.data() + write_offset_, to_write);
+        }
+        data_out_written = to_write;
+        write_offset_ += to_write;
+
+        return (write_offset_ >= buffer_.size())
+            ? RESPONSE_FILTER_DONE
+            : RESPONSE_FILTER_NEED_MORE_DATA;
+    }
+
+private:
+    void processBuffer() {
+        // Rename ad-related JSON keys so YouTube's player JS can't find them.
+        // The replacement adds an underscore to the key name, preserving JSON
+        // validity while making the key invisible to YouTube's ad rendering code.
+        struct Replacement {
+            const char* find;
+            const char* replace;
+        };
+        static const Replacement replacements[] = {
+            { "\"adPlacements\":",           "\"adPlacements_\":" },
+            { "\"playerAds\":",              "\"playerAds_\":" },
+            { "\"adSlots\":",                "\"adSlots_\":" },
+            { "\"adBreakParams\":",          "\"adBreakParams_\":" },
+            { "\"adBreakHeartbeatParams\":", "\"adBreakHeartbeatParams_\":" },
+        };
+
+        int total = 0;
+        for (const auto& r : replacements) {
+            std::string f(r.find);
+            std::string rep(r.replace);
+            size_t pos = 0;
+            while ((pos = buffer_.find(f, pos)) != std::string::npos) {
+                buffer_.replace(pos, f.length(), rep);
+                pos += rep.length();
+                total++;
+            }
+        }
+
+        if (total > 0) {
+            LOG_DEBUG_BROWSER("🛡️ AdblockResponseFilter: " +
+                std::to_string(total) + " ad keys renamed in " +
+                std::to_string(buffer_.size()) + " byte response");
+        }
+    }
+
+    std::string buffer_;
+    size_t write_offset_ = 0;
+    bool processed_ = false;
+
+    IMPLEMENT_REFCOUNTING(AdblockResponseFilter);
+};
+#endif
+
 // CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
-// so cookie blocking applies to all browsing.
+// so cookie blocking applies to all browsing. Also returns AdblockResponseFilter
+// for YouTube responses to strip ad configuration at the network level.
 class CookieFilterResourceHandler : public CefResourceRequestHandler {
 public:
     CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
@@ -3771,6 +4234,45 @@ public:
         }
         return nullptr;
     }
+
+    CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefResponse> response) override {
+#ifdef _WIN32
+        if (!g_adblockServerRunning) return nullptr;
+
+        std::string url = request->GetURL().ToString();
+
+        // Check YouTube host — use scheme+host prefix to avoid false positives
+        // (e.g. accounts.google.com/...?continue=youtube.com in query params)
+        bool isYouTube = (url.find("://www.youtube.com/") != std::string::npos ||
+                          url.find("://youtube.com/") != std::string::npos ||
+                          url.find("://m.youtube.com/") != std::string::npos);
+        if (!isYouTube) return nullptr;
+
+        std::string contentType = response->GetHeaderByName("Content-Type").ToString();
+
+        // YouTube API responses (JSON) — /youtubei/v1/player, /next, /get_watch, etc.
+        if (url.find("/youtubei/") != std::string::npos &&
+            contentType.find("application/json") != std::string::npos) {
+            LOG_DEBUG_BROWSER("🛡️ Response filter: YouTube API " + url);
+            return new AdblockResponseFilter();
+        }
+
+        // YouTube main page HTML — contains inline ytInitialPlayerResponse with ad data.
+        // Only filter top-level navigations (RT_MAIN_FRAME), not iframes, tracking
+        // pixels (/ptracking), live chat embeds, or other sub-resources.
+        if (request->GetResourceType() == RT_MAIN_FRAME &&
+            contentType.find("text/html") != std::string::npos) {
+            LOG_DEBUG_BROWSER("🛡️ Response filter: YouTube HTML " + url);
+            return new AdblockResponseFilter();
+        }
+#endif
+        return nullptr;
+    }
+
     IMPLEMENT_REFCOUNTING(CookieFilterResourceHandler);
 };
 
@@ -3793,6 +4295,44 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
+    // Ad & tracker blocking — check before wallet interception
+    // Only for tab browsers making external requests (skip internal/overlay URLs)
+#ifdef _WIN32
+    if (g_adblockServerRunning && !shouldSkipAdblockCheck(url)) {
+        std::string sourceUrl;
+        if (frame && frame->GetURL().length() > 0) {
+            sourceUrl = frame->GetURL().ToString();
+        }
+
+        // Check per-site toggle: extract domain from source URL
+        bool siteAdblockEnabled = true;
+        if (!sourceUrl.empty()) {
+            std::string domain;
+            size_t start = sourceUrl.find("://");
+            if (start != std::string::npos) {
+                start += 3;
+                size_t end = sourceUrl.find_first_of(":/", start);
+                domain = sourceUrl.substr(start, end - start);
+            }
+            if (!domain.empty()) {
+                siteAdblockEnabled = AdblockCache::GetInstance().isSiteEnabled(domain);
+            }
+        }
+
+        if (siteAdblockEnabled) {
+            const char* resourceType = CefResourceTypeToAdblock(request->GetResourceType());
+            bool adblockBlocked = AdblockCache::GetInstance().check(url, sourceUrl, resourceType);
+            if (adblockBlocked) {
+                LOG_DEBUG_BROWSER("🛡️ Blocked by adblock: " + url);
+                if (browser) {
+                    AdblockCache::GetInstance().incrementBlockedCount(browser->GetIdentifier());
+                }
+                return new AdblockBlockHandler();
+            }
+        }
+    }
+#endif
+
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
     // OR if it's a BRC-104 /.well-known/auth request (standard wallet authentication endpoint)
@@ -3812,9 +4352,17 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     }
 
     // For non-wallet requests, return CookieFilterResourceHandler
-    // to apply cookie blocking to all browsing traffic
-    if (CookieBlockManager::GetInstance().IsInitialized()) {
-        return new CookieFilterResourceHandler();
+    // to apply cookie blocking and ad response filtering (YouTube API/HTML stripping)
+    {
+        bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
+#ifdef _WIN32
+        bool needsResponseFilter = g_adblockServerRunning;
+#else
+        bool needsResponseFilter = false;
+#endif
+        if (needsCookieFilter || needsResponseFilter) {
+            return new CookieFilterResourceHandler();
+        }
     }
 
     return nullptr;

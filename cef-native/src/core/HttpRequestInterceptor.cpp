@@ -55,6 +55,7 @@ public:
         int64_t perTxLimitCents = 10;
         int64_t perSessionLimitCents = 300;
         int64_t rateLimitPerMin = 10;
+        bool adblockEnabled = true;     // Per-site ad blocking toggle (Sprint 8c)
     };
 
     static DomainPermissionCache& GetInstance() {
@@ -168,6 +169,7 @@ private:
             result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)10);
             result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)300);
             result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)10);
+            result.adblockEnabled = json.value("adblockEnabled", true);
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("🔒 Failed to parse domain permission response: " + std::string(e.what()));
         }

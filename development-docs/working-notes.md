@@ -139,4 +139,59 @@
 
 ---
 
+## 10. Ad & Tracker Blocking — Architecture & Implementation Notes
+
+**Discovered**: Sprint 8 research (2026-02-22). **Implemented**: Sprint 8 Phases 8a-8b (2026-02-23).
+
+**See also**: `ci-cd-testing-strategy.md` Section 7 (architectural decision), Section 9j (tests), `sprint-8-adblock-research.md` (full design doc).
+
+### Architecture Decision
+
+**Separate standalone project** at `adblock-engine/` — NOT inside `rust-wallet/` or a workspace. Runs as independent process on port 3302 (wallet is port 3301). C++ starts it via `CreateProcessA` + Job Object. Non-critical: if it fails, browsing continues unblocked.
+
+### Key Implementation Details
+
+**Crate version pinning** (critical):
+- `adblock = "=0.10.3"` — last version compatible with stable Rust 1.85.1. v0.10.4+ uses unstable `unsigned_is_multiple_of` (needs Rust 1.87+)
+- `rmp = "=0.8.14"` — required for rmp-serde 0.15 compat with adblock 0.10.x
+- `actix-web = "=4.11.0"` — 4.13+ requires Rust 1.88
+- `default-features = false` — disables `unsync-regex-caching` feature to enable `Send+Sync` for `RwLock<Engine>` (in v0.10.x the feature name is `unsync-regex-caching`, NOT `single-thread` as in newer versions)
+- `engine.serialize()` — NOT `serialize_raw()` (that's a newer API)
+
+**C++ integration**:
+- `AdblockCache.h` (header-only singleton): URL→bool cache + sync WinHTTP POST to `/check`
+- `AdblockBlockHandler`: `CefResourceRequestHandler` returning `RV_CANCEL`
+- Hook in `GetResourceRequestHandler()` BEFORE wallet interception
+- `shouldSkipAdblockCheck()`: skips localhost, data:, blob:, chrome:, devtools: URLs
+- macOS stubs: `fetchFromBackend()` returns false, `StartAdblockServer()`/`StopAdblockServer()` need `#elif defined(__APPLE__)` implementation
+
+**Two-phase startup**: HTTP server starts immediately (/health returns "loading"), engine loads async in background (deserialize engine.dat or download filter lists). C++ health poll checks for `"ready"`.
+
+**Unit tests**: 9 tests in `adblock-engine/src/engine.rs` — run with `cargo test --manifest-path adblock-engine/Cargo.toml`.
+
+### Brave's Approach (for reference)
+
+- Uses Chromium's **Component Updater** system (CRX packages, signed, distributed via S3)
+- Checks for filter list updates every **~5 hours** via `go-updater.brave.com`
+- Key repos: `brave/adblock-rust`, `brave/adblock-resources` (list catalog), `brave/adblock-lists` (brave-specific rules)
+- Major release every ~4 weeks mapped 1:1 to Chromium milestones
+
+### Our Approach (simpler)
+
+- Fetch lists directly from upstream URLs:
+  - EasyList: `https://easylist.to/easylist/easylist.txt` (expires: 4 days)
+  - EasyPrivacy: `https://easylist.to/easylist/easyprivacy.txt` (expires: 4 days)
+- Store raw lists in `%APPDATA%/HodosBrowser/adblock/lists/`
+- Compile with `adblock::Engine`, serialize to `engine.dat` for fast startup
+- Background task checks for updates every 6 hours (Phase 8d — not yet implemented)
+
+### Open Questions for Future Research
+
+- Do we need our own "unbreak" list (like Brave's `brave-unbreak.txt`)?
+- Should we bundle pre-compiled `engine.dat` with the installer?
+- How do we handle the crate's serialization format changing between versions?
+- Do we ever want cosmetic filtering (CSS element hiding)? Network blocking covers ~90% of ads.
+
+---
+
 *Add new items below as they come up during sprints.*

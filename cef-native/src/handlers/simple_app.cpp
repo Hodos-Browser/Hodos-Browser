@@ -1222,9 +1222,14 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
 
     // Calculate position - right side panel, right edge aligned under icon
     int panelWidth = 450;
-    int panelHeight = 450;
+    int panelHeight = 520;
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
 
     LOG_INFO_APP("🍪 Creating cookie panel overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
@@ -1278,7 +1283,7 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
     // Use global context (shared cache/cookies)
     bool result = CefBrowserHost::CreateBrowser(
         window_info, cookie_panel_handler,
-        "http://127.0.0.1:5137/cookie-panel",
+        "http://127.0.0.1:5137/privacy-shield",
         settings, nullptr,
         CefRequestContext::GetGlobalContext());
 
@@ -1338,12 +1343,19 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
 
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
     int panelWidth = 450;
-    int panelHeight = 450;
+    int panelHeight = 520;
     int overlayX = headerRect.right - g_cookie_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
@@ -1431,6 +1443,8 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     // Get main window dimensions
     extern HWND g_hwnd;
     extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
@@ -1439,6 +1453,11 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     int panelHeight = 400;
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
 
     LOG_INFO_APP("Creating download panel overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
@@ -1551,14 +1570,22 @@ void ShowDownloadPanelOverlay(int iconRightOffset) {
     }
 
     extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
     int panelWidth = 380;
     int panelHeight = 400;
     int overlayX = headerRect.right - g_download_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,

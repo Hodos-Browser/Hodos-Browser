@@ -398,101 +398,189 @@ All shortcuts use `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN` vs `EVENTFLAG_CO
 
 ## Sprint 8: Ad & Tracker Blocking (3-5 days)
 
-**Goal**: Block ads and trackers using `adblock-rust` via FFI.
+**Goal**: Block ads and trackers using the `adblock` crate via a separate HTTP microservice.
 
-### Architecture Decision: FFI Static Library
+### Architecture Decision: Separate Microservice (NOT FFI)
 
-Build `adblock-rust` as a static library with C FFI, linked into the C++ CEF process. This matches Brave's battle-tested architecture and provides ~5μs per request check.
+**Chosen approach**: Standalone Rust HTTP service (`adblock-engine/` at repo root), running on **port 3302**. C++ starts it alongside the wallet server and calls it via sync WinHTTP with a C++-side URL cache.
 
-### 8a: Rust FFI Library (Day 1-2)
+**Why microservice over FFI**: FFI requires a separate crate, cbindgen, CMake linking, system library deps (`ws2_32 userenv bcrypt ntdll`), panic-catching on every call, and `#[repr(C)]` structs. HTTP microservice uses proven patterns already in the codebase (same as wallet on port 3301).
 
-**New crate**: `adblock-ffi/` in project root (NOT in the Rust wallet workspace).
+**Why separate from `rust-wallet`**: (1) Separation of concerns — wallet handles money, adblock handles content filtering. (2) Attack surface — large dependency tree shouldn't be in the security-critical wallet process. (3) Independence — ad blocking works even if wallet is locked. (4) Startup — downloading filter lists shouldn't delay wallet. (5) Crash isolation.
 
+**Latency trade-off**: Engine check is ~5.7us in-process, but ~1-2ms via localhost HTTP. Mitigated by aggressive C++-side URL cache — after initial checks, cache hit rate is very high.
+
+### Key Technical Decisions
+
+- **`adblock` crate** (NOT `adblock-rust`): `=0.10.3` pinned — v0.10.4+ requires unstable `unsigned_is_multiple_of` (needs Rust 1.87+; we're on stable 1.85.1)
+- **`rmp` pinned to `=0.8.14`**: Required for rmp-serde 0.15 compat (used by adblock 0.10.x)
+- **`default-features = false`**: Disables `unsync-regex-caching` feature, which is what removes `Send+Sync` in v0.10.3. Required for `RwLock<Engine>`.
+- **Serialization**: v0.10.3 uses `.serialize()` (NOT `.serialize_raw()` which exists in newer versions)
+- **Standard mode** (default): Only blocks third-party requests. First-party passes through. Critical for avoiding site breakage.
+- **Filter lists**: EasyList + EasyPrivacy on first run. Stored in `%APPDATA%/HodosBrowser/adblock/lists/`. Serialized engine at `engine.dat` for fast reload.
+
+### 8a: Standalone Rust Engine — COMPLETE (2026-02-23)
+
+**Built**: `adblock-engine/` at repo root with Actix-web server on port 3302, 2 workers.
+
+**Project structure**:
 ```
-adblock-ffi/
-├── Cargo.toml          # depends on `adblock` crate
-├── src/
-│   └── lib.rs          # C FFI exports
-├── cbindgen.toml       # generates C header
-└── build.rs            # cargo build script
+adblock-engine/
+  Cargo.toml
+  src/
+    main.rs       # Actix-web server, two-phase startup
+    engine.rs     # AdblockEngine: RwLock<Engine>, init, serialize, check
+    handlers.rs   # HTTP endpoint handlers
 ```
 
-**FFI functions**:
-```rust
-#[no_mangle] pub extern "C" fn adblock_engine_create() -> *mut Engine;
-#[no_mangle] pub extern "C" fn adblock_engine_destroy(engine: *mut Engine);
-#[no_mangle] pub extern "C" fn adblock_engine_add_filter_list(engine: *mut Engine, data: *const c_char);
-#[no_mangle] pub extern "C" fn adblock_engine_check(engine: *mut Engine, url: *const c_char, source: *const c_char, request_type: *const c_char) -> bool;
-#[no_mangle] pub extern "C" fn adblock_engine_serialize(engine: *mut Engine, out_data: *mut *mut u8, out_len: *mut usize);
-#[no_mangle] pub extern "C" fn adblock_engine_deserialize(data: *const u8, len: usize) -> *mut Engine;
+**Cargo.toml configuration**:
+```toml
+adblock = { version = "=0.10.3", default-features = false, features = [
+    "embedded-domain-resolver",
+    "full-regex-handling",
+] }
+rmp = "=0.8.14"
 ```
 
-### 8b: C++ Integration (Day 2-3)
+**Two-phase startup**: Server starts immediately (health returns `{"status":"loading"}`), engine loads async (download lists or deserialize `engine.dat`), then health returns `{"status":"ready"}`.
 
-**New singleton**: `AdBlockEngine` in `cef-native/include/core/AdBlockEngine.h`
-- Wraps FFI calls
-- Loads serialized engine from `%APPDATA%/HodosBrowser/adblock/engine.dat`
-- Falls back to compiling from text lists if no cache
-- Thread-safe (engine itself is read-only after creation; reload creates new + atomic swap)
+**Endpoints**: `GET /health`, `POST /check` (url/sourceUrl/resourceType -> blocked/filter/redirect), `GET /status` (enabled/listCount/totalRules/lastUpdate/lists), `POST /toggle` (enabled bool).
 
-**Hook point**: `GetResourceRequestHandler` or `OnBeforeResourceLoad` in `HttpRequestInterceptor.cpp`
-- Before wallet interception check, call `AdBlockEngine::shouldBlock(url, sourceUrl, resourceType)`
-- If blocked: set `disable_default_handling = true` and return appropriate handler (or nullptr)
+### 8b: C++ Integration — COMPLETE (2026-02-23)
 
-### 8c: Filter List Management (Day 3)
+**Built**:
+- `StartAdblockServer()` / `StopAdblockServer()` in `cef_browser_shell.cpp` (mirrors wallet pattern: `CreateProcessA` + Job Object for auto-kill)
+- `AdblockCache` singleton (`AdblockCache.h`): sync WinHTTP to `POST localhost:3302/check`, in-memory URL cache (`hash(url+sourceDomain) -> Result`), per-browser blocked count tracking
+- Hook in `GetResourceRequestHandler()` in `simple_handler.cpp`, BEFORE wallet interception
+- `BlockedResourceHandler`: returns 0-byte response for blocked URLs
+- `CefResourceTypeToAdblock()`: maps all 19 CEF resource types to adblock's 17 string types
+- Cache invalidation: `clearForBrowser(browserId)` on main frame navigation, `clearAll()` on filter list update or toggle change
+- Health poll: 6 attempts x 500ms = 3s max (shorter than wallet's 5s — non-critical)
 
-- Download EasyList + EasyPrivacy on first run (store in `%APPDATA%/HodosBrowser/adblock/lists/`)
-- Compile to engine, serialize to `engine.dat`
-- Background update every 24 hours (check ETag / Last-Modified)
-- Bundle pre-compiled engine with installer for instant blocking on fresh install
+### 8c: Per-Site Toggle + UI — COMPLETE (2026-02-23)
 
-### 8d: Per-Site Toggle UI (Day 4-5)
+**Built**:
+- `adblock_enabled` column in `domain_permissions` table (migration V5, default true)
+- Rust wallet endpoints: `GET/POST /adblock/site-toggle?domain=X` (queries/updates domain_permissions)
+- C++ `DomainPermissionCache`: adblock status included in cached data
+- Frontend: `SecurityIcon` shield in header bar with blocked count badge
+- Click shield -> dropdown popup: domain name, ON/OFF toggle, blocked count, "Blocking may break this site" hint
+- IPC: `adblock_get_blocked_count`, `adblock_reset_blocked_count`, `adblock_site_toggle` -> renderer response handlers
+- `useAdblock.ts` React hook for adblock state management
 
-- Shield icon in header bar (similar to Brave)
-- Click → popup showing "Ad blocking ON/OFF for this site"
-- Persist per-site exceptions (could use `domain_permissions` table or separate storage)
-- Show blocked count badge on shield icon
+### 8d: Filter List Auto-Update — COMPLETE (2026-02-23)
+
+**Built**: Background auto-update of filter lists in the adblock engine.
+
+- Background tokio task in `adblock-engine/` (every 6 hours)
+- Checks `meta.json` timestamps, respects `Expires` headers from list servers
+- Downloads updated lists, recompiles engine under write lock, re-serializes to `engine.dat`
+- Atomic swap: build new engine, swap under `RwLock` write lock, then serialize
+- C++ cache invalidation: version counter in `/check` + `/status` responses — C++ `AdblockCache` detects version change on cache-miss calls and invalidates URL cache
+- EasyList/EasyPrivacy expire every 4 days; 6-hour check interval ensures timely updates
+
+### 8e: Cosmetic Filtering + Scriptlet Injection + YouTube Ad Blocking — COMPLETE (2026-02-24)
+
+**Three-layer approach**: CSS cosmetic filtering, JavaScript scriptlet injection, and network-level response filtering work together to block ads including YouTube's deeply-integrated ad system.
+
+#### Component A: Scriptlet Resources + uBlock Filters (Rust) — COMPLETE
+
+- uBlock Origin `scriptlets.js` pinned to v1.48.4 tag (last version using old `///`-delimited format compatible with `assemble_scriptlet_resources()` in adblock-rust 0.10.3). Post-1.48.x uses ES module format which is incompatible.
+- Added `resource-assembler` feature to `adblock` crate in `Cargo.toml`
+- Added 2 trusted filter lists: `ublock-filters.txt` + `ublock-privacy.txt` with `PermissionMask::from_bits(1)` for trusted scriptlet access
+- 6 extra scriptlets bundled as embedded JS templates (missing from v1.48.4 scriptlets.js, needed for YouTube):
+  - `trusted-replace-fetch-response.js` — Proxy-wraps `window.fetch`, applies regex/string replacement
+  - `trusted-replace-xhr-response.js` — Overrides XHR prototype, replaces response text
+  - `json-prune-fetch-response.js` — Proxy-wraps `window.fetch`, prunes JSON properties
+  - `json-prune-xhr-response.js` — Overrides XHR prototype, prunes JSON properties
+  - `trusted-replace-node-text.js` — MutationObserver on script tags, replaces matching text
+  - `remove-node-text.js` — MutationObserver that clears matching script text
+- `load_extra_scriptlets()` function registers these via `engine.add_resource()` with base64-encoded content
+- CONFIG_VERSION bumped to 3 (forces engine.dat rebuild)
+
+#### Component B: `/cosmetic-resources` + `/cosmetic-hidden-ids` Endpoints (Rust) — COMPLETE
+
+- `POST /cosmetic-resources` — returns `hideSelectors`, `injectedScript`, `generichide` for a URL
+- `POST /cosmetic-hidden-ids` — Phase 2 generic cosmetic selectors matching DOM class names and IDs
+- C++ `AdblockCache` calls these via sync WinHTTP with JSON parsing
+
+#### Component C: Scriptlet Pre-Caching + V8 Injection (C++) — COMPLETE
+
+Two-stage injection with timing optimization:
+
+1. **Pre-cache** (`OnBeforeBrowse` + `OnLoadingStateChange`): Browser process fetches scriptlets for navigation target URL, sends `preload_cosmetic_script` IPC to renderer. `OnBeforeBrowse` provides correct URL before navigation (fixes empty-URL bug in `OnLoadingStateChange`).
+2. **Inject** (`OnContextCreated` in renderer): Checks `s_scriptCache` for pre-cached scripts, executes via `frame->ExecuteJavaScript()` synchronously before any page JS runs.
+3. **Fallback** (`OnLoadingStateChange(!isLoading)`): If pre-cache missed, injects scriptlets after page load (covers SPA navigations).
+
+#### Component D: CSS Cosmetic Filtering (C++) — COMPLETE
+
+- Phase 1: Hostname-specific selectors injected via `inject_cosmetic_css` IPC
+- Phase 2: JS collects DOM classes/IDs, sends `cosmetic_class_id_query` IPC, C++ fetches generic selectors from `/cosmetic-hidden-ids`, returns additional CSS
+- Dedup via `last_cosmetic_url_` member variable
+
+#### Component E: CefResponseFilter for YouTube API/HTML (C++) — COMPLETE (2026-02-24)
+
+**The primary YouTube ad blocking mechanism.** Operates at the network level (browser process IO thread), before any JavaScript sees the response data. Solves the scriptlet injection timing problem.
+
+- `AdblockResponseFilter` class (CefResponseFilter): Buffers complete response, renames 5 ad-configuration JSON keys by appending `_` (`"adPlacements":` → `"adPlacements_":`, etc.). YouTube's player JS can't find the renamed keys → ads don't load.
+- `CookieFilterResourceHandler::GetResourceResponseFilter()`: Returns filter for YouTube API JSON (`/youtubei/` + `application/json`) and main-frame HTML (`RT_MAIN_FRAME` + `text/html`).
+- Host matching uses `://www.youtube.com/` prefix (not substring) to avoid false positives.
+- Verified: 35 ad key renames across a browsing session, processing responses 35KB-1.8MB. Zero YouTube ads observed.
+
+**Known trade-off**: Buffering adds page load latency (response can't render until fully buffered). Acceptable for YouTube; streaming replacement is a potential optimization tracked in `ux-ui-cleanup.md`.
+
+#### Key Technical Decisions
+- **Scriptlets.js URL**: Pinned to `gorhill/uBlock` tag 1.48.4 (NOT uAssets main branch which returns 404)
+- **Trusted scriptlets**: `trusted-replace-xhr-response`, `trusted-replace-fetch-response` require permission bit 0 on the filter list. uBlock filters loaded with `PermissionMask::from_bits(1)`.
+- **Response filter over scriptlet timing**: CefResponseFilter is more reliable than fixing IPC race conditions between `OnBeforeBrowse` and `OnContextCreated`. Both approaches are implemented for defense in depth.
+- **Arms race**: YouTube changes ad delivery frequently. Auto-updating filter lists (8d) + response filter key renaming provide complementary protection.
+
+### 8f: Unified Privacy Shield Panel — COMPLETE (2026-02-23)
+
+**Built**: Merged adblock controls and cookie blocking controls into a single "Privacy Shield" panel behind the shield icon in the header bar.
+
+- Unified overlay panel replaces separate adblock dropdown and cookie blocking UI
+- Shows combined privacy metrics: ads blocked count + cookies blocked count
+- Per-site toggle for ad blocking (existing from 8c)
+- Per-site toggle for cookie blocking (existing `CookieBlockManager` integration)
+- Consistent shield icon state reflects overall protection status
+- Known UI polish issues deferred to `ux-ui-cleanup.md`
 
 ### Files
-- New `adblock-ffi/` crate directory
-- `cef-native/include/core/AdBlockEngine.h` — Singleton wrapper
-- `cef-native/src/core/AdBlockEngine.cpp` — Implementation
-- `HttpRequestInterceptor.cpp` — Add block check before forwarding
-- `CMakeLists.txt` — Link adblock FFI static lib
-- Frontend shield icon component
+- `adblock-engine/` — Standalone Rust project (Cargo.toml, src/main.rs, src/engine.rs, src/handlers.rs)
+- `adblock-engine/src/scriptlets/` — 6 bundled extra scriptlet JS templates (trusted-replace-fetch/xhr, json-prune-fetch/xhr, trusted-replace-node-text, remove-node-text)
+- `cef-native/include/core/AdblockCache.h` — C++ singleton (URL cache, WinHTTP client, cosmetic resource fetching, `CookieFilterResourceHandler` with `GetResourceResponseFilter`)
+- `cef-native/cef_browser_shell.cpp` — `StartAdblockServer()` / `StopAdblockServer()`
+- `simple_handler.cpp` — `AdblockResponseFilter` (CefResponseFilter), `OnBeforeBrowse` scriptlet pre-cache, adblock check in `GetResourceRequestHandler()`, cosmetic filtering in `OnLoadingStateChange`, IPC handlers
+- `simple_render_process_handler.cpp` — Scriptlet pre-cache storage (`s_scriptCache`), `OnContextCreated` early injection, `preload_cosmetic_script`/`inject_cosmetic_script`/`inject_cosmetic_css` IPC handlers
+- `HttpRequestInterceptor.cpp` — Adblock check before wallet interception
+- `rust-wallet/src/database/domain_permission_repo.rs` — `adblock_enabled` column
+- `rust-wallet/src/database/migrations.rs` — V5 migration
+- `rust-wallet/src/handlers.rs` — `/adblock/site-toggle` endpoints
+- `frontend/src/hooks/useAdblock.ts` — React hook for adblock state
+- `frontend/src/hooks/useCookieBlocking.ts` — React hook for cookie blocking state
+- `frontend/src/hooks/usePrivacyShield.ts` — Composed hook (adblock + cookie blocking)
+- `frontend/src/components/PrivacyShieldPanel.tsx` — Unified privacy panel UI
+- `frontend/src/pages/PrivacyShieldOverlayRoot.tsx` — Overlay root for privacy shield panel
 
 ### macOS Notes
-- **adblock-rust builds natively on macOS** — Brave uses it on macOS. `cargo build --release` produces `.a` (static lib) on macOS instead of `.lib`.
-- **CMakeLists.txt**: Needs platform conditional for the library path and system libs:
-  ```cmake
-  if(WIN32)
-      target_link_libraries(${PROJECT_NAME} PRIVATE adblock_ffi.lib ws2_32 userenv bcrypt ntdll)
-  elseif(APPLE)
-      target_link_libraries(${PROJECT_NAME} PRIVATE libadblock_ffi.a "-framework Security" "-framework CoreFoundation")
-  endif()
-  ```
-- **C++ AdBlockEngine singleton**: All FFI function calls (`adblock_engine_check`, etc.) are C ABI — fully cross-platform. No platform conditionals needed inside the singleton.
-- **Filter list storage**: Use `~/Library/Application Support/HodosBrowser/adblock/` on macOS (resolved via the cross-platform path helper).
-- **Shield icon / per-site toggle**: React component, fully cross-platform.
-
-### Build Integration
-
-CMakeLists.txt addition:
-```cmake
-# Link adblock-rust static library
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    ${PROJECT_SOURCE_DIR}/../adblock-ffi/target/release/adblock_ffi.lib
-    # Windows system libs needed by Rust
-    ws2_32 userenv bcrypt ntdll
-)
-```
+- **adblock-engine**: Pure Rust, builds natively on macOS (`cargo build --release`). No platform-specific code.
+- **C++ AdblockCache**: Uses WinHTTP — needs `#elif defined(__APPLE__)` with libcurl/NSURLSession in macOS sprint. Same pattern as `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`.
+- **`StartAdblockServer()`**: Uses `CreateProcessA` — needs macOS `posix_spawn` equivalent in `cef_browser_shell_mac.mm`.
+- **Filter list storage**: Use `~/Library/Application Support/HodosBrowser/adblock/` on macOS (cross-platform path helper).
+- **Shield icon / privacy panel**: React components, fully cross-platform.
 
 ### Verification
-- [ ] Visit ad-heavy site → ads blocked
-- [ ] Blocked count shown in UI
-- [ ] Disable for specific site → ads appear
-- [ ] Re-enable → ads blocked again
-- [ ] Startup with cached engine → instant blocking (no compile delay)
+- [x] Visit ad-heavy site → ads blocked
+- [x] Blocked count shown in shield icon badge
+- [x] Disable for specific site → ads appear on that site
+- [x] Re-enable → ads blocked again
+- [x] Startup with cached `engine.dat` → instant blocking (no compile delay)
+- [x] Privacy shield panel shows combined adblock + cookie blocking controls
+- [x] Filter lists auto-update (8d) — 6-hour background check, version-based cache invalidation
+- [x] YouTube ads blocked (8e) — CefResponseFilter strips ad keys from API/HTML responses; scriptlet injection provides defense in depth
+- [x] Cosmetic CSS selectors hide ad-related DOM elements
+- [x] Scriptlets inject before page JS via OnContextCreated pre-cache
 
 ---
 
@@ -641,7 +729,7 @@ Week 4 (if time):
 | Permission handler | Return `false` for Chrome native UI | Zero effort, Chrome handles everything |
 | Download handler MVP | Save As dialog only (no progress overlay) | Ship faster, add overlay later |
 | Find bar | React component in MainBrowserView | Shares existing IPC, simpler than HWND |
-| Ad blocking architecture | FFI static lib (not HTTP to Rust) | 1000x faster, Brave's proven pattern |
+| Ad blocking architecture | HTTP microservice on port 3302 (not FFI) | Avoids cbindgen/CMake linking complexity, reuses proven HTTP patterns, crash isolation from wallet, adblock crate =0.10.3 pinned for stable Rust compat |
 | Settings persistence | JSON file (not SQLite) | Human-readable, simple, no migration needed |
 | Profile import | C++ reads Chrome files directly | No CEF API for import, direct read is straightforward |
 
@@ -669,10 +757,10 @@ All documentation fixes completed 2026-02-19, before implementation sprints bega
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| `adblock-rust` build fails on Windows | Sprint 8 blocked | Test build early; fallback to HTTP approach if FFI fails |
+| `adblock` crate incompatible with future Rust versions | Sprint 8 maintenance | Pinned to =0.10.3; monitor for stable Rust gaining `unsigned_is_multiple_of`; can upgrade when Rust 1.87+ is stable |
 | Chrome bootstrap doesn't show permission UI | Sprint 2 broken | Implement custom permission overlay (more work) |
 | x.com login still broken after SSL handler | User frustration | Investigate FedCM / redirect OAuth fallback |
-| adblock FFI linking conflicts with CEF | Sprint 8 blocked | Isolate in DLL instead of static lib |
+| YouTube ad blocking arms race | 8e effectiveness degrades | Auto-updating filter lists (8d) essential; uBlock Origin community maintains rules |
 | Profile import reads corrupt Chrome DB | Data loss | Copy DB first, validate before importing |
 
 ---

@@ -508,10 +508,15 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/certificate", web::get().to(handlers::check_cert_permissions))
             .route("/domain/permissions/certificate", web::post().to(handlers::approve_cert_fields))
 
+            // Adblock per-site toggle (Sprint 8c)
+            .route("/adblock/site-toggle", web::get().to(handlers::get_adblock_site_toggle))
+            .route("/adblock/site-toggle", web::post().to(handlers::set_adblock_site_toggle))
+
             // BRC-33 Message Relay endpoints
             .route("/sendMessage", web::post().to(handlers::send_message))
             .route("/listMessages", web::post().to(handlers::list_messages))
             .route("/acknowledgeMessage", web::post().to(handlers::acknowledge_message))
+
     })
     .bind(("127.0.0.1", 3301))?
     .run();

@@ -452,31 +452,37 @@ main (always releasable)
 
 ---
 
-## 7. Architectural Consideration: Repo Restructure
+## 7. Architectural Decision: Ad Blocker as Separate Service
 
-**Context**: Brave Browser uses a Rust daemon (`adblock-rust` crate) for ad blocking alongside their C++ browser shell. When we add ad blocking + content filtering (see `data-storage-and-encryption-review.md` Section 11), we should evaluate expanding `rust-wallet/` into a broader Rust workspace.
+**Context**: Brave Browser uses a Rust daemon (`adblock-rust` crate) for ad blocking alongside their C++ browser shell.
 
-### Potential Structure
+**Decision (Sprint 8, 2026-02-23)**: Separate standalone project at repo root (`adblock-engine/`), NOT a workspace with `rust-wallet/`. Runs as independent process on port 3302. C++ starts it via `CreateProcessA` + Job Object (same pattern as wallet on port 3301).
 
+**Rationale**: Wallet handles real money and has strict security requirements. Ad blocking is non-critical — if it fails, browsing continues. Keeping them in separate processes provides fault isolation and independent deployment.
+
+**Architecture**:
 ```
-hodos-core/                          (renamed from rust-wallet/)
-├── Cargo.toml                       (workspace)
-├── wallet/                          (existing wallet code)
-│   ├── src/
-│   └── Cargo.toml
-├── content-filter/                  (new — ad block + tracker block)
-│   ├── src/
-│   └── Cargo.toml
-├── privacy/                         (new — fingerprint, WebRTC rules)
-│   └── ...
-└── server/                          (unified Actix-web server)
-    ├── src/main.rs
-    └── Cargo.toml
+adblock-engine/        (standalone Rust project, port 3302)
+├── Cargo.toml         (actix-web 4.11, adblock 0.10.3)
+└── src/
+    ├── main.rs        (HTTP server, two-phase startup)
+    ├── engine.rs      (Engine wrapper, serialization, filter list management)
+    └── handlers.rs    (4 endpoints: /health, /check, /status, /toggle)
 ```
 
-**Decision point**: Evaluate during the Browser Security & Data sprint (Section 12 of data-storage doc). Don't restructure prematurely — only if the ad blocker genuinely benefits from workspace sharing with the wallet.
+**HTTP vs FFI decision**: HTTP (localhost API). C++ `AdblockCache` singleton caches URL→blocked results and makes sync WinHTTP POST calls to `/check` on cache miss. The ~1ms per-request overhead is negligible given the in-memory cache (most URLs are checked only once per session). See working-notes.md #10 and `sprint-8-adblock-research.md` for full details.
 
-**Open question**: FFI (Rust static lib linked into C++) vs HTTP (localhost API, current pattern) for ad block queries. HTTP is simpler but adds ~1ms per request. FFI is faster but tighter coupling.
+**CI/CD note**: GitHub Actions pipeline should add `adblock-check` job alongside `rust-check`:
+```yaml
+adblock-check:
+  runs-on: windows-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo check --manifest-path adblock-engine/Cargo.toml
+    - run: cargo test --manifest-path adblock-engine/Cargo.toml
+    - run: cargo clippy --manifest-path adblock-engine/Cargo.toml -- -D warnings
+```
 
 ---
 
@@ -502,7 +508,7 @@ hodos-core/                          (renamed from rust-wallet/)
 - [ ] Integrate WinSparkle for auto-updates
 - [ ] Set up canary/stable release channels
 - [ ] Add Google Test for C++ pure functions
-- [ ] Evaluate repo restructure for ad blocker integration
+- [x] ~~Evaluate repo restructure for ad blocker integration~~ → Decision: separate `adblock-engine/` project at repo root (not a workspace with rust-wallet). See working-notes.md #10.
 
 ### When Scaling
 - [ ] Port Tier 3 vectors (BEEF, sighash, BUMP)
@@ -756,6 +762,39 @@ These are C++ changes — mostly manual testing.
 | P24-M5 | Manage Sites link | Wallet panel → "Manage approved sites" → overlay opens on Approved Sites tab |
 | P24-M6 | Rust safety net logs | Approved domain → trigger createAction → Rust logs show "defense-in-depth check passed" |
 | P24-M7 | Internal ops unaffected | Send BSV from wallet panel → succeeds (no domain check, no header) |
+
+---
+
+### 9j. Sprint 8 — Ad & Tracker Blocking
+
+**What was built**: `adblock-engine/` standalone Rust project (port 3302), C++ `AdblockCache` singleton + `AdblockBlockHandler`, `StartAdblockServer()`/`StopAdblockServer()` in `cef_browser_shell.cpp`, hook in `GetResourceRequestHandler()`.
+
+#### Rust Tests (`cargo test --manifest-path adblock-engine/Cargo.toml`)
+
+| ID | Test | Type | Status |
+|----|------|------|--------|
+| S8-R1 | `test_basic_ad_blocking` | [auto] Unit | **DONE** — verifies EasyList-style rules block matching URLs |
+| S8-R2 | `test_exception_rules` | [auto] Unit | **DONE** — `@@` exception rules override block rules |
+| S8-R3 | `test_resource_type_filtering` | [auto] Unit | **DONE** — `$script` type filter blocks scripts only |
+| S8-R4 | `test_engine_new_starts_in_loading_state` | [auto] Unit | **DONE** — fresh engine in Loading state |
+| S8-R5 | `test_enable_disable_toggle` | [auto] Unit | **DONE** — set_enabled works correctly |
+| S8-R6 | `test_check_request_returns_false_when_disabled` | [auto] Unit | **DONE** — disabled engine never blocks |
+| S8-R7 | `test_check_request_returns_false_when_engine_not_loaded` | [auto] Unit | **DONE** — unloaded engine never blocks |
+| S8-R8 | `test_engine_serialize_deserialize` | [auto] Unit | **DONE** — round-trip preserves blocking |
+| S8-R9 | `test_status_defaults` | [auto] Unit | **DONE** — default status returns zero/empty |
+
+#### Manual Tests
+
+| ID | Test | Steps |
+|----|------|-------|
+| S8-M1 | Engine auto-starts | Launch browser → check debug_output.log for "Adblock engine ready" or "still loading" |
+| S8-M2 | Basic ad blocking | Navigate to ad-heavy site (e.g., news site) → check debug_output.log for "Blocked by adblock:" entries |
+| S8-M3 | Non-critical degradation | Stop adblock engine manually → browser continues functioning (no crashes, no blocked pages) |
+| S8-M4 | Dev mode detection | Start `cargo run --release` in adblock-engine/ manually → launch browser → logs show "already running (dev mode)" |
+| S8-M5 | Process cleanup | Close browser → verify `hodos-adblock.exe` is no longer running (Task Manager) |
+| S8-M6 | Toggle endpoint | `curl -X POST http://localhost:3302/toggle -d '{"enabled":false}'` → verify ads load → re-enable → ads blocked again |
+| S8-M7 | Status endpoint | `curl http://localhost:3302/status` → verify JSON shows list count, rule count, enabled state |
+| S8-M8 | Internal URLs skipped | Wallet panel, settings, overlays all work normally (localhost/chrome: URLs not sent to adblock) |
 
 ---
 

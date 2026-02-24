@@ -39,6 +39,25 @@ cd cef-native/build/bin/Release
 5. **Process-per-overlay architecture is intentional** — each overlay subprocess provides V8 context isolation for defense in depth
 6. **Browser data is separate from wallet data** — history, bookmarks, and cookies live in CEF layer (`%APPDATA%/HodosBrowser/Default/`), not in the Rust wallet
 
+## Logging
+
+All C++ logging goes to `debug_output.log` in the build output directory (`build/bin/Release/debug_output.log`). Use the `Logger` class via convenience macros — **never use `std::cout` or `printf` directly** (stdout is redirected to the same file anyway).
+
+```cpp
+// Macros defined in cef_browser_shell.cpp, re-defined per .cpp file
+LOG_DEBUG_BROWSER(msg)    // Level 0, source "BROWSER" — low-level debug noise
+LOG_INFO_BROWSER(msg)     // Level 1, source "BROWSER" — normal operational info
+LOG_WARNING_BROWSER(msg)  // Level 2, source "BROWSER" — recoverable issues
+LOG_ERROR_BROWSER(msg)    // Level 3, source "BROWSER" — errors
+
+LOG_DEBUG_RENDER(msg)     // Same levels, source "RENDER" — for render process handler
+LOG_INFO_RENDER(msg)
+```
+
+Output format: `[timestamp] [SOURCE] [LEVEL] message`
+
+Use `LOG_INFO_*` for things you want to see during normal testing. Use `LOG_DEBUG_*` for high-frequency noise (e.g. every IPC message). Each `.cpp` file that uses logging must `#define` the macros locally (they reference `Logger::Log` which is in `cef_browser_shell.cpp`).
+
 ## Window & Process Architecture
 
 Every CEF browser instance runs in its **own renderer process**. The browser process (UI thread) orchestrates them via IPC.

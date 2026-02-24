@@ -86,6 +86,15 @@ HANDLE g_walletJobObject = nullptr;  // Job object: auto-kills child when parent
 void StartWalletServer();
 void StopWalletServer();
 
+// Adblock server process management
+PROCESS_INFORMATION g_adblockServerProcess = {};
+bool g_adblockServerRunning = false;
+HANDLE g_adblockJobObject = nullptr;
+
+// Forward declarations for adblock server management
+void StartAdblockServer();
+void StopAdblockServer();
+
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO(msg) Logger::Log(msg, 1, 0)
@@ -186,9 +195,11 @@ void HandleFullscreenChange(bool fullscreen) {
 void ShutdownApplication() {
     LOG_INFO("🛑 Starting graceful application shutdown...");
 
-    // Step 0: Stop wallet server first (to prevent orphaned processes)
+    // Step 0: Stop child servers first (to prevent orphaned processes)
     LOG_INFO("🔄 Stopping wallet server...");
     StopWalletServer();
+    LOG_INFO("🔄 Stopping adblock engine...");
+    StopAdblockServer();
 
     // Step 1: Close all CEF browsers first
     LOG_INFO("🔄 Closing CEF browsers...");
@@ -356,14 +367,18 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
-            // Move cookie panel overlay if it exists and is visible (right-side popup)
+            // Move cookie/privacy shield panel overlay if it exists and is visible (right-side popup)
             if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 int cpWidth = 450;
-                int cpHeight = 450;
+                int cpHeight = 520;
                 int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
                 int cpY = hdrRect.top + 104;
+                if (cpY + cpHeight > mainRect.bottom) {
+                    cpHeight = mainRect.bottom - cpY;
+                    if (cpHeight < 200) cpHeight = 200;
+                }
                 SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
                     cpX, cpY, cpWidth, cpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -377,6 +392,10 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 int dpHeight = 400;
                 int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
                 int dpY = hdrRect.top + 104;
+                if (dpY + dpHeight > mainRect.bottom) {
+                    dpHeight = mainRect.bottom - dpY;
+                    if (dpHeight < 200) dpHeight = 200;
+                }
                 SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
                     dpX, dpY, dpWidth, dpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -537,14 +556,20 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Reposition cookie panel (right-side popup, right edge under icon)
+            // Reposition cookie/privacy shield panel (right-side popup, right edge under icon)
             if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
+                RECT mainWinRect;
+                GetWindowRect(g_hwnd, &mainWinRect);
                 int cpWidth = 450;
-                int cpHeight = 450;
+                int cpHeight = 520;
                 int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
                 int cpY = hdrRect.top + 104;
+                if (cpY + cpHeight > mainWinRect.bottom) {
+                    cpHeight = mainWinRect.bottom - cpY;
+                    if (cpHeight < 200) cpHeight = 200;
+                }
                 SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
                     cpX, cpY, cpWidth, cpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -559,10 +584,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
+                RECT dlMainRect;
+                GetWindowRect(g_hwnd, &dlMainRect);
                 int dpWidth = 380;
                 int dpHeight = 400;
                 int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
                 int dpY = hdrRect.top + 104;
+                if (dpY + dpHeight > dlMainRect.bottom) {
+                    dpHeight = dlMainRect.bottom - dpY;
+                    if (dpHeight < 200) dpHeight = 200;
+                }
                 SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
                     dpX, dpY, dpWidth, dpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1443,8 +1474,9 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
         }
 
         case WM_MOUSEWHEEL: {
-            // Forward mouse wheel events for scrolling
+            // WM_MOUSEWHEEL lParam contains SCREEN coords — must convert to client
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
             CefMouseEvent mouse_event;
@@ -1708,6 +1740,158 @@ void StopWalletServer() {
     LOG_INFO("Wallet server stopped");
 }
 
+// ============================================================================
+// Adblock Server Management
+// ============================================================================
+
+// Health check for adblock engine — checks GET /health on port 3302
+// Returns true if response contains "ready" (engine loaded and ready to check)
+static bool QuickAdblockHealthCheck() {
+    HINTERNET hSession = WinHttpOpen(L"HodosBrowser/AdblockCheck",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    DWORD timeout = 2000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3302, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    BOOL ok = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!ok) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    ok = WinHttpReceiveResponse(hRequest, nullptr);
+    bool ready = false;
+    if (ok) {
+        DWORD dwSize = 0;
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize > 0 && dwSize < 4096) {
+            std::vector<char> buf(dwSize + 1, 0);
+            DWORD dwRead = 0;
+            WinHttpReadData(hRequest, buf.data(), dwSize, &dwRead);
+            std::string body(buf.data(), dwRead);
+            ready = (body.find("\"ready\"") != std::string::npos);
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ready;
+}
+
+// Start the adblock engine as a subprocess (non-critical — browser works without it)
+void StartAdblockServer() {
+    // Check if already running (dev mode: cargo run separately)
+    if (QuickAdblockHealthCheck()) {
+        LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
+        g_adblockServerRunning = true;
+        return;
+    }
+
+    // Resolve exe path relative to browser executable
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string exeDir(exePath);
+    size_t lastSlash = exeDir.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        exeDir = exeDir.substr(0, lastSlash);
+    }
+    std::string adblockExe = exeDir + "\\..\\..\\..\\..\\adblock-engine\\target\\release\\hodos-adblock.exe";
+
+    // Check if the exe exists
+    if (GetFileAttributesA(adblockExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        LOG_WARNING("Adblock engine executable not found: " + adblockExe);
+        LOG_WARNING("Browser will run without ad blocking");
+        return;
+    }
+
+    LOG_INFO("Launching adblock engine: " + adblockExe);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    ZeroMemory(&g_adblockServerProcess, sizeof(PROCESS_INFORMATION));
+
+    if (!CreateProcessA(
+        adblockExe.c_str(),
+        nullptr,
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &g_adblockServerProcess)) {
+        LOG_WARNING("Failed to launch adblock engine. Error: " + std::to_string(GetLastError()));
+        LOG_WARNING("Browser will run without ad blocking");
+        return;
+    }
+
+    LOG_INFO("Adblock engine process created (PID: " + std::to_string(g_adblockServerProcess.dwProcessId) + ")");
+
+    // Assign to Job Object — auto-kill when browser exits
+    g_adblockJobObject = CreateJobObject(nullptr, nullptr);
+    if (g_adblockJobObject) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {};
+        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(g_adblockJobObject, JobObjectExtendedLimitInformation,
+            &jobInfo, sizeof(jobInfo));
+        AssignProcessToJobObject(g_adblockJobObject, g_adblockServerProcess.hProcess);
+        LOG_INFO("Adblock engine assigned to job object (auto-kill on browser exit)");
+    }
+
+    // Poll for health — max 6 attempts, 500ms apart (3 seconds total)
+    // Shorter than wallet since adblock is non-critical
+    for (int i = 0; i < 6; i++) {
+        Sleep(500);
+        if (QuickAdblockHealthCheck()) {
+            LOG_INFO("Adblock engine ready after " + std::to_string((i + 1) * 500) + "ms");
+            g_adblockServerRunning = true;
+            return;
+        }
+    }
+
+    // Engine launched but still loading filter lists — mark as running
+    // (it will respond to /check once ready; AdblockCache will get false until then)
+    LOG_INFO("Adblock engine launched but still loading — ad blocking available once ready");
+    g_adblockServerRunning = true;
+}
+
+// Stop the adblock engine subprocess
+void StopAdblockServer() {
+    if (!g_adblockServerRunning) return;
+
+    if (g_adblockServerProcess.hProcess) {
+        LOG_INFO("Terminating adblock engine (PID: " + std::to_string(g_adblockServerProcess.dwProcessId) + ")");
+        TerminateProcess(g_adblockServerProcess.hProcess, 0);
+        WaitForSingleObject(g_adblockServerProcess.hProcess, 3000);
+        CloseHandle(g_adblockServerProcess.hProcess);
+        CloseHandle(g_adblockServerProcess.hThread);
+        ZeroMemory(&g_adblockServerProcess, sizeof(PROCESS_INFORMATION));
+    }
+
+    if (g_adblockJobObject) {
+        CloseHandle(g_adblockJobObject);
+        g_adblockJobObject = nullptr;
+    }
+
+    g_adblockServerRunning = false;
+    LOG_INFO("Adblock engine stopped");
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
     CefMainArgs main_args(hInstance);
@@ -1929,14 +2113,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO("Starting wallet server...");
     StartWalletServer();
 
+    // Start adblock engine (non-critical — browser works without it)
+    LOG_INFO("Starting adblock engine...");
+    StartAdblockServer();
+
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
 
     CefRunMessageLoop();
 
-    // Stop wallet server before CEF shutdown
+    // Stop child servers before CEF shutdown
     LOG_INFO("Stopping wallet server...");
     StopWalletServer();
+    LOG_INFO("Stopping adblock engine...");
+    StopAdblockServer();
 
     CefShutdown();
     return 0;

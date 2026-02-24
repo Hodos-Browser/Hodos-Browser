@@ -1,0 +1,35 @@
+[package]
+name = "hodos-adblock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HTTP server (pinned to 4.11 — 4.13+ requires Rust 1.88)
+actix-web = "=4.11.0"
+
+# Ad & tracker blocking engine (Brave's adblock-rust)
+# Pinned to 0.10.3: last version compatible with stable Rust 1.85 (0.10.4+ needs unstable unsigned_is_multiple_of)
+# default-features = false disables "unsync-regex-caching" — enables Send+Sync for RwLock<Engine>
+adblock = { version = "=0.10.3", default-features = false, features = [
+    "embedded-domain-resolver",
+    "full-regex-handling",
+    "resource-assembler",
+] }
+rmp = "=0.8.14"  # Pin for rmp-serde 0.15 compat (required by adblock 0.10.x)
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for downloading filter lists
+reqwest = { version = "0.11", features = ["json"] }
+
+# Base64 encoding (for custom scriptlet resources)
+base64 = "0.22"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
