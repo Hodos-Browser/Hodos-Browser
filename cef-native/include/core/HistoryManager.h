@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <unordered_map>
+#include <mutex>
 
 struct HistoryEntry {
     int64_t id;
@@ -64,8 +66,13 @@ private:
     HistoryManager() = default;
     ~HistoryManager();
 
-    sqlite3* history_db_;
+    sqlite3* history_db_ = nullptr;
     std::string history_db_path_;
+
+    // Debounce: prevent duplicate logs within 2 seconds for same URL
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> recent_visits_;
+    std::mutex recent_visits_mutex_;
+    static constexpr int DEBOUNCE_SECONDS = 2;
 
     bool OpenDatabase();
     void CloseDatabase();

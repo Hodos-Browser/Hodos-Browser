@@ -21,6 +21,9 @@
 #include "../../include/core/CookieManager.h"
 #include "../../include/core/CookieBlockManager.h"
 #include "../../include/core/BookmarkManager.h"
+#include "../../include/core/SettingsManager.h"
+#include "../../include/core/ProfileManager.h"
+#include "../../include/core/ProfileImporter.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -176,6 +179,7 @@ CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
 std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_;
 std::set<uint32_t> SimpleHandler::paused_downloads_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
 
 CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
     return this;
@@ -192,6 +196,10 @@ CefRefPtr<CefJSDialogHandler> SimpleHandler::GetJSDialogHandler() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
     return download_panel_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
+    return profile_panel_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -793,6 +801,22 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+
+        // Auto-show profile picker on startup if configured
+        CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+            auto& pm = ProfileManager::GetInstance();
+            if (pm.ShouldShowPickerOnStartup() && pm.GetAllProfiles().size() >= 2) {
+                extern void ShowProfilePanelOverlay(int);
+                extern void CreateProfilePanelOverlay(HINSTANCE, bool, int);
+                extern HWND g_profile_panel_overlay_hwnd;
+                extern HINSTANCE g_hInstance;
+                if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
+                    CreateProfilePanelOverlay(g_hInstance, true, 0);
+                } else {
+                    ShowProfilePanelOverlay(0);
+                }
+            }
+        }), 500);
 #endif
     } else if (role_ == "wallet_panel") {
         wallet_panel_browser_ = browser;
@@ -932,9 +956,23 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
         // CRITICAL: Set focus so interactions work
         browser->GetHost()->SetFocus(true);
-        LOG_DEBUG_BROWSER("⌨️ Cookie panel browser focus enabled");
+        LOG_DEBUG_BROWSER("⌨️ Download panel browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render black screen issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+    } else if (role_ == "profilepanel") {
+        profile_panel_browser_ = browser;
+        LOG_DEBUG_BROWSER("👤 Profile panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        browser->GetHost()->SetFocus(true);
+        LOG_DEBUG_BROWSER("⌨️ Profile panel browser focus enabled");
+
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -1021,6 +1059,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "downloadpanel" && browser == download_panel_browser_) {
         std::cout << "  → Download panel overlay browser cleanup" << std::endl;
         download_panel_browser_ = nullptr;
+    } else if (role_ == "profilepanel" && browser == profile_panel_browser_) {
+        std::cout << "  → Profile panel overlay browser cleanup" << std::endl;
+        profile_panel_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -1483,6 +1524,44 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // Profile Panel IPC handlers
+    if (message_name == "profile_panel_show") {
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> pp_args = message->GetArgumentList();
+        if (pp_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(pp_args->GetString(0).ToString()); } catch(...) {}
+        }
+
+#ifdef _WIN32
+        extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void ShowProfilePanelOverlay(int iconRightOffset);
+        extern HWND g_profile_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
+            CreateProfilePanelOverlay(g_hInstance, true, iconRightOffset);
+        } else {
+            ShowProfilePanelOverlay(iconRightOffset);
+        }
+
+        LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+#else
+        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "profile_panel_hide") {
+#ifdef _WIN32
+        extern void HideProfilePanelOverlay();
+        HideProfilePanelOverlay();
+        LOG_DEBUG_BROWSER("👤 Profile panel overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#endif
+        return true;
+    }
+
     // Dedicated settings close — bypasses role_ check, works from any browser process
     if (message_name == "settings_close") {
         LOG_DEBUG_BROWSER("⚙️ settings_close message received");
@@ -1516,6 +1595,265 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("✅ Settings overlay destroyed via settings_close (macOS)");
         }
 #endif
+        return true;
+    }
+
+    // Settings persistence IPC handlers
+    if (message_name == "settings_get_all") {
+        LOG_DEBUG_BROWSER("⚙️ settings_get_all requested");
+        
+        std::string settingsJson = SettingsManager::GetInstance().ToJson();
+        
+        // Send response back to the requesting browser
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("settings_response");
+        response->GetArgumentList()->SetString(0, settingsJson);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
+        LOG_DEBUG_BROWSER("⚙️ Settings response sent: " + settingsJson.substr(0, 100) + "...");
+        return true;
+    }
+
+    if (message_name == "settings_set") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 2) {
+            LOG_ERROR_BROWSER("❌ settings_set: missing key/value arguments");
+            return true;
+        }
+        
+        std::string key = args->GetString(0).ToString();
+        std::string value = args->GetString(1).ToString();
+        
+        LOG_DEBUG_BROWSER("⚙️ settings_set: " + key + " = " + value);
+        
+        auto& settings = SettingsManager::GetInstance();
+        
+        // Browser settings
+        if (key == "browser.homepage") {
+            settings.SetHomepage(value);
+        } else if (key == "browser.searchEngine") {
+            settings.SetSearchEngine(value);
+        } else if (key == "browser.zoomLevel") {
+            settings.SetZoomLevel(std::stod(value));
+        } else if (key == "browser.showBookmarkBar") {
+            settings.SetShowBookmarkBar(value == "true");
+        } else if (key == "browser.downloadsPath") {
+            settings.SetDownloadsPath(value);
+        } else if (key == "browser.restoreSessionOnStart") {
+            settings.SetRestoreSessionOnStart(value == "true");
+        }
+        // Privacy settings
+        else if (key == "privacy.adBlockEnabled") {
+            settings.SetAdBlockEnabled(value == "true");
+        } else if (key == "privacy.thirdPartyCookieBlocking") {
+            settings.SetThirdPartyCookieBlocking(value == "true");
+        } else if (key == "privacy.doNotTrack") {
+            settings.SetDoNotTrack(value == "true");
+        } else if (key == "privacy.clearDataOnExit") {
+            settings.SetClearDataOnExit(value == "true");
+        }
+        // Wallet settings
+        else if (key == "wallet.autoApproveEnabled") {
+            settings.SetAutoApproveEnabled(value == "true");
+        } else if (key == "wallet.defaultPerTxLimitCents") {
+            settings.SetDefaultPerTxLimitCents(std::stoi(value));
+        } else if (key == "wallet.defaultPerSessionLimitCents") {
+            settings.SetDefaultPerSessionLimitCents(std::stoi(value));
+        } else if (key == "wallet.defaultRateLimitPerMin") {
+            settings.SetDefaultRateLimitPerMin(std::stoi(value));
+        } else {
+            LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
+        }
+        
+        return true;
+    }
+
+    if (message_name == "settings_update_all") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 1) {
+            LOG_ERROR_BROWSER("❌ settings_update_all: missing JSON argument");
+            return true;
+        }
+        
+        std::string jsonStr = args->GetString(0).ToString();
+        LOG_DEBUG_BROWSER("⚙️ settings_update_all: updating from JSON");
+        
+        if (SettingsManager::GetInstance().UpdateFromJson(jsonStr)) {
+            LOG_INFO_BROWSER("✅ Settings updated successfully");
+        } else {
+            LOG_ERROR_BROWSER("❌ Failed to update settings from JSON");
+        }
+        
+        return true;
+    }
+
+    // Profile Manager IPC handlers
+    if (message_name == "profiles_get_all") {
+        LOG_DEBUG_BROWSER("👤 profiles_get_all requested");
+        
+        auto profiles = ProfileManager::GetInstance().GetAllProfiles();
+        auto current = ProfileManager::GetInstance().GetCurrentProfile();
+        
+        // Build JSON response
+        std::string json = "{\"currentProfileId\":\"" + current.id + "\",\"profiles\":[";
+        for (size_t i = 0; i < profiles.size(); i++) {
+            if (i > 0) json += ",";
+            json += "{\"id\":\"" + profiles[i].id + "\"";
+            json += ",\"name\":\"" + profiles[i].name + "\"";
+            json += ",\"color\":\"" + profiles[i].color + "\"";
+            json += ",\"avatarInitial\":\"" + profiles[i].avatarInitial + "\"";
+            if (!profiles[i].avatarImage.empty()) {
+                // Avatar image is already base64 data URL, safe to include
+                json += ",\"avatarImage\":\"" + profiles[i].avatarImage + "\"";
+            }
+            json += "}";
+        }
+        json += "]}";
+        
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("profiles_result");
+        response->GetArgumentList()->SetString(0, json);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
+        LOG_DEBUG_BROWSER("👤 Sent " + std::to_string(profiles.size()) + " profiles");
+        return true;
+    }
+
+    if (message_name == "profiles_create") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string name = args->GetSize() > 0 ? args->GetString(0).ToString() : "New Profile";
+        std::string color = args->GetSize() > 1 ? args->GetString(1).ToString() : "#5f6368";
+        std::string avatarImage = args->GetSize() > 2 ? args->GetString(2).ToString() : "";
+        
+        bool success = ProfileManager::GetInstance().CreateProfile(name, color, avatarImage);
+        LOG_INFO_BROWSER("👤 Profile created: " + name + " = " + (success ? "success" : "failed"));
+        
+        // Send updated profile list
+        CefRefPtr<CefProcessMessage> trigger = CefProcessMessage::Create("profiles_get_all");
+        OnProcessMessageReceived(browser, browser->GetMainFrame(), PID_RENDERER, trigger);
+        return true;
+    }
+
+    if (message_name == "profiles_rename") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 2) {
+            std::string id = args->GetString(0).ToString();
+            std::string newName = args->GetString(1).ToString();
+            ProfileManager::GetInstance().RenameProfile(id, newName);
+            LOG_INFO_BROWSER("👤 Profile renamed: " + id + " -> " + newName);
+        }
+        return true;
+    }
+
+    if (message_name == "profiles_delete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 1) {
+            std::string id = args->GetString(0).ToString();
+            ProfileManager::GetInstance().DeleteProfile(id);
+            LOG_INFO_BROWSER("👤 Profile deleted: " + id);
+        }
+        return true;
+    }
+
+    if (message_name == "profiles_switch") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 1) {
+            std::string id = args->GetString(0).ToString();
+            LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
+            ProfileManager::GetInstance().LaunchWithProfile(id);
+        }
+        return true;
+    }
+
+    // Profile Import IPC handlers
+    if (message_name == "import_detect_profiles") {
+        LOG_DEBUG_BROWSER("📂 import_detect_profiles requested");
+        
+        std::vector<DetectedProfile> profiles = ProfileImporter::DetectProfiles();
+        std::string profilesJson = ProfileImporter::ProfilesToJson(profiles);
+        
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("import_profiles_result");
+        response->GetArgumentList()->SetString(0, profilesJson);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
+        LOG_DEBUG_BROWSER("📂 Found " + std::to_string(profiles.size()) + " profiles");
+        return true;
+    }
+
+    if (message_name == "import_bookmarks") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 1) {
+            LOG_ERROR_BROWSER("❌ import_bookmarks: missing profile path");
+            return true;
+        }
+        
+        std::string profilePath = args->GetString(0).ToString();
+        LOG_INFO_BROWSER("📚 Starting bookmark import from: " + profilePath);
+        
+        ImportResult result = ProfileImporter::ImportBookmarks(profilePath);
+        std::string resultJson = ProfileImporter::ResultToJson(result);
+        
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("import_complete");
+        response->GetArgumentList()->SetString(0, resultJson);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
+        return true;
+    }
+
+    if (message_name == "import_history") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 1) {
+            LOG_ERROR_BROWSER("❌ import_history: missing profile path");
+            return true;
+        }
+        
+        std::string profilePath = args->GetString(0).ToString();
+        int maxEntries = 10000;  // default
+        if (args->GetSize() > 1) {
+            if (args->GetType(1) == VTYPE_STRING) {
+                maxEntries = std::stoi(args->GetString(1).ToString());
+            } else {
+                maxEntries = args->GetInt(1);
+            }
+        }
+        
+        LOG_INFO_BROWSER("📜 Starting history import from: " + profilePath + " (max: " + std::to_string(maxEntries) + ")");
+        
+        ImportResult result = ProfileImporter::ImportHistory(profilePath, maxEntries);
+        std::string resultJson = ProfileImporter::ResultToJson(result);
+        
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("import_complete");
+        response->GetArgumentList()->SetString(0, resultJson);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
+        return true;
+    }
+
+    if (message_name == "import_all") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 1) {
+            LOG_ERROR_BROWSER("❌ import_all: missing profile path");
+            return true;
+        }
+        
+        std::string profilePath = args->GetString(0).ToString();
+        int maxHistoryEntries = 10000;  // default
+        if (args->GetSize() > 1) {
+            // Handle both string and int input
+            if (args->GetType(1) == VTYPE_STRING) {
+                maxHistoryEntries = std::stoi(args->GetString(1).ToString());
+            } else {
+                maxHistoryEntries = args->GetInt(1);
+            }
+        }
+        
+        LOG_INFO_BROWSER("📦 Starting full import from: " + profilePath + " (maxHistory: " + std::to_string(maxHistoryEntries) + ")");
+        
+        ImportResult result = ProfileImporter::ImportAll(profilePath, maxHistoryEntries);
+        std::string resultJson = ProfileImporter::ResultToJson(result);
+        
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("import_complete");
+        response->GetArgumentList()->SetString(0, resultJson);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        
         return true;
     }
 

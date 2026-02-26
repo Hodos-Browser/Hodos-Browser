@@ -1,7 +1,20 @@
 # HodosBrowser - Project Context for Claude
 
 # Guidelines
-Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps
+
+Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps.
+
+## Testing Standards
+
+**Every feature must be tested against real-world sites.** See `development-docs/browser-core/test-site-basket.md` for the standard verification sites.
+
+| Level | When | Duration | Sites |
+|-------|------|----------|-------|
+| **Minimal** | After any browser-core change | 5 min | youtube.com, x.com, github.com |
+| **Standard** | After sprint completion | 15 min | Auth category + 2-3 video/media + 1-2 news |
+| **Thorough** | Before release/demo | 30-45 min | Full basket, all categories |
+
+**Categories:** Authentication (x.com, google.com, github.com), Video/Media (youtube.com, twitch.tv), News/Content (nytimes.com, reddit.com), E-commerce (amazon.com), Productivity (docs.google.com), BSV (whatsonchain.com)
 ## Overview
 
 A Web3 browser built on CEF (Chromium Embedded Framework) with a native Rust wallet backend. Implements BRC-100 protocol suite for Bitcoin SV authentication and micropayments. This is production software handling real money; security and correctness take priority over development speed.
@@ -32,6 +45,128 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 | Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol; private keys never leave this process |
 
 **Overlay Model**: Settings, Wallet Panel, Backup Modal, and BRC-100 Auth each run as separate CEF subprocesses with isolated V8 contexts.
+
+---
+
+## ⚠️ CRITICAL: UI Architecture Rules
+
+**NEVER add new panels/menus/dropdowns directly to MainBrowserView.tsx (header_hwnd).**
+
+All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
+
+| Component | Implementation | Location |
+|-----------|---------------|----------|
+| Wallet Panel | ✅ Overlay | `WalletPanelPage.tsx` → `WalletOverlayRoot.tsx` |
+| Settings | ✅ Overlay | `SettingsOverlayRoot.tsx` |
+| Cookie Panel | ✅ Overlay | `CookiePanelOverlayRoot.tsx` |
+| Downloads | ✅ Overlay | `DownloadsOverlayRoot.tsx` |
+| Privacy Shield | ✅ Overlay | `PrivacyShieldOverlayRoot.tsx` |
+| Omnibox | ✅ Overlay | `OmniboxOverlayRoot.tsx` |
+| **Profile Picker** | ✅ Overlay | `ProfilePickerOverlayRoot.tsx` (TODO) |
+
+**Why overlays?**
+- Each overlay is isolated V8 context (security)
+- Doesn't block main browser thread
+- Can be positioned relative to toolbar icons
+- Consistent UX pattern across all panels
+
+**Pattern for new panels:**
+1. Create `<Name>OverlayRoot.tsx` in `frontend/src/pages/`
+2. Add route in `frontend/src/App.tsx`
+3. Add C++ handler to show/hide overlay in `simple_handler.cpp`
+4. Trigger via `window.cefMessage.send('<name>_panel_show', [offset])`
+
+**MainBrowserView.tsx should ONLY contain:**
+- Tab bar
+- Navigation buttons (back/forward/refresh)
+- Address bar input
+- Toolbar icon buttons (that TRIGGER overlays)
+- Find bar (inline exception)
+
+---
+
+## ⚠️ CEF Input Patterns (IMPORTANT)
+
+CEF overlays have quirks with form inputs. Follow these patterns:
+
+### Text Inputs
+- **Use native `<input>` elements**, not MUI `TextField`
+- MUI's extra layers break CEF focus handling
+- Add delayed focus with `useEffect` + `setTimeout(50ms)`
+
+```tsx
+// ✅ Works in CEF
+<input
+  type="text"
+  style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+  onFocus={(e) => e.target.style.borderColor = '#1a73e8'}
+  onBlur={(e) => e.target.style.borderColor = '#ccc'}
+/>
+
+// ❌ Broken in CEF overlays
+<TextField variant="outlined" />
+```
+
+### File Inputs
+- **Use VISIBLE file inputs**, not hidden ones triggered by click
+- CEF handles visible `<input type="file">` correctly
+- Hidden file inputs triggered via `.click()` often fail
+
+```tsx
+// ✅ Works in CEF (visible input)
+<div style={{ background: '#f5f5f5', padding: '8px', borderRadius: '4px' }}>
+  <input type="file" accept="image/*" onChange={handleFile} style={{ width: '100%' }} />
+</div>
+
+// ❌ Unreliable in CEF (hidden + click trigger)
+<input type="file" style={{ display: 'none' }} ref={ref} />
+<button onClick={() => ref.current?.click()}>Choose File</button>
+```
+
+### Reference Implementation
+- `WalletPanelPage.tsx` — working file input for wallet recovery
+- `BackupOverlayRoot.tsx` — working native text inputs
+
+### Focus & Keyboard Handling (C++ side)
+CEF windowless overlays need explicit focus AND keyboard event forwarding:
+
+**1. HWND Creation:**
+```cpp
+// Use WS_VISIBLE flag for proper focus
+WS_POPUP | WS_VISIBLE,  // NOT just WS_POPUP
+```
+
+**2. Browser Settings:**
+```cpp
+settings.javascript_access_clipboard = STATE_ENABLED;
+settings.javascript_dom_paste = STATE_ENABLED;
+```
+
+**3. WndProc (CRITICAL):**
+```cpp
+case WM_MOUSEACTIVATE:
+    return MA_ACTIVATE;  // NOT MA_NOACTIVATE!
+
+case WM_LBUTTONDOWN:
+    SetFocus(hwnd);  // Windows focus
+    browser->GetHost()->SetFocus(true);  // CEF focus
+    browser->GetHost()->SendMouseClickEvent(...);
+    return 0;
+
+case WM_KEYDOWN:
+case WM_KEYUP:
+case WM_CHAR:
+    // Forward ALL keyboard events to CEF browser
+    browser->GetHost()->SendKeyEvent(key_event);
+    return 0;
+```
+
+**4. OnAfterCreated:**
+```cpp
+browser->GetHost()->SetFocus(true);
+```
+
+**Reference:** `WalletOverlayWndProc` in `cef_browser_shell.cpp` — working keyboard input
 
 ---
 
@@ -172,3 +307,47 @@ First-time setup (requires CEF binaries already downloaded):
 | CefResponseFilter | CEF API for streaming modification of HTTP response bodies. Used by `AdblockResponseFilter` to strip YouTube ad keys at the network level before JavaScript sees the data |
 | Cosmetic Filtering | CSS selector injection to hide ad-related DOM elements + scriptlet injection to override JavaScript ad behavior. Two-phase: hostname-specific selectors on page load, generic selectors after DOM class/ID collection |
 | Scriptlet Injection | JavaScript injected into page context via V8 to override browser APIs (fetch, XHR, JSON.parse) and strip ad data. Pre-cached via `OnBeforeBrowse` IPC, injected in `OnContextCreated` |
+
+---
+
+## Testing
+
+### Test Site Basket
+
+Standard verification sites are documented in `development-docs/browser-core/test-site-basket.md`.
+
+| Level | When | Sites |
+|-------|------|-------|
+| **Minimal (5 min)** | After any browser-core change | youtube.com, x.com, github.com |
+| **Standard (15 min)** | After sprint completion | Auth category + 2-3 video/media + 1-2 news |
+| **Thorough (30-45 min)** | Before release/demo | Full basket, all categories |
+
+### Build Verification
+
+After changes, always build before asking user to test:
+- **C++:** `cmake --build build --config Release` in `cef-native/`
+- **Rust wallet:** `cargo build --release` in `rust-wallet/`
+- **Rust adblock:** `cargo build --release` in `adblock-engine/`
+- **Frontend:** `npm run build` in `frontend/`
+
+---
+
+## Context File Maintenance
+
+### Continuous Improvement Directive
+
+**After each sprint, phase, or sub-phase:**
+1. Review this CLAUDE.md — Is it still accurate? Update Key Files table if architecture changed.
+2. Check sprint-specific CLAUDE.md in `development-docs/browser-core/` or `development-docs/UX_UI/`.
+3. Update test-site-basket.md if new test cases identified.
+4. Add new patterns/gotchas to the relevant context file.
+
+**Goal:** Context files should always reflect current reality. They're the institutional memory that lets any AI (or human) pick up where the last session left off.
+
+### Sprint Documentation
+
+| Folder | Purpose |
+|--------|---------|
+| `development-docs/browser-core/` | Browser feature sprints (SSL, permissions, downloads, ad blocking, etc.) |
+| `development-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) |
+| `development-docs/macos-port/` | macOS porting plan and status |

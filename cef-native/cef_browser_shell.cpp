@@ -30,6 +30,9 @@
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/SettingsManager.h"
+#include "include/core/ProfileManager.h"
+#include "include/core/ProfileLock.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -56,6 +59,7 @@ HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
 HWND g_cookie_panel_overlay_hwnd = nullptr;
 HWND g_download_panel_overlay_hwnd = nullptr;
+HWND g_profile_panel_overlay_hwnd = nullptr;
 HWND g_notification_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
@@ -65,6 +69,7 @@ bool g_file_dialog_active = false;
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
 HHOOK g_download_panel_mouse_hook = nullptr;
+HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
@@ -72,6 +77,7 @@ HHOOK g_settings_mouse_hook = nullptr;
 int g_settings_icon_right_offset = 0;
 int g_cookie_icon_right_offset = 0;
 int g_download_icon_right_offset = 0;
+int g_profile_icon_right_offset = 0;
 int g_wallet_icon_right_offset = 0;
 
 // Fullscreen state tracking
@@ -1530,6 +1536,27 @@ LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lPa
     return CallNextHookEx(g_download_panel_mouse_hook, nCode, wParam, lParam);
 }
 
+// ========== PROFILE PANEL OVERLAY ==========
+
+LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd) && IsWindowVisible(g_profile_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_profile_panel_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside profile panel overlay bounds - dismissing");
+                    extern void HideProfilePanelOverlay();
+                    HideProfilePanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_profile_panel_mouse_hook, nCode, wParam, lParam);
+}
+
 LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_MOUSEACTIVATE:
@@ -1576,6 +1603,160 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
             if (dl_browser) {
                 dl_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// Profile Panel Overlay Window Procedure
+LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            LOG_DEBUG("👆 Profile Panel HWND received WM_MOUSEACTIVATE");
+            // Allow normal activation (same as wallet) - CRITICAL for keyboard focus
+            return MA_ACTIVATE;
+
+        case WM_SETCURSOR:
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            LOG_DEBUG("🖱️ Profile Panel received WM_LBUTTONDOWN");
+            SetFocus(hwnd);  // CRITICAL: Set Windows focus on click
+
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SetFocus(true);  // Also set CEF focus
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_RBUTTONDOWN: {
+            LOG_DEBUG("🖱️ Profile Panel received WM_RBUTTONDOWN");
+            SetFocus(hwnd);
+
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            LOG_DEBUG("⌨️ Profile Panel received WM_KEYDOWN - key: " + std::to_string(wParam));
+            SetFocus(hwnd);
+
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYDOWN;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+
+                // Check for modifier keys
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+
+                profile_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_KEYUP: {
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYUP;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+
+                profile_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_CHAR: {
+            LOG_DEBUG("⌨️ Profile Panel received WM_CHAR - char: " + std::to_string(wParam));
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_CHAR;
+                key_event.windows_key_code = wParam;
+                key_event.character = wParam;
+                key_event.unmodified_character = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+
+                profile_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
             }
             return 0;
         }
@@ -1921,14 +2102,62 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     settings.command_line_args_disabled = false;
     CefString(&settings.log_file).FromASCII("debug.log");
     settings.log_severity = LOGSEVERITY_INFO;
-    settings.remote_debugging_port = 9222;
     settings.windowless_rendering_enabled = true;
 
-    // Set root cache path for browser data (history, cookies, etc.)
+    // Set base app data path
     std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
     std::string user_data_path = appdata_path + "\\HodosBrowser";
-    CefString(&settings.root_cache_path).FromString(user_data_path);
-    CefString(&settings.cache_path).FromString(user_data_path + "\\Default");
+
+    // Initialize ProfileManager BEFORE CefInitialize so cache_path is correct
+    LOG_INFO("Initializing ProfileManager...");
+    if (!ProfileManager::GetInstance().Initialize(user_data_path)) {
+        LOG_ERROR("Failed to initialize ProfileManager");
+    }
+
+    // Parse --profile argument from command line
+    std::string profileId = ProfileManager::ParseProfileArgument(GetCommandLineW());
+    ProfileManager::GetInstance().SetCurrentProfileId(profileId);
+    LOG_INFO("Using profile: " + profileId);
+
+    // Get profile-specific data directory
+    std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+    LOG_INFO("Profile data path: " + profile_cache);
+
+    // Acquire exclusive lock on profile directory (prevents SQLite corruption)
+    if (!AcquireProfileLock(profile_cache)) {
+        MessageBoxA(nullptr,
+            ("Profile \"" + profileId + "\" is already in use by another instance.\n\n"
+             "Close the other instance first, or launch with a different profile.").c_str(),
+            "Hodos Browser - Profile Locked",
+            MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    LOG_INFO("Profile lock acquired");
+
+    // Initialize SettingsManager with profile-specific path
+    SettingsManager::GetInstance().Initialize(profile_cache);
+    LOG_INFO("Settings loaded for profile: " + profileId);
+
+    // Each profile instance needs its own root to avoid CEF SingletonLock conflicts
+    // root_cache_path = profile dir, cache_path = profile dir + /cache (must be child of root)
+    CefString(&settings.root_cache_path).FromString(profile_cache);
+    std::string cache_subdir = profile_cache + "\\cache";
+    CefString(&settings.cache_path).FromString(cache_subdir);
+
+    // Remote debugging port: each profile gets a unique port so multiple instances can coexist
+    // Default=9222, others get 9223+ based on profile number, or 0 to disable
+    if (profileId == "Default") {
+        settings.remote_debugging_port = 9222;
+    } else {
+        // Extract number from profile ID (e.g., "Profile_2" -> 2) for port offset
+        int portOffset = 0;
+        size_t underscorePos = profileId.find('_');
+        if (underscorePos != std::string::npos) {
+            try { portOffset = std::stoi(profileId.substr(underscorePos + 1)); } catch (...) {}
+        }
+        settings.remote_debugging_port = 9222 + portOffset;
+    }
+    LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));
 
     // Persist session cookies across browser restarts
     // TEMPORARILY DISABLED - testing if this causes extra windows
@@ -2055,6 +2284,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("Failed to register download panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
+    // Register Profile Panel overlay window class
+    WNDCLASS profilePanelOverlayClass = {};
+    profilePanelOverlayClass.lpfnWndProc = ProfilePanelOverlayWndProc;
+    profilePanelOverlayClass.hInstance = hInstance;
+    profilePanelOverlayClass.lpszClassName = L"CEFProfilePanelOverlayWindow";
+
+    if (!RegisterClass(&profilePanelOverlayClass)) {
+        LOG_DEBUG("Failed to register profile panel overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
@@ -2082,28 +2321,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     bool success = CefInitialize(main_args, settings, app, nullptr);
     LOG_DEBUG("CefInitialize success: " + std::string(success ? "true" : "false"));
 
-    if (!success) return 1;
+    if (!success) {
+        ReleaseProfileLock();
+        return 1;
+    }
 
-    // Initialize HistoryManager with cache path (where CEF creates History database)
+    // Initialize HistoryManager with profile-specific path
     LOG_INFO("Initializing HistoryManager...");
-    std::string cache_dir = user_data_path + "\\Default";
-    if (HistoryManager::GetInstance().Initialize(cache_dir)) {
-        LOG_INFO("✅ HistoryManager initialized successfully");
+    if (HistoryManager::GetInstance().Initialize(profile_cache)) {
+        LOG_INFO("HistoryManager initialized successfully");
     } else {
-        LOG_ERROR("❌ Failed to initialize HistoryManager");
+        LOG_ERROR("Failed to initialize HistoryManager");
     }
 
     // Initialize CookieBlockManager with same cache path
     LOG_INFO("Initializing CookieBlockManager...");
-    if (CookieBlockManager::GetInstance().Initialize(cache_dir)) {
-        LOG_INFO("✅ CookieBlockManager initialized successfully");
+    if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+        LOG_INFO("CookieBlockManager initialized successfully");
     } else {
-        LOG_ERROR("❌ Failed to initialize CookieBlockManager");
+        LOG_ERROR("Failed to initialize CookieBlockManager");
     }
 
     // Initialize BookmarkManager with same cache path
     LOG_INFO("Initializing BookmarkManager...");
-    if (BookmarkManager::GetInstance().Initialize(cache_dir)) {
+    if (BookmarkManager::GetInstance().Initialize(profile_cache)) {
         LOG_INFO("BookmarkManager initialized successfully");
     } else {
         LOG_ERROR("Failed to initialize BookmarkManager");
@@ -2128,6 +2369,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO("Stopping adblock engine...");
     StopAdblockServer();
 
+    ReleaseProfileLock();
     CefShutdown();
     return 0;
 }

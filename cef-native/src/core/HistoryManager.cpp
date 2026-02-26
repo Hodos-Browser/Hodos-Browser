@@ -123,6 +123,34 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         return false;
     }
 
+    // Debounce: skip if we've logged this URL within DEBOUNCE_SECONDS
+    {
+        std::lock_guard<std::mutex> lock(recent_visits_mutex_);
+        auto now_clock = std::chrono::steady_clock::now();
+        auto it = recent_visits_.find(url);
+        if (it != recent_visits_.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now_clock - it->second).count();
+            if (elapsed < DEBOUNCE_SECONDS) {
+                LOG_INFO_HISTORY("📚 Skipping duplicate visit (debounced): " + url);
+                return true; // Return true - not an error, just skipped
+            }
+        }
+        // Update the timestamp for this URL
+        recent_visits_[url] = now_clock;
+        
+        // Cleanup old entries (keep map from growing unbounded)
+        if (recent_visits_.size() > 100) {
+            for (auto it = recent_visits_.begin(); it != recent_visits_.end(); ) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now_clock - it->second).count();
+                if (elapsed > 60) {  // Remove entries older than 60 seconds
+                    it = recent_visits_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
     int64_t now = GetCurrentChromiumTime();
 
     LOG_INFO_HISTORY("📚 Adding visit: " + url);
@@ -236,12 +264,14 @@ std::vector<HistoryEntry> HistoryManager::GetHistory(int limit, int offset) {
         return entries;
     }
 
+    // Return unique URLs only (not every individual visit)
+    // Uses MAX(visit_time) to get the most recent visit for each URL
     const char* sql = R"(
-        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, v.visit_time, v.transition
+        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, 
+               u.last_visit_time as visit_time, 0 as transition
         FROM urls u
-        INNER JOIN visits v ON u.id = v.url
         WHERE u.hidden = 0
-        ORDER BY v.visit_time DESC
+        ORDER BY u.last_visit_time DESC
         LIMIT ? OFFSET ?
     )";
 
@@ -301,10 +331,11 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
         return entries;
     }
 
+    // Return unique URLs only (not every individual visit)
     std::stringstream sql;
-    sql << "SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, v.visit_time, v.transition "
+    sql << "SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time, "
+        << "u.last_visit_time as visit_time, 0 as transition "
         << "FROM urls u "
-        << "INNER JOIN visits v ON u.id = v.url "
         << "WHERE u.hidden = 0";
 
     bool has_search = !params.search_term.empty();
@@ -316,14 +347,14 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
     }
 
     if (has_start) {
-        sql << " AND v.visit_time >= ?";
+        sql << " AND u.last_visit_time >= ?";
     }
 
     if (has_end) {
-        sql << " AND v.visit_time <= ?";
+        sql << " AND u.last_visit_time <= ?";
     }
 
-    sql << " ORDER BY v.visit_time DESC LIMIT ? OFFSET ?";
+    sql << " ORDER BY u.last_visit_time DESC LIMIT ? OFFSET ?";
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(history_db_, sql.str().c_str(), -1, &stmt, nullptr);

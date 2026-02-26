@@ -143,6 +143,26 @@
 
 ---
 
+## 10. Profile Button — Show Active Profile Identity
+
+**Status**: Open — wired but no visual indicator.
+
+**Problem**: The profile icon/button in the toolbar (MainBrowserView.tsx header) is a generic icon. When running multiple browser instances with different profiles, there's no way to tell which profile a window belongs to. This is critical for multi-profile UX — users running profiles on different virtual desktops need an at-a-glance indicator.
+
+**What Chrome does**: Chrome shows the profile's avatar image (or colored initial) as the toolbar button itself. Clicking it opens the profile picker. The avatar is always visible, making it immediately clear which profile you're in.
+
+**Implementation**:
+- `useProfiles` hook already provides `currentProfile` with `avatarImage`, `avatarInitial`, and `color`
+- Replace the generic profile icon button in `MainBrowserView.tsx` with a small circular avatar:
+  - If `currentProfile.avatarImage` exists: show the image (scaled to ~24x24px)
+  - Otherwise: show `currentProfile.avatarInitial` on a circle with `currentProfile.color` as background
+- The click handler stays the same (opens profile picker overlay)
+- Consider adding the profile name as a tooltip on hover
+
+**Files**: `frontend/src/pages/MainBrowserView.tsx` (toolbar icon), `frontend/src/hooks/useProfiles.ts` (data source)
+
+---
+
 ## Testing Checklist (for the cleanup & optimization sprint)
 
 ### UX/UI

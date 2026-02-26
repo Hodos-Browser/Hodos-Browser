@@ -24,6 +24,10 @@ import {
   MenuItem,
   ListItemIcon,
   ListItemText,
+  FormControl,
+  InputLabel,
+  Select,
+  Pagination as MuiPagination,
 } from '@mui/material';
 import {
   ExpandMore,
@@ -41,6 +45,9 @@ import { useCookies } from '../hooks/useCookies';
 import { useCookieBlocking } from '../hooks/useCookieBlocking';
 import type { CookieData, DomainCookieGroup } from '../types/cookies';
 import type { BlockedDomainEntry } from '../types/cookieBlocking';
+
+type SortOption = 'default' | 'blocked' | 'count' | 'size';
+const ITEMS_PER_PAGE = 20;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -108,6 +115,8 @@ export function CookiesPanel() {
   } = useCookieBlocking();
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [sortOption, setSortOption] = useState<SortOption>('default');
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedCookie, setSelectedCookie] = useState<{
     domain: string;
     name: string;
@@ -164,32 +173,70 @@ export function CookiesPanel() {
     [blockedDomains]
   );
 
-  // Filter domain groups based on search term
-  const filteredGroups = useMemo((): DomainCookieGroup[] => {
-    if (!searchTerm.trim()) return domainGroups;
-    const term = searchTerm.toLowerCase();
-    const result: DomainCookieGroup[] = [];
-    for (const group of domainGroups) {
-      // If domain matches, include the whole group
-      if (group.domain.toLowerCase().includes(term)) {
-        result.push(group);
-        continue;
-      }
-      // Otherwise, filter cookies within the group by name
-      const matchingCookies = group.cookies.filter((c) =>
-        c.name.toLowerCase().includes(term)
-      );
-      if (matchingCookies.length > 0) {
-        result.push({
-          domain: group.domain,
-          cookies: matchingCookies,
-          totalSize: matchingCookies.reduce((sum, c) => sum + c.size, 0),
-          count: matchingCookies.length,
-        });
+  // Filter and sort domain groups
+  const filteredAndSortedGroups = useMemo((): DomainCookieGroup[] => {
+    let result: DomainCookieGroup[] = [];
+    
+    // Filter by search term
+    if (!searchTerm.trim()) {
+      result = [...domainGroups];
+    } else {
+      const term = searchTerm.toLowerCase();
+      for (const group of domainGroups) {
+        // If domain matches, include the whole group
+        if (group.domain.toLowerCase().includes(term)) {
+          result.push(group);
+          continue;
+        }
+        // Otherwise, filter cookies within the group by name
+        const matchingCookies = group.cookies.filter((c) =>
+          c.name.toLowerCase().includes(term)
+        );
+        if (matchingCookies.length > 0) {
+          result.push({
+            domain: group.domain,
+            cookies: matchingCookies,
+            totalSize: matchingCookies.reduce((sum, c) => sum + c.size, 0),
+            count: matchingCookies.length,
+          });
+        }
       }
     }
+
+    // Sort based on sort option
+    switch (sortOption) {
+      case 'blocked':
+        result.sort((a, b) => {
+          const aBlocked = isDomainBlocked(a.domain) ? 1 : 0;
+          const bBlocked = isDomainBlocked(b.domain) ? 1 : 0;
+          return bBlocked - aBlocked; // Blocked first
+        });
+        break;
+      case 'count':
+        result.sort((a, b) => b.count - a.count); // Most cookies first
+        break;
+      case 'size':
+        result.sort((a, b) => b.totalSize - a.totalSize); // Largest first
+        break;
+      default:
+        // Keep default order (alphabetical by domain)
+        break;
+    }
+
     return result;
-  }, [domainGroups, searchTerm]);
+  }, [domainGroups, searchTerm, sortOption, isDomainBlocked]);
+
+  // Pagination
+  const totalPages = Math.ceil(filteredAndSortedGroups.length / ITEMS_PER_PAGE);
+  const paginatedGroups = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredAndSortedGroups.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredAndSortedGroups, currentPage]);
+
+  // Reset page when filter/sort changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, sortOption]);
 
   const showToast = useCallback((message: string, severity: 'success' | 'info' = 'success') => {
     setToastMessage(message);
@@ -457,22 +504,47 @@ export function CookiesPanel() {
           disabled={!selectedCookie}
           onClick={handleDeleteSelected}
         >
-          Delete Selected
+          Delete Cookie
         </Button>
       </Box>
 
-      {/* Search box */}
-      <TextField
-        fullWidth
-        placeholder="Search by domain or cookie name..."
-        value={searchTerm}
-        onChange={(e) => setSearchTerm(e.target.value)}
-        InputProps={{
-          startAdornment: <SearchIcon sx={{ mr: 1, color: 'action.active' }} />,
-        }}
-        sx={{ mb: 2 }}
-        size="small"
-      />
+      {/* Search and Sort */}
+      <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+        <TextField
+          fullWidth
+          placeholder="Search by domain or cookie name..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          InputProps={{
+            startAdornment: <SearchIcon sx={{ mr: 1, color: 'action.active' }} />,
+          }}
+          size="small"
+        />
+        <FormControl size="small" sx={{ minWidth: 140 }}>
+          <InputLabel id="cookie-sort-label">Sort by</InputLabel>
+          <Select
+            labelId="cookie-sort-label"
+            value={sortOption}
+            label="Sort by"
+            onChange={(e) => setSortOption(e.target.value as SortOption)}
+          >
+            <MenuItem value="default">Default</MenuItem>
+            <MenuItem value="blocked">Blocked first</MenuItem>
+            <MenuItem value="count">Most cookies</MenuItem>
+            <MenuItem value="size">Largest</MenuItem>
+          </Select>
+        </FormControl>
+      </Box>
+
+      {/* Info line */}
+      {!loading && !error && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          {filteredAndSortedGroups.length} {filteredAndSortedGroups.length === 1 ? 'domain' : 'domains'}
+          {filteredAndSortedGroups.length > ITEMS_PER_PAGE && 
+            ` • Showing ${(currentPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(currentPage * ITEMS_PER_PAGE, filteredAndSortedGroups.length)}`
+          }
+        </Typography>
+      )}
 
       <Divider sx={{ mb: 2 }} />
 
@@ -496,7 +568,7 @@ export function CookiesPanel() {
       )}
 
       {/* Empty state */}
-      {!loading && !error && filteredGroups.length === 0 && (
+      {!loading && !error && filteredAndSortedGroups.length === 0 && (
         <Box sx={{ textAlign: 'center', py: 6 }}>
           <Cookie sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
           <Typography variant="body1" color="text.secondary">
@@ -506,9 +578,9 @@ export function CookiesPanel() {
       )}
 
       {/* Domain groups */}
-      {!loading && !error && filteredGroups.length > 0 && (
+      {!loading && !error && paginatedGroups.length > 0 && (
         <Box sx={{ flex: 1, overflow: 'auto' }}>
-          {filteredGroups.map((group) => {
+          {paginatedGroups.map((group) => {
             const blockedEntry = isDomainBlocked(group.domain);
             const isBlocked = !!blockedEntry;
 
@@ -763,6 +835,21 @@ export function CookiesPanel() {
               </Accordion>
             );
           })}
+        </Box>
+      )}
+
+      {/* Pagination */}
+      {!loading && !error && totalPages > 1 && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', py: 1, mt: 1 }}>
+          <MuiPagination
+            count={totalPages}
+            page={currentPage}
+            onChange={(_, page) => setCurrentPage(page)}
+            color="primary"
+            size="small"
+            showFirstButton
+            showLastButton
+          />
         </Box>
       )}
 

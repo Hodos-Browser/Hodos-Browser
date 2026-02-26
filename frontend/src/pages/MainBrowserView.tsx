@@ -14,6 +14,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import HistoryIcon from '@mui/icons-material/History';
 import SettingsIcon from '@mui/icons-material/Settings';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
@@ -450,8 +451,11 @@ const MainBrowserView: React.FC = () => {
                     <RefreshIcon fontSize="small" />
                 </IconButton>
 
-                {/* Address Bar with Inline Autocomplete */}
-                <Box sx={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                {/* Spacer to help center address bar */}
+                <Box sx={{ flex: 1 }} />
+
+                {/* Address Bar with Inline Autocomplete - centered, constrained width */}
+                <Box sx={{ position: 'relative', flex: '0 1 1200px', minWidth: 200, maxWidth: 1200 }}>
                     {securityState !== 'none' && (
                         <Box
                             sx={{
@@ -572,6 +576,9 @@ const MainBrowserView: React.FC = () => {
                         }}
                     />
                 </Box>
+
+                {/* Spacer to help center address bar */}
+                <Box sx={{ flex: 1 }} />
 
                 {/* Download Button - only shown when downloads exist */}
                 {hasDownloads && (
@@ -711,6 +718,25 @@ const MainBrowserView: React.FC = () => {
                     title="Settings"
                 >
                     <SettingsIcon fontSize="small" />
+                </IconButton>
+
+                {/* Profile Button - triggers overlay */}
+                <IconButton
+                    onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        window.cefMessage?.send('profile_panel_show', [iconRightOffset.toString()]);
+                    }}
+                    size="small"
+                    sx={{
+                        flexShrink: 0,
+                        ml: 0.5,
+                        p: 0.5,
+                    }}
+                    title="Profile"
+                >
+                    <AccountCircleIcon fontSize="small" />
                 </IconButton>
 
                 {/* Find Bar - inline in toolbar */}

@@ -74,6 +74,9 @@ void ShutdownApplication();
 #include "include/core/Logger.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
+#include "include/core/ProfileManager.h"
+#include "include/core/ProfileLock.h"
+#include "include/core/SettingsManager.h"
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -1558,13 +1561,60 @@ int main(int argc, char* argv[]) {
             NSApplicationSupportDirectory, NSUserDomainMask, YES);
         NSString* appSupport = [paths firstObject];
         NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
-        NSString* defaultDir = [hodosBrowserDir stringByAppendingPathComponent:@"Default"];
 
-        std::string cache_path = [defaultDir UTF8String];
-        CefString(&settings.root_cache_path).FromString([hodosBrowserDir UTF8String]);
+        std::string user_data_path = [hodosBrowserDir UTF8String];
+        CefString(&settings.root_cache_path).FromString(user_data_path);
+
+        // Initialize ProfileManager BEFORE CefInitialize so cache_path is correct
+        LOG_INFO("Initializing ProfileManager...");
+        if (!ProfileManager::GetInstance().Initialize(user_data_path)) {
+            LOG_ERROR("Failed to initialize ProfileManager");
+        }
+
+        // Parse --profile argument from command line
+        // macOS: use argc/argv from main_args
+        std::string profileId = "Default";
+        NSArray* arguments = [[NSProcessInfo processInfo] arguments];
+        for (NSString* arg in arguments) {
+            std::string argStr = [arg UTF8String];
+            if (argStr.find("--profile=") == 0) {
+                profileId = argStr.substr(10);
+                // Remove quotes if present
+                if (!profileId.empty() && profileId.front() == '"') profileId = profileId.substr(1);
+                if (!profileId.empty() && profileId.back() == '"') profileId.pop_back();
+                break;
+            }
+        }
+        ProfileManager::GetInstance().SetCurrentProfileId(profileId);
+        LOG_INFO("Using profile: " + profileId);
+
+        // Get profile-specific data directory
+        std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+        LOG_INFO("Profile data path: " + profile_cache);
+
+        // Acquire exclusive lock on profile directory (prevents SQLite corruption)
+        if (!AcquireProfileLock(profile_cache)) {
+            NSAlert* alert = [[NSAlert alloc] init];
+            [alert setMessageText:@"Profile Locked"];
+            NSString* infoText = [NSString stringWithFormat:
+                @"Profile \"%s\" is already in use by another instance.\n\nClose the other instance first, or launch with a different profile.",
+                profileId.c_str()];
+            [alert setInformativeText:infoText];
+            [alert setAlertStyle:NSAlertStyleCritical];
+            [alert runModal];
+            return 1;
+        }
+        LOG_INFO("Profile lock acquired");
+
+        // Initialize SettingsManager with profile-specific path
+        SettingsManager::GetInstance().Initialize(profile_cache);
+        LOG_INFO("Settings loaded for profile: " + profileId);
+
+        // Set cache_path to profile-specific directory (cookie/localStorage isolation!)
+        std::string cache_path = profile_cache;
         CefString(&settings.cache_path).FromString(cache_path);
 
-        LOG_INFO("📁 Cache path: " + cache_path);
+        LOG_INFO("Cache path: " + cache_path);
 
         // Enable JavaScript features
         CefString(&settings.javascript_flags).FromASCII("--expose-gc");
@@ -1743,7 +1793,8 @@ int main(int argc, char* argv[]) {
         CefRunMessageLoop();
 
         // Cleanup
-        LOG_INFO("🔄 CEF message loop exited - shutting down...");
+        LOG_INFO("CEF message loop exited - shutting down...");
+        ReleaseProfileLock();
         CefShutdown();
 
         LOG_INFO("✅ Application exited cleanly");

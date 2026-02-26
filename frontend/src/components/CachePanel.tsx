@@ -13,7 +13,7 @@ import {
   Paper,
   Skeleton,
 } from '@mui/material';
-import { Storage, Delete, Cookie } from '@mui/icons-material';
+import { Storage, Delete, Cookie, Warning } from '@mui/icons-material';
 import { useCookies } from '../hooks/useCookies';
 
 function formatBytes(bytes: number): string {
@@ -36,6 +36,7 @@ export function CachePanel() {
 
   const [cacheSizeLoading, setCacheSizeLoading] = useState(true);
   const [confirmCacheClear, setConfirmCacheClear] = useState(false);
+  const [confirmCookieClear, setConfirmCookieClear] = useState(false);
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
@@ -67,7 +68,12 @@ export function CachePanel() {
     }
   };
 
-  const handleDeleteAllCookies = async () => {
+  const handleDeleteAllCookiesClick = () => {
+    setConfirmCookieClear(true);
+  };
+
+  const handleDeleteAllCookiesConfirm = async () => {
+    setConfirmCookieClear(false);
     try {
       await deleteAllCookies();
       showToast('All cookies deleted');
@@ -173,7 +179,7 @@ export function CachePanel() {
           variant="outlined"
           color="error"
           startIcon={<Delete />}
-          onClick={handleDeleteAllCookies}
+          onClick={handleDeleteAllCookiesClick}
           size="large"
         >
           Delete All Cookies
@@ -201,6 +207,34 @@ export function CachePanel() {
             variant="contained"
           >
             Clear Cache
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete All Cookies confirmation dialog */}
+      <Dialog
+        open={confirmCookieClear}
+        onClose={() => setConfirmCookieClear(false)}
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Warning color="warning" />
+          Delete all cookies?
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This will sign you out of all websites. You'll need to log back in to
+            sites like Google, YouTube, Twitter, and any other accounts you're
+            currently signed into.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmCookieClear(false)}>Cancel</Button>
+          <Button
+            onClick={handleDeleteAllCookiesConfirm}
+            color="error"
+            variant="contained"
+          >
+            Delete All Cookies
           </Button>
         </DialogActions>
       </Dialog>

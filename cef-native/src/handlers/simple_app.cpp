@@ -1641,4 +1641,216 @@ void HideDownloadPanelOverlay() {
 
     LOG_INFO_APP("Download panel overlay hidden");
 }
+
+// ==================== PROFILE PANEL OVERLAY ====================
+
+void ShowProfilePanelOverlay(int iconRightOffset = 0);
+void HideProfilePanelOverlay();
+
+void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO_APP("Creating profile panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconRightOffset=" +
+                 std::to_string(iconRightOffset) + ")");
+
+    // Store offset globally for repositioning
+    extern int g_profile_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_profile_icon_right_offset = iconRightOffset;
+    }
+
+    // Keep-alive check: if HWND already exists, conditionally show it
+    extern HWND g_profile_panel_overlay_hwnd;
+    if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd)) {
+        LOG_INFO_APP("Profile panel overlay already exists");
+        if (showImmediately) {
+            ShowProfilePanelOverlay(iconRightOffset);
+        }
+        return;
+    }
+
+    // Get main window dimensions
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position - larger panel for profile management UI
+    int panelWidth = 380;   // Wide enough for profile list + create form
+    int panelHeight = 500;  // Tall enough for image picker + color grid + buttons
+    int overlayX = headerRect.right - iconRightOffset - panelWidth;
+    int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom with margin
+    if (overlayY + panelHeight > mainRect.bottom - 20) {
+        panelHeight = mainRect.bottom - overlayY - 20;
+        if (panelHeight < 350) panelHeight = 350;
+    }
+
+    LOG_INFO_APP("Creating profile panel overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
+                 std::to_string(panelHeight));
+
+    // Create HWND for profile panel overlay
+    // WS_VISIBLE is needed for proper keyboard focus (same as wallet overlay)
+    HWND profile_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFProfilePanelOverlayWindow",
+        L"Profile Panel Overlay",
+        WS_POPUP | WS_VISIBLE,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!profile_panel_hwnd) {
+        LOG_ERROR_APP("Failed to create profile panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
+    SetWindowPos(profile_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        flags);
+
+    // Store HWND globally
+    g_profile_panel_overlay_hwnd = profile_panel_hwnd;
+    LOG_INFO_APP("Profile panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(profile_panel_hwnd)));
+
+    // Create CEF browser subprocess for profile panel overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(profile_panel_hwnd, "ProfilePanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;  // Needed for text input
+    settings.javascript_dom_paste = STATE_ENABLED;         // Needed for text input
+
+    CefRefPtr<SimpleHandler> profile_panel_handler(new SimpleHandler("profilepanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(profile_panel_hwnd, panelWidth, panelHeight);
+    profile_panel_handler->SetRenderHandler(render_handler);
+
+    // Use global context (shared cache/cookies)
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, profile_panel_handler,
+        "http://127.0.0.1:5137/profile-picker",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Profile panel overlay browser created with subprocess");
+
+        if (showImmediately) {
+            extern HHOOK g_profile_panel_mouse_hook;
+            extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+            if (!g_profile_panel_mouse_hook) {
+                g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+                if (g_profile_panel_mouse_hook) {
+                    LOG_INFO_APP("Profile panel mouse hook installed");
+                }
+            }
+
+            LONG exStyle = GetWindowLong(profile_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(profile_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create profile panel overlay browser");
+    }
+}
+
+void ShowProfilePanelOverlay(int iconRightOffset) {
+    extern HWND g_profile_panel_overlay_hwnd;
+    if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show profile panel overlay - HWND does not exist");
+        return;
+    }
+
+    extern int g_profile_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_profile_icon_right_offset = iconRightOffset;
+    }
+
+    LOG_INFO_APP("Showing profile panel overlay");
+
+    // Install mouse hook
+    extern HHOOK g_profile_panel_mouse_hook;
+    extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_profile_panel_mouse_hook) {
+        g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+    }
+
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+
+    int panelWidth = 380;   // Wider for profile management UI
+    int panelHeight = 500;  // Taller for create form with image picker
+    int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
+    int overlayY = headerRect.top + 104;
+
+    // Clamp to screen bounds
+    if (overlayY + panelHeight > mainRect.bottom - 20) {
+        panelHeight = mainRect.bottom - overlayY - 20;
+        if (panelHeight < 350) panelHeight = 350;
+    }
+
+    SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW);  // Removed SWP_NOACTIVATE to allow focus
+
+    LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // CRITICAL: Set Windows focus on the overlay HWND first
+    SetForegroundWindow(g_profile_panel_overlay_hwnd);
+    SetFocus(g_profile_panel_overlay_hwnd);
+
+    // Then set CEF browser focus so text inputs work
+    CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+    if (profile_browser) {
+        profile_browser->GetHost()->SetFocus(true);
+        // Force invalidate to ensure focus state is rendered
+        profile_browser->GetHost()->Invalidate(PET_VIEW);
+        LOG_INFO_APP("Profile panel browser focus set to true");
+    }
+}
+
+void HideProfilePanelOverlay() {
+    extern HWND g_profile_panel_overlay_hwnd;
+    if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
+        return;
+    }
+
+    LOG_INFO_APP("Hiding profile panel overlay");
+
+    extern HHOOK g_profile_panel_mouse_hook;
+    if (g_profile_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_profile_panel_mouse_hook);
+        g_profile_panel_mouse_hook = nullptr;
+    }
+
+    CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+    if (profile_browser) {
+        profile_browser->GetHost()->SetFocus(false);
+    }
+
+    ShowWindow(g_profile_panel_overlay_hwnd, SW_HIDE);
+
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+}
 #endif // _WIN32

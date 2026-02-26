@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useHistory } from '../hooks/useHistory';
 import {
   Box,
@@ -13,9 +13,23 @@ import {
   Button,
   Paper,
   Chip,
-  Divider
+  Divider,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Pagination as MuiPagination
 } from '@mui/material';
 import { Delete, Clear, Search as SearchIcon } from '@mui/icons-material';
+
+type TimeRange = 'hour' | 'day' | 'week' | 'all';
+
+const ITEMS_PER_PAGE = 20;
 
 export function HistoryPanel() {
   const {
@@ -26,22 +40,66 @@ export function HistoryPanel() {
     searchHistory,
     deleteEntry,
     clearAllHistory,
-    chromiumTimeToDate
+    clearHistoryRange,
+    chromiumTimeToDate,
+    dateToChromiumTime
   } = useHistory();
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
     console.log('📚 HistoryPanel mounted, fetching history...');
-    fetchHistory({ limit: 100, offset: 0 });
+    fetchHistory({ limit: 5000, offset: 0 }); // Fetch all for client-side pagination
   }, [fetchHistory]);
+
+  // Filter history by time range
+  const filteredHistory = useMemo(() => {
+    if (timeRange === 'all') return history;
+    
+    const now = Date.now();
+    let cutoffTime: number;
+    
+    switch (timeRange) {
+      case 'hour':
+        cutoffTime = now - (60 * 60 * 1000);
+        break;
+      case 'day':
+        cutoffTime = now - (24 * 60 * 60 * 1000);
+        break;
+      case 'week':
+        cutoffTime = now - (7 * 24 * 60 * 60 * 1000);
+        break;
+      default:
+        return history;
+    }
+
+    return history.filter(entry => {
+      const entryDate = chromiumTimeToDate(entry.visitTime);
+      return entryDate.getTime() >= cutoffTime;
+    });
+  }, [history, timeRange, chromiumTimeToDate]);
+
+  // Pagination
+  const totalPages = Math.ceil(filteredHistory.length / ITEMS_PER_PAGE);
+  const paginatedHistory = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredHistory.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredHistory, currentPage]);
+
+  // Reset page when filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [timeRange, searchTerm]);
 
   const handleSearch = (term: string) => {
     setSearchTerm(term);
     if (term.trim()) {
-      searchHistory({ search: term, limit: 100, offset: 0 });
+      searchHistory({ search: term, limit: 5000, offset: 0 });
     } else {
-      fetchHistory({ limit: 100, offset: 0 });
+      fetchHistory({ limit: 5000, offset: 0 });
     }
   };
 
@@ -50,9 +108,37 @@ export function HistoryPanel() {
     deleteEntry(url);
   };
 
-  const handleClearAll = () => {
-    if (window.confirm('Are you sure you want to clear all browsing history?')) {
+  const handleClearClick = () => {
+    setConfirmClearOpen(true);
+  };
+
+  const handleClearConfirm = () => {
+    setConfirmClearOpen(false);
+    
+    if (timeRange === 'all') {
       clearAllHistory();
+    } else {
+      const now = new Date();
+      let startDate: Date;
+      
+      switch (timeRange) {
+        case 'hour':
+          startDate = new Date(now.getTime() - (60 * 60 * 1000));
+          break;
+        case 'day':
+          startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+          break;
+        case 'week':
+          startDate = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+          break;
+        default:
+          clearAllHistory();
+          return;
+      }
+      
+      const startTime = dateToChromiumTime(startDate);
+      const endTime = dateToChromiumTime(now);
+      clearHistoryRange(startTime, endTime);
     }
   };
 
@@ -66,22 +152,50 @@ export function HistoryPanel() {
     }
   };
 
+  const getTimeRangeLabel = () => {
+    switch (timeRange) {
+      case 'hour': return 'last hour';
+      case 'day': return 'last 24 hours';
+      case 'week': return 'last 7 days';
+      default: return 'all time';
+    }
+  };
+
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE + 1;
+  const endIndex = Math.min(currentPage * ITEMS_PER_PAGE, filteredHistory.length);
+
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 2 }}>
       {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
         <Typography variant="h5" component="h2">
           Browsing History
         </Typography>
-        <Button
-          variant="outlined"
-          color="error"
-          startIcon={<Clear />}
-          onClick={handleClearAll}
-          size="small"
-        >
-          Clear All
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <FormControl size="small" sx={{ minWidth: 140 }}>
+            <InputLabel id="time-range-label">Time Range</InputLabel>
+            <Select
+              labelId="time-range-label"
+              value={timeRange}
+              label="Time Range"
+              onChange={(e) => setTimeRange(e.target.value as TimeRange)}
+            >
+              <MenuItem value="hour">Last hour</MenuItem>
+              <MenuItem value="day">Last 24 hours</MenuItem>
+              <MenuItem value="week">Last 7 days</MenuItem>
+              <MenuItem value="all">All time</MenuItem>
+            </Select>
+          </FormControl>
+          <Button
+            variant="outlined"
+            color="error"
+            startIcon={<Clear />}
+            onClick={handleClearClick}
+            size="small"
+          >
+            Clear {timeRange !== 'all' ? getTimeRangeLabel() : 'All'}
+          </Button>
+        </Box>
       </Box>
 
       {/* Search Bar */}
@@ -100,7 +214,9 @@ export function HistoryPanel() {
       {/* Info */}
       {!loading && !error && (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          {history.length} {history.length === 1 ? 'entry' : 'entries'}
+          {filteredHistory.length} {filteredHistory.length === 1 ? 'entry' : 'entries'}
+          {timeRange !== 'all' && ` (${getTimeRangeLabel()})`}
+          {filteredHistory.length > ITEMS_PER_PAGE && ` • Showing ${startIndex}-${endIndex}`}
         </Typography>
       )}
 
@@ -123,7 +239,7 @@ export function HistoryPanel() {
       {/* History List */}
       {!loading && !error && (
         <Box sx={{ flex: 1, overflow: 'auto' }}>
-          {history.length === 0 ? (
+          {paginatedHistory.length === 0 ? (
             <Box sx={{ textAlign: 'center', py: 4 }}>
               <Typography variant="body1" color="text.secondary">
                 No history entries found
@@ -131,12 +247,12 @@ export function HistoryPanel() {
             </Box>
           ) : (
             <List sx={{ p: 0 }}>
-              {history.map((entry, index) => (
+              {paginatedHistory.map((entry, index) => (
                 <ListItem
                   key={`${entry.url}-${index}`}
                   disablePadding
                   sx={{
-                    borderBottom: index < history.length - 1 ? '1px solid' : 'none',
+                    borderBottom: index < paginatedHistory.length - 1 ? '1px solid' : 'none',
                     borderColor: 'divider'
                   }}
                   secondaryAction={
@@ -193,6 +309,52 @@ export function HistoryPanel() {
           )}
         </Box>
       )}
+
+      {/* Pagination */}
+      {!loading && !error && totalPages > 1 && (
+        <>
+          <Divider sx={{ mt: 2, mb: 1 }} />
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', py: 1 }}>
+            <MuiPagination
+              count={totalPages}
+              page={currentPage}
+              onChange={(_, page) => setCurrentPage(page)}
+              color="primary"
+              size="small"
+              showFirstButton
+              showLastButton
+            />
+          </Box>
+        </>
+      )}
+
+      {/* Clear Confirmation Dialog */}
+      <Dialog
+        open={confirmClearOpen}
+        onClose={() => setConfirmClearOpen(false)}
+      >
+        <DialogTitle>
+          Clear browsing history?
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {timeRange === 'all' 
+              ? 'This will permanently delete all your browsing history. This action cannot be undone.'
+              : `This will permanently delete your browsing history from the ${getTimeRangeLabel()}. This action cannot be undone.`
+            }
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmClearOpen(false)}>Cancel</Button>
+          <Button
+            onClick={handleClearConfirm}
+            color="error"
+            variant="contained"
+          >
+            Clear History
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

@@ -31,7 +31,7 @@
 | 6 | JS Dialog Handler + Keyboard Shortcuts | **Complete** |
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking | **Complete** (8a-8f) |
-| 9 | Settings Persistence + Profile Import | Pending |
+| 9 | Settings Persistence + Profile Import | **Ready** (plan complete) |
 | 10 | Third-Party Cookie Blocking + Fingerprinting | Pending |
 
 ---
@@ -58,6 +58,28 @@ Every sprint MUST follow these rules to avoid accumulating macOS debt:
 5. **Keyboard shortcuts**: Define with both `Ctrl+X` (Windows) and `Cmd+X` (macOS) variants. Use the platform key macro.
 
 6. **CEF helper bundles**: No action needed per-sprint, but be aware: macOS requires 5 helper `.app` bundles. Any new subprocess types need entries.
+
+---
+
+## Windows Build Pitfalls
+
+Common issues encountered during builds:
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| `'XXX' is not a member of 'ClassName'` when calling Windows API | Windows API names are macros (e.g., `CopyFile` → `CopyFileW`) that conflict with method names | Rename methods to avoid conflicts: `CopyFilePortable`, `CreateWindowSafe`, etc. |
+| `LOG_INFO_MAIN` not found | Each module defines its own log macros | Define local macros: `#define LOG_INFO_XX(msg) Logger::Log(msg, 1, MODULE_ID)` |
+| Include file not found | Wrong include path pattern | Use relative paths from source file: `#include "../../include/core/Foo.h"` |
+| vcpkg package not found | VCPKG_ROOT not set | Set env: `$env:VCPKG_ROOT = "C:/Users/archb/Dev/vcpkg"` |
+
+**Windows API Macro Conflicts** (common culprits):
+- `CopyFile` → `CopyFileA`/`CopyFileW`
+- `CreateWindow` → `CreateWindowA`/`CreateWindowW`
+- `DeleteFile` → `DeleteFileA`/`DeleteFileW`
+- `GetMessage` → `GetMessageA`/`GetMessageW`
+- `SendMessage` → `SendMessageA`/`SendMessageW`
+
+When calling Windows APIs from within a method that might conflict, use `::` scope: `::CopyFileA(...)`.
 
 ---
 
@@ -122,6 +144,25 @@ React → cefMessage.send("command_name", data)
 - 5 new keyboard shortcuts: Ctrl+H (history tab), Ctrl+J (download panel), Ctrl+D (bookmark), Alt+Left/Right (back/forward). All cross-platform with `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN`.
 - Many shortcuts already work natively (Ctrl+P print, zoom, DevTools) — only intercepted the ones that opened `chrome://` pages in separate windows.
 
+### Sprint 10 (Scriptlet Compatibility System) — PLANNED
+- **Problem discovered**: Scriptlet injection breaks auth on x.com (and likely other sites)
+- **Decision**: No quick whitelist hack — do it properly in Sprint 10
+- **Research needed**: Brave's `adblock-resources` repo, their compatibility patterns
+- **Scope**: Site exception system (built-in, not user-managed), auto-detect auth flows, test against x.com/google/microsoft/banks
+- **For Sprint 9 testing**: Manually disable shield per-site
+
+### Sprint 9 (Settings + Import + Profiles) — READY
+- **Detailed plan**: [sprint-9-implementation-plan.md](./sprint-9-implementation-plan.md)
+- **Research**: [sprint-9-profile-account-research.md](./sprint-9-profile-account-research.md) — Chrome/Firefox/Safari/Edge profile UX patterns
+- **9a Settings**: New `SettingsManager` singleton, JSON file at `%APPDATA%/HodosBrowser/settings.json`, IPC for React UI
+- **9b Import**: `ProfileImporter` class, auto-detect Chrome/Brave/Edge profiles, import bookmarks (JSON parse) and history (SQLite copy-then-read)
+- **9c Clear Data**: `DataClearer` class, clear history/cache/cookies with time range options
+- **9d Multi-Profile**: `ProfileManager` singleton, `profiles.json` metadata, profile picker UI, header profile indicator with dropdown
+- **Key gotcha**: Chrome locks its DB while running — must copy file before reading
+- **Chrome timestamp conversion**: `(chrome_timestamp / 1000000) - 11644473600LL` = Unix epoch
+- **Decision**: Wallet is shared across all profiles (not per-profile) for MVP
+- **New files**: `SettingsManager.h/cpp`, `ProfileImporter.h/cpp`, `DataClearer.h/cpp`, `ProfileManager.h/cpp`, `ProfilePickerOverlayRoot.tsx`
+
 ### Sprint 8 (Ad Blocking) — COMPLETE
 - `adblock-engine/` is a **separate Rust project** at repo root (NOT in `rust-wallet`). Runs on **port 3302**.
 - **Crate pinning**: `adblock = "=0.10.3"` (0.10.4+ needs unstable Rust feature), `rmp = "=0.8.14"`, `default-features = false` (keeps `Send+Sync` by disabling `unsync-regex-caching`). Serialization uses `.serialize()` not `.serialize_raw()`.
@@ -166,3 +207,24 @@ React → cefMessage.send("command_name", data)
 - After Rust changes: `cargo check` or `cargo build --release` in `rust-wallet/`
 - After frontend changes: `npm run build` in `frontend/`
 - Each sprint has a verification checklist in `implementation-plan.md`
+
+### Test Site Basket
+
+See [test-site-basket.md](./test-site-basket.md) for standard verification sites.
+
+**Minimum after any change:** youtube.com, x.com, github.com (5 min)
+**After sprint completion:** Full "Standard" basket (15 min)
+**Before release/demo:** Full basket, all categories (30-45 min)
+
+---
+
+## Continuous Improvement Directive
+
+**After each sprint, phase, or sub-phase:**
+1. Review this CLAUDE.md — Is it still accurate? Update stale sections.
+2. Update Sprint Status Tracker — Mark completed work.
+3. Add new patterns/discoveries (key gotchas, timing issues, workarounds).
+4. Update test-site-basket.md if new test cases identified.
+5. Check if main CLAUDE.md (repo root) needs key file updates.
+
+**Goal:** Context files should always reflect current reality. They're the institutional memory that lets any AI (or human) pick up where the last session left off.

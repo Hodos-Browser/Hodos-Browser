@@ -1328,6 +1328,67 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
     // Wallet Response Handlers
 
+    // Settings persistence response
+    if (message_name == "settings_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string settingsJson = args->GetString(0);
+
+        std::cout << "✅ Settings response received" << std::endl;
+        std::ofstream debugLog("debug_output.log", std::ios::app);
+        debugLog << "✅ Settings response received: " << settingsJson.substr(0, 100) << "..." << std::endl;
+        debugLog.close();
+
+        // Execute JavaScript to call the callback function directly
+        std::string js = "if (window.onSettingsResponse) { window.onSettingsResponse(" + settingsJson + "); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
+    // Profile Manager responses
+    if (message_name == "profiles_result") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string profilesJson = args->GetString(0);
+
+        std::cout << "👤 Profiles result received" << std::endl;
+
+        std::string js = "if (window.onProfilesResult) { window.onProfilesResult(" + profilesJson + "); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
+    // Profile import responses
+    if (message_name == "import_profiles_result") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string profilesJson = args->GetString(0);
+
+        std::cout << "📂 Import profiles result received" << std::endl;
+        std::ofstream debugLog("debug_output.log", std::ios::app);
+        debugLog << "📂 Import profiles result: " << profilesJson << std::endl;
+        debugLog.close();
+
+        std::string js = "if (window.onImportProfilesResult) { window.onImportProfilesResult(" + profilesJson + "); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
+    if (message_name == "import_complete") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string resultJson = args->GetString(0);
+
+        std::cout << "📦 Import complete" << std::endl;
+        std::ofstream debugLog("debug_output.log", std::ios::app);
+        debugLog << "📦 Import complete: " << resultJson << std::endl;
+        debugLog.close();
+
+        std::string js = "if (window.onImportComplete) { window.onImportComplete(" + resultJson + "); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        return true;
+    }
+
     if (message_name == "wallet_status_check_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);

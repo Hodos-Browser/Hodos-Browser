@@ -7,6 +7,7 @@ import BRC100AuthOverlayRoot from './pages/BRC100AuthOverlayRoot';
 import OmniboxOverlayRoot from './pages/OmniboxOverlayRoot';
 import PrivacyShieldOverlayRoot from './pages/PrivacyShieldOverlayRoot';
 import DownloadsOverlayRoot from './pages/DownloadsOverlayRoot';
+import ProfilePickerOverlayRoot from './pages/ProfilePickerOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
 import HistoryPage from './pages/HistoryPage';
 import CertErrorPage from './pages/CertErrorPage';
@@ -173,6 +174,7 @@ const App = () => {
         <Route path="/omnibox" element={<OmniboxOverlayRoot />} />
         <Route path="/privacy-shield" element={<PrivacyShieldOverlayRoot />} />
         <Route path="/downloads" element={<DownloadsOverlayRoot />} />
+        <Route path="/profile-picker" element={<ProfilePickerOverlayRoot />} />
       </Routes>
 
       {/* BRC-100 Authentication Modal */}

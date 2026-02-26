@@ -113,10 +113,12 @@ set(SOURCES
     src/core/AddressHandler.cpp
     src/core/Logger.cpp
     src/core/HistoryManager.cpp
+    src/core/ProfileManager.cpp
     src/core/GoogleSuggestService.cpp
     src/core/CookieManager.cpp
     src/core/CookieBlockManager.cpp
     src/core/BookmarkManager.cpp
+    src/core/ProfileLock.cpp
 )
 
 # Platform-specific handler files
@@ -174,12 +176,20 @@ elseif(WIN32)
         src/core/TabManager.cpp
         include/core/HistoryManager.h
         src/core/HistoryManager.cpp
+        include/core/ProfileManager.h
+        src/core/ProfileManager.cpp
         include/core/CookieManager.h
         src/core/CookieManager.cpp
         include/core/CookieBlockManager.h
         src/core/CookieBlockManager.cpp
         include/core/BookmarkManager.h
         src/core/BookmarkManager.cpp
+        include/core/SettingsManager.h
+        src/core/SettingsManager.cpp
+        include/core/ProfileLock.h
+        src/core/ProfileLock.cpp
+        include/core/ProfileImporter.h
+        src/core/ProfileImporter.cpp
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
 endif()

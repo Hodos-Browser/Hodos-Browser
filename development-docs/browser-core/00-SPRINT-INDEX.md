@@ -34,8 +34,10 @@ Assess what we have, identify gaps, research how Chrome and Brave handle core br
 | 6 | JS Dialog Handler + Keyboard Shortcuts | ✅ Complete |
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking (8a-8f) | ✅ Complete |
-| 9 | Settings Persistence + Profile Import | Pending |
-| 10 | Third-Party Cookie Blocking + Fingerprinting | Pending |
+| 9 | Settings + Import + Clear Data + Multi-Profile | ✅ Complete (2026-02-25) |
+| 10 | Scriptlet Compatibility System (Brave-style) | Pending |
+| 11 | Menu Button UX + Full-Page Settings | Pending |
+| 12 | Third-Party Cookie Blocking + Fingerprinting | Pending |
 
 ---
 
