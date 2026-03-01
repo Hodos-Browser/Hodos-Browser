@@ -4,8 +4,8 @@
 
 This document serves as the master index and tracker for the five Web3 BitcoinSV UI/UX interfaces being implemented for Hodos Browser.
 
-**Document Version:** 1.3
-**Last Updated:** 2026-02-15
+**Document Version:** 1.4
+**Last Updated:** 2026-02-26
 **Target Audience:** UI/UX Developers, Full-Stack Developers
 
 ---
@@ -38,8 +38,11 @@ The Web3 BitcoinSV UI/UX enhancement includes the startup flow (foundation) and 
 | 1a. Mnemonic Recovery + PIN | ✅ Complete | *(see IMPLEMENTATION_STATUS.md)* | 2026-02-14 |
 | 1b. Encrypted File Backup | ✅ Complete | [WALLET_BACKUP_AND_RECOVERY_PLAN.md](../WALLET_BACKUP_AND_RECOVERY_PLAN.md) | 2026-02-14 |
 | 1c. Centbee External Recovery | ✅ Complete | *(see IMPLEMENTATION_STATUS.md)* | 2026-02-15 |
+| 1d. Raw Private Key Recovery | 📋 Planning | [phase-1d-raw-private-key-recovery.md](./phase-1d-raw-private-key-recovery.md) | 2026-02-26 |
 | 2. User Notifications | 📋 Planning | [phase-2-user-notifications.md](./phase-2-user-notifications.md) | 2026-02-11 |
 | 3. Light Wallet (Polish) | 📋 Planning | [phase-3-light-wallet.md](./phase-3-light-wallet.md) | 2026-02-11 |
+| 3a. BRC-29 Peer Payments | 📋 Planning | [phase-3a-brc29-peer-payments.md](./phase-3a-brc29-peer-payments.md) | 2026-02-26 |
+| **Phase 3 Master Plan** | 📋 Planning | [PHASE_3_IMPLEMENTATION_PLAN.md](./PHASE_3_IMPLEMENTATION_PLAN.md) | 2026-02-26 |
 | 4. Full Wallet | 📋 Planning | [phase-4-full-wallet.md](./phase-4-full-wallet.md) | 2026-02-11 |
 | 5. Activity Status Indicator | 📋 Planning (Low Priority) | [phase-5-activity-status-indicator.md](./phase-5-activity-status-indicator.md) | - |
 
@@ -101,6 +104,11 @@ The interfaces should be implemented in the following order to ensure dependenci
 - **[CEF Refinement Tracker](../CEF_REFINEMENT_TRACKER.md)** - Phased checklist for C++ stability, security, and architecture fixes. **Consult during pre-phase planning** to identify CR prerequisites for each UX phase.
 - **[UX Design Considerations](./helper-3-ux-considerations.md)** - User experience considerations
 - **[Color Guidelines & Logos](./helper-4-branding-colors-logos.md)** - Brand colors and logo usage
+
+### Research Documents
+- **[Phase 2 Research Findings](./phase-2-research-findings.md)** - Domain permissions and notification research
+- **[Phase 3 Peer Payments Research](./phase-3-peer-payments-research.md)** - BRC-29, MessageBox, paymail analysis
+- **[Privileged Keyring Analysis](../PRIVILEGED_KEYRING_ANALYSIS.md)** - BRC-100 dual-keyring assessment
 
 ---
 

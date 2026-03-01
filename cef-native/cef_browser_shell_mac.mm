@@ -1803,3 +1803,16 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 }
+
+// macOS stubs for menu overlay (Windows-only for now)
+void CreateMenuOverlay(void* hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO("CreateMenuOverlay not yet implemented on macOS");
+}
+
+void ShowMenuOverlay(int iconRightOffset) {
+    LOG_INFO("ShowMenuOverlay not yet implemented on macOS");
+}
+
+void HideMenuOverlay() {
+    LOG_INFO("HideMenuOverlay not yet implemented on macOS");
+}

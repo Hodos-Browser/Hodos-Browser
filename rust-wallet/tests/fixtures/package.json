@@ -1,0 +1,14 @@
+{
+  "name": "hodos-test-vectors",
+  "version": "1.0.0",
+  "description": "Test vector validation against BSV TypeScript SDK",
+  "private": true,
+  "scripts": {
+    "validate": "npx ts-node validate_vectors.ts"
+  },
+  "devDependencies": {
+    "@bsv/sdk": "^1.1.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}

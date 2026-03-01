@@ -5,12 +5,16 @@ declare global {
     onAdblockBlockedCountResponse?: (data: { count: number }) => void;
     onAdblockResetBlockedCountResponse?: (data: { success: boolean }) => void;
     onAdblockSiteToggleResponse?: (data: { domain: string; adblockEnabled: boolean; success: boolean }) => void;
+    onAdblockScriptletToggleResponse?: (data: { domain: string; scriptletsEnabled: boolean; success: boolean }) => void;
+    onAdblockCheckSiteEnabledResponse?: (data: { domain: string; adblockEnabled: boolean }) => void;
+    onAdblockCheckScriptletsEnabledResponse?: (data: { domain: string; scriptletsEnabled: boolean }) => void;
   }
 }
 
 export const useAdblock = () => {
   const [blockedCount, setBlockedCount] = useState<number>(0);
   const [adblockEnabled, setAdblockEnabled] = useState<boolean>(true);
+  const [scriptletsEnabled, setScriptletsEnabled] = useState<boolean>(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch blocked count via IPC
@@ -51,7 +55,7 @@ export const useAdblock = () => {
     });
   }, []);
 
-  // Toggle adblock for a domain via IPC → C++ → Rust
+  // Toggle adblock for a domain via IPC → C++ local JSON
   const toggleSiteAdblock = useCallback((domain: string, enabled: boolean) => {
     return new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => {
@@ -70,20 +74,61 @@ export const useAdblock = () => {
     });
   }, []);
 
-  // Check per-site adblock status from Rust backend directly
-  const checkSiteAdblock = useCallback(async (domain: string) => {
-    try {
-      const resp = await fetch(`http://localhost:3301/adblock/site-toggle?domain=${encodeURIComponent(domain)}`);
-      if (resp.ok) {
-        const data = await resp.json();
+  // Toggle scriptlet injection for a domain via IPC → C++ local JSON
+  const toggleScriptlets = useCallback((domain: string, enabled: boolean) => {
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve(false);
+        delete window.onAdblockScriptletToggleResponse;
+      }, 5000);
+
+      window.onAdblockScriptletToggleResponse = (data) => {
+        clearTimeout(timeout);
+        setScriptletsEnabled(data.scriptletsEnabled);
+        resolve(data.success);
+        delete window.onAdblockScriptletToggleResponse;
+      };
+
+      window.cefMessage?.send('adblock_scriptlet_toggle', [domain, enabled.toString()]);
+    });
+  }, []);
+
+  // Check per-site scriptlet status via IPC → C++ local JSON
+  const checkScriptlets = useCallback((domain: string) => {
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve(true);
+        delete window.onAdblockCheckScriptletsEnabledResponse;
+      }, 3000);
+
+      window.onAdblockCheckScriptletsEnabledResponse = (data) => {
+        clearTimeout(timeout);
+        setScriptletsEnabled(data.scriptletsEnabled);
+        resolve(data.scriptletsEnabled);
+        delete window.onAdblockCheckScriptletsEnabledResponse;
+      };
+
+      window.cefMessage?.send('adblock_check_scriptlets_enabled', [domain]);
+    });
+  }, []);
+
+  // Check per-site adblock status via IPC → C++ local JSON
+  const checkSiteAdblock = useCallback((domain: string) => {
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve(true);
+        delete window.onAdblockCheckSiteEnabledResponse;
+      }, 3000);
+
+      window.onAdblockCheckSiteEnabledResponse = (data) => {
+        clearTimeout(timeout);
         setAdblockEnabled(data.adblockEnabled);
-        return data.adblockEnabled as boolean;
-      }
-    } catch {
-      // Backend not available — default to enabled
-    }
-    setAdblockEnabled(true);
-    return true;
+        resolve(data.adblockEnabled);
+        delete window.onAdblockCheckSiteEnabledResponse;
+      };
+
+      window.cefMessage?.send('adblock_check_site_enabled', [domain]);
+    });
   }, []);
 
   // Poll blocked count periodically (every 2s while mounted)
@@ -103,9 +148,12 @@ export const useAdblock = () => {
   return {
     blockedCount,
     adblockEnabled,
+    scriptletsEnabled,
     fetchBlockedCount,
     resetBlockedCount,
     toggleSiteAdblock,
     checkSiteAdblock,
+    toggleScriptlets,
+    checkScriptlets,
   };
 };

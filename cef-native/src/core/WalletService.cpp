@@ -613,17 +613,19 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
 
     if (response.contains("balance")) {
         int64_t totalBalance = response["balance"].get<int64_t>();
+        double bsvPrice = response.value("bsvPrice", 0.0);
 
         std::cout << "✅ Total balance retrieved successfully" << std::endl;
-        std::cout << "💵 Total Balance: " << totalBalance << " satoshis" << std::endl;
+        std::cout << "💵 Total Balance: " << totalBalance << " satoshis, BSV/USD: $" << bsvPrice << std::endl;
         std::ofstream debugLog2("debug_output.log", std::ios::app);
         debugLog2 << "✅ Total balance retrieved successfully" << std::endl;
-        debugLog2 << "💵 Total Balance: " << totalBalance << " satoshis" << std::endl;
+        debugLog2 << "💵 Total Balance: " << totalBalance << " satoshis, BSV/USD: $" << bsvPrice << std::endl;
         debugLog2.close();
 
-        // Return balance in expected format
+        // Return balance + price in expected format
         nlohmann::json balanceResponse;
         balanceResponse["balance"] = totalBalance;
+        balanceResponse["bsvPrice"] = bsvPrice;
         return balanceResponse;
     } else {
         std::cerr << "❌ Failed to get total balance: " << response.dump() << std::endl;

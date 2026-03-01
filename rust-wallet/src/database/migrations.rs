@@ -458,7 +458,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sync_states_ref_num ON sync_states(ref_num);
 
         -- =====================================================================
-        -- Domain permissions (Phase 2.1, updated Phase 2.3 + Sprint 8)
+        -- Domain permissions (Phase 2.1, updated Phase 2.3)
         -- =====================================================================
 
         CREATE TABLE IF NOT EXISTS domain_permissions (
@@ -469,7 +469,6 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
             per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
             rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
-            adblock_enabled INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -575,24 +574,14 @@ pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrate V4 → V5: Add adblock_enabled column to domain_permissions
-pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
-    let has_adblock: bool = {
-        let mut stmt = conn.prepare("PRAGMA table_info(domain_permissions)")?;
-        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
-            .collect();
-        cols.iter().any(|c| c == "adblock_enabled")
-    };
-    if has_adblock {
-        info!("   adblock_enabled column already exists — skipping ALTER");
-    } else {
-        info!("   Adding adblock_enabled column to domain_permissions...");
-        conn.execute(
-            "ALTER TABLE domain_permissions ADD COLUMN adblock_enabled INTEGER NOT NULL DEFAULT 1",
-            [],
-        )?;
-    }
-    info!("   ✅ V5 migration applied (per-site ad blocking toggle)");
+/// Migrate V4 → V5: No-op (adblock_enabled moved to C++ AdblockCache JSON)
+pub fn migrate_v4_to_v5(_conn: &Connection) -> Result<()> {
+    info!("   ✅ V5 migration — no-op (adblock settings moved to C++ AdblockCache)");
+    Ok(())
+}
+
+/// Migrate V5 → V6: No-op (scriptlets_enabled moved to C++ AdblockCache JSON)
+pub fn migrate_v5_to_v6(_conn: &Connection) -> Result<()> {
+    info!("   ✅ V6 migration — no-op (scriptlet settings moved to C++ AdblockCache)");
     Ok(())
 }

@@ -21,6 +21,7 @@ use adblock::Engine;
 use base64::{Engine as Base64Engine, engine::general_purpose::STANDARD as BASE64};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -60,7 +61,22 @@ const META_JSON: &str = "meta.json";
 
 /// Configuration version — bump this when filter list URLs, features, or scriptlet
 /// loading changes. Forces engine.dat rebuild on next startup.
-const CONFIG_VERSION: u32 = 3; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL
+const CONFIG_VERSION: u32 = 6; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL, v4 = +hodos-unbreak, v5 = +entity-aware blocking, v6 = $generichide suppresses P1 CSS
+
+/// Hodos Browser compatibility exception list (embedded at compile time).
+/// Contains #@#+js() blanket exceptions for auth domains where scriptlet injection breaks login.
+const HODOS_UNBREAK: &str = include_str!("hodos-unbreak.txt");
+
+/// disconnect.me entity list (embedded at compile time, ~400KB).
+/// Maps organizations to their owned domains so same-entity CDN resources
+/// (e.g. twimg.com on x.com) are not blocked as trackers.
+/// License: CC BY-NC-SA 4.0 (same as Brave's usage).
+const ENTITIES_JSON: &str = include_str!("entities.json");
+
+/// Upstream URL for entity list auto-updates (checked every 6 hours alongside filter lists)
+const ENTITIES_URL: &str =
+    "https://raw.githubusercontent.com/disconnectme/disconnect-tracking-protection/master/entities.json";
+const ENTITIES_FILE: &str = "entities.json";
 
 // ============================================================================
 // Metadata
@@ -139,6 +155,8 @@ pub struct AdblockEngine {
     /// Monotonically increasing version — incremented on each engine rebuild.
     /// C++ uses this to detect when to invalidate its URL cache.
     update_version: AtomicU64,
+    /// disconnect.me entity map: same-org domains are treated as first-party
+    entity_map: RwLock<EntityMap>,
 }
 
 // ============================================================================
@@ -223,9 +241,146 @@ fn load_extra_scriptlets(engine: &mut Engine) -> usize {
     count
 }
 
+// ============================================================================
+// Entity Map (disconnect.me same-organization domain grouping)
+// ============================================================================
+
+/// Maps domains to entity IDs so same-organization CDN resources are treated
+/// as first-party. For example, `twimg.com` and `x.com` both belong to entity
+/// "Twitter" — so `pbs.twimg.com` loaded on `x.com` is not blocked as a tracker.
+struct EntityMap {
+    /// domain → entity_id. Two domains with the same entity_id are same-org.
+    domain_to_entity: HashMap<String, u16>,
+}
+
+impl EntityMap {
+    /// Parse the disconnect.me entities.json format:
+    /// `{ "license": "...", "entities": { "OrgName": { "properties": [...], "resources": [...] } } }`
+    fn from_json(json_str: &str) -> Self {
+        let mut domain_to_entity = HashMap::new();
+
+        let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Entity map: failed to parse JSON: {}", e);
+                return Self { domain_to_entity };
+            }
+        };
+
+        let entities = match parsed.get("entities").and_then(|e| e.as_object()) {
+            Some(e) => e,
+            None => {
+                warn!("Entity map: missing 'entities' key in JSON");
+                return Self { domain_to_entity };
+            }
+        };
+
+        let mut entity_id: u16 = 0;
+        for (_org_name, org_data) in entities {
+            let props = org_data.get("properties")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let resources = org_data.get("resources")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            // Only assign an entity_id if there are actual domains
+            if props.is_empty() && resources.is_empty() {
+                continue;
+            }
+
+            for domain in props.iter().chain(resources.iter()) {
+                let d = domain.to_lowercase();
+                domain_to_entity.insert(d, entity_id);
+            }
+
+            entity_id = entity_id.saturating_add(1);
+        }
+
+        Self { domain_to_entity }
+    }
+
+    /// Check if two domains belong to the same organization.
+    ///
+    /// Uses suffix-walking: for "pbs.twimg.com", checks "pbs.twimg.com",
+    /// then "twimg.com" — matches on the entity list's registered domain.
+    fn is_same_entity(&self, domain_a: &str, domain_b: &str) -> bool {
+        let a_lower = domain_a.to_lowercase();
+        let b_lower = domain_b.to_lowercase();
+
+        let id_a = self.lookup_entity(&a_lower);
+        let id_b = self.lookup_entity(&b_lower);
+
+        match (id_a, id_b) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Walk the domain suffix chain to find an entity match.
+    /// "pbs.twimg.com" → try "pbs.twimg.com", then "twimg.com"
+    fn lookup_entity(&self, domain: &str) -> Option<u16> {
+        // Try exact match first
+        if let Some(&id) = self.domain_to_entity.get(domain) {
+            return Some(id);
+        }
+        // Walk suffixes: strip one label at a time
+        let mut remaining = domain;
+        while let Some(pos) = remaining.find('.') {
+            remaining = &remaining[pos + 1..];
+            // Don't look up bare TLDs (e.g. "com")
+            if !remaining.contains('.') {
+                break;
+            }
+            if let Some(&id) = self.domain_to_entity.get(remaining) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn domain_count(&self) -> usize {
+        self.domain_to_entity.len()
+    }
+}
+
+/// Extract the hostname from a URL string.
+/// "https://pbs.twimg.com/media/photo.jpg" → "pbs.twimg.com"
+fn extract_domain(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host.split('?').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host); // strip port
+    host.to_lowercase()
+}
+
+/// Load the entity list from disk (updatable) or fall back to embedded version.
+fn load_entity_map(adblock_dir: &Path) -> EntityMap {
+    let entity_path = adblock_dir.join(ENTITIES_FILE);
+    if entity_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&entity_path) {
+            if !content.trim().is_empty() {
+                let map = EntityMap::from_json(&content);
+                if map.domain_count() > 0 {
+                    info!("Entity map: loaded {} domains from disk", map.domain_count());
+                    return map;
+                }
+            }
+        }
+    }
+    // Fall back to embedded version
+    let map = EntityMap::from_json(ENTITIES_JSON);
+    info!("Entity map: loaded {} domains from embedded list", map.domain_count());
+    map
+}
+
 impl AdblockEngine {
     /// Create an engine in "loading" state. Call `load()` to initialize.
     pub fn new(adblock_dir: PathBuf) -> Self {
+        // Load entity map eagerly (fast — just JSON parsing of embedded data)
+        let entity_map = load_entity_map(&adblock_dir);
         Self {
             engine: RwLock::new(None),
             enabled: AtomicBool::new(true),
@@ -233,6 +388,7 @@ impl AdblockEngine {
             adblock_dir,
             meta: RwLock::new(FilterListMeta::default()),
             update_version: AtomicU64::new(0),
+            entity_map: RwLock::new(entity_map),
         }
     }
 
@@ -337,6 +493,21 @@ impl AdblockEngine {
 
         let result = engine.check_network_request(&request);
 
+        // Entity-aware override: if the engine says "block" but the URL and
+        // source belong to the same organization (e.g. twimg.com on x.com),
+        // allow the request. Only overrides blocks, not redirects (which are
+        // scriptlet-related and should always apply).
+        if result.matched && result.redirect.is_none() {
+            let url_domain = extract_domain(url);
+            let source_domain = extract_domain(source_url);
+            if !url_domain.is_empty() && !source_domain.is_empty() {
+                let entity_guard = self.entity_map.read().unwrap();
+                if entity_guard.is_same_entity(&url_domain, &source_domain) {
+                    return (false, None, None);
+                }
+            }
+        }
+
         (
             result.matched,
             result.redirect.clone(),
@@ -359,7 +530,17 @@ impl AdblockEngine {
         };
 
         let resources = engine.url_cosmetic_resources(url);
-        let selectors: Vec<String> = resources.hide_selectors.into_iter().collect();
+
+        // When generichide is true (set by @@||domain^$elemhide rules), suppress ALL
+        // cosmetic CSS selectors — both hostname-specific and generic. adblock-rust sets
+        // the generichide flag but may still return hostname-specific selectors; we clear
+        // them here because $elemhide means "no cosmetic CSS filtering at all".
+        // Scriptlets (injected_script) are handled separately by #@#+js() exceptions.
+        let selectors: Vec<String> = if resources.generichide {
+            Vec::new()
+        } else {
+            resources.hide_selectors.into_iter().collect()
+        };
 
         (selectors, resources.injected_script, resources.generichide)
     }
@@ -439,6 +620,13 @@ impl AdblockEngine {
         {
             let mut m = self.meta.write().unwrap();
             *m = meta;
+        }
+
+        // Reload entity map (may have been updated on disk by build_from_lists)
+        let new_entity_map = load_entity_map(&self.adblock_dir);
+        {
+            let mut em = self.entity_map.write().unwrap();
+            *em = new_entity_map;
         }
 
         let ver = self.update_version.fetch_add(1, Ordering::Relaxed) + 1;
@@ -533,6 +721,12 @@ impl AdblockEngine {
             return Err("No filter lists available — cannot build engine".to_string());
         }
 
+        // Load Hodos compatibility exceptions (embedded + optional updatable override)
+        let unbreak_text = load_unbreak_list(adblock_dir);
+        let unbreak_rule_count = unbreak_text.lines().filter(|l| !l.starts_with('!') && !l.trim().is_empty()).count();
+        filter_set.add_filter_list(&unbreak_text, ParseOptions::default());
+        info!("Ad blocker: loaded hodos-unbreak ({} rules)", unbreak_rule_count);
+
         // Compile the engine (optimize = true for better performance)
         let mut engine = Engine::from_filter_set(filter_set, true);
 
@@ -559,6 +753,27 @@ impl AdblockEngine {
         let extra = load_extra_scriptlets(&mut engine);
         if extra > 0 {
             info!("Ad blocker: loaded {} extra bundled scriptlets", extra);
+        }
+
+        // Download updated entity list (disconnect.me same-org domain mapping)
+        // Non-critical: if download fails, embedded version is used at runtime
+        match download_filter_list(&client, ENTITIES_URL).await {
+            Ok(text) => {
+                // Validate JSON before saving
+                if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+                    let entity_path = adblock_dir.join(ENTITIES_FILE);
+                    if let Err(e) = std::fs::write(&entity_path, &text) {
+                        warn!("Ad blocker: failed to save entities.json: {}", e);
+                    } else {
+                        info!("Ad blocker: updated entities.json ({} KB)", text.len() / 1024);
+                    }
+                } else {
+                    warn!("Ad blocker: downloaded entities.json is not valid JSON, skipping");
+                }
+            }
+            Err(e) => {
+                warn!("Ad blocker: failed to download entities.json: {} (using embedded fallback)", e);
+            }
         }
 
         // Serialize for fast startup
@@ -692,6 +907,22 @@ async fn download_filter_list(client: &reqwest::Client, url: &str) -> Result<Str
         .map_err(|e| format!("Failed to read response body: {}", e))
 }
 
+/// Load the Hodos compatibility exception list.
+/// Checks for an updatable version on disk first; falls back to the embedded version.
+fn load_unbreak_list(adblock_dir: &Path) -> String {
+    let unbreak_path = adblock_dir.join("hodos-unbreak.txt");
+    if unbreak_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&unbreak_path) {
+            if !content.trim().is_empty() {
+                info!("Ad blocker: using updatable hodos-unbreak.txt from disk");
+                return content;
+            }
+        }
+    }
+    // Fall back to embedded version
+    HODOS_UNBREAK.to_string()
+}
+
 /// Current Unix timestamp in seconds
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -752,6 +983,112 @@ mod tests {
 
         let req = Request::new("https://cdn.example.com/logo.png", "https://site.com", "image").unwrap();
         assert!(!engine.check_network_request(&req).matched, "image type should NOT be blocked by script-only rule");
+    }
+
+    /// CRITICAL: Verify that `#@#+js()` blanket exception syntax is supported
+    /// by adblock-rust 0.10.3. If this test fails, we need a C++ domain-check bypass instead.
+    #[test]
+    fn test_scriptlet_exception_blanket_js() {
+        // Add a scriptlet rule for youtube.com AND a blanket exception for x.com
+        let rules = r#"
+youtube.com##+js(set, ytInitialPlayerResponse.adPlacements, undefined)
+x.com#@#+js()
+twitter.com#@#+js()
+"#;
+        let mut filter_set = FilterSet::new(false);
+        filter_set.add_filter_list(rules, ParseOptions::default());
+        let engine = Engine::from_filter_set(filter_set, true);
+
+        // x.com should have EMPTY injected_script due to #@#+js() exception
+        let xcom_resources = engine.url_cosmetic_resources("https://x.com/home");
+        assert!(
+            xcom_resources.injected_script.is_empty(),
+            "x.com should have no scriptlets due to #@#+js() exception, got: {}",
+            &xcom_resources.injected_script[..std::cmp::min(100, xcom_resources.injected_script.len())]
+        );
+
+        // twitter.com should also have EMPTY injected_script
+        let twitter_resources = engine.url_cosmetic_resources("https://twitter.com/home");
+        assert!(
+            twitter_resources.injected_script.is_empty(),
+            "twitter.com should have no scriptlets due to #@#+js() exception"
+        );
+
+        // youtube.com should STILL have scriptlets (no exception for it)
+        let yt_resources = engine.url_cosmetic_resources("https://www.youtube.com/watch?v=test");
+        // Note: The scriptlet may be empty if resources aren't loaded, but at minimum
+        // no exception should suppress it. We check it's not suppressed by an exception.
+        // The actual injected_script content depends on whether scriptlet resources are loaded.
+        // The key verification is that x.com IS empty.
+        let _ = yt_resources; // youtube check is informational
+    }
+
+    /// Test that generichide flag suppresses ALL cosmetic CSS selectors (Phase 1 + Phase 2).
+    /// This was the root cause of x.com media being hidden — EasyList hostname-specific
+    /// CSS selectors were being injected even when generichide was set (from $elemhide/$generichide).
+    /// In production, x.com gets generichide=1 from filter lists; our wrapper must clear
+    /// hostname-specific selectors when this flag is set.
+    #[test]
+    fn test_generichide_suppresses_all_css_selectors() {
+        // Use $generichide (which adblock-rust 0.10.3 directly supports) to test our wrapper.
+        // In production, @@||x.com^$elemhide and EasyList rules both set generichide=true.
+        let rules = r#"
+x.com##.promoted-tweet
+x.com##.ad-container
+x.com##div[data-testid="promoted"]
+@@||x.com^$generichide
+youtube.com##.ad-showing
+"#;
+        // Our cosmetic_resources() wrapper should return EMPTY selectors when generichide=true
+        let adblock = AdblockEngine::new(PathBuf::from("/tmp/test-elemhide"));
+        {
+            let mut engine_guard = adblock.engine.write().unwrap();
+            let mut filter_set = FilterSet::new(false);
+            filter_set.add_filter_list(rules, ParseOptions::default());
+            *engine_guard = Some(Engine::from_filter_set(filter_set, true));
+        }
+
+        let (selectors, _, generichide) = adblock.cosmetic_resources("https://x.com/home");
+        assert!(generichide, "generichide should be true for x.com");
+        assert!(selectors.is_empty(),
+            "x.com should have NO CSS selectors when generichide=true, got: {:?}", selectors);
+
+        // youtube.com has NO generichide — should still get selectors
+        let (yt_selectors, _, yt_generichide) = adblock.cosmetic_resources("https://www.youtube.com/");
+        assert!(!yt_generichide, "youtube.com should not have generichide");
+        assert!(!yt_selectors.is_empty(), "youtube.com should have CSS selectors");
+    }
+
+    /// Test that the embedded hodos-unbreak.txt is properly loaded and its rules work
+    #[test]
+    fn test_hodos_unbreak_list_loaded() {
+        let unbreak = HODOS_UNBREAK;
+        assert!(!unbreak.is_empty(), "hodos-unbreak.txt should not be empty");
+        assert!(unbreak.contains("x.com#@#+js()"), "should contain x.com exception");
+        assert!(unbreak.contains("github.com#@#+js()"), "should contain github.com exception");
+        assert!(unbreak.contains("accounts.google.com#@#+js()"), "should contain Google auth exception");
+
+        // Build engine with just the unbreak list + a dummy scriptlet rule
+        let rules = format!(
+            "{}\n{}",
+            "example.com##+js(set, test, true)",
+            unbreak
+        );
+        let mut filter_set = FilterSet::new(false);
+        filter_set.add_filter_list(&rules, ParseOptions::default());
+        let engine = Engine::from_filter_set(filter_set, true);
+
+        // Verify auth domains have empty injected_script
+        for domain in &["x.com", "github.com", "accounts.google.com", "login.microsoftonline.com", "discord.com"] {
+            let url = format!("https://{}/", domain);
+            let resources = engine.url_cosmetic_resources(&url);
+            assert!(
+                resources.injected_script.is_empty(),
+                "{} should have no scriptlets due to hodos-unbreak.txt, got: {}",
+                domain,
+                &resources.injected_script[..std::cmp::min(80, resources.injected_script.len())]
+            );
+        }
     }
 
     #[test]
@@ -934,5 +1271,117 @@ mod tests {
         let result = engine.check_network_request(&req);
         println!("  googlesyndication => matched={}, filter={:?}", result.matched, result.filter);
         assert!(result.matched, "Deserialized engine should block googlesyndication");
+    }
+
+    // ========================================================================
+    // Entity Map Tests
+    // ========================================================================
+
+    #[test]
+    fn test_entity_map_parses_embedded_json() {
+        let map = EntityMap::from_json(ENTITIES_JSON);
+        assert!(map.domain_count() > 1000, "should have >1000 domains, got {}", map.domain_count());
+    }
+
+    #[test]
+    fn test_entity_map_same_entity() {
+        let map = EntityMap::from_json(ENTITIES_JSON);
+        // X Corp: x.com, twitter.com, twimg.com are same entity
+        assert!(map.is_same_entity("x.com", "twimg.com"), "x.com and twimg.com should be same entity");
+        assert!(map.is_same_entity("twitter.com", "twimg.com"), "twitter.com and twimg.com should be same entity");
+        assert!(map.is_same_entity("x.com", "t.co"), "x.com and t.co should be same entity");
+
+        // Google: google.com, gstatic.com, googleapis.com, youtube.com
+        assert!(map.is_same_entity("google.com", "gstatic.com"), "google.com and gstatic.com should be same entity");
+        assert!(map.is_same_entity("google.com", "googleapis.com"), "google.com and googleapis.com should be same entity");
+        assert!(map.is_same_entity("youtube.com", "googlevideo.com"), "youtube.com and googlevideo.com should be same entity");
+
+        // Different entities should NOT match
+        assert!(!map.is_same_entity("x.com", "google.com"), "x.com and google.com should be different entities");
+        assert!(!map.is_same_entity("facebook.com", "google.com"), "facebook.com and google.com should be different entities");
+    }
+
+    #[test]
+    fn test_entity_map_subdomain_walking() {
+        let map = EntityMap::from_json(ENTITIES_JSON);
+        // Subdomains should walk up to the registrable domain
+        assert!(map.is_same_entity("pbs.twimg.com", "x.com"), "pbs.twimg.com should match x.com via twimg.com");
+        assert!(map.is_same_entity("video.twimg.com", "twitter.com"), "video.twimg.com should match twitter.com");
+        assert!(map.is_same_entity("ssl.gstatic.com", "accounts.google.com"), "ssl.gstatic.com should match accounts.google.com");
+        assert!(map.is_same_entity("fonts.googleapis.com", "google.com"), "fonts.googleapis.com should match google.com");
+    }
+
+    #[test]
+    fn test_entity_map_unknown_domains() {
+        let map = EntityMap::from_json(ENTITIES_JSON);
+        // Completely unknown domains should not match anything
+        assert!(!map.is_same_entity("example.com", "example.org"), "unknown domains should not match");
+        assert!(!map.is_same_entity("unknown.test", "x.com"), "unknown domain should not match x.com");
+    }
+
+    #[test]
+    fn test_extract_domain() {
+        assert_eq!(extract_domain("https://pbs.twimg.com/media/photo.jpg"), "pbs.twimg.com");
+        assert_eq!(extract_domain("https://www.google.com/search?q=test"), "www.google.com");
+        assert_eq!(extract_domain("http://example.com:8080/path"), "example.com");
+        assert_eq!(extract_domain("https://x.com"), "x.com");
+        assert_eq!(extract_domain("data:text/html,test"), "data");  // edge case — data: URLs are pre-filtered by C++
+    }
+
+    #[test]
+    fn test_entity_map_from_invalid_json() {
+        let map = EntityMap::from_json("not json");
+        assert_eq!(map.domain_count(), 0, "invalid JSON should produce empty map");
+
+        let map = EntityMap::from_json("{}");
+        assert_eq!(map.domain_count(), 0, "missing entities key should produce empty map");
+    }
+
+    /// Integration test: entity-aware blocking allows same-entity CDN resources
+    /// that would otherwise be blocked by filter rules
+    #[test]
+    fn test_entity_aware_check_request() {
+        // Set up an AdblockEngine with a filter rule that blocks twimg.com
+        let engine = AdblockEngine::new(PathBuf::from("/tmp/test-entity-adblock"));
+
+        // Manually inject an adblock engine with a rule blocking twimg.com
+        let rules = "||twimg.com^\n||gstatic.com^\n||tracker.example.net^";
+        let inner = engine_from_rules(rules);
+        {
+            let mut eng = engine.engine.write().unwrap();
+            *eng = Some(inner);
+        }
+
+        // twimg.com on x.com → same entity → should NOT be blocked
+        let (blocked, _, _) = engine.check_request(
+            "https://pbs.twimg.com/media/photo.jpg",
+            "https://x.com/home",
+            "image",
+        );
+        assert!(!blocked, "pbs.twimg.com on x.com should be allowed (same entity)");
+
+        // gstatic.com on google.com → same entity → should NOT be blocked
+        let (blocked, _, _) = engine.check_request(
+            "https://ssl.gstatic.com/accounts/ui/logo.png",
+            "https://accounts.google.com/signin",
+            "image",
+        );
+        assert!(!blocked, "ssl.gstatic.com on accounts.google.com should be allowed (same entity)");
+
+        // tracker.example.net on news.com → different entity → SHOULD be blocked
+        let (blocked, _, _) = engine.check_request(
+            "https://tracker.example.net/pixel.gif",
+            "https://news.com/article",
+            "image",
+        );
+        assert!(blocked, "tracker.example.net on news.com should be blocked (different entity)");
+
+        // twimg.com on news.com → different entity → SHOULD be blocked
+        let (blocked, _, _) = engine.check_request(
+            "https://pbs.twimg.com/media/embed.jpg",
+            "https://news.com/article",
+            "image",
+        );
+        assert!(blocked, "pbs.twimg.com on news.com should be blocked (different entity)");
     }
 }

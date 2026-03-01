@@ -658,6 +658,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V5 applied");
         }
 
+        if current_version < 6 {
+            info!("   Applying migration V6 (per-site scriptlet toggle)...");
+            migrations::migrate_v5_to_v6(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
+            info!("   ✅ Schema V6 applied");
+        }
+
         Ok(())
     }
 

@@ -1,5 +1,6 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/SessionManager.h"
+#include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
 #include "include/wrapper/cef_helpers.h"
@@ -163,9 +164,10 @@ bool TabManager::CloseTab(int tab_id) {
         }
     }
 
-    // Clear session spending for this tab's browser
+    // Clear session spending and notify ephemeral cookie manager
     if (tab.browser) {
         SessionManager::GetInstance().clearSession(tab.browser->GetIdentifier());
+        EphemeralCookieManager::GetInstance().OnTabClosed(tab.browser->GetIdentifier());
     }
 
     // Request browser to close

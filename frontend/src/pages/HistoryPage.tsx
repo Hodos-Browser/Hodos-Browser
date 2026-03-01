@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Box, Container, Typography, Paper, Tabs, Tab } from '@mui/material';
 import {
   History as HistoryIcon,
@@ -14,6 +14,12 @@ export function HistoryPage() {
   const [searchParams] = useSearchParams();
   const initialTab = searchParams.get('tab') === 'cookies' ? 1 : searchParams.get('tab') === 'cache' ? 2 : 0;
   const [tabIndex, setTabIndex] = useState(initialTab);
+
+  useEffect(() => {
+    document.title = 'Hodos Browser Data';
+    document.body.style.margin = '0';
+    document.body.style.overflow = 'hidden';
+  }, []);
 
   return (
     <Box
@@ -34,9 +40,12 @@ export function HistoryPage() {
           }}
         >
           <Box sx={{ borderBottom: '1px solid rgba(0, 0, 0, 0.12)', p: 3, pb: 0, bgcolor: '#fafafa' }}>
-            <Typography variant="h4" component="h1" sx={{ fontWeight: 500 }}>
-              Browsing Data
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <img src="/Hodos_Black_Icon.svg" alt="" style={{ height: 40 }} />
+              <Typography variant="h4" component="h1" sx={{ fontWeight: 500 }}>
+                Browsing Data
+              </Typography>
+            </Box>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
               View and manage your browsing history, cookies, and cache
             </Typography>

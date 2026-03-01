@@ -31,8 +31,10 @@
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
 #include "include/core/SettingsManager.h"
+#include "include/core/FingerprintProtection.h"
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
+#include "include/core/AdblockCache.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -61,6 +63,7 @@ HWND g_cookie_panel_overlay_hwnd = nullptr;
 HWND g_download_panel_overlay_hwnd = nullptr;
 HWND g_profile_panel_overlay_hwnd = nullptr;
 HWND g_notification_overlay_hwnd = nullptr;
+HWND g_menu_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -71,6 +74,7 @@ HHOOK g_cookie_panel_mouse_hook = nullptr;
 HHOOK g_download_panel_mouse_hook = nullptr;
 HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
+HHOOK g_menu_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -79,6 +83,7 @@ int g_cookie_icon_right_offset = 0;
 int g_download_icon_right_offset = 0;
 int g_profile_icon_right_offset = 0;
 int g_wallet_icon_right_offset = 0;
+int g_menu_icon_right_offset = 0;
 
 // Fullscreen state tracking
 bool g_is_fullscreen = false;
@@ -316,6 +321,28 @@ void ShutdownApplication() {
         }
         DestroyWindow(g_download_panel_overlay_hwnd);
         g_download_panel_overlay_hwnd = nullptr;
+    }
+
+    if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd)) {
+        LOG_INFO("Destroying profile panel overlay window...");
+        if (g_profile_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_profile_panel_mouse_hook);
+            g_profile_panel_mouse_hook = nullptr;
+            LOG_INFO("Profile panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_profile_panel_overlay_hwnd);
+        g_profile_panel_overlay_hwnd = nullptr;
+    }
+
+    if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd)) {
+        LOG_INFO("Destroying menu overlay window...");
+        if (g_menu_mouse_hook) {
+            UnhookWindowsHookEx(g_menu_mouse_hook);
+            g_menu_mouse_hook = nullptr;
+            LOG_INFO("Menu mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_menu_overlay_hwnd);
+        g_menu_overlay_hwnd = nullptr;
     }
 
     // Step 3: Destroy main windows (child windows first)
@@ -1774,6 +1801,91 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ========== MENU OVERLAY ==========
+
+LRESULT CALLBACK MenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd) && IsWindowVisible(g_menu_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_menu_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("Click detected outside menu overlay bounds - dismissing");
+                    extern void HideMenuOverlay();
+                    HideMenuOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_menu_mouse_hook, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_SETCURSOR:
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+            if (menu_browser) {
+                menu_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+            if (menu_browser) {
+                menu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                menu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+            if (menu_browser) {
+                menu_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // Lightweight health check — returns true if GET /health responds with "ok".
 // Uses a short 2-second timeout so it fails fast when nothing is listening.
 static bool QuickHealthCheck() {
@@ -2138,6 +2250,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SettingsManager::GetInstance().Initialize(profile_cache);
     LOG_INFO("Settings loaded for profile: " + profileId);
 
+    // Initialize AdblockCache with profile path (loads per-site settings from JSON)
+    AdblockCache::GetInstance().Initialize(profile_cache);
+    LOG_INFO("AdblockCache per-site settings loaded");
+
+    // Sprint 12c: Initialize fingerprint protection session token
+    FingerprintProtection::GetInstance().Initialize();
+    LOG_INFO("Fingerprint protection initialized");
+
     // Each profile instance needs its own root to avoid CEF SingletonLock conflicts
     // root_cache_path = profile dir, cache_path = profile dir + /cache (must be child of root)
     CefString(&settings.root_cache_path).FromString(profile_cache);
@@ -2294,6 +2414,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("Failed to register profile panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
+    // Register Menu overlay window class
+    WNDCLASS menuOverlayClass = {};
+    menuOverlayClass.lpfnWndProc = MenuOverlayWndProc;
+    menuOverlayClass.hInstance = hInstance;
+    menuOverlayClass.lpszClassName = L"CEFMenuOverlayWindow";
+
+    if (!RegisterClass(&menuOverlayClass)) {
+        LOG_DEBUG("Failed to register menu overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
@@ -2360,6 +2490,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
+
+    // Pre-create panel overlays hidden so React is warm when user first clicks.
+    // This eliminates the first-open race condition where JS injection fires before
+    // React mounts and registers callbacks.
+    extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    CreateCookiePanelOverlay(g_hInstance, false, 100);
+    CreateDownloadPanelOverlay(g_hInstance, false, 100);
+    CreateProfilePanelOverlay(g_hInstance, false, 50);
+    CreateMenuOverlay(g_hInstance, false, 30);
+    LOG_INFO("Pre-created panel overlays (hidden) for warm startup");
 
     CefRunMessageLoop();
 

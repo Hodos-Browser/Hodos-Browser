@@ -102,6 +102,12 @@ const WalletOverlayRoot: React.FC = () => {
   };
   const [tabValue, setTabValue] = useState(getInitialTab);
 
+  useEffect(() => {
+    document.title = 'Hodos Wallet';
+    document.body.style.margin = '0';
+    document.body.style.overflow = 'hidden';
+  }, []);
+
   // Export backup state
   const [showExportForm, setShowExportForm] = useState(false);
   const [exportPassword, setExportPassword] = useState('');

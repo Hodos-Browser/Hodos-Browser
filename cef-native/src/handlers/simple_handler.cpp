@@ -15,13 +15,16 @@
 #endif
 
 // Cross-platform includes (available on both platforms)
+#include <cmath>
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/GoogleSuggestService.h"
 #include "../../include/core/CookieManager.h"
 #include "../../include/core/CookieBlockManager.h"
+#include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/SettingsManager.h"
+#include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/ProfileImporter.h"
 
@@ -180,6 +183,8 @@ std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_
 std::set<uint32_t> SimpleHandler::paused_downloads_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
+std::string SimpleHandler::pending_shield_domain_;
 
 CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
     return this;
@@ -200,6 +205,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
 
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
     return profile_panel_browser_;
+}
+
+CefRefPtr<CefBrowser> SimpleHandler::GetMenuBrowser() {
+    return menu_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -283,6 +292,13 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
         std::string url_str = url.ToString();
         TabManager::GetInstance().UpdateTabURL(tab_id, url_str);
         LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url_str);
+
+        // Notify ephemeral cookie manager of navigation (for third-party cookie lifecycle)
+        Tab* tab = TabManager::GetInstance().GetTab(tab_id);
+        if (tab && tab->browser) {
+            EphemeralCookieManager::GetInstance().OnTabNavigated(
+                tab->browser->GetIdentifier(), url_str);
+        }
 
         // Clear cert error flag when navigating away from cert-error page to a real site
         if (url_str.find("/cert-error") == std::string::npos) {
@@ -490,7 +506,9 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         if (mainFrame && mainFrame->IsValid() && g_adblockServerRunning) {
             std::string navUrl = mainFrame->GetURL().ToString();
             if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
-                auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl);
+                // Sprint 10b: Check if scriptlets are disabled for this domain
+                bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(navUrl);
+                auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl, skipScriptlets);
                 if (!cosmetic.injectedScript.empty()) {
                     LOG_INFO_BROWSER("💉 Pre-caching scriptlets for " + navUrl +
                         " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
@@ -547,6 +565,28 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     if (role_ == "backup") {
         LOG_DEBUG_BROWSER("📡 Backup URL: " + browser->GetMainFrame()->GetURL().ToString());
+    }
+
+    // Deferred shield domain injection: when cookie panel finishes loading,
+    // inject any pending domain. This fires AFTER React has mounted and registered
+    // the setShieldDomain callback, fixing the first-open race condition.
+    if (!isLoading && role_ == "cookiepanel" && !pending_shield_domain_.empty()) {
+        CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+        if (frame && frame->IsValid()) {
+            std::string domain = pending_shield_domain_;
+            pending_shield_domain_.clear();
+            // Escape domain for safe JS injection
+            std::string escapedDomain = domain;
+            for (size_t i = 0; i < escapedDomain.size(); ++i) {
+                if (escapedDomain[i] == '\\' || escapedDomain[i] == '\'') {
+                    escapedDomain.insert(i, "\\");
+                    ++i;
+                }
+            }
+            std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); }";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_INFO_BROWSER("Deferred shield domain injected after page load: " + domain);
+        }
     }
 
     // API injection logic (cross-platform)
@@ -632,7 +672,9 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                     } else if (!shouldSkipAdblockCheck(pageUrl) && g_adblockServerRunning) {
                         last_cosmetic_url_ = pageUrl;
                         // Fetch cosmetic resources from adblock engine
-                        auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(pageUrl);
+                        // Sprint 10b: Check if scriptlets are disabled for this domain
+                        bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(pageUrl);
+                        auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(pageUrl, skipScriptlets);
 
                         LOG_DEBUG_BROWSER("🎨 Cosmetic P1: css=" + std::to_string(cosmetic.cssSelectors.size()) +
                             " script=" + std::to_string(cosmetic.injectedScript.size()) +
@@ -980,6 +1022,17 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "menu") {
+        menu_browser_ = browser;
+        LOG_DEBUG_BROWSER("Menu overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -1062,6 +1115,9 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "profilepanel" && browser == profile_panel_browser_) {
         std::cout << "  → Profile panel overlay browser cleanup" << std::endl;
         profile_panel_browser_ = nullptr;
+    } else if (role_ == "menu" && browser == menu_browser_) {
+        std::cout << "  → Menu overlay browser cleanup" << std::endl;
+        menu_browser_ = nullptr;
     } else {
         std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
     }
@@ -1176,6 +1232,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "tab_create") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+
+        // Sprint 11b: Use homepage setting for blank tabs
+        if (url.empty() || url == "about:blank") {
+            std::string homepage = SettingsManager::GetInstance().GetBrowserSettings().homepage;
+            if (!homepage.empty() && homepage != "about:blank") {
+                url = homepage;
+            }
+        }
 
 #ifdef _WIN32
         // Windows: Get main window dimensions for tab size
@@ -1480,20 +1544,21 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern HWND g_cookie_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
+        bool alreadyExists = g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd);
+
         // Create if doesn't exist, otherwise show
-        if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
+        if (!alreadyExists) {
             CreateCookiePanelOverlay(g_hInstance, true, iconRightOffset);
         } else {
             ShowCookiePanelOverlay(iconRightOffset);
         }
 
-        // Inject domain into overlay via JS callback (keep-alive pattern)
+        // Inject domain into overlay via JS callback
         if (!shieldDomain.empty()) {
             CefRefPtr<CefBrowser> cookie_browser = GetCookiePanelBrowser();
             if (cookie_browser && cookie_browser->GetMainFrame()) {
                 // Escape domain for safe JS injection
                 std::string escapedDomain = shieldDomain;
-                // Simple escape: replace backslash and single quote
                 for (size_t i = 0; i < escapedDomain.size(); ++i) {
                     if (escapedDomain[i] == '\\' || escapedDomain[i] == '\'') {
                         escapedDomain.insert(i, "\\");
@@ -1504,6 +1569,10 @@ bool SimpleHandler::OnProcessMessageReceived(
                 cookie_browser->GetMainFrame()->ExecuteJavaScript(js, cookie_browser->GetMainFrame()->GetURL(), 0);
                 LOG_DEBUG_BROWSER("Injected domain into privacy shield overlay: " + shieldDomain);
             }
+            // Also store as pending for deferred injection (defense-in-depth):
+            // If the browser was just created (pre-created hidden), React may not
+            // have mounted yet when ExecuteJavaScript runs above.
+            pending_shield_domain_ = shieldDomain;
         }
 
         LOG_DEBUG_BROWSER("Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
@@ -1559,6 +1628,204 @@ bool SimpleHandler::OnProcessMessageReceived(
 #else
         LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
 #endif
+        return true;
+    }
+
+    // Menu Overlay IPC handlers
+    if (message_name == "menu_show") {
+        int iconRightOffset = 0;
+        CefRefPtr<CefListValue> menu_args = message->GetArgumentList();
+        if (menu_args->GetSize() > 0) {
+            try { iconRightOffset = std::stoi(menu_args->GetString(0).ToString()); } catch(...) {}
+        }
+
+#ifdef _WIN32
+        extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void ShowMenuOverlay(int iconRightOffset);
+        extern HWND g_menu_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        if (!g_menu_overlay_hwnd || !IsWindow(g_menu_overlay_hwnd)) {
+            CreateMenuOverlay(g_hInstance, true, iconRightOffset);
+        } else {
+            ShowMenuOverlay(iconRightOffset);
+        }
+
+        // Inject current zoom level into menu overlay
+        CefRefPtr<CefBrowser> menu_browser = GetMenuBrowser();
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (menu_browser && menu_browser->GetMainFrame() && active_tab && active_tab->browser) {
+            double zoomLevel = active_tab->browser->GetHost()->GetZoomLevel();
+            // Convert CEF zoom level to percentage (0.0 = 100%, each 0.5 step ≈ +25%)
+            int zoomPercent = static_cast<int>(100.0 * pow(1.2, zoomLevel));
+            std::string js = "if (window.setMenuZoomLevel) { window.setMenuZoomLevel(" + std::to_string(zoomPercent) + "); }";
+            menu_browser->GetMainFrame()->ExecuteJavaScript(js, menu_browser->GetMainFrame()->GetURL(), 0);
+        }
+
+        LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+#else
+        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "menu_hide") {
+#ifdef _WIN32
+        extern void HideMenuOverlay();
+        HideMenuOverlay();
+        LOG_DEBUG_BROWSER("Menu overlay hidden");
+#else
+        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "menu_action") {
+        CefRefPtr<CefListValue> action_args = message->GetArgumentList();
+        std::string action;
+        if (action_args->GetSize() > 0) {
+            action = action_args->GetString(0).ToString();
+        }
+
+        LOG_DEBUG_BROWSER("Menu action received: " + action);
+
+        // Auto-hide menu first
+#ifdef _WIN32
+        extern void HideMenuOverlay();
+        HideMenuOverlay();
+#endif
+
+        // Helper lambda to create a tab with current window dimensions
+#ifdef _WIN32
+        auto createTabHelper = [](const std::string& url) {
+            extern HWND g_hwnd;
+            RECT rect;
+            GetClientRect(g_hwnd, &rect);
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+            int tabHeight = height - shellHeight;
+            TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+        };
+#endif
+
+        // Dispatch actions
+        if (action == "new_tab") {
+            std::string url = "";
+            std::string homepage = SettingsManager::GetInstance().GetBrowserSettings().homepage;
+            if (!homepage.empty() && homepage != "about:blank") {
+                url = homepage;
+            }
+#ifdef _WIN32
+            createTabHelper(url);
+#endif
+        } else if (action == "history") {
+#ifdef _WIN32
+            createTabHelper("http://127.0.0.1:5137/browser-data");
+#endif
+        } else if (action == "settings") {
+#ifdef _WIN32
+            createTabHelper("http://127.0.0.1:5137/settings-page");
+#endif
+        } else if (action == "wallet") {
+#ifdef _WIN32
+            createTabHelper("http://127.0.0.1:5137/wallet");
+#endif
+        } else if (action == "about") {
+#ifdef _WIN32
+            createTabHelper("http://127.0.0.1:5137/settings-page/about");
+#endif
+        } else if (action == "downloads") {
+#ifdef _WIN32
+            extern void ShowDownloadPanelOverlay(int iconRightOffset);
+            extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+            extern HWND g_download_panel_overlay_hwnd;
+            extern HINSTANCE g_hInstance;
+            if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
+                CreateDownloadPanelOverlay(g_hInstance, true, 100);
+            } else {
+                ShowDownloadPanelOverlay(100);
+            }
+            NotifyDownloadStateChanged();
+#endif
+        } else if (action == "find") {
+            // Send find_show IPC to header browser
+            CefRefPtr<CefBrowser> header = GetHeaderBrowser();
+            if (header) {
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("find_show");
+                header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+            }
+        } else if (action == "print") {
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                active_tab->browser->GetHost()->Print();
+            }
+        } else if (action == "devtools") {
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                CefWindowInfo windowInfo;
+#ifdef _WIN32
+                windowInfo.SetAsPopup(nullptr, "Developer Tools");
+#elif defined(__APPLE__)
+                windowInfo.SetAsPopup(nullptr, "Developer Tools");
+#endif
+                CefBrowserSettings devSettings;
+                active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
+            }
+        } else if (action == "zoom_in") {
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                double level = active_tab->browser->GetHost()->GetZoomLevel();
+                active_tab->browser->GetHost()->SetZoomLevel(level + 0.5);
+            }
+        } else if (action == "zoom_out") {
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                double level = active_tab->browser->GetHost()->GetZoomLevel();
+                active_tab->browser->GetHost()->SetZoomLevel(level - 0.5);
+            }
+        } else if (action == "zoom_reset") {
+            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            if (active_tab && active_tab->browser) {
+                active_tab->browser->GetHost()->SetZoomLevel(0.0);
+            }
+        } else if (action == "fullscreen") {
+            // Toggle fullscreen via Windows API
+#ifdef _WIN32
+            extern HWND g_hwnd;
+            extern bool g_is_fullscreen;
+            if (!g_is_fullscreen) {
+                // Enter fullscreen
+                HMONITOR hMon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi = { sizeof(mi) };
+                GetMonitorInfo(hMon, &mi);
+                SetWindowLong(g_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                SetWindowPos(g_hwnd, HWND_TOP,
+                    mi.rcMonitor.left, mi.rcMonitor.top,
+                    mi.rcMonitor.right - mi.rcMonitor.left,
+                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    SWP_FRAMECHANGED);
+            } else {
+                // Exit fullscreen
+                SetWindowLong(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+                SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+#endif
+        } else if (action == "exit") {
+#ifdef _WIN32
+            extern HWND g_hwnd;
+            PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+#endif
+        } else if (action == "settings_privacy") {
+#ifdef _WIN32
+            createTabHelper("http://127.0.0.1:5137/settings-page/privacy");
+#endif
+        } else if (action == "bookmarks") {
+            // TODO: bookmarks page
+            LOG_DEBUG_BROWSER("Bookmarks action not yet implemented");
+        }
+
         return true;
     }
 
@@ -1650,6 +1917,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             settings.SetDoNotTrack(value == "true");
         } else if (key == "privacy.clearDataOnExit") {
             settings.SetClearDataOnExit(value == "true");
+        } else if (key == "privacy.fingerprintProtection") {
+            settings.SetFingerprintProtection(value == "true");
+            FingerprintProtection::GetInstance().SetEnabled(value == "true");
         }
         // Wallet settings
         else if (key == "wallet.autoApproveEnabled") {
@@ -2527,6 +2797,67 @@ bool SimpleHandler::OnProcessMessageReceived(
         CreateBackupOverlayWithSeparateProcess(g_hInstance);
 #elif defined(__APPLE__)
         CreateBackupOverlayWithSeparateProcess();
+#endif
+        return true;
+    }
+
+    // ========== MENU ACTIONS (Sprint 11a) ==========
+
+    if (message_name == "print") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            active_tab->browser->GetHost()->Print();
+        }
+        return true;
+    }
+
+    if (message_name == "devtools") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            CefWindowInfo windowInfo;
+#ifdef _WIN32
+            windowInfo.SetAsPopup(nullptr, "Developer Tools");
+#elif defined(__APPLE__)
+            windowInfo.SetAsPopup(nullptr, "Developer Tools");
+#endif
+            CefBrowserSettings devSettings;
+            active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
+        }
+        return true;
+    }
+
+    if (message_name == "zoom_in") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            double level = active_tab->browser->GetHost()->GetZoomLevel();
+            active_tab->browser->GetHost()->SetZoomLevel(level + 0.5);
+        }
+        return true;
+    }
+
+    if (message_name == "zoom_out") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            double level = active_tab->browser->GetHost()->GetZoomLevel();
+            active_tab->browser->GetHost()->SetZoomLevel(level - 0.5);
+        }
+        return true;
+    }
+
+    if (message_name == "zoom_reset") {
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser) {
+            active_tab->browser->GetHost()->SetZoomLevel(0.0);
+        }
+        return true;
+    }
+
+    if (message_name == "exit") {
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+#elif defined(__APPLE__)
+        // macOS quit handled via NSApp terminate
 #endif
         return true;
     }
@@ -3694,69 +4025,84 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("🛡️ Adblock site toggle: " + domain + " → " + (enabled ? "ON" : "OFF"));
 
-        // POST to Rust backend
-        class AdblockToggleTask : public CefTask {
-        public:
-            std::string domain_;
-            bool enabled_;
-            CefRefPtr<CefBrowser> browser_;
+        // Update local JSON-backed cache (no HTTP call needed)
+        AdblockCache::GetInstance().setSiteEnabled(domain, enabled);
 
-            AdblockToggleTask(const std::string& domain, bool enabled, CefRefPtr<CefBrowser> browser)
-                : domain_(domain), enabled_(enabled), browser_(browser) {}
+        // Send response back to renderer
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["adblockEnabled"] = enabled;
+        response["success"] = true;
 
-            void Execute() override {
-                // POST to /adblock/site-toggle on Rust backend
-                HINTERNET hSession = WinHttpOpen(L"AdblockToggle/1.0",
-                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-                if (!hSession) return;
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_site_toggle_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
+        return true;
+    }
 
-                DWORD timeout = 5000;
-                WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-                WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    // Check adblock site-enabled state (GET equivalent via IPC)
+    if (message_name == "adblock_check_site_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
 
-                HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
-                if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+        bool enabled = AdblockCache::GetInstance().isSiteEnabled(domain);
 
-                HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/adblock/site-toggle",
-                    nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-                if (!hRequest) {
-                    WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
-                    return;
-                }
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["adblockEnabled"] = enabled;
 
-                std::string body = "{\"domain\":\"" + domain_ + "\",\"enabled\":" + (enabled_ ? "true" : "false") + "}";
-                LPCWSTR contentType = L"Content-Type: application/json";
-                WinHttpSendRequest(hRequest, contentType, -1L,
-                    (LPVOID)body.c_str(), (DWORD)body.size(), (DWORD)body.size(), 0);
-                WinHttpReceiveResponse(hRequest, nullptr);
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_check_site_enabled_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
+        return true;
+    }
 
-                WinHttpCloseHandle(hRequest);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
+    // Sprint 10b: Per-site scriptlet toggle
+    if (message_name == "adblock_scriptlet_toggle") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        std::string enabledStr = args->GetString(1).ToString();
+        bool enabled = (enabledStr == "true" || enabledStr == "1");
 
-                // Invalidate caches
-                AdblockCache::GetInstance().invalidateSiteToggle(domain_);
-                AdblockCache::GetInstance().clearAll();
+        LOG_DEBUG_BROWSER("💉 Scriptlet toggle: " + domain + " → " + (enabled ? "ON" : "OFF"));
 
-                // Send response back to renderer
-                nlohmann::json response;
-                response["domain"] = domain_;
-                response["adblockEnabled"] = enabled_;
-                response["success"] = true;
+        // Update local JSON-backed cache (no HTTP call needed)
+        AdblockCache::GetInstance().setScriptletsEnabled(domain, enabled);
 
-                CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_site_toggle_response");
-                responseMsg->GetArgumentList()->SetString(0, response.dump());
-                if (browser_ && browser_->GetMainFrame()) {
-                    browser_->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
-                }
-            }
+        // Send response back to renderer
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["scriptletsEnabled"] = enabled;
+        response["success"] = true;
 
-            IMPLEMENT_REFCOUNTING(AdblockToggleTask);
-        };
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_scriptlet_toggle_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
+        return true;
+    }
 
-        CefPostTask(TID_IO, new AdblockToggleTask(domain, enabled, browser));
+    // Check scriptlet-enabled state (GET equivalent via IPC)
+    if (message_name == "adblock_check_scriptlets_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+
+        bool enabled = AdblockCache::GetInstance().isScriptletsEnabled(domain);
+
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["scriptletsEnabled"] = enabled;
+
+        CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_check_scriptlets_enabled_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
         return true;
     }
 #endif
@@ -4438,7 +4784,9 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
     if (g_adblockServerRunning && frame->IsMain()) {
         std::string navUrl = request->GetURL().ToString();
         if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
-            auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl);
+            // Sprint 10b: Check if scriptlets are disabled for this domain
+            bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(navUrl);
+            auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl, skipScriptlets);
             if (!cosmetic.injectedScript.empty()) {
                 LOG_INFO_BROWSER("💉 OnBeforeBrowse: pre-caching scriptlets for " + navUrl +
                     " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
@@ -4451,6 +4799,19 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
         }
     }
 #endif
+
+    // Sprint 12c: Send fingerprint seed to renderer for this navigation
+    if (frame->IsMain() && FingerprintProtection::GetInstance().IsEnabled()) {
+        std::string navUrl = request->GetURL().ToString();
+        if (!navUrl.empty() && navUrl.find("127.0.0.1") == std::string::npos &&
+            navUrl.find("localhost") == std::string::npos) {
+            uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
+            CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
+            msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
+            msg->GetArgumentList()->SetString(1, navUrl);
+            frame->SendProcessMessage(PID_RENDERER, msg);
+        }
+    }
 
     return false;  // Never cancel navigation
 }
@@ -4633,6 +4994,12 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
+    // Sprint 11b: Inject Do Not Track headers if enabled
+    if (SettingsManager::GetInstance().GetPrivacySettings().doNotTrack) {
+        request->SetHeaderByName("DNT", "1", true);
+        request->SetHeaderByName("Sec-GPC", "1", true);
+    }
+
     // Ad & tracker blocking — check before wallet interception
     // Only for tab browsers making external requests (skip internal/overlay URLs)
 #ifdef _WIN32
@@ -4808,8 +5175,8 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #else
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
-                LOG_INFO_BROWSER("⌨️ Ctrl+H: Opening history in new tab");
-                CreateNewTabWithUrl("http://127.0.0.1:5137/history");
+                LOG_INFO_BROWSER("⌨️ Ctrl+H: Opening browser data in new tab");
+                CreateNewTabWithUrl("http://127.0.0.1:5137/browser-data");
                 SimpleHandler::NotifyTabListChanged();
                 return true;
             }

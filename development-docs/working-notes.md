@@ -20,6 +20,30 @@
 
 **Decision needed**: Which option, and when to implement (before or after MVP launch)
 
+### Real-World Impact (confirmed 2026-02-27)
+
+Testing confirms proprietary codecs are the **root cause** of media failures on multiple sites:
+
+| Site | Static Images | Video | Root Cause |
+|------|--------------|-------|------------|
+| **x.com** | ✅ JPEG/PNG work | ❌ No playback (0:00, blank) | x.com converts ALL animated GIFs to H.264 MP4 (`<video>` elements). HLS via MSE requires H.264. No fallback codec. |
+| **Reddit** | ✅ Thumbnails work | ❌ Spinner, never plays | Reddit video player uses H.264 MP4. No VP9/AV1 fallback. |
+| **YouTube** | ✅ All work | ✅ Plays fine | YouTube has VP9/AV1 fallback — doesn't need H.264. |
+
+**x.com "intermittent images" explained**: Static JPEG/PNG images load fine. But x.com converts animated GIFs to MP4 and renders them as `<video>` elements — these appear as broken "images" because the H.264 codec is missing. The "intermittent" behavior is actually: real `<img>` tags work, `<video>` tags (disguised as images) don't.
+
+**Diagnostic command** (run in DevTools console on any page):
+```javascript
+const v = document.createElement('video');
+console.log('H.264:', v.canPlayType('video/mp4; codecs="avc1.42E01E"'));
+console.log('VP9:', v.canPlayType('video/webm; codecs="vp9"'));
+console.log('AV1:', v.canPlayType('video/webm; codecs="av01.0.01M.08"'));
+console.log('AAC:', v.canPlayType('audio/mp4; codecs="mp4a.40.2"'));
+// H.264 and AAC will be empty string (unsupported), VP9/AV1 will be "probably"
+```
+
+**Priority**: This is the **single biggest UX issue** for the browser. Sites that don't work without H.264: x.com (videos+GIFs), Reddit (videos), Twitch (some streams), Instagram, TikTok, most news sites with embedded video. Should be addressed before MVP launch.
+
 ---
 
 ## 2. CEF Binary Strategy — Prebuilt vs Source Build
@@ -261,10 +285,15 @@ cd cef-native/build/bin/Release
 
 ### Open Questions for Future Research
 
-- Do we need our own "unbreak" list (like Brave's `brave-unbreak.txt`)?
+- ~~Do we need our own "unbreak" list (like Brave's `brave-unbreak.txt`)?~~ **YES** — implemented as `hodos-unbreak.txt` (Sprint 10). Contains `#@#+js()` scriptlet exceptions + `$generichide` cosmetic exceptions for auth/banking/e-commerce domains, plus global OAuth SDK network exceptions.
 - Should we bundle pre-compiled `engine.dat` with the installer?
 - How do we handle the crate's serialization format changing between versions?
-- Do we ever want cosmetic filtering (CSS element hiding)? Network blocking covers ~90% of ads.
+- ~~Do we ever want cosmetic filtering (CSS element hiding)?~~ **YES** — implemented in Sprint 8e. Two-phase: hostname-specific CSS selectors on page load, generic selectors after DOM class/ID collection. Suppressed per-domain via `$generichide` rules in `hodos-unbreak.txt`.
+
+### adblock-rust Quirks (discovered 2026-02-27)
+
+- **`$elemhide` NOT supported in adblock-rust 0.10.3**: The `elemhide` option (which should suppress all cosmetic filtering) does NOT set the `generichide` flag in `UrlSpecificResources`. Only `$generichide` works. This is a known limitation — PR #587 in the adblock-rust repo is still open. All rules in `hodos-unbreak.txt` use `$generichide` instead of `$elemhide`.
+- **`cosmetic_resources()` Phase 1 fix**: The `url_cosmetic_resources()` API returns hostname-specific CSS selectors in `hide_selectors` even when `generichide=true`. Our `cosmetic_resources()` wrapper now explicitly returns empty selectors when `generichide=true`, suppressing both Phase 1 (hostname-specific) and Phase 2 (generic) CSS. See `engine.rs` `cosmetic_resources()` function. `CONFIG_VERSION` bumped to 6.
 
 ---
 
@@ -349,6 +378,93 @@ cd cef-native/build/bin/Release
 - `frontend/src/pages/MainBrowserView.tsx` — Ctrl+N shortcut, window-aware tab management
 
 **Priority**: Post-MVP. The current lock behavior is safe and prevents data corruption. The UX improvement is important but not blocking.
+
+---
+
+## 13. Exception List Auto-Update via CDN (Post-MVP)
+
+**Discovered**: Sprint 10 planning (2026-02-25)
+
+**Context**: Sprint 10 creates `hodos-unbreak.txt` — a scriptlet exception filter list embedded in the adblock-engine binary via `include_str!()`. It also checks for an updatable version at `%APPDATA%/HodosBrowser/adblock/hodos-unbreak.txt` (local override).
+
+**Current approach**: Embedded list is sufficient for MVP. When new broken auth domains are discovered, they require an adblock-engine rebuild to update the embedded list (or manual file placement for the local override).
+
+**Post-MVP enhancement**: Add the exception list to the existing filter list auto-update cycle (6-hour background task in `adblock-engine/src/engine.rs`). Implementation:
+
+1. Host `hodos-unbreak.txt` at a stable URL (e.g., `https://updates.hodosbrowser.com/adblock/hodos-unbreak.txt` or a GitHub Pages/raw GitHub URL)
+2. Add the URL to the `FILTER_LISTS` array in `engine.rs` alongside EasyList, EasyPrivacy, uBlock Filters, and uBlock Privacy
+3. The existing `needs_update()` / `rebuild_engine()` infrastructure handles the rest — version checking, downloading, engine hot-swap under `RwLock`
+4. Include `! Expires: 7 days` header so it updates weekly (less frequent than the 4-day filter lists since exception rules change rarely)
+5. Keep the embedded `include_str!()` fallback for offline/first-run scenarios
+
+**Infrastructure needed**: A static file hosting endpoint. Options:
+- **GitHub Pages** (free, version-controlled, auto-deploys on push) — simplest
+- **GitHub raw URL** (`raw.githubusercontent.com/...`) — even simpler but has CDN caching delays
+- **S3 + CloudFront** — proper CDN with cache invalidation, cost ~$1/month for our traffic
+- **Cloudflare Pages** (free tier) — fast CDN, auto-deploy from repo
+
+**Priority**: Low — implement when we set up the browser update infrastructure (see #4). The same CDN/hosting can serve both browser updates and filter list updates.
+
+---
+
+## 14. Entity-Aware Ad Blocking (disconnect.me Entity Lists)
+
+**Implemented**: 2026-02-27
+
+**Context**: EasyList/EasyPrivacy rules block same-organization CDN domains as "trackers" (e.g. `pbs.twimg.com` on `x.com`, `gstatic.com` on `google.com`). This kills images, videos, and auth flows even when the resources are first-party CDN content. Manual `@@||domain^$domain=` exceptions don't scale.
+
+**Solution**: Entity-aware blocking using the disconnect.me `entities.json` file (~400KB, 1859 organizations, 9500+ domains). When the adblock engine says "block", we check whether the URL domain and source domain belong to the same organization. If same-entity → allow (first-party CDN). If different-entity → block (real tracker).
+
+**Implementation details**:
+- `EntityMap` struct in `engine.rs` with `HashMap<String, u16>` (domain → entity_id)
+- Suffix-walking lookup: `pbs.twimg.com` → tries `pbs.twimg.com`, then `twimg.com` → matches X Corp entity
+- Embedded via `include_str!("entities.json")`, auto-updated alongside filter lists every 6 hours
+- Only overrides **blocks**, not redirects (redirects are scriptlet-related)
+- Removed 13 manual same-entity network exception lines from `hodos-unbreak.txt`
+- `CONFIG_VERSION` bumped to 5 for entity-aware blocking, then to 6 for cosmetic CSS fix (forces engine.dat rebuild)
+- 7 new unit tests covering entity matching, subdomain walking, and integration with `check_request()`
+
+**Production build note**: The `entities.json` file (~400KB) is embedded at compile time. This adds ~400KB to the binary size but avoids a runtime dependency on disk. The file is also downloaded to `%APPDATA%/HodosBrowser/adblock/entities.json` for runtime updates — the disk version takes priority over embedded if present and valid.
+
+**License**: disconnect.me entity lists are CC BY-NC-SA 4.0. Include attribution in the About page (same as Brave does).
+
+**Update frequency**: The entity list is very stable (updates every few weeks). Piggybacks on the existing 6-hour filter list update cycle. No separate timer needed.
+
+---
+
+## 15. x.com Media Debugging — Lessons Learned (2026-02-27)
+
+**Summary**: Extended debugging session to fix x.com media (images/videos not displaying). Found and fixed two real bugs, but the primary issue was proprietary codecs (item #1).
+
+### What was fixed
+
+1. **Cosmetic CSS Phase 1 suppression** (real bug): `cosmetic_resources()` in engine.rs returned hostname-specific CSS selectors even when `generichide=true`. EasyList has selectors that match organic tweet containers, not just ads. Fixed by clearing selectors when `generichide=true`.
+
+2. **`$elemhide` → `$generichide` in hodos-unbreak.txt** (real bug): adblock-rust 0.10.3 doesn't support `$elemhide` (only `$generichide` sets the flag). Changed all 16 rules.
+
+3. **Entity-aware blocking** (implemented in prior session): disconnect.me entity list prevents same-org CDN blocking (twimg.com on x.com, gstatic.com on google.com).
+
+### What was NOT the problem
+
+All of these were investigated and ruled out:
+- **Network blocking**: `debug_output.log` showed all pbs.twimg.com/media requests going through (200 OK). Entity-aware blocking working correctly.
+- **Cookie blocking**: CookieBlockManager only blocks cookies, not requests. EphemeralCookieManager correctly allowing third-party cookies.
+- **CORS**: Regular `<img>` tags don't require CORS. CEF handles CORS natively.
+- **Fingerprint protection**: x.com is in `IsAuthDomain()` — fingerprint farbling skipped.
+- **Scriptlet injection**: x.com has `#@#+js()` exception — no scriptlets injected.
+- **CefResponseFilter**: Only applies to YouTube (via `CookieFilterResourceHandler`), not x.com.
+
+### The actual root cause
+
+**Missing proprietary codecs (H.264/AAC)** — see item #1 for full details. x.com converts GIFs to H.264 MP4 rendered as `<video>` elements. Without H.264 support, these appear as missing "images." True static images (JPEG/PNG) always worked fine.
+
+### Debugging approach for future media issues
+
+1. Check `debug_output.log` for "Blocked by adblock" lines for the domain's CDN resources
+2. Check DevTools Network tab for failed/blocked requests (filter by domain)
+3. Run `canPlayType()` diagnostic in console (see item #1) to confirm codec support
+4. Check if the "image" is actually a `<video>` element (inspect element → look for `<video>` tags)
+5. Check cosmetic CSS: look for `css=N` in debug log — if N>0, cosmetic selectors may be hiding content
 
 ---
 

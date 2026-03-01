@@ -278,6 +278,14 @@ void SettingsManager::SetClearDataOnExit(bool clear) {
     Save();
 }
 
+void SettingsManager::SetFingerprintProtection(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        privacy_.fingerprintProtection = enabled;
+    }
+    Save();
+}
+
 // Wallet settings setters
 void SettingsManager::SetAutoApproveEnabled(bool enabled) {
     {

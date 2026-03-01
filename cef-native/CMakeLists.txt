@@ -182,6 +182,8 @@ elseif(WIN32)
         src/core/CookieManager.cpp
         include/core/CookieBlockManager.h
         src/core/CookieBlockManager.cpp
+        include/core/EphemeralCookieManager.h
+        src/core/EphemeralCookieManager.cpp
         include/core/BookmarkManager.h
         src/core/BookmarkManager.cpp
         include/core/SettingsManager.h

@@ -20,6 +20,7 @@ struct PrivacySettings {
     bool thirdPartyCookieBlocking = true;
     bool doNotTrack = false;
     bool clearDataOnExit = false;
+    bool fingerprintProtection = true;  // Sprint 12e
 };
 
 // Wallet settings (auto-approve, spending limits)
@@ -36,7 +37,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
     downloadsPath, restoreSessionOnStart)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
-    adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit)
+    adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
+    fingerprintProtection)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(WalletSettings,
     autoApproveEnabled, defaultPerTxLimitCents, 
@@ -75,6 +77,7 @@ public:
     void SetThirdPartyCookieBlocking(bool enabled);
     void SetDoNotTrack(bool enabled);
     void SetClearDataOnExit(bool clear);
+    void SetFingerprintProtection(bool enabled);
 
     // Wallet settings
     void SetAutoApproveEnabled(bool enabled);

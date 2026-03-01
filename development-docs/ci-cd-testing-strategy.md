@@ -814,4 +814,461 @@ Before writing these tests, the following infrastructure is needed:
 
 ---
 
+## 10. Local Development Workflow
+
+### 10a. Test Directory Structure
+
+Each stack layer has its own test location following language conventions:
+
+```
+Hodos-Browser/
+├── rust-wallet/
+│   ├── src/
+│   │   └── crypto/
+│   │       ├── brc42.rs
+│   │       └── brc42_tests.rs      # Unit tests inline or sibling files
+│   └── tests/                       # Integration tests (separate binaries)
+│       ├── brc42_vectors_test.rs   # ts-sdk vector tests
+│       ├── wallet_integration.rs   # Full wallet flow tests
+│       └── fixtures/               # Test data files
+│           └── test_vectors.json
+│
+├── adblock-engine/
+│   ├── src/
+│   └── tests/
+│
+├── frontend/
+│   ├── src/
+│   │   └── components/
+│   │       └── __tests__/          # Co-located with components
+│   │           └── WalletPanel.test.tsx
+│   └── tests/                       # Integration/E2E tests
+│       └── setup.ts                 # Vitest setup
+│
+└── scripts/
+    └── test-all.ps1                 # Unified test runner
+```
+
+**Rust convention**: Unit tests go in `#[cfg(test)] mod tests {}` inside source files OR sibling `_tests.rs` files. Integration tests go in `tests/` directory (compiled as separate binaries).
+
+**TypeScript convention**: `__tests__/` directories co-located with source, or `.test.tsx` suffix.
+
+**No centralized test folder** — each stack owns its tests. Cross-stack integration is handled by manual test checklists or future E2E harness.
+
+### 10b. Unified Test Command
+
+Create `scripts/test-all.ps1` (Windows) for local development:
+
+```powershell
+# scripts/test-all.ps1 — Run all tests across the stack
+param(
+    [switch]$Coverage,
+    [switch]$Verbose,
+    [switch]$NightlyReport,
+    [string]$Filter = ""
+)
+
+$ErrorActionPreference = "Continue"  # Don't stop on first failure
+$results = @()
+$startTime = Get-Date
+
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  HODOS BROWSER — FULL TEST SUITE" -ForegroundColor Cyan
+Write-Host "  Started: $startTime" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
+# ─── Rust Wallet Tests ───
+Write-Host "`n▶ RUST WALLET TESTS" -ForegroundColor Yellow
+Push-Location rust-wallet
+
+$cargoArgs = "test"
+if ($Verbose) { $cargoArgs += " -- --nocapture" }
+if ($Filter) { $cargoArgs += " $Filter" }
+if ($Coverage) { $cargoArgs = "tarpaulin --out Html --output-dir ../test-reports/rust-wallet" }
+
+$rustStart = Get-Date
+$rustOutput = Invoke-Expression "cargo $cargoArgs 2>&1" | Tee-Object -Variable rustLog
+$rustExit = $LASTEXITCODE
+$rustDuration = (Get-Date) - $rustStart
+
+$results += @{
+    Stack = "rust-wallet"
+    Exit = $rustExit
+    Duration = $rustDuration
+    Log = $rustLog -join "`n"
+}
+Pop-Location
+
+# ─── Adblock Engine Tests ───
+Write-Host "`n▶ ADBLOCK ENGINE TESTS" -ForegroundColor Yellow
+Push-Location adblock-engine
+
+$adblockStart = Get-Date
+$adblockOutput = Invoke-Expression "cargo test 2>&1" | Tee-Object -Variable adblockLog
+$adblockExit = $LASTEXITCODE
+$adblockDuration = (Get-Date) - $adblockStart
+
+$results += @{
+    Stack = "adblock-engine"
+    Exit = $adblockExit
+    Duration = $adblockDuration
+    Log = $adblockLog -join "`n"
+}
+Pop-Location
+
+# ─── Frontend Tests ───
+Write-Host "`n▶ FRONTEND TESTS" -ForegroundColor Yellow
+Push-Location frontend
+
+$npmArgs = "test -- --run"
+if ($Coverage) { $npmArgs = "test -- --run --coverage" }
+
+$frontendStart = Get-Date
+$frontendOutput = Invoke-Expression "npm $npmArgs 2>&1" | Tee-Object -Variable frontendLog
+$frontendExit = $LASTEXITCODE
+$frontendDuration = (Get-Date) - $frontendStart
+
+$results += @{
+    Stack = "frontend"
+    Exit = $frontendExit
+    Duration = $frontendDuration
+    Log = $frontendLog -join "`n"
+}
+Pop-Location
+
+# ─── Summary ───
+$endTime = Get-Date
+$totalDuration = $endTime - $startTime
+
+Write-Host "`n═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  TEST SUMMARY" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
+foreach ($r in $results) {
+    $status = if ($r.Exit -eq 0) { "✓ PASS" } else { "✗ FAIL" }
+    $color = if ($r.Exit -eq 0) { "Green" } else { "Red" }
+    Write-Host "  $($r.Stack.PadRight(20)) $status  ($([math]::Round($r.Duration.TotalSeconds, 1))s)" -ForegroundColor $color
+}
+
+Write-Host "`n  Total time: $([math]::Round($totalDuration.TotalMinutes, 1)) minutes"
+
+# ─── Nightly Report ───
+if ($NightlyReport) {
+    $reportDir = "test-reports/$(Get-Date -Format 'yyyy-MM-dd')"
+    New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
+    
+    $report = @{
+        timestamp = $endTime.ToString("o")
+        duration_seconds = $totalDuration.TotalSeconds
+        results = $results | ForEach-Object {
+            @{
+                stack = $_.Stack
+                passed = ($_.Exit -eq 0)
+                duration_seconds = $_.Duration.TotalSeconds
+            }
+        }
+    }
+    
+    $report | ConvertTo-Json -Depth 3 | Out-File "$reportDir/summary.json"
+    
+    foreach ($r in $results) {
+        $r.Log | Out-File "$reportDir/$($r.Stack).log"
+    }
+    
+    Write-Host "`n  Report saved to: $reportDir" -ForegroundColor Cyan
+}
+
+# ─── Exit Code ───
+$failCount = ($results | Where-Object { $_.Exit -ne 0 }).Count
+exit $failCount
+```
+
+**Usage:**
+```powershell
+# Quick test (all stacks)
+./scripts/test-all.ps1
+
+# Verbose (see test output)
+./scripts/test-all.ps1 -Verbose
+
+# With coverage reports
+./scripts/test-all.ps1 -Coverage
+
+# Overnight run with saved report
+./scripts/test-all.ps1 -NightlyReport
+
+# Filter specific tests (Rust only)
+./scripts/test-all.ps1 -Filter "brc42"
+```
+
+### 10c. Overnight / Nightly Test Runs
+
+For unattended overnight runs that continue past failures:
+
+```powershell
+# scripts/test-nightly.ps1 — Run overnight, never stop, report in morning
+$logFile = "test-reports/nightly-$(Get-Date -Format 'yyyy-MM-dd-HHmm').log"
+Start-Transcript -Path $logFile
+
+try {
+    ./scripts/test-all.ps1 -NightlyReport -Verbose 2>&1
+} finally {
+    Stop-Transcript
+}
+
+# Optional: Send notification when done
+# Send-MailMessage -To "matt@marston.com" -Subject "Nightly tests complete" -Body "See $logFile"
+```
+
+**Key principle**: Use `-ErrorActionPreference = "Continue"` so one failing test doesn't abort the whole run.
+
+---
+
+## 11. Test Coverage Metrics
+
+### Tools
+
+| Stack | Tool | Command |
+|-------|------|---------|
+| Rust | `cargo-tarpaulin` | `cargo tarpaulin --out Html` |
+| Frontend | Vitest built-in | `npm test -- --coverage` |
+| C++ | (deferred) | gcov/llvm-cov when needed |
+
+### Installation
+
+```bash
+# Rust coverage
+cargo install cargo-tarpaulin
+
+# Frontend (add to package.json devDependencies)
+npm install -D @vitest/coverage-v8
+```
+
+### Vitest config for coverage
+
+```typescript
+// frontend/vite.config.ts
+export default defineConfig({
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      exclude: ['node_modules/', 'tests/', '**/*.d.ts'],
+      thresholds: {
+        // MVP: no enforcement. Post-MVP: uncomment
+        // lines: 60,
+        // functions: 60,
+        // branches: 50,
+      }
+    }
+  }
+});
+```
+
+### Coverage Thresholds (Post-MVP)
+
+| Stack | Target | Rationale |
+|-------|--------|-----------|
+| rust-wallet/crypto/ | 90%+ | Handles real money |
+| rust-wallet/handlers/ | 70%+ | API surface |
+| rust-wallet/database/ | 60%+ | CRUD, less critical |
+| frontend utilities | 80%+ | Pure functions |
+| frontend components | 50%+ | UI, harder to test |
+
+**MVP approach**: Generate reports, don't enforce thresholds. Use coverage to find untested code paths, not as a gate.
+
+---
+
+## 12. Flaky Test Handling
+
+### CI Retry Strategy
+
+```yaml
+# .github/workflows/ci.yml
+jobs:
+  rust-check:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false  # Don't cancel other jobs on failure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests with retry
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_on: error
+          command: cargo test --manifest-path rust-wallet/Cargo.toml
+```
+
+### Identifying Flaky Tests
+
+```rust
+// Run same test 10x to find flakiness
+// cargo test test_name -- --test-threads=1 --nocapture
+#[test]
+fn test_potentially_flaky() {
+    for _ in 0..10 {
+        // actual test logic
+    }
+}
+```
+
+### Common Flakiness Sources & Fixes
+
+| Source | Symptom | Fix |
+|--------|---------|-----|
+| Network timeouts | Tests fail intermittently on HTTP calls | Mock HTTP with `mockito` or `wiremock` |
+| Race conditions | Tests pass locally, fail in CI | Use `tokio::sync::Mutex`, deterministic ordering |
+| Time-dependent | Fails around midnight or DST | Use `chrono::Utc::now()` consistently, mock time in tests |
+| File system | Temp files clash between tests | Use unique temp dirs per test (`tempfile` crate) |
+| Port conflicts | "Address already in use" | Let OS assign ports (`127.0.0.1:0`) |
+
+### Quarantine Pattern
+
+If a test is flaky and blocking CI, quarantine it temporarily:
+
+```rust
+#[test]
+#[ignore = "flaky: investigating race condition in price_cache"]
+fn test_price_cache_concurrent_refresh() {
+    // ...
+}
+```
+
+Run ignored tests separately: `cargo test -- --ignored`
+
+---
+
+## 13. Test Data Fixtures
+
+### Rust: `test_app_state()` Helper
+
+This is the foundation for all Rust integration tests.
+
+```rust
+// rust-wallet/src/test_helpers.rs
+use crate::{AppState, database::Database, price_cache::PriceCache};
+use sqlx::sqlite::SqlitePoolOptions;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// Creates a test AppState with in-memory SQLite and mock caches.
+/// Each call creates a fresh, isolated database.
+pub async fn test_app_state() -> web::Data<AppState> {
+    // In-memory SQLite with unique name to avoid test interference
+    let db_url = format!("sqlite::memory:?cache=shared&name={}", uuid::Uuid::new_v4());
+    
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url)
+        .await
+        .expect("Failed to create test database");
+    
+    // Run migrations
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to run migrations");
+    
+    let db = Database::new(pool);
+    
+    web::Data::new(AppState {
+        db: Arc::new(db),
+        price_cache: Arc::new(RwLock::new(PriceCache::new_with_price(50.0))), // Mock $50 BSV
+        user_id: 1, // Test user
+        // ... other fields with test defaults
+    })
+}
+
+/// Creates test AppState with a pre-populated wallet for handler tests.
+pub async fn test_app_state_with_wallet() -> web::Data<AppState> {
+    let state = test_app_state().await;
+    
+    // Insert test wallet
+    sqlx::query("INSERT INTO wallets (id, created_at) VALUES (1, datetime('now'))")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    
+    // Insert test address with known values
+    sqlx::query(r#"
+        INSERT INTO addresses (wallet_id, address, derivation_path, is_change) 
+        VALUES (1, '1TestAddress123...', 'm/44''/236''/0''/0/0', 0)
+    "#)
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    
+    state
+}
+```
+
+### Rust: Test Vectors File
+
+```rust
+// rust-wallet/tests/fixtures/mod.rs
+pub mod brc42_vectors {
+    pub struct PrivateKeyVector {
+        pub sender_pubkey: &'static str,
+        pub recipient_privkey: &'static str,
+        pub invoice: &'static str,
+        pub expected: &'static str,
+    }
+    
+    pub const VECTORS: &[PrivateKeyVector] = &[
+        PrivateKeyVector {
+            sender_pubkey: "033f9160df035156f1c48e75eae99914fa1a1546bec19781e8eddb900200bff9d1",
+            recipient_privkey: "6a1751169c111b4667a6539ee1be6b7cd9f6e9c8fe011a5f2fe31e03a15e0ede",
+            invoice: "f3WCaUmnN9U=",
+            expected: "761656715bbfa172f8f9f58f5af95d9d0dfd69014cfdcacc9a245a10ff8893ef",
+        },
+        // ... remaining vectors from Section 2
+    ];
+}
+```
+
+### Frontend: Mock API Helper
+
+```typescript
+// frontend/tests/mocks/api.ts
+import { vi } from 'vitest';
+
+export function mockWalletApi(overrides: Partial<WalletState> = {}) {
+  const defaultState = {
+    exists: true,
+    locked: false,
+    balance: 100000, // satoshis
+    bsvPrice: 50.0,
+    ...overrides,
+  };
+
+  global.fetch = vi.fn((url: string) => {
+    if (url.includes('/wallet/status')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(defaultState),
+      });
+    }
+    if (url.includes('/wallet/balance')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ 
+          balance: defaultState.balance,
+          bsvPrice: defaultState.bsvPrice 
+        }),
+      });
+    }
+    return Promise.reject(new Error(`Unmocked endpoint: ${url}`));
+  }) as any;
+}
+```
+
+---
+
+**Priority order**: Rust `test_app_state` helper first (enables all P0-R through P24-R tests), then Vitest setup (enables frontend component tests), then mock HTTP for recovery/sync tests.
+
+---
+
 **End of Document**

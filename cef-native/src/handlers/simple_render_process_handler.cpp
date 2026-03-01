@@ -20,6 +20,8 @@
 #include <iomanip>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/FingerprintScript.h"
+#include "../../include/core/FingerprintProtection.h"
 
 #include <unordered_map>
 #include <mutex>
@@ -29,6 +31,10 @@
 // OnContextCreated injects them synchronously before page JS runs.
 static std::mutex s_scriptCacheMutex;
 static std::unordered_map<std::string, std::string> s_scriptCache; // URL → scriptlet JS
+
+// Sprint 12c: Static cache for fingerprint seeds (URL → seed)
+static std::mutex s_seedMutex;
+static std::unordered_map<std::string, uint32_t> s_domainSeeds;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_RENDER(msg) Logger::Log(msg, 0, 1)
@@ -572,6 +578,37 @@ void SimpleRenderProcessHandler::OnContextCreated(
         }
     }
 
+    // Sprint 12d: Inject fingerprint protection script for external pages
+    // Skip auth domains — fingerprint farbling breaks Google/Microsoft bot detection
+    if (!url.empty() && url.find("127.0.0.1") == std::string::npos &&
+        url.find("localhost") == std::string::npos &&
+        !FingerprintProtection::IsAuthDomain(url)) {
+        uint32_t seed = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_seedMutex);
+            auto it = s_domainSeeds.find(url);
+            if (it != s_domainSeeds.end()) {
+                seed = it->second;
+                if (frame->IsMain()) {
+                    s_domainSeeds.erase(it); // One-shot for main frame
+                }
+            } else {
+                // Fallback: use URL hash as seed
+                seed = static_cast<uint32_t>(std::hash<std::string>{}(url) & 0xFFFFFFFF);
+            }
+        }
+        if (seed != 0) {
+            std::string script = FINGERPRINT_PROTECTION_SCRIPT;
+            std::string seedStr = std::to_string(seed);
+            size_t pos = script.find("FINGERPRINT_SEED");
+            if (pos != std::string::npos) {
+                script.replace(pos, 16, seedStr);
+            }
+            LOG_DEBUG_RENDER("🛡️ Injecting fingerprint protection (seed=" + seedStr + ") for " + url);
+            frame->ExecuteJavaScript(script, url, 0);
+        }
+    }
+
     // Check if this is an overlay browser (any browser that's not the main root browser)
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
     bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
@@ -897,6 +934,20 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                 s_scriptCache[url] = script;
                 LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + url +
                     " (" + std::to_string(script.size()) + " chars)");
+            }
+            return true;
+        }
+
+        // Sprint 12c: Cache fingerprint seed for injection in OnContextCreated
+        if (message_name == "fingerprint_seed") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            uint32_t seed = static_cast<uint32_t>(args->GetInt(0));
+            std::string url = args->GetString(1).ToString();
+
+            if (!url.empty() && seed != 0) {
+                std::lock_guard<std::mutex> lock(s_seedMutex);
+                s_domainSeeds[url] = seed;
+                LOG_DEBUG_RENDER("🛡️ Cached fingerprint seed " + std::to_string(seed) + " for " + url);
             }
             return true;
         }
@@ -1790,6 +1841,33 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0).ToString();
         std::string escaped = escapeJsonForJs(responseJson);
         std::string js = "if (window.onAdblockSiteToggleResponse) { window.onAdblockSiteToggleResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "adblock_scriptlet_toggle_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockScriptletToggleResponse) { window.onAdblockScriptletToggleResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "adblock_check_site_enabled_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockCheckSiteEnabledResponse) { window.onAdblockCheckSiteEnabledResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "adblock_check_scriptlets_enabled_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onAdblockCheckScriptletsEnabledResponse) { window.onAdblockCheckScriptletsEnabledResponse(JSON.parse('" + escaped + "')); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
         return true;
     }

@@ -1,4 +1,5 @@
 #include "../../include/core/CookieBlockManager.h"
+#include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/Logger.h"
 #include "DefaultTrackerList.h"
 
@@ -511,12 +512,10 @@ bool CookieBlockManager::CanSendCookie(CefRefPtr<CefBrowser> browser,
     std::string cookie_domain = CefString(&cookie.domain).ToString();
     std::string normalized_cookie = NormalizeDomain(cookie_domain);
 
-    // Check blocked domain list (O(1) lookup)
+    // Check blocked domain list — known trackers always blocked
     if (MatchesDomain(normalized_cookie)) {
-        // Log blocked cookie (posts to FILE thread)
         LogBlockedCookie(normalized_cookie, url, "blocked_domain");
 
-        // Increment per-browser count
         if (browser) {
             std::unique_lock<std::shared_mutex> lock(count_mutex_);
             blocked_counts_[browser->GetIdentifier()]++;
@@ -524,27 +523,57 @@ bool CookieBlockManager::CanSendCookie(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
-    // Check third-party cookies
-    std::string page_url;
-    if (frame) {
+    // Determine the page context for third-party checks.
+    // IMPORTANT: Prefer GetFirstPartyForCookies() over frame->GetURL().
+    // During navigation, frame->GetURL() returns the PREVIOUS page's URL (stale),
+    // while GetFirstPartyForCookies() always reflects the correct target URL.
+    std::string page_url = request->GetFirstPartyForCookies().ToString();
+    if (page_url.empty() && frame) {
         page_url = frame->GetURL().ToString();
     }
-    if (page_url.empty()) {
-        page_url = request->GetFirstPartyForCookies().ToString();
+
+    // Skip if page context is localhost (e.g. navigating away from dev server homepage)
+    if (!page_url.empty() &&
+        (page_url.find("localhost") != std::string::npos ||
+         page_url.find("127.0.0.1") != std::string::npos)) {
+        return true;
     }
 
     if (!page_url.empty()) {
         std::string page_domain = NormalizeDomain(ExtractDomain(page_url));
         if (!page_domain.empty() && IsThirdParty(normalized_cookie, page_domain)) {
-            if (!IsThirdPartyAllowed(normalized_cookie)) {
-                LogBlockedCookie(normalized_cookie, url, "third_party");
-
-                if (browser) {
-                    std::unique_lock<std::shared_mutex> lock(count_mutex_);
-                    blocked_counts_[browser->GetIdentifier()]++;
+            // Ephemeral check: use the TOP-LEVEL site the user is browsing.
+            // For subframes, frame->GetURL() returns the iframe URL, not what's in the
+            // address bar. Use browser->GetMainFrame() for the true top-level context,
+            // falling back to GetFirstPartyForCookies().
+            std::string ephemeral_url;
+            if (browser) {
+                auto main_frame = browser->GetMainFrame();
+                if (main_frame) {
+                    ephemeral_url = main_frame->GetURL().ToString();
                 }
-                return false;
             }
+            // Fall back if main frame URL is empty or localhost (during initial navigation)
+            if (ephemeral_url.empty() ||
+                ephemeral_url.find("localhost") != std::string::npos ||
+                ephemeral_url.find("127.0.0.1") != std::string::npos) {
+                ephemeral_url = page_url;
+            }
+
+            std::string top_level_site = EphemeralCookieManager::ExtractSiteFromUrl(ephemeral_url);
+            if (!top_level_site.empty() &&
+                EphemeralCookieManager::GetInstance().IsSiteActive(top_level_site)) {
+                return true; // Site is active — allow third-party cookie
+            }
+
+            // Site not active — block third-party cookie
+            LogBlockedCookie(normalized_cookie, url, "third_party");
+
+            if (browser) {
+                std::unique_lock<std::shared_mutex> lock(count_mutex_);
+                blocked_counts_[browser->GetIdentifier()]++;
+            }
+            return false;
         }
     }
 
@@ -567,7 +596,7 @@ bool CookieBlockManager::CanSaveCookie(CefRefPtr<CefBrowser> browser,
     std::string cookie_domain = CefString(&cookie.domain).ToString();
     std::string normalized_cookie = NormalizeDomain(cookie_domain);
 
-    // Check blocked domain list (O(1) lookup)
+    // Check blocked domain list — known trackers always blocked
     if (MatchesDomain(normalized_cookie)) {
         LogBlockedCookie(normalized_cookie, url, "blocked_domain");
 
@@ -578,27 +607,60 @@ bool CookieBlockManager::CanSaveCookie(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
-    // Check third-party cookies
-    std::string page_url;
-    if (frame) {
+    // Determine the page context for third-party checks.
+    // IMPORTANT: Prefer GetFirstPartyForCookies() over frame->GetURL().
+    // During navigation, frame->GetURL() returns the PREVIOUS page's URL (stale),
+    // while GetFirstPartyForCookies() always reflects the correct target URL.
+    std::string page_url = request->GetFirstPartyForCookies().ToString();
+    if (page_url.empty() && frame) {
         page_url = frame->GetURL().ToString();
     }
-    if (page_url.empty()) {
-        page_url = request->GetFirstPartyForCookies().ToString();
+
+    // Skip if page context is localhost (e.g. navigating away from dev server homepage)
+    if (!page_url.empty() &&
+        (page_url.find("localhost") != std::string::npos ||
+         page_url.find("127.0.0.1") != std::string::npos)) {
+        return true;
     }
 
     if (!page_url.empty()) {
         std::string page_domain = NormalizeDomain(ExtractDomain(page_url));
         if (!page_domain.empty() && IsThirdParty(normalized_cookie, page_domain)) {
-            if (!IsThirdPartyAllowed(normalized_cookie)) {
-                LogBlockedCookie(normalized_cookie, url, "third_party");
-
-                if (browser) {
-                    std::unique_lock<std::shared_mutex> lock(count_mutex_);
-                    blocked_counts_[browser->GetIdentifier()]++;
+            // Ephemeral check: use the TOP-LEVEL site the user is browsing.
+            // For subframes, frame->GetURL() returns the iframe URL, not what's in the
+            // address bar. Use browser->GetMainFrame() for the true top-level context,
+            // falling back to GetFirstPartyForCookies().
+            std::string ephemeral_url;
+            if (browser) {
+                auto main_frame = browser->GetMainFrame();
+                if (main_frame) {
+                    ephemeral_url = main_frame->GetURL().ToString();
                 }
-                return false;
             }
+            // Fall back if main frame URL is empty or localhost (during initial navigation)
+            if (ephemeral_url.empty() ||
+                ephemeral_url.find("localhost") != std::string::npos ||
+                ephemeral_url.find("127.0.0.1") != std::string::npos) {
+                ephemeral_url = page_url;
+            }
+
+            std::string top_level_site = EphemeralCookieManager::ExtractSiteFromUrl(ephemeral_url);
+            if (!top_level_site.empty() &&
+                EphemeralCookieManager::GetInstance().IsSiteActive(top_level_site)) {
+                // Record this third-party domain for cleanup when site session ends
+                EphemeralCookieManager::GetInstance().RecordThirdPartyCookie(
+                    top_level_site, normalized_cookie);
+                return true; // Site is active — allow and record for later cleanup
+            }
+
+            // Site not active — block third-party cookie
+            LogBlockedCookie(normalized_cookie, url, "third_party");
+
+            if (browser) {
+                std::unique_lock<std::shared_mutex> lock(count_mutex_);
+                blocked_counts_[browser->GetIdentifier()]++;
+            }
+            return false;
         }
     }
 

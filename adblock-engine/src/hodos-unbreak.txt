@@ -1,0 +1,118 @@
+! Title: Hodos Browser Compatibility Exceptions
+! Description: Disables scriptlet injection, cosmetic CSS, and network blocking
+!   on domains where it breaks authentication or core functionality
+! Expires: 7 days
+! Last modified: 2026-02-27
+! License: MIT
+! Homepage: https://github.com/ArcBit/Hodos-Browser
+!
+! NOTE: Cookie handling is separate from this file. Third-party cookies are
+! managed by EphemeralCookieManager (Brave-style ephemeral storage) — cookies
+! are allowed while a site has open tabs, then cleaned up 30s after the last
+! tab closes. The old AUTH_COOKIE_DOMAINS hardcoded allowlist has been removed.
+! This exception list handles adblock/cosmetic/scriptlet exceptions ONLY.
+
+! =====================================================================
+! Authentication Domains — adblock/cosmetic/scriptlet exemptions
+!
+! Each auth domain gets TWO layers of exceptions in this file:
+!   1. #@#+js()      — disable scriptlet injection (fetch/XHR proxy breaks OAuth)
+!   2. @@||...$generichide — disable cosmetic CSS hiding (EasyList hides login forms)
+!
+! Same-entity network exceptions (e.g. gstatic.com on google.com, twimg.com on
+! x.com) are handled systemically by entity-aware blocking using the disconnect.me
+! entity list — no per-domain @@|| network rules needed for same-org CDN resources.
+!
+! See auth-cookies-profiles-guide.md for the full rationale.
+! =====================================================================
+
+! --- Twitter / X ---
+! OAuth + session cookies; fetch() proxy breaks token exchange.
+! Cosmetic CSS filtering hides legitimate post images (EasyList selectors
+! match organic tweet containers, not just ads).
+! Network exceptions for same-entity CDNs (twimg.com, t.co) are handled
+! systemically by entity-aware blocking (disconnect.me entity list).
+x.com#@#+js()
+twitter.com#@#+js()
+api.twitter.com#@#+js()
+abs.twimg.com#@#+js()
+@@||x.com^$generichide
+@@||twitter.com^$generichide
+
+! --- Google Auth ---
+! Google Sign-In, OAuth, FedCM, CAPTCHA.
+! accounts.google.com is the primary auth page — needs scriptlet + cosmetic exceptions.
+! Network exceptions for same-entity CDNs (gstatic.com, googleapis.com, etc.) are
+! handled systemically by entity-aware blocking (disconnect.me entity list).
+accounts.google.com#@#+js()
+accounts.youtube.com#@#+js()
+myaccount.google.com#@#+js()
+@@||accounts.google.com^$generichide
+@@||myaccount.google.com^$generichide
+
+! --- Microsoft Auth ---
+! Microsoft OAuth / Azure AD / Live
+login.microsoftonline.com#@#+js()
+login.live.com#@#+js()
+login.microsoft.com#@#+js()
+@@||login.microsoftonline.com^$generichide
+@@||login.live.com^$generichide
+@@||login.microsoft.com^$generichide
+
+! --- GitHub ---
+! Session cookies + OAuth
+github.com#@#+js()
+@@||github.com^$generichide
+
+! --- Apple Auth ---
+appleid.apple.com#@#+js()
+@@||appleid.apple.com^$generichide
+
+! --- Facebook / Meta Auth ---
+! OAuth SDK used by many third-party sites
+www.facebook.com#@#+js()
+@@||www.facebook.com^$generichide
+
+! --- Discord ---
+! Session cookies + OAuth
+discord.com#@#+js()
+@@||discord.com^$generichide
+
+! --- Reddit ---
+! OAuth
+reddit.com#@#+js()
+www.reddit.com#@#+js()
+@@||reddit.com^$generichide
+@@||www.reddit.com^$generichide
+
+! =====================================================================
+! OAuth SDK Network Exceptions (global — needed on ANY site using these)
+! Allow OAuth SDK scripts that are blocked by EasyList but required for login
+! =====================================================================
+
+@@||connect.facebook.net^*/sdk/$script
+@@||apis.google.com/js/api.js$script
+@@||accounts.google.com^$subdocument
+
+! =====================================================================
+! Banking / Financial — scriptlet + cosmetic exceptions
+! Banks have strict CSP and auth flows that break with API hooks
+! =====================================================================
+
+chase.com#@#+js()
+bankofamerica.com#@#+js()
+wellsfargo.com#@#+js()
+paypal.com#@#+js()
+stripe.com#@#+js()
+@@||chase.com^$generichide
+@@||bankofamerica.com^$generichide
+@@||wellsfargo.com^$generichide
+@@||paypal.com^$generichide
+@@||stripe.com^$generichide
+
+! =====================================================================
+! E-commerce Auth — scriptlet + cosmetic exceptions
+! =====================================================================
+
+amazon.com#@#+js()
+@@||amazon.com^$generichide

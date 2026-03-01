@@ -4,6 +4,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "../../include/core/TabManager.h"
+#include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/Logger.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
@@ -171,6 +172,11 @@ bool TabManager::CloseTab(int tab_id) {
         }
     } else if (tab_id == active_tab_id_) {
         active_tab_id_ = -1;
+    }
+
+    // Notify ephemeral cookie manager before closing
+    if (tab.browser) {
+        EphemeralCookieManager::GetInstance().OnTabClosed(tab.browser->GetIdentifier());
     }
 
     // Initiate browser close

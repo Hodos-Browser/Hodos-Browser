@@ -15,6 +15,7 @@ export interface PrivacySettings {
   thirdPartyCookieBlocking: boolean;
   doNotTrack: boolean;
   clearDataOnExit: boolean;
+  fingerprintProtection: boolean;
 }
 
 export interface WalletSettings {
@@ -47,6 +48,7 @@ const defaultSettings: AllSettings = {
     thirdPartyCookieBlocking: true,
     doNotTrack: false,
     clearDataOnExit: false,
+    fingerprintProtection: true,
   },
   wallet: {
     autoApproveEnabled: true,

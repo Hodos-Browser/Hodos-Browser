@@ -64,7 +64,7 @@ declare global {
         markBackedUp: () => Promise<{ success: boolean }>;
         getBackupModalState: () => Promise<{ shown: boolean }>;
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean }>;
-        getBalance: () => Promise<{ balance: number }>;
+        getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
         sendTransaction: (data: { recipient: string; amount: number }) => Promise<TransactionResponse>;
         getTransactionHistory: () => Promise<any[]>;
       };

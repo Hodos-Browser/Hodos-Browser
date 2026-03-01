@@ -44,8 +44,9 @@ export const usePrivacyShield = (domain: string) => {
     if (domain) {
       checkCookieSiteAllowed(domain);
       adblock.checkSiteAdblock(domain);
+      adblock.checkScriptlets(domain);
     }
-  }, [domain, checkCookieSiteAllowed, adblock.checkSiteAdblock]);
+  }, [domain, checkCookieSiteAllowed, adblock.checkSiteAdblock, adblock.checkScriptlets]);
 
   // Toggle cookie blocking for site
   const toggleCookieBlocking = useCallback(async (d: string, enable: boolean) => {
@@ -66,9 +67,11 @@ export const usePrivacyShield = (domain: string) => {
   const toggleMaster = useCallback(async (d: string, enable: boolean) => {
     // Toggle adblock
     await adblock.toggleSiteAdblock(d, enable);
+    // Toggle scriptlets with adblock
+    await adblock.toggleScriptlets(d, enable);
     // Toggle cookie blocking
     await toggleCookieBlocking(d, enable);
-  }, [adblock.toggleSiteAdblock, toggleCookieBlocking]);
+  }, [adblock.toggleSiteAdblock, adblock.toggleScriptlets, toggleCookieBlocking]);
 
   const totalBlockedCount = adblock.blockedCount + cookie.blockedCount;
 
@@ -82,6 +85,10 @@ export const usePrivacyShield = (domain: string) => {
     adblockEnabled: adblock.adblockEnabled,
     adblockBlockedCount: adblock.blockedCount,
     toggleSiteAdblock: adblock.toggleSiteAdblock,
+
+    // Scriptlets (Sprint 10c)
+    scriptletsEnabled: adblock.scriptletsEnabled,
+    toggleScriptlets: adblock.toggleScriptlets,
 
     // Cookie blocking
     cookieBlockingEnabled,

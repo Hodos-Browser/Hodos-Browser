@@ -54,6 +54,7 @@ const PrivacyShieldOverlayRoot: React.FC = () => {
         flexDirection: 'column',
         overflow: 'hidden',
         boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.1)',
+        borderRadius: '8px',
       }}
     >
       {/* Header */}

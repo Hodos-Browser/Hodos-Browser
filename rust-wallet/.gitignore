@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+
+# Diagnostic reports (generated, not committed)
+diagnostic_report.txt
+tests/fixtures/node_modules/
+tests/fixtures/package-lock.json
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

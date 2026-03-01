@@ -1222,7 +1222,7 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
 
     // Calculate position - right side panel, right edge aligned under icon
     int panelWidth = 450;
-    int panelHeight = 520;
+    int panelHeight = 370;  // Fits all shield panel content without scrollbar
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + 104;
     // Clamp to main window bottom
@@ -1348,7 +1348,7 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
 
     // Calculate position - right edge aligned under icon
     int panelWidth = 450;
-    int panelHeight = 520;
+    int panelHeight = 370;  // Fits all shield panel content without scrollbar
     int overlayX = headerRect.right - g_cookie_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
     // Clamp to main window bottom
@@ -1642,6 +1642,207 @@ void HideDownloadPanelOverlay() {
     LOG_INFO_APP("Download panel overlay hidden");
 }
 
+// ==================== MENU OVERLAY ====================
+
+void ShowMenuOverlay(int iconRightOffset = 0);
+void HideMenuOverlay();
+
+void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO_APP("Creating menu overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconRightOffset=" +
+                 std::to_string(iconRightOffset) + ")");
+
+    // Store offset globally for repositioning
+    extern int g_menu_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_menu_icon_right_offset = iconRightOffset;
+    }
+
+    // Keep-alive check: if HWND already exists, conditionally show it
+    extern HWND g_menu_overlay_hwnd;
+    if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd)) {
+        LOG_INFO_APP("Menu overlay already exists");
+        if (showImmediately) {
+            ShowMenuOverlay(iconRightOffset);
+        }
+        return;
+    }
+
+    // Get main window dimensions
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // Calculate position — right-aligned under three-dot icon
+    int panelWidth = 280;
+    int panelHeight = 450;
+    int overlayX = headerRect.right - iconRightOffset - panelWidth;
+    int overlayY = headerRect.top + 104;
+    // Clamp to main window bottom
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
+
+    LOG_INFO_APP("Creating menu overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
+                 std::to_string(panelHeight));
+
+    // Create HWND for menu overlay
+    HWND menu_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFMenuOverlayWindow",
+        L"Menu Overlay",
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!menu_hwnd) {
+        LOG_ERROR_APP("Failed to create menu overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    // Force position (conditionally show)
+    UINT flags = SWP_NOACTIVATE;
+    if (showImmediately) {
+        flags |= SWP_SHOWWINDOW;
+    } else {
+        flags |= SWP_HIDEWINDOW;
+    }
+    SetWindowPos(menu_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        flags);
+
+    // Store HWND globally
+    g_menu_overlay_hwnd = menu_hwnd;
+    LOG_INFO_APP("Menu overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(menu_hwnd)));
+
+    // Create CEF browser subprocess for menu overlay
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(menu_hwnd, "MenuOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> menu_handler(new SimpleHandler("menu"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(menu_hwnd, panelWidth, panelHeight);
+    menu_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, menu_handler,
+        "http://127.0.0.1:5137/menu",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Menu overlay browser created with subprocess");
+
+        if (showImmediately) {
+            extern HHOOK g_menu_mouse_hook;
+            extern LRESULT CALLBACK MenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+            if (!g_menu_mouse_hook) {
+                g_menu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, MenuMouseHookProc, nullptr, 0);
+                if (g_menu_mouse_hook) {
+                    LOG_INFO_APP("Menu mouse hook installed for click-outside detection");
+                }
+            }
+
+            LONG exStyle = GetWindowLong(menu_hwnd, GWL_EXSTYLE);
+            SetWindowLong(menu_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create menu overlay browser");
+    }
+}
+
+void ShowMenuOverlay(int iconRightOffset) {
+    extern HWND g_menu_overlay_hwnd;
+    if (!g_menu_overlay_hwnd || !IsWindow(g_menu_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show menu overlay - HWND does not exist");
+        return;
+    }
+
+    extern int g_menu_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_menu_icon_right_offset = iconRightOffset;
+    }
+
+    LOG_INFO_APP("Showing menu overlay");
+
+    // Install mouse hook
+    extern HHOOK g_menu_mouse_hook;
+    extern LRESULT CALLBACK MenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_menu_mouse_hook) {
+        g_menu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, MenuMouseHookProc, nullptr, 0);
+    }
+
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+
+    int panelWidth = 280;
+    int panelHeight = 450;
+    int overlayX = headerRect.right - g_menu_icon_right_offset - panelWidth;
+    int overlayY = headerRect.top + 104;
+    if (overlayY + panelHeight > mainRect.bottom) {
+        panelHeight = mainRect.bottom - overlayY;
+        if (panelHeight < 200) panelHeight = 200;
+    }
+
+    SetWindowPos(g_menu_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    LONG exStyle = GetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+    if (menu_browser && menu_browser->GetHost()) {
+        menu_browser->GetHost()->WasResized();
+        menu_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    LOG_INFO_APP("Menu overlay shown");
+}
+
+void HideMenuOverlay() {
+    extern HWND g_menu_overlay_hwnd;
+    if (!g_menu_overlay_hwnd || !IsWindow(g_menu_overlay_hwnd)) {
+        return;
+    }
+
+    LOG_INFO_APP("Hiding menu overlay");
+
+    extern HHOOK g_menu_mouse_hook;
+    if (g_menu_mouse_hook) {
+        UnhookWindowsHookEx(g_menu_mouse_hook);
+        g_menu_mouse_hook = nullptr;
+    }
+
+    CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+    if (menu_browser) {
+        menu_browser->GetHost()->SetFocus(false);
+    }
+
+    ShowWindow(g_menu_overlay_hwnd, SW_HIDE);
+
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+}
+
 // ==================== PROFILE PANEL OVERLAY ====================
 
 void ShowProfilePanelOverlay(int iconRightOffset = 0);
@@ -1678,13 +1879,13 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
 
     // Calculate position - larger panel for profile management UI
     int panelWidth = 380;   // Wide enough for profile list + create form
-    int panelHeight = 500;  // Tall enough for image picker + color grid + buttons
+    int panelHeight = 380;  // Reduced from 500 to match actual content height
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + 104;
     // Clamp to main window bottom with margin
     if (overlayY + panelHeight > mainRect.bottom - 20) {
         panelHeight = mainRect.bottom - overlayY - 20;
-        if (panelHeight < 350) panelHeight = 350;
+        if (panelHeight < 280) panelHeight = 280;
     }
 
     LOG_INFO_APP("Creating profile panel overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -1796,14 +1997,14 @@ void ShowProfilePanelOverlay(int iconRightOffset) {
     GetWindowRect(g_hwnd, &mainRect);
 
     int panelWidth = 380;   // Wider for profile management UI
-    int panelHeight = 500;  // Taller for create form with image picker
+    int panelHeight = 380;  // Reduced from 500 to match actual content height
     int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
 
     // Clamp to screen bounds
     if (overlayY + panelHeight > mainRect.bottom - 20) {
         panelHeight = mainRect.bottom - overlayY - 20;
-        if (panelHeight < 350) panelHeight = 350;
+        if (panelHeight < 280) panelHeight = 280;
     }
 
     SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,

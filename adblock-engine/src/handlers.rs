@@ -95,11 +95,14 @@ pub async fn status(engine: web::Data<AdblockEngine>) -> HttpResponse {
 #[derive(Debug, Deserialize)]
 pub struct CosmeticRequest {
     pub url: String,
+    /// When true, return empty injectedScript (user disabled scriptlets for this domain)
+    #[serde(default)]
+    pub skip_scriptlets: bool,
 }
 
 /// POST /cosmetic-resources — Get CSS selectors and scriptlets for a URL
 ///
-/// Request:  { "url": "https://www.youtube.com/watch?v=xyz" }
+/// Request:  { "url": "https://www.youtube.com/watch?v=xyz", "skipScriptlets": false }
 /// Response: { "hideSelectors": [...], "injectedScript": "...", "generichide": false }
 pub async fn cosmetic_resources(
     engine: web::Data<AdblockEngine>,
@@ -107,9 +110,16 @@ pub async fn cosmetic_resources(
 ) -> HttpResponse {
     let (selectors, injected_script, generichide) = engine.cosmetic_resources(&body.url);
 
+    // If user disabled scriptlets for this domain, return empty injectedScript
+    let final_script = if body.skip_scriptlets {
+        String::new()
+    } else {
+        injected_script
+    };
+
     HttpResponse::Ok().json(serde_json::json!({
         "hideSelectors": selectors,
-        "injectedScript": injected_script,
+        "injectedScript": final_script,
         "generichide": generichide,
     }))
 }

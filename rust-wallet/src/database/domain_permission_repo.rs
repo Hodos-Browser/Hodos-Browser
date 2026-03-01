@@ -34,7 +34,7 @@ impl<'a> DomainPermissionRepository<'a> {
     pub fn get_by_domain(&self, user_id: i64, domain: &str) -> Result<Option<DomainPermission>> {
         match self.conn.query_row(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                    rate_limit_per_min, adblock_enabled, created_at, updated_at
+                    rate_limit_per_min, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 AND domain = ?2",
             params![user_id, domain],
             |row| Ok(DomainPermission {
@@ -45,9 +45,8 @@ impl<'a> DomainPermissionRepository<'a> {
                 per_tx_limit_cents: row.get(4)?,
                 per_session_limit_cents: row.get(5)?,
                 rate_limit_per_min: row.get(6)?,
-                adblock_enabled: row.get::<_, i64>(7)? != 0,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             }),
         ) {
             Ok(perm) => Ok(Some(perm)),
@@ -79,15 +78,13 @@ impl<'a> DomainPermissionRepository<'a> {
                     per_tx_limit_cents = ?2,
                     per_session_limit_cents = ?3,
                     rate_limit_per_min = ?4,
-                    adblock_enabled = ?5,
-                    updated_at = ?6
-                 WHERE id = ?7",
+                    updated_at = ?5
+                 WHERE id = ?6",
                 params![
                     perm.trust_level,
                     perm.per_tx_limit_cents,
                     perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
-                    perm.adblock_enabled as i64,
                     now,
                     id,
                 ],
@@ -97,8 +94,8 @@ impl<'a> DomainPermissionRepository<'a> {
             self.conn.execute(
                 "INSERT INTO domain_permissions
                  (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                  rate_limit_per_min, adblock_enabled, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  rate_limit_per_min, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     perm.user_id,
                     perm.domain,
@@ -106,7 +103,6 @@ impl<'a> DomainPermissionRepository<'a> {
                     perm.per_tx_limit_cents,
                     perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
-                    perm.adblock_enabled as i64,
                     now,
                     now,
                 ],
@@ -129,7 +125,7 @@ impl<'a> DomainPermissionRepository<'a> {
     pub fn list_all(&self, user_id: i64) -> Result<Vec<DomainPermission>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                    rate_limit_per_min, adblock_enabled, created_at, updated_at
+                    rate_limit_per_min, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 ORDER BY domain"
         )?;
         let rows = stmt.query_map(params![user_id], |row| Ok(DomainPermission {
@@ -140,21 +136,10 @@ impl<'a> DomainPermissionRepository<'a> {
             per_tx_limit_cents: row.get(4)?,
             per_session_limit_cents: row.get(5)?,
             rate_limit_per_min: row.get(6)?,
-            adblock_enabled: row.get::<_, i64>(7)? != 0,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         }))?.collect::<Result<Vec<_>>>()?;
         Ok(rows)
-    }
-
-    /// Update only the adblock_enabled flag for a permission
-    pub fn update_adblock_enabled(&self, id: i64, enabled: bool) -> Result<()> {
-        let now = unix_now();
-        self.conn.execute(
-            "UPDATE domain_permissions SET adblock_enabled = ?1, updated_at = ?2 WHERE id = ?3",
-            params![enabled as i64, now, id],
-        )?;
-        Ok(())
     }
 
     /// Delete a domain permission (and cascade-delete its cert field permissions)

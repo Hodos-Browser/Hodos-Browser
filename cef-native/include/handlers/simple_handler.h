@@ -66,7 +66,9 @@ public:
     static CefRefPtr<CefBrowser> GetCookiePanelBrowser();
     static CefRefPtr<CefBrowser> GetDownloadPanelBrowser();
     static CefRefPtr<CefBrowser> GetProfilePanelBrowser();
+    static CefRefPtr<CefBrowser> GetMenuBrowser();
     static std::string pending_panel_;
+    static std::string pending_shield_domain_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
     static void NotifyTabListChanged();  // Notify frontend of tab list changes
@@ -240,6 +242,7 @@ private:
     static CefRefPtr<CefBrowser> cookie_panel_browser_;
     static CefRefPtr<CefBrowser> download_panel_browser_;
     static CefRefPtr<CefBrowser> profile_panel_browser_;
+    static CefRefPtr<CefBrowser> menu_browser_;
 
     /**
      * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)

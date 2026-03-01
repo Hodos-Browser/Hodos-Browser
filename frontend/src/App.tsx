@@ -8,8 +8,10 @@ import OmniboxOverlayRoot from './pages/OmniboxOverlayRoot';
 import PrivacyShieldOverlayRoot from './pages/PrivacyShieldOverlayRoot';
 import DownloadsOverlayRoot from './pages/DownloadsOverlayRoot';
 import ProfilePickerOverlayRoot from './pages/ProfilePickerOverlayRoot';
+import MenuOverlayRoot from './pages/MenuOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
 import HistoryPage from './pages/HistoryPage';
+import SettingsPage from './pages/SettingsPage';
 import CertErrorPage from './pages/CertErrorPage';
 import WalletPanelPage from './pages/WalletPanelPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
@@ -164,7 +166,9 @@ const App = () => {
       <Routes>
         {/* <Route path="/" element={walletExists ? <MainBrowserView /> : <OverlayRoot />} /> */}
         <Route path="/" element={<MainBrowserView />} />
-        <Route path="/history" element={<HistoryPage />} />
+        <Route path="/browser-data" element={<HistoryPage />} />
+        <Route path="/settings-page" element={<SettingsPage />} />
+        <Route path="/settings-page/:section" element={<SettingsPage />} />
         <Route path="/cert-error" element={<CertErrorPage />} />
         <Route path="/wallet-panel" element={<WalletPanelPage />} />
         <Route path="/settings" element={<SettingsOverlayRoot />} />
@@ -175,6 +179,7 @@ const App = () => {
         <Route path="/privacy-shield" element={<PrivacyShieldOverlayRoot />} />
         <Route path="/downloads" element={<DownloadsOverlayRoot />} />
         <Route path="/profile-picker" element={<ProfilePickerOverlayRoot />} />
+        <Route path="/menu" element={<MenuOverlayRoot />} />
       </Routes>
 
       {/* BRC-100 Authentication Modal */}

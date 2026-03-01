@@ -8301,7 +8301,6 @@ pub struct SetDomainPermissionRequest {
     pub per_tx_limit_cents: Option<i64>,
     pub per_session_limit_cents: Option<i64>,
     pub rate_limit_per_min: Option<i64>,
-    pub adblock_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8337,7 +8336,6 @@ pub async fn get_domain_permission(
             "perTxLimitCents": perm.per_tx_limit_cents,
             "perSessionLimitCents": perm.per_session_limit_cents,
             "rateLimitPerMin": perm.rate_limit_per_min,
-            "adblockEnabled": perm.adblock_enabled,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
@@ -8345,7 +8343,6 @@ pub async fn get_domain_permission(
             HttpResponse::Ok().json(serde_json::json!({
                 "domain": domain,
                 "trustLevel": "unknown",
-                "adblockEnabled": true,
                 "found": false,
             }))
         }
@@ -8396,10 +8393,6 @@ pub async fn set_domain_permission(
     if let Some(v) = req.rate_limit_per_min {
         perm.rate_limit_per_min = v;
     }
-    if let Some(v) = req.adblock_enabled {
-        perm.adblock_enabled = v;
-    }
-
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response
@@ -8411,7 +8404,6 @@ pub async fn set_domain_permission(
                     "perTxLimitCents": saved.per_tx_limit_cents,
                     "perSessionLimitCents": saved.per_session_limit_cents,
                     "rateLimitPerMin": saved.rate_limit_per_min,
-                    "adblockEnabled": saved.adblock_enabled,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
                 })),
@@ -8489,7 +8481,6 @@ pub async fn list_domain_permissions(
                 "perTxLimitCents": p.per_tx_limit_cents,
                 "perSessionLimitCents": p.per_session_limit_cents,
                 "rateLimitPerMin": p.rate_limit_per_min,
-                "adblockEnabled": p.adblock_enabled,
                 "createdAt": p.created_at,
                 "updatedAt": p.updated_at,
             })).collect();
@@ -8637,111 +8628,8 @@ pub async fn approve_cert_fields(
     }
 }
 
-// ============================================================================
-// Adblock Per-Site Toggle (Sprint 8c)
-// ============================================================================
-
-/// GET /adblock/site-toggle?domain=example.com
-/// Returns whether ad blocking is enabled for a domain.
-/// Default: true (ads blocked) for all domains.
-pub async fn get_adblock_site_toggle(
-    state: web::Data<AppState>,
-    query: web::Query<std::collections::HashMap<String, String>>,
-) -> HttpResponse {
-    let domain = match query.get("domain") {
-        Some(d) => d,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "domain parameter is required"
-            }));
-        }
-    };
-
-    let db = state.database.lock().unwrap();
-    let repo = crate::database::DomainPermissionRepository::new(db.connection());
-    match repo.get_by_domain(state.current_user_id, domain) {
-        Ok(Some(perm)) => HttpResponse::Ok().json(serde_json::json!({
-            "domain": domain,
-            "adblockEnabled": perm.adblock_enabled,
-        })),
-        Ok(None) => {
-            // No record = default (enabled)
-            HttpResponse::Ok().json(serde_json::json!({
-                "domain": domain,
-                "adblockEnabled": true,
-            }))
-        }
-        Err(e) => {
-            log::error!("Failed to get adblock toggle for {}: {}", domain, e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
-            }))
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAdblockSiteToggleRequest {
-    pub domain: String,
-    pub enabled: bool,
-}
-
-/// POST /adblock/site-toggle
-/// Toggle ad blocking for a specific domain.
-/// Creates a domain_permissions record if none exists.
-pub async fn set_adblock_site_toggle(
-    state: web::Data<AppState>,
-    req: web::Json<SetAdblockSiteToggleRequest>,
-) -> HttpResponse {
-    log::info!("🛡️ POST /adblock/site-toggle domain={} enabled={}", req.domain, req.enabled);
-
-    if req.domain.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "domain is required"
-        }));
-    }
-
-    let db = state.database.lock().unwrap();
-    let repo = crate::database::DomainPermissionRepository::new(db.connection());
-
-    // Check if record exists
-    match repo.get_by_domain(state.current_user_id, &req.domain) {
-        Ok(Some(perm)) => {
-            // Update existing record
-            if let Err(e) = repo.update_adblock_enabled(perm.id.unwrap(), req.enabled) {
-                log::error!("Failed to update adblock toggle: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Database error: {}", e)
-                }));
-            }
-        }
-        Ok(None) => {
-            // Create new record with adblock toggle set
-            let mut perm = crate::database::DomainPermission::defaults(
-                state.current_user_id, &req.domain,
-            );
-            perm.adblock_enabled = req.enabled;
-            if let Err(e) = repo.upsert(&perm) {
-                log::error!("Failed to create domain permission for adblock toggle: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Database error: {}", e)
-                }));
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to look up domain for adblock toggle: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e)
-            }));
-        }
-    }
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "domain": req.domain,
-        "adblockEnabled": req.enabled,
-    }))
-}
+// NOTE: Adblock per-site toggle handlers were removed — per-site adblock settings
+// now live in C++ AdblockCache (JSON file in profile dir).
 
 // ============================================================================
 // BRC-33 Message Relay Handlers

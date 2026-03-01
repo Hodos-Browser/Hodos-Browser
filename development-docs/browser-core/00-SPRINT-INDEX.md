@@ -35,9 +35,9 @@ Assess what we have, identify gaps, research how Chrome and Brave handle core br
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking (8a-8f) | ✅ Complete |
 | 9 | Settings + Import + Clear Data + Multi-Profile | ✅ Complete (2026-02-25) |
-| 10 | Scriptlet Compatibility System (Brave-style) | Pending |
-| 11 | Menu Button UX + Full-Page Settings | Pending |
-| 12 | Third-Party Cookie Blocking + Fingerprinting | Pending |
+| 10 | Scriptlet Compatibility System (10a-10c) | ✅ Complete (2026-02-25) |
+| 11 | Menu Button UX + Full-Page Settings (11a-11b) | ✅ Complete (2026-02-25) |
+| 12 | Fingerprint Protection (12c-12e) | ✅ Complete (2026-02-25) |
 
 ---
 

@@ -18,6 +18,10 @@
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include <fstream>
+#include <filesystem>
+
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -85,6 +89,18 @@ public:
         return instance;
     }
 
+    // Initialize with profile path — loads per-site settings from JSON file.
+    // Must be called once at startup after profile path is known.
+    void Initialize(const std::string& profilePath) {
+        std::lock_guard<std::mutex> lock(settingsFileMutex_);
+#ifdef _WIN32
+        settingsFilePath_ = profilePath + "\\adblock_settings.json";
+#else
+        settingsFilePath_ = profilePath + "/adblock_settings.json";
+#endif
+        loadSettingsFromDisk();
+    }
+
     // Check if a URL should be blocked.
     // Returns true if blocked. Uses cache; calls backend on cache miss.
     bool check(const std::string& url, const std::string& sourceUrl,
@@ -147,27 +163,35 @@ public:
     }
 
     // Check if adblock is enabled for a specific domain.
-    // Queries Rust backend (GET /adblock/site-toggle?domain=X).
-    // Cached per-domain to avoid repeated HTTP calls.
-    bool isSiteEnabled(const std::string& domain) {
+    // Reads from in-memory cache (populated from JSON on startup).
+    // Default: true (adblock enabled) for unknown domains.
+    // Accepts either a domain or a full URL — domain is extracted automatically.
+    bool isSiteEnabled(const std::string& urlOrDomain) {
+        if (urlOrDomain.empty()) return true;
+
+        std::string domain = extractDomain(urlOrDomain);
         if (domain.empty()) return true;
 
-        // Check site-toggle cache
-        {
-            std::lock_guard<std::mutex> lock(siteMutex_);
-            auto it = siteToggleCache_.find(domain);
-            if (it != siteToggleCache_.end()) {
-                return it->second;
-            }
+        std::lock_guard<std::mutex> lock(siteMutex_);
+        auto it = siteToggleCache_.find(domain);
+        if (it != siteToggleCache_.end()) {
+            return it->second;
         }
+        return true;  // default: enabled
+    }
 
-        bool enabled = fetchSiteToggle(domain);
+    // Set adblock enabled/disabled for a domain. Updates cache + saves JSON.
+    void setSiteEnabled(const std::string& urlOrDomain, bool enabled) {
+        std::string domain = extractDomain(urlOrDomain);
+        if (domain.empty()) return;
 
         {
             std::lock_guard<std::mutex> lock(siteMutex_);
             siteToggleCache_[domain] = enabled;
         }
-        return enabled;
+        // Clear URL result cache since site toggle changed
+        clearAll();
+        saveSettingsToDisk();
     }
 
     // Invalidate site toggle cache for a domain (after toggle change)
@@ -182,6 +206,48 @@ public:
         siteToggleCache_.clear();
     }
 
+    // Check if scriptlets are enabled for a domain.
+    // Reads from in-memory cache (populated from JSON on startup).
+    // Default: true (scriptlets enabled) for unknown domains.
+    // Accepts either a domain or a full URL — domain is extracted automatically.
+    bool isScriptletsEnabled(const std::string& urlOrDomain) {
+        if (urlOrDomain.empty()) return true;
+
+        std::string domain = extractDomain(urlOrDomain);
+        if (domain.empty()) return true;
+
+        std::lock_guard<std::mutex> lock(scriptletMutex_);
+        auto it = scriptletToggleCache_.find(domain);
+        if (it != scriptletToggleCache_.end()) {
+            return it->second;
+        }
+        return true;  // default: enabled
+    }
+
+    // Set scriptlets enabled/disabled for a domain. Updates cache + saves JSON.
+    void setScriptletsEnabled(const std::string& urlOrDomain, bool enabled) {
+        std::string domain = extractDomain(urlOrDomain);
+        if (domain.empty()) return;
+
+        {
+            std::lock_guard<std::mutex> lock(scriptletMutex_);
+            scriptletToggleCache_[domain] = enabled;
+        }
+        saveSettingsToDisk();
+    }
+
+    // Invalidate scriptlet toggle cache for a domain
+    void invalidateScriptletToggle(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(scriptletMutex_);
+        scriptletToggleCache_.erase(domain);
+    }
+
+    // Clear all scriptlet toggle cache entries
+    void clearScriptletToggles() {
+        std::lock_guard<std::mutex> lock(scriptletMutex_);
+        scriptletToggleCache_.clear();
+    }
+
     // Cosmetic filtering result
     struct CosmeticResult {
         std::string cssSelectors;    // joined selectors for CSS injection
@@ -191,9 +257,10 @@ public:
 
     // Fetch cosmetic resources for a URL from the adblock engine.
     // Returns CSS selectors to hide and scriptlet JS to inject.
-    CosmeticResult fetchCosmeticResources(const std::string& url) {
+    // If skipScriptlets is true, returns empty injectedScript.
+    CosmeticResult fetchCosmeticResources(const std::string& url, bool skipScriptlets = false) {
         if (!g_adblockServerRunning) return {};
-        return fetchCosmeticFromBackend(url);
+        return fetchCosmeticFromBackend(url, skipScriptlets);
     }
 
     // Phase 2: Fetch generic cosmetic selectors matching DOM class names and IDs.
@@ -210,6 +277,89 @@ private:
     AdblockCache(const AdblockCache&) = delete;
     AdblockCache& operator=(const AdblockCache&) = delete;
 
+    // Extract domain from a URL (or return as-is if already a domain).
+    // e.g. "https://accounts.google.com/oauth2?foo=bar" → "accounts.google.com"
+    static std::string extractDomain(const std::string& urlOrDomain) {
+        size_t start = urlOrDomain.find("://");
+        if (start == std::string::npos) return urlOrDomain;  // already a domain
+        start += 3;
+        size_t end = urlOrDomain.find_first_of(":/", start);
+        if (end == std::string::npos) end = urlOrDomain.size();
+        return urlOrDomain.substr(start, end - start);
+    }
+
+    // Load per-site settings from adblock_settings.json into memory caches
+    void loadSettingsFromDisk() {
+        if (settingsFilePath_.empty()) return;
+        if (!std::filesystem::exists(settingsFilePath_)) return;
+
+        try {
+            std::ifstream file(settingsFilePath_);
+            if (!file.is_open()) return;
+            nlohmann::json j;
+            file >> j;
+
+            if (j.contains("siteSettings") && j["siteSettings"].is_object()) {
+                std::lock_guard<std::mutex> slock(siteMutex_);
+                std::lock_guard<std::mutex> sclock(scriptletMutex_);
+                for (auto& [domain, settings] : j["siteSettings"].items()) {
+                    if (settings.contains("adblockEnabled") && settings["adblockEnabled"].is_boolean()) {
+                        siteToggleCache_[domain] = settings["adblockEnabled"].get<bool>();
+                    }
+                    if (settings.contains("scriptletsEnabled") && settings["scriptletsEnabled"].is_boolean()) {
+                        scriptletToggleCache_[domain] = settings["scriptletsEnabled"].get<bool>();
+                    }
+                }
+            }
+        } catch (...) {
+            // Corrupt file — start fresh
+        }
+    }
+
+    // Save per-site settings from memory caches to adblock_settings.json
+    void saveSettingsToDisk() {
+        std::lock_guard<std::mutex> flock(settingsFileMutex_);
+        if (settingsFilePath_.empty()) return;
+
+        nlohmann::json j;
+        nlohmann::json siteSettings = nlohmann::json::object();
+
+        // Collect all domains from both caches
+        std::unordered_map<std::string, nlohmann::json> merged;
+
+        {
+            std::lock_guard<std::mutex> slock(siteMutex_);
+            for (auto& [domain, enabled] : siteToggleCache_) {
+                merged[domain]["adblockEnabled"] = enabled;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> sclock(scriptletMutex_);
+            for (auto& [domain, enabled] : scriptletToggleCache_) {
+                merged[domain]["scriptletsEnabled"] = enabled;
+            }
+        }
+
+        for (auto& [domain, settings] : merged) {
+            siteSettings[domain] = settings;
+        }
+        j["siteSettings"] = siteSettings;
+
+        try {
+            // Ensure directory exists
+            auto parentDir = std::filesystem::path(settingsFilePath_).parent_path();
+            if (!parentDir.empty() && !std::filesystem::exists(parentDir)) {
+                std::filesystem::create_directories(parentDir);
+            }
+            std::ofstream file(settingsFilePath_);
+            if (file.is_open()) {
+                file << j.dump(2);
+            }
+        } catch (...) {
+            // Best-effort save
+        }
+    }
+
     mutable std::mutex mutex_;
     std::unordered_map<std::string, bool> cache_;
 
@@ -219,58 +369,16 @@ private:
     mutable std::mutex siteMutex_;
     std::unordered_map<std::string, bool> siteToggleCache_;  // domain → adblockEnabled
 
+    mutable std::mutex scriptletMutex_;
+    std::unordered_map<std::string, bool> scriptletToggleCache_;  // domain → scriptletsEnabled
+
+    mutable std::mutex settingsFileMutex_;
+    std::string settingsFilePath_;
+
     mutable std::mutex versionMutex_;
     int64_t lastKnownVersion_ = -1;  // -1 = not yet seen
 
 #ifdef _WIN32
-    // Sync WinHTTP GET to localhost:3301/adblock/site-toggle?domain=X
-    bool fetchSiteToggle(const std::string& domain) {
-        HINTERNET hSession = WinHttpOpen(L"AdblockSiteToggle/1.0",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) return true;
-
-        DWORD timeout = 2000;
-        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
-        if (!hConnect) { WinHttpCloseHandle(hSession); return true; }
-
-        std::string endpoint = "/adblock/site-toggle?domain=" + domain;
-        std::wstring wideEndpoint(endpoint.begin(), endpoint.end());
-
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
-            wideEndpoint.c_str(), nullptr, WINHTTP_NO_REFERER,
-            WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return true;
-        }
-
-        bool enabled = true;
-        if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
-            WinHttpReceiveResponse(hRequest, nullptr)) {
-            DWORD dwSize = 0;
-            WinHttpQueryDataAvailable(hRequest, &dwSize);
-            if (dwSize > 0 && dwSize < 4096) {
-                std::vector<char> buf(dwSize + 1, 0);
-                DWORD dwRead = 0;
-                WinHttpReadData(hRequest, buf.data(), dwSize, &dwRead);
-                std::string response(buf.data(), dwRead);
-                // Look for "adblockEnabled":false
-                if (response.find("\"adblockEnabled\":false") != std::string::npos) {
-                    enabled = false;
-                }
-            }
-        }
-
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return enabled;
-    }
 
     // Sync WinHTTP POST to localhost:3302/check
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
@@ -356,7 +464,7 @@ private:
     }
 
     // Sync WinHTTP POST to localhost:3302/cosmetic-resources
-    CosmeticResult fetchCosmeticFromBackend(const std::string& url) {
+    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
         CosmeticResult result;
 
         HINTERNET hSession = WinHttpOpen(L"AdblockCosmetic/1.0",
@@ -383,10 +491,14 @@ private:
             return result;
         }
 
-        // Build JSON body
+        // Build JSON body with optional skipScriptlets flag
         std::string body = "{\"url\":\"";
         body += escapeJson(url);
-        body += "\"}";
+        body += "\"";
+        if (skipScriptlets) {
+            body += ",\"skip_scriptlets\":true";
+        }
+        body += "}";
 
         LPCWSTR contentType = L"Content-Type: application/json";
         BOOL ok = WinHttpSendRequest(hRequest, contentType, -1L,
@@ -608,22 +720,20 @@ private:
     }
 #elif defined(__APPLE__)
     // macOS stub — TODO: implement with libcurl or NSURLSession
-    bool fetchSiteToggle(const std::string& domain) { return true; }
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
         return false;
     }
-    CosmeticResult fetchCosmeticFromBackend(const std::string& url) { return {}; }
+    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
                                           const std::vector<std::string>& ids) { return ""; }
 #else
-    bool fetchSiteToggle(const std::string& domain) { return true; }
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
         return false;
     }
-    CosmeticResult fetchCosmeticFromBackend(const std::string& url) { return {}; }
+    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
                                           const std::vector<std::string>& ids) { return ""; }

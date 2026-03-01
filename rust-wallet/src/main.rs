@@ -508,9 +508,8 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/certificate", web::get().to(handlers::check_cert_permissions))
             .route("/domain/permissions/certificate", web::post().to(handlers::approve_cert_fields))
 
-            // Adblock per-site toggle (Sprint 8c)
-            .route("/adblock/site-toggle", web::get().to(handlers::get_adblock_site_toggle))
-            .route("/adblock/site-toggle", web::post().to(handlers::set_adblock_site_toggle))
+            // NOTE: Adblock per-site toggles moved to C++ AdblockCache (JSON file in profile dir).
+            // No longer served by wallet backend — see AdblockCache.h.
 
             // BRC-33 Message Relay endpoints
             .route("/sendMessage", web::post().to(handlers::send_message))

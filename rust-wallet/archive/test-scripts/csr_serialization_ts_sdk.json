@@ -1,0 +1,27 @@
+{
+  "requestNonce": "gPhzY5fH2NiiL7G2RNnNLDkg1kLQ7ti1kL0tLRtAKBA=",
+  "csrBody": {
+    "clientNonce": "test_client_nonce_base64_32_bytes_here",
+    "type": "test_certificate_type",
+    "fields": {
+      "field1": "encrypted_field1_base64",
+      "field2": "encrypted_field2_base64"
+    },
+    "masterKeyring": {
+      "field1": "encrypted_revelation_key1_base64",
+      "field2": "encrypted_revelation_key2_base64"
+    }
+  },
+  "serialized": {
+    "hex": "80f8736397c7d8d8a22fb1b644d9cd2c3920d642d0eed8b590bd2d2d1b40281004504f5354102f7369676e4365727469666963617465ffffffffffffffffff010c636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6efd12017b22636c69656e744e6f6e6365223a22746573745f636c69656e745f6e6f6e63655f6261736536345f33325f62797465735f68657265222c2274797065223a22746573745f63657274696669636174655f74797065222c226669656c6473223a7b226669656c6431223a22656e637279707465645f6669656c64315f626173653634222c226669656c6432223a22656e637279707465645f6669656c64325f626173653634227d2c226d61737465724b657972696e67223a7b226669656c6431223a22656e637279707465645f726576656c6174696f6e5f6b6579315f626173653634222c226669656c6432223a22656e637279707465645f726576656c6174696f6e5f6b6579325f626173653634227d7d",
+    "base64": "gPhzY5fH2NiiL7G2RNnNLDkg1kLQ7ti1kL0tLRtAKBAEUE9TVBAvc2lnbkNlcnRpZmljYXRl////////////AQxjb250ZW50LXR5cGUQYXBwbGljYXRpb24vanNvbv0SAXsiY2xpZW50Tm9uY2UiOiJ0ZXN0X2NsaWVudF9ub25jZV9iYXNlNjRfMzJfYnl0ZXNfaGVyZSIsInR5cGUiOiJ0ZXN0X2NlcnRpZmljYXRlX3R5cGUiLCJmaWVsZHMiOnsiZmllbGQxIjoiZW5jcnlwdGVkX2ZpZWxkMV9iYXNlNjQiLCJmaWVsZDIiOiJlbmNyeXB0ZWRfZmllbGQyX2Jhc2U2NCJ9LCJtYXN0ZXJLZXlyaW5nIjp7ImZpZWxkMSI6ImVuY3J5cHRlZF9yZXZlbGF0aW9uX2tleTFfYmFzZTY0IiwiZmllbGQyIjoiZW5jcnlwdGVkX3JldmVsYXRpb25fa2V5Ml9iYXNlNjQifX0=",
+    "length": 371
+  },
+  "breakdown": {
+    "nonce": "80f8736397c7d8d8a22fb1b644d9cd2c3920d642d0eed8b590bd2d2d1b402810",
+    "method": "POST",
+    "path": "/signCertificate",
+    "headerCount": 1,
+    "body": "{\"clientNonce\":\"test_client_nonce_base64_32_bytes_here\",\"type\":\"test_certificate_type\",\"fields\":{\"field1\":\"encrypted_field1_base64\",\"field2\":\"encrypted_field2_base64\"},\"masterKeyring\":{\"field1\":\"encrypted_revelation_key1_base64\",\"field2\":\"encrypted_revelation_key2_base64\"}}"
+  }
+}

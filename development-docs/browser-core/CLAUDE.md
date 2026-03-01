@@ -15,6 +15,7 @@
 | [01-chrome-brave-research.md](./01-chrome-brave-research.md) | Chrome/Brave research findings |
 | [doc-discrepancies.md](./doc-discrepancies.md) | Stale documentation tracker |
 | [file-inventory.md](./file-inventory.md) | Complete runtime file/DB/singleton catalog |
+| [auth-cookies-profiles-guide.md](./auth-cookies-profiles-guide.md) | **AUTH BIBLE** — Google OAuth, Brave comparison, cookie architecture, sign-in debugging |
 
 ---
 
@@ -31,8 +32,10 @@
 | 6 | JS Dialog Handler + Keyboard Shortcuts | **Complete** |
 | 7 | Light Wallet Polish | Pending |
 | 8 | Ad & Tracker Blocking | **Complete** (8a-8f) |
-| 9 | Settings Persistence + Profile Import | **Ready** (plan complete) |
-| 10 | Third-Party Cookie Blocking + Fingerprinting | Pending |
+| 9 | Settings Persistence + Profile Import | **Complete** |
+| 10 | Scriptlet Compatibility System | **Complete** (10a-10c) |
+| 11 | Menu Button UX + Full-Page Settings | **Complete** (11a-11b) |
+| 12 | Fingerprint Protection | **Complete** (12c-12e) |
 
 ---
 
@@ -144,14 +147,24 @@ React → cefMessage.send("command_name", data)
 - 5 new keyboard shortcuts: Ctrl+H (history tab), Ctrl+J (download panel), Ctrl+D (bookmark), Alt+Left/Right (back/forward). All cross-platform with `#ifdef __APPLE__` / `EVENTFLAG_COMMAND_DOWN`.
 - Many shortcuts already work natively (Ctrl+P print, zoom, DevTools) — only intercepted the ones that opened `chrome://` pages in separate windows.
 
-### Sprint 10 (Scriptlet Compatibility System) — PLANNED
-- **Problem discovered**: Scriptlet injection breaks auth on x.com (and likely other sites)
-- **Decision**: No quick whitelist hack — do it properly in Sprint 10
-- **Research needed**: Brave's `adblock-resources` repo, their compatibility patterns
-- **Scope**: Site exception system (built-in, not user-managed), auto-detect auth flows, test against x.com/google/microsoft/banks
-- **For Sprint 9 testing**: Manually disable shield per-site
+### Sprint 10 (Scriptlet Compatibility) — COMPLETE
+- **10a**: `hodos-unbreak.txt` exception list with `#@#+js()` blanket scriptlet exceptions for auth sites (x.com, google.com, github.com, microsoft.com, apple.com, etc.). Loaded by adblock engine alongside filter lists.
+- **10b**: Per-site scriptlet toggle — `scriptlets_enabled` column in `domain_permissions` (migration V6). Rust endpoints: `GET/POST /adblock/scriptlet-toggle` on port 3301. C++ IPC handler `adblock_scriptlet_toggle`. `AdblockCache::fetchCosmeticResources()` takes `skipScriptlets` parameter. Three call sites updated in `simple_handler.cpp` (OnBeforeBrowse, OnLoadingStateChange pre-cache, OnLoadingStateChange Phase 1).
+- **10c**: Privacy Shield panel scriptlet toggle row. `useAdblock.ts` exposes `scriptletsEnabled`/`toggleScriptlets`/`checkScriptlets`. Toggle disabled when adblock is off.
 
-### Sprint 9 (Settings + Import + Profiles) — READY
+### Sprint 11 (Menu Button + Settings) — COMPLETE
+- **11a**: Three-dot menu (`MenuOverlay.tsx`) replaces History + Settings buttons. Sections: Tab, Content, Page Actions, Developer, Settings/Exit. Inline zoom controls with +/- and percentage display. Keyboard shortcut labels. C++ IPC handlers: `print`, `devtools`, `zoom_in`, `zoom_out`, `zoom_reset`, `exit`.
+- **11a**: Full-page settings (`SettingsPage.tsx`) with 240px sidebar. 5 sections: General, Privacy, Downloads, Wallet, About. Shared `SettingsCard`/`SettingRow` components. Route: `/settings-page/:section`.
+- **11b**: Wallet settings section (auto-approve, spending limits). Wired homepage setting to `tab_create` IPC. Wired DNT/GPC headers in `GetResourceRequestHandler`.
+- **New files**: `MenuOverlay.tsx`, `SettingsPage.tsx`, `SettingsCard.tsx`, `GeneralSettings.tsx`, `PrivacySettings.tsx`, `DownloadSettings.tsx`, `AboutSettings.tsx`, `WalletSettings.tsx`
+
+### Sprint 12 (Fingerprint Protection) — COMPLETE
+- **12c**: `FingerprintProtection.h` singleton — session token from platform CSPRNG (Windows `CryptGenRandom`, macOS `SecRandomCopyBytes`, fallback `mt19937`). `GetDomainSeed()` hashes session token with domain for deterministic per-domain seeds. Seed IPC: `OnBeforeBrowse` sends seed → renderer caches in `s_domainSeeds` → `OnContextCreated` injects.
+- **12d**: `FingerprintScript.h` — embedded JS with Mulberry32 PRNG. Canvas farbling (getImageData, toDataURL, toBlob for canvases <65536px), WebGL spoofing (generic UNMASKED_VENDOR/RENDERER, readPixels), Navigator overrides (hardwareConcurrency 2-8, deviceMemory 8, plugins empty), AudioContext farbling. **NO screen resolution spoofing** (intentional — Brave removed it, breakage > entropy).
+- **12e**: `fingerprintProtection` added to `PrivacySettings` struct (SettingsManager), defaults to `true`. Toggle in `PrivacySettings.tsx` settings page. Read-only "Fingerprint shield" row in Privacy Shield panel. `settings_set` IPC handler wired.
+- **Test checklist**: [sprint-10-11-12-test-checklist.md](./sprint-10-11-12-test-checklist.md)
+
+### Sprint 9 (Settings + Import + Profiles) — COMPLETE
 - **Detailed plan**: [sprint-9-implementation-plan.md](./sprint-9-implementation-plan.md)
 - **Research**: [sprint-9-profile-account-research.md](./sprint-9-profile-account-research.md) — Chrome/Firefox/Safari/Edge profile UX patterns
 - **9a Settings**: New `SettingsManager` singleton, JSON file at `%APPDATA%/HodosBrowser/settings.json`, IPC for React UI
