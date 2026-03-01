@@ -41,6 +41,7 @@ interface HMACVector {
 }
 
 interface Vectors {
+  _last_validated: string | null;
   brc42_private_key_derivation: BRC42PrivateKeyVector[];
   brc42_public_key_derivation: BRC42PublicKeyVector[];
   hmac_sha256: HMACVector[];

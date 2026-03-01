@@ -21,7 +21,7 @@ The macOS port is in a **strong foundation state**. The hard architectural work 
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **CMakeLists.txt** | ✅ Complete | Platform detection, Homebrew packages, framework linking, helper bundles |
+| **CMakeLists.txt** | ✅ Complete | Platform detection, Homebrew packages, framework linking, helper bundles. Portable build (Phase 1): hardcoded vcpkg paths removed, auto-detects via `VCPKG_ROOT` env var or `-DCMAKE_TOOLCHAIN_FILE` flag. No breaking changes to existing builds. |
 | **cef_browser_shell_mac.mm** | ✅ Complete (1754 lines) | NSWindow, header/webview NSViews, 5 overlays, event forwarding |
 | **my_overlay_render_handler.mm** | ✅ Complete | CALayer rendering with transparency |
 | **process_helper_mac.mm** | ✅ Complete | 5 helper .app bundles (GPU, Renderer, Plugin, Alerts, base) |
@@ -458,6 +458,43 @@ Without code signing, macOS Gatekeeper blocks the app. Users can override via Sy
 
 ---
 
+## 11. Portable Build Configuration (Complete)
+
+The Windows build system was made portable, removing all developer-specific hardcoded paths from `cef-native/CMakeLists.txt`. This was a prerequisite for cross-platform builds.
+
+**What was done**:
+- Removed hardcoded vcpkg paths (`C:/Users/archb/Dev/vcpkg/...`)
+- Added automatic vcpkg detection via `VCPKG_ROOT` environment variable
+- Falls back to `-DCMAKE_TOOLCHAIN_FILE=...` command-line parameter
+- Automatic package discovery (OpenSSL, nlohmann-json, sqlite3)
+- No breaking changes to existing Windows builds
+
+**Build options (Windows)**:
+```powershell
+# Option 1: Environment variable (recommended)
+$env:VCPKG_ROOT = "C:/Users/<YourUsername>/Dev/vcpkg"
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+# Option 2: Command-line parameter
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE=C:/Users/<YourUsername>/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+---
+
+## 12. Settings Sprints — macOS Considerations
+
+Several settings sprints in `development-docs/Settings_Sprints/` include platform-specific C++ code. When porting to macOS, review these sprints for platform conditionals:
+
+| Sprint | macOS Notes |
+|--------|------------|
+| **G4** (New Tab Page) | Context menu "Set as homepage" needs macOS equivalent |
+| **G5** (Default Browser) | `ms-settings:defaultapps` → macOS System Settings + `LSSetDefaultHandlerForURLScheme` |
+| **D1** (Download Settings) | `CefBrowserHost::RunFileDialog` should work cross-platform; verify on macOS |
+| **PS3** (Clear Data on Exit) | Shutdown hook: `WM_CLOSE` → `applicationShouldTerminate:` or `windowWillClose:` |
+
+---
+
 ## Related Documents
 
 - [MACOS_IMPLEMENTATION_COMPLETE.md](/MACOS_IMPLEMENTATION_COMPLETE.md) — Dec 2025 port details
@@ -465,6 +502,7 @@ Without code signing, macOS Gatekeeper blocks the app. Users can override via Sy
 - [PHASE2_MACOS_SUPPORT_SUMMARY.md](/PHASE2_MACOS_SUPPORT_SUMMARY.md) — Phase 2 CMake details
 - [build-instructions/MACOS_BUILD_INSTRUCTIONS.md](/build-instructions/MACOS_BUILD_INSTRUCTIONS.md) — Build guide
 - [browser-core/implementation-plan.md](../browser-core/implementation-plan.md) — MVP sprint plan (Windows-first)
+- [Settings_Sprints/00-SPRINT-INDEX.md](../Settings_Sprints/00-SPRINT-INDEX.md) — Settings implementation sprints (Windows-first, macOS notes flagged)
 
 ---
 

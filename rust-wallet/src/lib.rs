@@ -12,6 +12,10 @@ pub mod action_storage;
 pub mod json_storage;
 pub mod cache_errors;
 pub mod utxo_fetcher;
+pub mod beef;
+pub mod script;
+pub mod balance_cache;
+pub mod price_cache;
 
 // Re-export commonly used modules for convenience
 pub use crypto::brc2;

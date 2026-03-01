@@ -9,10 +9,13 @@
 
 | Setting | UI Exists | Persists | Behavior Works | Sprint | Status |
 |---------|-----------|----------|---------------|--------|--------|
-| **Homepage** | Yes | Yes | Yes | N/A — complete (Sprint 11b) | Done |
+| **Homepage** | Yes | Yes | Yes (launch only) | N/A — complete (Sprint 11b) | Done |
 | **Search Engine** | Yes | Yes | **No** — hardcoded to Google | G1 | Not Started |
 | **Restore Previous Session** | Yes | Yes | **No** — no save/restore logic | G2 | Not Started |
 | **Bookmark Bar** | Yes | Yes | **No** — no bookmark bar UI | G3 | Not Started |
+| **New Tab Page** | No | No | **No** — new tabs open external URL, no branded page | G4 | Not Started |
+| **Set as Default Browser** | No | N/A | **No** — no button to open OS default browser settings | G5 | Not Started |
+| **Right-click "Set as Homepage"** | No | N/A | **No** — no context menu option | G4 (Phase 3) | Not Started |
 
 ## Privacy & Security Tab
 
@@ -44,6 +47,8 @@
 | **G1** | Default Search Engine | [G1-search-engine.md](./G1-search-engine.md) | Low-Medium | None |
 | **G2** | Session Restore | [G2-session-restore.md](./G2-session-restore.md) | Medium | None |
 | **G3** | Bookmark Bar | [G3-bookmark-bar.md](./G3-bookmark-bar.md) | High (multi-phase) | BookmarkManager backend exists |
+| **G4** | New Tab Page & Homepage | [G4-new-tab-page.md](./G4-new-tab-page.md) | Medium-High (4 phases) | G1 (search engine for search bar), HistoryManager |
+| **G5** | Set as Default Browser | [G5-default-browser.md](./G5-default-browser.md) | Low | OS protocol registration (installer) |
 
 ## Sprint Docs — Privacy & Security
 
@@ -67,9 +72,10 @@ Each sprint follows this lifecycle:
 
 1. **Research** — Understand how Chrome/Brave handle it, identify design decisions
 2. **Plan** — Write implementation plan with phases, make decisions
-3. **Implement** — Build in small phases, build-verify each
+3. **Implement** — Build in small phases, build-verify each (Windows only for now)
 4. **Test** — Verify with test site basket
 5. **Polish** — UX refinements, edge cases
+6. **macOS notes** — If the sprint includes platform-specific C++ code, add notes to `development-docs/macos-port/MAC_PLATFORM_SUPPORT_PLAN.md` for future porting
 
 ---
 
