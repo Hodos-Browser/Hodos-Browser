@@ -1144,3 +1144,177 @@ More sophisticated integration for:
 │  Merchant Site  │────▶│  MNEE Button/SDK │────▶│  Yours Wallet   │
 │  (has button)   │     │  (on-chain JS)   │  
 
+
+---
+
+## Turn at 22:29:41
+
+## User Messages
+
+[13:43:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[14:43:10] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[16:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[17:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[18:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[19:30:47] [Sun 2026-03-01 12:30 MST] Next I want you to review the BSV21 folder. I created that awhile ago but I don't even remember what we did and didn't look at. I want to start looking at the BSV20 protocol and comparing it to BSV21. I believe these are token protocols but I don't know the difference between BSV20, BSV21, BRC Push/Drop, and STAS tokens. Will you change the name of the BSV21 folder BSV-Tokens. Then search online to get as much documentation as you can on these protocols and make a docu
+
+[19:34:06] System: [2026-03-01 12:31:25 MST] Exec failed (fast-com, signal SIGKILL)
+System: [2026-03-01 12:31:25 MST] Exec failed (tidal-va, signal SIGKILL)
+
+Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[19:35:14] System: [2026-03-01 12:35:12 MST] Exec completed (brisk-su, code 0) :: /archboldmatt/.edwin/workspace (**/*.md) Indexed: 1 new, 2 updated, 13 unchanged, 0 removed Cleaned up 2 orphaned content hash(es) [2/2] hodos (**/*.md) Collection: /mnt/c/Users/archb/Hodos-Browser (**/*.md) Indexed: 5 new, 1 updated, 273 unchanged, 4 removed Cleaned up 1 orphaned content hash(es) ✓ All collections updated. Run 'qmd embed' to update embeddings (59 unique hashes need vectors)
+
+Read HEARTBEAT.md if it exists (w
+
+[19:39:06] [Sun 2026-03-01 12:39 MST] There is a stable coin on BSV called MNEE that uses the BSV21 protocol. Can you look into MNEE and let me know what you think about implementing MNEE functionality in our wallet. Can you add a MNEE document to BSV-Tokens folder that outlines what we would have to do to implement it.
+[message_id: 95fd5ff3-3220-4069-9d9a-7d3d8538de66]
+
+[20:06:46] [Sun 2026-03-01 13:06 MST] Sprint 10 is complete but we create all of the setting_sprints sprints but we can come back to that later. Lets focus on BSV-21 tokens and MNEE. What wallets do use BSV-21 and MNEE? How are http requests or API calls made between wallets, apps, and websites? Is there an open standardized format? Should we try to/do we have to create http intercepts and wallet endpoints to handle these? Do we need to talk the app into making createAction calls with a BSV21/1sat ordinals
+
+[20:35:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[20:36:42] [Sun 2026-03-01 13:35 MST] We could do one of these but I feel like the BSVA and MNEE should see the problem that they would have have create endpoints for each wallet. Can you also look into Rock Wallet and see how they handle it. Can Rock Wallet send MNEE to Handcash and to Yours wallets and vice versa? I guess most apps still just use one of those so we would need to get them to support a BRC100 MNEE or 1satOrdinal call. Same with exchanges? What are the most popular/most used MNEE apps and 1
+
+[20:38:46] [Sun 2026-03-01 13:36 MST] what happened, I don't see my last question?
+[message_id: 114ba741-a054-49cf-b172-759d46347fe0]
+
+[21:35:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[21:45:19] [Sun 2026-03-01 14:45 MST] Can you look at the MNEE docs (https://docs.mnee.io/) and specifically look into the merchant side. What would we have to do to interact with the merchant who create a MNEE pay integration into their platforms?
+[message_id: 7cca4c44-1e44-4f2a-aa7c-ff79b2538e1f]
+
+[22:25:00] [Sun 2026-03-01 15:24 MST] I am going to talk to some other people in the space to see they recommend I implement this and when. Lets move on to doing some other research. I want to clean up and reorganize the working-notes.md in the development-docs folder. We have just been putting notes in there as we have been going so it is kind of random and not a cohesive documents. Can you categorize notes and put them together in a logical order. Then I want you to a deep dive into two questions: 1 - th
+
+## Assistant Responses
+
+[22:26:49] Now let me research the codec issues and production build options:
+
+[22:28:16] Now let me add the deep dive sections to the working-notes.md:
+
+[22:29:27] Done! Here's what I did:
+
+---
+
+## Working Notes Reorganization
+
+Restructured the document into **6 logical parts**:
+
+| Part | Content |
+|------|---------|
+| **A: Critical Production Decisions** | Codecs, CEF strategy, installers, auto-update |
+| **B: Profile & Multi-Instance** | Cookie isolation bug, multi-window support |
+| **C: Ad Blocking** | Architecture, entity-aware blocking, quirks |
+| **D: Other Technical Items** | Wrapper notes, menu quirks, UA string, settings |
+| **E: Deep Dive** | Codec issues + production build analysis |
+| **F: Debugging Reference** | x.com media debugging lessons |
+
+---
+
+## Deep Dive Summary
+
+### Question 1: Codec Issues
+
+**The Problem**: CEF prebuilt binaries exclude H.264/AAC due to patent licensing. This breaks x.com, Reddit, Twitch, Instagram, TikTok, and most news sites.
+
+**Options Evaluated**:
+| Option | Verdict |
+|--------|---------|
+| Find prebuilt CEF with codecs | ❌ Doesn't exist |
+| Swap FFmpeg binary | ❌ Doesn't work (compile-time) |
+| **Buil
+
+
+---
+
+## Turn at 22:36:11
+
+## User Messages
+
+[13:43:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[14:43:10] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[16:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[17:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[18:10:29] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[19:30:47] [Sun 2026-03-01 12:30 MST] Next I want you to review the BSV21 folder. I created that awhile ago but I don't even remember what we did and didn't look at. I want to start looking at the BSV20 protocol and comparing it to BSV21. I believe these are token protocols but I don't know the difference between BSV20, BSV21, BRC Push/Drop, and STAS tokens. Will you change the name of the BSV21 folder BSV-Tokens. Then search online to get as much documentation as you can on these protocols and make a docu
+
+[19:34:06] System: [2026-03-01 12:31:25 MST] Exec failed (fast-com, signal SIGKILL)
+System: [2026-03-01 12:31:25 MST] Exec failed (tidal-va, signal SIGKILL)
+
+Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[19:35:14] System: [2026-03-01 12:35:12 MST] Exec completed (brisk-su, code 0) :: /archboldmatt/.edwin/workspace (**/*.md) Indexed: 1 new, 2 updated, 13 unchanged, 0 removed Cleaned up 2 orphaned content hash(es) [2/2] hodos (**/*.md) Collection: /mnt/c/Users/archb/Hodos-Browser (**/*.md) Indexed: 5 new, 1 updated, 273 unchanged, 4 removed Cleaned up 1 orphaned content hash(es) ✓ All collections updated. Run 'qmd embed' to update embeddings (59 unique hashes need vectors)
+
+Read HEARTBEAT.md if it exists (w
+
+[19:39:06] [Sun 2026-03-01 12:39 MST] There is a stable coin on BSV called MNEE that uses the BSV21 protocol. Can you look into MNEE and let me know what you think about implementing MNEE functionality in our wallet. Can you add a MNEE document to BSV-Tokens folder that outlines what we would have to do to implement it.
+[message_id: 95fd5ff3-3220-4069-9d9a-7d3d8538de66]
+
+[20:06:46] [Sun 2026-03-01 13:06 MST] Sprint 10 is complete but we create all of the setting_sprints sprints but we can come back to that later. Lets focus on BSV-21 tokens and MNEE. What wallets do use BSV-21 and MNEE? How are http requests or API calls made between wallets, apps, and websites? Is there an open standardized format? Should we try to/do we have to create http intercepts and wallet endpoints to handle these? Do we need to talk the app into making createAction calls with a BSV21/1sat ordinals
+
+[20:35:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[20:36:42] [Sun 2026-03-01 13:35 MST] We could do one of these but I feel like the BSVA and MNEE should see the problem that they would have have create endpoints for each wallet. Can you also look into Rock Wallet and see how they handle it. Can Rock Wallet send MNEE to Handcash and to Yours wallets and vice versa? I guess most apps still just use one of those so we would need to get them to support a BRC100 MNEE or 1satOrdinal call. Same with exchanges? What are the most popular/most used MNEE apps and 1
+
+[20:38:46] [Sun 2026-03-01 13:36 MST] what happened, I don't see my last question?
+[message_id: 114ba741-a054-49cf-b172-759d46347fe0]
+
+[21:35:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[21:45:19] [Sun 2026-03-01 14:45 MST] Can you look at the MNEE docs (https://docs.mnee.io/) and specifically look into the merchant side. What would we have to do to interact with the merchant who create a MNEE pay integration into their platforms?
+[message_id: 7cca4c44-1e44-4f2a-aa7c-ff79b2538e1f]
+
+[22:25:00] [Sun 2026-03-01 15:24 MST] I am going to talk to some other people in the space to see they recommend I implement this and when. Lets move on to doing some other research. I want to clean up and reorganize the working-notes.md in the development-docs folder. We have just been putting notes in there as we have been going so it is kind of random and not a cohesive documents. Can you categorize notes and put them together in a logical order. Then I want you to a deep dive into two questions: 1 - th
+
+[22:35:14] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+## Assistant Responses
+
+[22:28:16] Now let me add the deep dive sections to the working-notes.md:
+
+[22:29:27] Done! Here's what I did:
+
+---
+
+## Working Notes Reorganization
+
+Restructured the document into **6 logical parts**:
+
+| Part | Content |
+|------|---------|
+| **A: Critical Production Decisions** | Codecs, CEF strategy, installers, auto-update |
+| **B: Profile & Multi-Instance** | Cookie isolation bug, multi-window support |
+| **C: Ad Blocking** | Architecture, entity-aware blocking, quirks |
+| **D: Other Technical Items** | Wrapper notes, menu quirks, UA string, settings |
+| **E: Deep Dive** | Codec issues + production build analysis |
+| **F: Debugging Reference** | x.com media debugging lessons |
+
+---
+
+## Deep Dive Summary
+
+### Question 1: Codec Issues
+
+**The Problem**: CEF prebuilt binaries exclude H.264/AAC due to patent licensing. This breaks x.com, Reddit, Twitch, Instagram, TikTok, and most news sites.
+
+**Options Evaluated**:
+| Option | Verdict |
+|--------|---------|
+| Find prebuilt CEF with codecs | ❌ Doesn't exist |
+| Swap FFmpeg binary | ❌ Doesn't work (compile-time) |
+| **Buil
+
+[22:36:04] Memory flushed. Context at 81% - compacting.
+
+/compact Full day of BSV-21/MNEE research: Created comparison doc + MNEE implementation doc. Researched wallet integration models (Yours injects `window.yours`, HandCash OAuth, BRC-100 HTTP). Cross-wallet transfers work fine. MNEE Button hardcodes Yours wallet - need compatibility layer or push for BRC-100 standard. Reorganized working-notes.md into 6 parts. Deep dive on codecs + production build: MUST build CEF from source (solves both - codecs require compile-time flags). Action plan: set up build machine, build CEF with `proprietary_codecs=true`, replace binaries. ~2 days effort. Matt talking to people in space before BSV-21 implementation decision.
+

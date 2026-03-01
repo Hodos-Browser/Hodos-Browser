@@ -2,7 +2,16 @@
 
 **Status**: Not Started
 **Complexity**: Medium
-**Estimated Phases**: 3
+**Estimated Phases**: 2 (Phase 3 crash recovery deferred indefinitely)
+
+---
+
+## Decisions (2026-03-01)
+
+- **Lazy tab loading**: YES — only active tab loads content on restore. Other tabs show title/URL in tab bar but don't fetch content until clicked. This is the Chrome approach and critical for startup performance with many tabs.
+- **Restore vs homepage**: When restore is enabled, skip homepage. Don't open homepage as an extra tab.
+- **Conflict with PS3 (Clear on Exit)**: If both "restore session" and "clear on exit" are enabled, disable restore and show warning in settings UI. Don't allow both simultaneously.
+- **Phase 3 (crash recovery)**: Deferred post-MVP. Significantly more complex.
 
 ---
 
@@ -45,11 +54,11 @@
 - [ ] Set the active tab to the saved active index
 - [ ] Delete/clear session file after successful restore (avoid stale restores)
 
-**Design decisions**:
-- Restore vs homepage: if restore is enabled, skip homepage? Or open homepage + restored tabs?
-- What if session file is corrupt or URLs are invalid?
-- Tab creation timing: all tabs at once or sequential? (CEF has browser creation limits)
-- Loading behavior: load all tabs eagerly or only active tab (lazy load)?
+**Design decisions** (resolved):
+- Restore vs homepage: **Skip homepage** when restore is enabled (decided 2026-03-01)
+- What if session file is corrupt or URLs are invalid? Fall back to homepage.
+- Tab creation timing: Create all tab HWNDs at once but only load active tab content
+- Loading behavior: **Lazy load** — only active tab loads content (decided 2026-03-01). Other tabs show title/URL in tab bar. Content loads on first click. This requires TabManager to support "unloaded" tab state (HWND created, browser NOT navigated yet).
 
 ### Phase 3: Crash Recovery (Optional/Future)
 

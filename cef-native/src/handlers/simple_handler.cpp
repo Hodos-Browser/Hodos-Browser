@@ -503,7 +503,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         // 8e-2: Pre-fetch scriptlets for the new URL and send to renderer BEFORE page JS runs.
         // OnContextCreated (renderer) will inject them synchronously.
         CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
-        if (mainFrame && mainFrame->IsValid() && g_adblockServerRunning) {
+        if (mainFrame && mainFrame->IsValid() && g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled()) {
             std::string navUrl = mainFrame->GetURL().ToString();
             if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
                 // Sprint 10b: Check if scriptlets are disabled for this domain
@@ -669,7 +669,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                     // Dedup: skip if we already injected for this exact URL
                     if (pageUrl == last_cosmetic_url_) {
                         // Already processed — skip redundant cosmetic injection
-                    } else if (!shouldSkipAdblockCheck(pageUrl) && g_adblockServerRunning) {
+                    } else if (!shouldSkipAdblockCheck(pageUrl) && g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled()) {
                         last_cosmetic_url_ = pageUrl;
                         // Fetch cosmetic resources from adblock engine
                         // Sprint 10b: Check if scriptlets are disabled for this domain
@@ -1911,6 +1911,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Privacy settings
         else if (key == "privacy.adBlockEnabled") {
             settings.SetAdBlockEnabled(value == "true");
+            AdblockCache::GetInstance().SetGlobalEnabled(value == "true");
         } else if (key == "privacy.thirdPartyCookieBlocking") {
             settings.SetThirdPartyCookieBlocking(value == "true");
         } else if (key == "privacy.doNotTrack") {
@@ -4781,7 +4782,7 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
     if (tab_id == -1) return false;  // Only pre-cache for tab browsers
 
 #ifdef _WIN32
-    if (g_adblockServerRunning && frame->IsMain()) {
+    if (g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled() && frame->IsMain()) {
         std::string navUrl = request->GetURL().ToString();
         if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
             // Sprint 10b: Check if scriptlets are disabled for this domain
@@ -4940,7 +4941,7 @@ public:
         CefRefPtr<CefRequest> request,
         CefRefPtr<CefResponse> response) override {
 #ifdef _WIN32
-        if (!g_adblockServerRunning) return nullptr;
+        if (!g_adblockServerRunning || !AdblockCache::GetInstance().IsGlobalEnabled()) return nullptr;
 
         std::string url = request->GetURL().ToString();
 
@@ -5003,7 +5004,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Ad & tracker blocking — check before wallet interception
     // Only for tab browsers making external requests (skip internal/overlay URLs)
 #ifdef _WIN32
-    if (g_adblockServerRunning && !shouldSkipAdblockCheck(url)) {
+    if (g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled() && !shouldSkipAdblockCheck(url)) {
         std::string sourceUrl;
         if (frame && frame->GetURL().length() > 0) {
             sourceUrl = frame->GetURL().ToString();

@@ -1,5 +1,6 @@
 #include "../../include/core/CookieBlockManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
+#include "../../include/core/SettingsManager.h"
 #include "../../include/core/Logger.h"
 #include "DefaultTrackerList.h"
 
@@ -523,6 +524,11 @@ bool CookieBlockManager::CanSendCookie(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
+    // Global third-party cookie toggle — if off, allow all non-blocked third-party cookies
+    if (!SettingsManager::GetInstance().GetPrivacySettings().thirdPartyCookieBlocking) {
+        return true;
+    }
+
     // Determine the page context for third-party checks.
     // IMPORTANT: Prefer GetFirstPartyForCookies() over frame->GetURL().
     // During navigation, frame->GetURL() returns the PREVIOUS page's URL (stale),
@@ -605,6 +611,11 @@ bool CookieBlockManager::CanSaveCookie(CefRefPtr<CefBrowser> browser,
             blocked_counts_[browser->GetIdentifier()]++;
         }
         return false;
+    }
+
+    // Global third-party cookie toggle — if off, allow all non-blocked third-party cookies
+    if (!SettingsManager::GetInstance().GetPrivacySettings().thirdPartyCookieBlocking) {
+        return true;
     }
 
     // Determine the page context for third-party checks.

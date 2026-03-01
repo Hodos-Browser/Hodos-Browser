@@ -16,6 +16,7 @@
 #include "include/cef_frame.h"
 #include <string>
 #include <unordered_map>
+#include <atomic>
 #include <mutex>
 #include <vector>
 #include <fstream>
@@ -99,6 +100,19 @@ public:
         settingsFilePath_ = profilePath + "/adblock_settings.json";
 #endif
         loadSettingsFromDisk();
+    }
+
+    // Global ad-block master switch — checked in all blocking code paths.
+    // Synced from SettingsManager on startup and on settings_set IPC.
+    void SetGlobalEnabled(bool enabled) {
+        global_enabled_.store(enabled, std::memory_order_relaxed);
+        if (!enabled) {
+            clearAll();  // Invalidate cache when disabling
+        }
+    }
+
+    bool IsGlobalEnabled() const {
+        return global_enabled_.load(std::memory_order_relaxed);
     }
 
     // Check if a URL should be blocked.
@@ -359,6 +373,8 @@ private:
             // Best-effort save
         }
     }
+
+    std::atomic<bool> global_enabled_{true};  // Master switch — no mutex needed
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, bool> cache_;

@@ -2252,6 +2252,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Initialize AdblockCache with profile path (loads per-site settings from JSON)
     AdblockCache::GetInstance().Initialize(profile_cache);
+    // Sync global ad-block toggle from persisted settings
+    AdblockCache::GetInstance().SetGlobalEnabled(
+        SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
     LOG_INFO("AdblockCache per-site settings loaded");
 
     // Sprint 12c: Initialize fingerprint protection session token
