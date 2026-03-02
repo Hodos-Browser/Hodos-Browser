@@ -8,6 +8,9 @@
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
     #include <windows.h>
+    #include <shobjidl.h>
+    #include <shlobj.h>
+    #include <thread>
 #endif
 
 #ifdef __APPLE__
@@ -1232,14 +1235,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "tab_create") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string url = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
-
-        // Sprint 11b: Use homepage setting for blank tabs
-        if (url.empty() || url == "about:blank") {
-            std::string homepage = SettingsManager::GetInstance().GetBrowserSettings().homepage;
-            if (!homepage.empty() && homepage != "about:blank") {
-                url = homepage;
-            }
-        }
+        // Empty URL flows through to TabManager::CreateTab which defaults to NTP
 
 #ifdef _WIN32
         // Windows: Get main window dimensions for tab size
@@ -1297,6 +1293,26 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("📑 Tab switch: ID " + std::to_string(tab_id) +
                              (success ? " succeeded" : " failed"));
         }
+        return true;
+    }
+
+    if (message_name == "tab_reorder") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() > 0) {
+            std::string json_str = args->GetString(0).ToString();
+            try {
+                nlohmann::json order_json = nlohmann::json::parse(json_str);
+                std::vector<int> order;
+                for (const auto& id : order_json) {
+                    order.push_back(id.get<int>());
+                }
+                bool success = TabManager::GetInstance().ReorderTabs(order);
+                LOG_DEBUG_BROWSER("📑 Tab reorder: " + std::string(success ? "succeeded" : "failed"));
+            } catch (const std::exception& e) {
+                LOG_WARNING_BROWSER("📑 Tab reorder: failed to parse JSON: " + std::string(e.what()));
+            }
+        }
+        // Do NOT send tab list update — frontend already has correct order
         return true;
     }
 
@@ -1711,13 +1727,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         // Dispatch actions
         if (action == "new_tab") {
-            std::string url = "";
-            std::string homepage = SettingsManager::GetInstance().GetBrowserSettings().homepage;
-            if (!homepage.empty() && homepage != "about:blank") {
-                url = homepage;
-            }
 #ifdef _WIN32
-            createTabHelper(url);
+            createTabHelper("");  // Always NTP
 #endif
         } else if (action == "history") {
 #ifdef _WIN32
@@ -1907,6 +1918,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             settings.SetDownloadsPath(value);
         } else if (key == "browser.restoreSessionOnStart") {
             settings.SetRestoreSessionOnStart(value == "true");
+        } else if (key == "browser.askWhereToSave") {
+            settings.SetAskWhereToSave(value == "true");
         }
         // Privacy settings
         else if (key == "privacy.adBlockEnabled") {
@@ -1934,7 +1947,119 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }
-        
+
+        // Broadcast settings_updated to the header browser so it picks up changes
+        // (e.g. search engine change made in settings tab)
+        if (header_browser_ && header_browser_->GetIdentifier() != browser->GetIdentifier()) {
+            std::string updatedJson = SettingsManager::GetInstance().ToJson();
+            CefRefPtr<CefProcessMessage> updateMsg = CefProcessMessage::Create("settings_response");
+            updateMsg->GetArgumentList()->SetString(0, updatedJson);
+            header_browser_->GetMainFrame()->SendProcessMessage(PID_RENDERER, updateMsg);
+            LOG_DEBUG_BROWSER("⚙️ Broadcast settings_updated to header browser");
+        }
+
+        return true;
+    }
+
+    // Browse for download folder — opens native folder picker, sends result back to JS
+    if (message_name == "download_browse_folder") {
+        LOG_INFO_BROWSER("📂 download_browse_folder: opening folder picker");
+
+#ifdef _WIN32
+        // Use Win32 IFileOpenDialog directly — CEF's RunFileDialog labels the button "Upload"
+        CefRefPtr<CefBrowser> dialogBrowser = browser;
+        auto task = [dialogBrowser]() {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            IFileOpenDialog* pDialog = nullptr;
+            HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+                                          IID_IFileOpenDialog, reinterpret_cast<void**>(&pDialog));
+            if (SUCCEEDED(hr) && pDialog) {
+                pDialog->SetTitle(L"Select Download Folder");
+                pDialog->SetOkButtonLabel(L"Select Folder");
+                DWORD options = 0;
+                pDialog->GetOptions(&options);
+                pDialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+
+                // Set initial directory if one is configured
+                auto bs = SettingsManager::GetInstance().GetBrowserSettings();
+                if (!bs.downloadsPath.empty()) {
+                    IShellItem* pInitDir = nullptr;
+                    std::wstring wpath(bs.downloadsPath.begin(), bs.downloadsPath.end());
+                    if (SUCCEEDED(SHCreateItemFromParsingName(wpath.c_str(), nullptr,
+                                                               IID_IShellItem, reinterpret_cast<void**>(&pInitDir)))) {
+                        pDialog->SetFolder(pInitDir);
+                        pInitDir->Release();
+                    }
+                }
+
+                hr = pDialog->Show(nullptr);
+                if (SUCCEEDED(hr)) {
+                    IShellItem* pItem = nullptr;
+                    if (SUCCEEDED(pDialog->GetResult(&pItem)) && pItem) {
+                        PWSTR pszPath = nullptr;
+                        if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
+                            // Convert wide string to UTF-8
+                            int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                            std::string selected(len - 1, '\0');
+                            WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &selected[0], len, nullptr, nullptr);
+                            CoTaskMemFree(pszPath);
+
+                            // Send result back on UI thread
+                            CefRefPtr<CefBrowser> b = dialogBrowser;
+                            std::string path = selected;
+                            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> browser, std::string path) {
+                                CefRefPtr<CefProcessMessage> msg =
+                                    CefProcessMessage::Create("download_folder_selected");
+                                msg->GetArgumentList()->SetString(0, path);
+                                browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                            }, b, path));
+                        }
+                        pItem->Release();
+                    }
+                }
+                pDialog->Release();
+            }
+            CoUninitialize();
+        };
+
+        // Run dialog on a separate thread to avoid blocking CEF UI thread
+        std::thread(task).detach();
+#else
+        // macOS: use CEF's RunFileDialog (shows proper "Choose" button on Mac)
+        class FolderDialogCallback : public CefRunFileDialogCallback {
+        public:
+            explicit FolderDialogCallback(CefRefPtr<CefBrowser> browser)
+                : browser_(browser) {}
+
+            void OnFileDialogDismissed(
+                const std::vector<CefString>& file_paths) override {
+                if (!file_paths.empty()) {
+                    std::string selected = file_paths[0].ToString();
+                    CefRefPtr<CefProcessMessage> msg =
+                        CefProcessMessage::Create("download_folder_selected");
+                    msg->GetArgumentList()->SetString(0, selected);
+                    browser_->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                }
+            }
+
+        private:
+            CefRefPtr<CefBrowser> browser_;
+            IMPLEMENT_REFCOUNTING(FolderDialogCallback);
+        };
+
+        auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
+        CefString title("Select Download Folder");
+        CefString defaultPath(browserSettings.downloadsPath);
+        std::vector<CefString> acceptFilters;
+
+        browser->GetHost()->RunFileDialog(
+            FILE_DIALOG_OPEN_FOLDER,
+            title,
+            defaultPath,
+            acceptFilters,
+            new FolderDialogCallback(browser));
+#endif
+
         return true;
     }
 
@@ -2144,6 +2269,25 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔍 Query forwarded to omnibox overlay: " + query);
         } else {
             LOG_DEBUG_BROWSER("⚠️ Omnibox browser not available for query forward");
+        }
+
+        return true;
+    }
+
+    if (message_name == "omnibox_select") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string direction = args->GetString(0).ToString();
+
+        LOG_DEBUG_BROWSER("🔍 Omnibox select received: " + direction);
+
+        // Forward to omnibox overlay browser's renderer process
+        CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+        if (omnibox_browser && omnibox_browser->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> forward_msg = CefProcessMessage::Create("omnibox_select");
+            CefRefPtr<CefListValue> forward_args = forward_msg->GetArgumentList();
+            forward_args->SetString(0, direction);
+            omnibox_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, forward_msg);
+            LOG_DEBUG_BROWSER("🔍 Select forwarded to omnibox overlay: " + direction);
         }
 
         return true;
@@ -3745,16 +3889,58 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
     // All wallet handlers now cross-platform (WalletService has platform implementations)
 
+    // ========== NEW TAB PAGE (G4) ==========
+
+    if (message_name == "get_most_visited") {
+        auto topSites = HistoryManager::GetInstance().GetTopSites(8);
+
+        nlohmann::json response = nlohmann::json::array();
+        for (const auto& entry : topSites) {
+            nlohmann::json site;
+            site["url"] = entry.url;
+            site["title"] = entry.title;
+            site["visitCount"] = entry.visit_count;
+            response.push_back(site);
+        }
+
+        std::string jsonStr = response.dump();
+
+        // Send response back to the requesting browser (tab), NOT header_browser_
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("most_visited_response");
+        msg->GetArgumentList()->SetString(0, jsonStr);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+
+        LOG_DEBUG_BROWSER("📊 Sent most_visited_response with " + std::to_string(topSites.size()) + " sites");
+        return true;
+    }
+
+    if (message_name == "get_session_blocked_total") {
+        int total = AdblockCache::GetInstance().getTotalSessionBlocked();
+
+        nlohmann::json response;
+        response["total"] = total;
+        std::string jsonStr = response.dump();
+
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("session_blocked_total_response");
+        msg->GetArgumentList()->SetString(0, jsonStr);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+
+        LOG_DEBUG_BROWSER("🛡️ Sent session_blocked_total_response: " + std::to_string(total));
+        return true;
+    }
+
     // ========== GOOGLE SUGGEST SERVICE ==========
     if (message_name == "google_suggest_request") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
         int requestId = args->GetSize() > 1 ? args->GetInt(1) : 0;
 
-        LOG_DEBUG_BROWSER("🔍 Google Suggest request for query: " + query + " (requestId: " + std::to_string(requestId) + ")");
+        // Read search engine from settings
+        std::string engine = SettingsManager::GetInstance().GetBrowserSettings().searchEngine;
+        LOG_DEBUG_BROWSER("🔍 Suggest request for query: " + query + " engine: " + engine + " (requestId: " + std::to_string(requestId) + ")");
 
-        // Fetch suggestions (returns empty vector on failure)
-        std::vector<std::string> suggestions = GoogleSuggestService::GetInstance().fetchSuggestions(query);
+        // Fetch suggestions using the configured engine
+        std::vector<std::string> suggestions = GoogleSuggestService::GetInstance().fetchSuggestions(query, engine);
 
         LOG_DEBUG_BROWSER("🔍 Got " + std::to_string(suggestions.size()) + " suggestions from Google");
 
@@ -5169,6 +5355,41 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #endif
         }
 
+        // Ctrl+T / Cmd+T — New tab (intercept chrome://newtab)
+        if (event.windows_key_code == 'T') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+T: Creating new tab");
+                CreateNewTabWithUrl("");  // Empty URL → NTP via TabManager default
+                SimpleHandler::NotifyTabListChanged();
+                return true;
+            }
+        }
+
+        // Ctrl+W / Cmd+W — Close active tab
+        if (event.windows_key_code == 'W') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                int activeTabId = TabManager::GetInstance().GetActiveTabId();
+                if (activeTabId != -1) {
+                    LOG_INFO_BROWSER("⌨️ Ctrl+W: Closing active tab " + std::to_string(activeTabId));
+                    TabManager::GetInstance().CloseTab(activeTabId);
+                    SimpleHandler::NotifyTabListChanged();
+                    if (TabManager::GetInstance().GetTabCount() == 0) {
+                        CreateNewTabWithUrl("");  // Never leave window empty
+                        SimpleHandler::NotifyTabListChanged();
+                    }
+                }
+                return true;
+            }
+        }
+
         // Ctrl+H / Cmd+H — Open history in new tab (intercept chrome://history)
         if (event.windows_key_code == 'H') {
 #ifdef __APPLE__
@@ -5306,6 +5527,7 @@ static const int MENU_ID_CUSTOM_PASTE           = MENU_ID_USER_FIRST + 17;
 static const int MENU_ID_CUSTOM_DELETE          = MENU_ID_USER_FIRST + 18;
 static const int MENU_ID_CUSTOM_SELECT_ALL      = MENU_ID_USER_FIRST + 19;
 static const int MENU_ID_CUSTOM_VIEW_SOURCE     = MENU_ID_USER_FIRST + 20;
+static const int MENU_ID_SET_HOMEPAGE            = MENU_ID_USER_FIRST + 21;
 
 void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
@@ -5372,6 +5594,8 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
         model->AddSeparator();
         model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
         model->AddItem(MENU_ID_CUSTOM_VIEW_SOURCE, "View Page Source");
+        model->AddSeparator();
+        model->AddItem(MENU_ID_SET_HOMEPAGE, "Set as Home Page");
     }
 
     // --- Always add Inspect at the bottom ---
@@ -5509,6 +5733,16 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
         return true;
     }
 
+    // --- Set as Home Page ---
+    if (command_id == MENU_ID_SET_HOMEPAGE) {
+        std::string url = browser->GetMainFrame()->GetURL().ToString();
+        if (!url.empty()) {
+            SettingsManager::GetInstance().SetHomepage(url);
+            LOG_INFO_BROWSER("🏠 Homepage set to: " + url);
+        }
+        return true;
+    }
+
     // --- Navigation commands ---
     if (command_id == MENU_ID_CUSTOM_BACK) {
         browser->GoBack();
@@ -5571,9 +5805,124 @@ bool SimpleHandler::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
                                      const CefString& suggested_name,
                                      CefRefPtr<CefBeforeDownloadCallback> callback) {
     CEF_REQUIRE_UI_THREAD();
-    LOG_INFO_BROWSER("📥 OnBeforeDownload: " + suggested_name.ToString() +
+    std::string suggestedName = suggested_name.ToString();
+    LOG_INFO_BROWSER("📥 OnBeforeDownload: " + suggestedName +
                      " (id: " + std::to_string(download_item->GetId()) + ")");
-    // Show system Save As dialog with empty path (uses suggested name + default directory)
+
+    auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
+    LOG_INFO_BROWSER("📥 Settings: downloadsPath='" + browserSettings.downloadsPath +
+                     "', askWhereToSave=" + (browserSettings.askWhereToSave ? "true" : "false"));
+
+    std::string folder = browserSettings.downloadsPath;
+    bool folderValid = false;
+
+    if (!folder.empty()) {
+        try {
+            folderValid = std::filesystem::is_directory(folder);
+        } catch (...) {
+            folderValid = false;
+        }
+        if (!folderValid) {
+            LOG_WARNING_BROWSER("📥 Downloads folder does not exist: " + folder);
+        }
+    }
+
+    // Case 1: No dialog — silent download to configured (or system default) folder
+    if (!browserSettings.askWhereToSave) {
+        if (folderValid) {
+#ifdef _WIN32
+            std::string path = folder + "\\" + suggestedName;
+#else
+            std::string path = folder + "/" + suggestedName;
+#endif
+            LOG_INFO_BROWSER("📥 Silent download to: " + path);
+            callback->Continue(path, false);
+        } else {
+            LOG_INFO_BROWSER("📥 Silent download to system default");
+            callback->Continue("", false);
+        }
+        return true;
+    }
+
+    // Case 2: Ask where to save — need Save As dialog
+#ifdef _WIN32
+    // Use Win32 IFileSaveDialog directly so we control the initial directory.
+    // CEF's built-in Save As ignores the directory from the path we pass.
+    if (folderValid) {
+        CefRefPtr<CefBeforeDownloadCallback> cb = callback;
+        std::string name = suggestedName;
+        std::string dir = folder;
+
+        std::thread([cb, dir, name]() {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            IFileSaveDialog* pDialog = nullptr;
+            HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_ALL,
+                                          IID_IFileSaveDialog, reinterpret_cast<void**>(&pDialog));
+            if (SUCCEEDED(hr) && pDialog) {
+                pDialog->SetTitle(L"Save As");
+
+                // Set initial directory
+                int dirLen = MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0);
+                std::wstring wdir(dirLen - 1, L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, &wdir[0], dirLen);
+
+                IShellItem* pDir = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(wdir.c_str(), nullptr,
+                                                           IID_IShellItem, reinterpret_cast<void**>(&pDir)))) {
+                    pDialog->SetFolder(pDir);
+                    pDir->Release();
+                }
+
+                // Set suggested filename and default extension
+                int nameLen = MultiByteToWideChar(CP_UTF8, 0, name.c_str(), -1, nullptr, 0);
+                std::wstring wname(nameLen - 1, L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, name.c_str(), -1, &wname[0], nameLen);
+                pDialog->SetFileName(wname.c_str());
+
+                size_t dotPos = wname.rfind(L'.');
+                if (dotPos != std::wstring::npos) {
+                    pDialog->SetDefaultExtension(wname.substr(dotPos + 1).c_str());
+                }
+
+                // All file types filter
+                COMDLG_FILTERSPEC filter = { L"All Files", L"*.*" };
+                pDialog->SetFileTypes(1, &filter);
+
+                extern HWND g_hwnd;
+                hr = pDialog->Show(g_hwnd);
+                if (SUCCEEDED(hr)) {
+                    IShellItem* pItem = nullptr;
+                    if (SUCCEEDED(pDialog->GetResult(&pItem)) && pItem) {
+                        PWSTR pszPath = nullptr;
+                        if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                            std::string selectedPath(len - 1, '\0');
+                            WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &selectedPath[0], len, nullptr, nullptr);
+                            CoTaskMemFree(pszPath);
+
+                            CefRefPtr<CefBeforeDownloadCallback> ref = cb;
+                            std::string p = selectedPath;
+                            CefPostTask(TID_UI, base::BindOnce(
+                                [](CefRefPtr<CefBeforeDownloadCallback> callback, std::string path) {
+                                    callback->Continue(path, false);
+                                }, ref, p));
+                        }
+                        pItem->Release();
+                    }
+                }
+                // If user cancelled, Continue() is never called — download stays pending
+                // and is cleaned up by CEF when the callback ref is released.
+                pDialog->Release();
+            }
+            CoUninitialize();
+        }).detach();
+
+        return true;
+    }
+#endif
+
+    // Fallback: no custom folder or macOS — use CEF's built-in Save As
+    LOG_INFO_BROWSER("📥 Using CEF Save As dialog (system default)");
     callback->Continue("", true);
     return true;
 }

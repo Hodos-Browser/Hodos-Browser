@@ -8,7 +8,6 @@ import {
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import HistoryIcon from '@mui/icons-material/History';
-import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
 import DownloadIcon from '@mui/icons-material/Download';
 import PrintIcon from '@mui/icons-material/Print';
 import SearchIcon from '@mui/icons-material/Search';
@@ -127,12 +126,6 @@ const MenuOverlay: React.FC<MenuOverlayProps> = ({ onClose, onAction, currentZoo
           label="History"
           shortcut="Ctrl+H"
           onClick={() => handleAction('history')}
-        />
-        <MenuItemRow
-          icon={<BookmarkBorderIcon sx={{ fontSize: 18 }} />}
-          label="Bookmarks"
-          shortcut="Ctrl+D"
-          onClick={() => handleAction('bookmarks')}
         />
         <MenuItemRow
           icon={<DownloadIcon sx={{ fontSize: 18 }} />}

@@ -79,7 +79,7 @@ std::string GoogleSuggestService::urlEncode(const std::string& str) {
     return escaped.str();
 }
 
-std::vector<std::string> GoogleSuggestService::fetchSuggestions(const std::string& query) {
+std::vector<std::string> GoogleSuggestService::fetchSuggestions(const std::string& query, const std::string& engine) {
     std::vector<std::string> suggestions;
 
 #ifdef _WIN32
@@ -93,19 +93,28 @@ std::vector<std::string> GoogleSuggestService::fetchSuggestions(const std::strin
         return suggestions;
     }
 
-    LOG_DEBUG_GOOGLE("Fetching Google suggestions for query: " + query);
+    bool useDDG = (engine != "google");
+    LOG_DEBUG_GOOGLE("Fetching suggestions for query: " + query + " (engine: " + engine + ")");
 
-    // Build URL: https://suggestqueries.google.com/complete/search?client=chrome&q={query}&hl=en
     std::string encodedQuery = urlEncode(query);
-    std::wstring path = L"/complete/search?client=chrome&q=" +
-                        std::wstring(encodedQuery.begin(), encodedQuery.end()) +
-                        L"&hl=en";
+    std::wstring host;
+    std::wstring path;
 
-    // Connect to Google Suggest server
-    HINTERNET hConnect = WinHttpConnect(hSession_, L"suggestqueries.google.com",
+    if (useDDG) {
+        host = L"duckduckgo.com";
+        path = L"/ac/?q=" + std::wstring(encodedQuery.begin(), encodedQuery.end());
+    } else {
+        host = L"suggestqueries.google.com";
+        path = L"/complete/search?client=chrome&q=" +
+               std::wstring(encodedQuery.begin(), encodedQuery.end()) +
+               L"&hl=en";
+    }
+
+    // Connect to suggest server
+    HINTERNET hConnect = WinHttpConnect(hSession_, host.c_str(),
                                        INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) {
-        LOG_ERROR_GOOGLE("Failed to connect to Google Suggest server");
+        LOG_ERROR_GOOGLE("Failed to connect to suggest server");
         return suggestions; // Return empty vector
     }
 
@@ -180,39 +189,48 @@ std::vector<std::string> GoogleSuggestService::fetchSuggestions(const std::strin
         return suggestions; // Return empty vector
     }
 
-    LOG_DEBUG_GOOGLE("Raw Google response (first 500 chars): " + responseData.substr(0, 500));
+    LOG_DEBUG_GOOGLE("Raw response (first 500 chars): " + responseData.substr(0, 500));
 
-    // Parse JSON response using nlohmann::json for robustness
-    // Response format: ["query", ["suggestion1", "suggestion2", ...], [], {"google:suggesttype":[...]}]
-    // We need to extract the second array (index 1)
-
+    // Parse JSON response using nlohmann::json
     try {
         nlohmann::json jsonResponse = nlohmann::json::parse(responseData);
 
-        // Validate response structure
-        if (!jsonResponse.is_array() || jsonResponse.size() < 2) {
-            LOG_ERROR_GOOGLE("Invalid Google Suggest response: not an array or too few elements");
-            return suggestions;
-        }
-
-        // Extract suggestions array (second element, index 1)
-        const auto& suggestionsArray = jsonResponse[1];
-        if (!suggestionsArray.is_array()) {
-            LOG_ERROR_GOOGLE("Invalid Google Suggest response: suggestions element is not an array");
-            return suggestions;
-        }
-
-        // Extract each suggestion string
-        for (const auto& suggestion : suggestionsArray) {
-            if (suggestion.is_string()) {
-                std::string suggestionStr = suggestion.get<std::string>();
-                if (!suggestionStr.empty()) {
-                    suggestions.push_back(suggestionStr);
+        if (useDDG) {
+            // DDG format: [{"phrase":"s1"}, {"phrase":"s2"}, ...]
+            if (!jsonResponse.is_array()) {
+                LOG_ERROR_GOOGLE("Invalid DDG response: not an array");
+                return suggestions;
+            }
+            for (const auto& item : jsonResponse) {
+                if (item.is_object() && item.contains("phrase") && item["phrase"].is_string()) {
+                    std::string phrase = item["phrase"].get<std::string>();
+                    if (!phrase.empty()) {
+                        suggestions.push_back(phrase);
+                    }
+                }
+            }
+        } else {
+            // Google format: ["query", ["s1", "s2", ...], [], {...}]
+            if (!jsonResponse.is_array() || jsonResponse.size() < 2) {
+                LOG_ERROR_GOOGLE("Invalid Google response: not an array or too few elements");
+                return suggestions;
+            }
+            const auto& suggestionsArray = jsonResponse[1];
+            if (!suggestionsArray.is_array()) {
+                LOG_ERROR_GOOGLE("Invalid Google response: suggestions element is not an array");
+                return suggestions;
+            }
+            for (const auto& suggestion : suggestionsArray) {
+                if (suggestion.is_string()) {
+                    std::string suggestionStr = suggestion.get<std::string>();
+                    if (!suggestionStr.empty()) {
+                        suggestions.push_back(suggestionStr);
+                    }
                 }
             }
         }
 
-        LOG_DEBUG_GOOGLE("Parsed " + std::to_string(suggestions.size()) + " suggestions from Google");
+        LOG_DEBUG_GOOGLE("Parsed " + std::to_string(suggestions.size()) + " suggestions from " + engine);
 
     } catch (const nlohmann::json::exception& e) {
         LOG_ERROR_GOOGLE("JSON parsing failed: " + std::string(e.what()));

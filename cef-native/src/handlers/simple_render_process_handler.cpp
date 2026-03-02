@@ -921,6 +921,55 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== DOWNLOAD FOLDER PICKER RESULT ==========
+        if (message_name == "download_folder_selected") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string path = args->GetString(0);
+            std::string escaped = escapeJsonForJs(path);
+
+            LOG_DEBUG_RENDER("📂 download_folder_selected: " + path);
+
+            std::string js = "if (window.onDownloadFolderSelected) { window.onDownloadFolderSelected('" + escaped + "'); }";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        // ========== NEW TAB PAGE (G4) ==========
+
+        if (message_name == "most_visited_response") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string jsonStr = args->GetString(0);
+            std::string escaped = escapeJsonForJs(jsonStr);
+
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'most_visited_response',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        if (message_name == "session_blocked_total_response") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string jsonStr = args->GetString(0);
+            std::string escaped = escapeJsonForJs(jsonStr);
+
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'session_blocked_total_response',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         // ========== COSMETIC FILTERING (Sprint 8e) ==========
 
         // 8e-2: Pre-cache scriptlets for early injection in OnContextCreated
@@ -1609,6 +1658,21 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
 
         LOG_DEBUG_RENDER("🔍 omniboxQueryUpdate event dispatched");
+        return true;
+    }
+
+    // ========== OMNIBOX SELECT (ARROW KEY NAVIGATION) ==========
+    if (message_name == "omnibox_select") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string direction = args->GetString(0);
+
+        LOG_DEBUG_RENDER("🔍 Omnibox select received in renderer: " + direction);
+
+        std::string js = "window.dispatchEvent(new CustomEvent('omniboxSelect', "
+                         "{ detail: { direction: '" + direction + "' } }));";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("🔍 omniboxSelect event dispatched");
         return true;
     }
 

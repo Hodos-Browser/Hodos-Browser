@@ -132,7 +132,7 @@ const PrivacySettings: React.FC = () => {
               <Box key={entry.domain} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1, borderBottom: '1px solid #333', '&:last-child': { borderBottom: 'none' } }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <Typography sx={{ color: '#e0e0e0', fontSize: '0.88rem' }}>{entry.domain}</Typography>
-                  <Chip label={entry.source === 'default' ? 'Tracker' : 'User'} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                  <Chip label={entry.source === 'default' ? 'Tracker' : 'User'} size="small" sx={{ height: 20, fontSize: '0.7rem', bgcolor: 'rgba(255,255,255,0.1)', color: '#bbb' }} />
                 </Box>
                 <Button size="small" onClick={() => handleUnblock(entry.domain)} sx={{ textTransform: 'none', color: '#a67c00' }}>
                   Unblock
@@ -171,7 +171,7 @@ const PrivacySettings: React.FC = () => {
                   {entry.page_url.length > 80 ? entry.page_url.slice(0, 77) + '...' : entry.page_url}
                 </Typography>
                 <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center' }}>
-                  <Chip label={entry.reason === 'blocked_domain' ? 'Domain' : '3rd-party'} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
+                  <Chip label={entry.reason === 'blocked_domain' ? 'Domain' : '3rd-party'} size="small" sx={{ height: 18, fontSize: '0.65rem', bgcolor: 'rgba(255,255,255,0.1)', color: '#bbb' }} />
                   <Typography sx={{ color: '#666', fontSize: '0.72rem' }}>{formatRelativeTime(entry.blocked_at)}</Typography>
                 </Box>
               </Box>

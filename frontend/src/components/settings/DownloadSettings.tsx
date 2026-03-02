@@ -1,10 +1,37 @@
-import React from 'react';
-import { Typography, Box } from '@mui/material';
+import React, { useEffect, useCallback } from 'react';
+import { Switch, Typography, Box, Button } from '@mui/material';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import { SettingsCard, SettingRow } from './SettingsCard';
 import { useSettings } from '../../hooks/useSettings';
 
+declare global {
+  interface Window {
+    onDownloadFolderSelected?: (path: string) => void;
+  }
+}
+
 const DownloadSettings: React.FC = () => {
   const { settings, updateSetting } = useSettings();
+
+  // Listen for folder picker result from C++
+  const handleFolderSelected = useCallback((path: string) => {
+    if (path) {
+      updateSetting('browser.downloadsPath', path);
+    }
+  }, [updateSetting]);
+
+  useEffect(() => {
+    window.onDownloadFolderSelected = handleFolderSelected;
+    return () => {
+      window.onDownloadFolderSelected = undefined;
+    };
+  }, [handleFolderSelected]);
+
+  const handleBrowse = () => {
+    if (window.cefMessage?.send) {
+      window.cefMessage.send('download_browse_folder');
+    }
+  };
 
   return (
     <Box>
@@ -17,23 +44,31 @@ const DownloadSettings: React.FC = () => {
           label="Default download folder"
           description={settings.browser.downloadsPath || 'System default (Downloads folder)'}
           control={
-            <input
-              type="text"
-              value={settings.browser.downloadsPath}
-              onChange={(e) => updateSetting('browser.downloadsPath', e.target.value)}
-              placeholder="System default"
-              style={{
-                width: 240,
-                padding: '6px 10px',
-                border: '1px solid #444',
-                borderRadius: 4,
-                backgroundColor: '#2a2a2a',
-                color: '#e0e0e0',
-                fontSize: '0.85rem',
-                outline: 'none',
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<FolderOpenIcon />}
+              onClick={handleBrowse}
+              sx={{
+                color: '#a67c00',
+                borderColor: '#a67c00',
+                textTransform: 'none',
+                fontSize: '0.8rem',
+                '&:hover': { borderColor: '#c9a000', color: '#c9a000' },
               }}
-              onFocus={(e) => (e.target.style.borderColor = '#a67c00')}
-              onBlur={(e) => (e.target.style.borderColor = '#444')}
+            >
+              Browse
+            </Button>
+          }
+        />
+        <SettingRow
+          label="Ask where to save each file"
+          description="When off, files download to the default folder without prompting"
+          control={
+            <Switch
+              checked={settings.browser.askWhereToSave}
+              onChange={(e) => updateSetting('browser.askWhereToSave', e.target.checked)}
+              size="small"
             />
           }
         />

@@ -8,6 +8,7 @@ export interface BrowserSettings {
   showBookmarkBar: boolean;
   downloadsPath: string;
   restoreSessionOnStart: boolean;
+  askWhereToSave: boolean;
 }
 
 export interface PrivacySettings {
@@ -37,11 +38,12 @@ const defaultSettings: AllSettings = {
   version: 1,
   browser: {
     homepage: 'about:blank',
-    searchEngine: 'google',
+    searchEngine: 'duckduckgo',
     zoomLevel: 0.0,
     showBookmarkBar: false,
     downloadsPath: '',
     restoreSessionOnStart: false,
+    askWhereToSave: true,
   },
   privacy: {
     adBlockEnabled: true,

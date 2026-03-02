@@ -31,13 +31,14 @@ import { useDownloads } from '../hooks/useDownloads';
 import { useProfiles } from '../hooks/useProfiles';
 import { TabBar } from '../components/TabBar';
 import FindBar from '../components/FindBar';
-import { isUrl, normalizeUrl, toGoogleSearchUrl } from '../utils/urlDetection';
+import { isUrl, normalizeUrl, toSearchUrl } from '../utils/urlDetection';
 
 // Map internal localhost URLs to friendly display names
 function toDisplayUrl(url: string): string {
     const prefix = 'http://127.0.0.1:5137/';
     if (!url.startsWith(prefix)) return url;
     const path = url.slice(prefix.length);
+    if (path === 'newtab') return 'hodos://newtab';
     if (path.startsWith('settings-page')) return 'hodos://settings';
     if (path === 'browser-data') return 'hodos://browser-data';
     if (path === 'wallet') return 'hodos://wallet';
@@ -46,10 +47,10 @@ function toDisplayUrl(url: string): string {
 
 const MainBrowserView: React.FC = () => {
     // Address bar state
-    const [address, setAddress] = useState('https://metanetapps.com/');
+    const [address, setAddress] = useState('hodos://newtab');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const [autocompleteText, setAutocompleteText] = useState<string>('');
-    const [userTypedText, setUserTypedText] = useState('https://metanetapps.com/');
+    const [userTypedText, setUserTypedText] = useState('hodos://newtab');
     const addressInputRef = React.useRef<HTMLInputElement>(null);
     const justNavigatedRef = React.useRef(false);
     // Tracks navigation-in-progress to prevent tab sync from reverting address bar
@@ -57,6 +58,9 @@ const MainBrowserView: React.FC = () => {
     const preNavTabUrlRef = React.useRef<string>('');
     // Suppress autocomplete after Backspace/Delete so it doesn't re-fill
     const suppressAutocompleteRef = React.useRef(false);
+
+    // Search engine setting — fetched from C++ settings on mount
+    const [searchEngine, setSearchEngine] = useState('duckduckgo');
 
     const { navigate, goBack, goForward, reload } = useHodosBrowser();
 
@@ -82,6 +86,24 @@ const MainBrowserView: React.FC = () => {
             });
     }, []);
 
+    // Load search engine setting from C++ backend
+    useEffect(() => {
+        const prevHandler = window.onSettingsResponse;
+        window.onSettingsResponse = (data: { browser?: { searchEngine?: string } }) => {
+            if (data?.browser?.searchEngine) {
+                setSearchEngine(data.browser.searchEngine);
+            }
+            // Restore previous handler if any (settings overlay also uses this)
+            if (prevHandler) prevHandler(data as any);
+        };
+        if (window.cefMessage?.send) {
+            window.cefMessage.send('settings_get_all');
+        }
+        return () => {
+            window.onSettingsResponse = prevHandler;
+        };
+    }, []);
+
     // Tab management
     const {
         tabs,
@@ -94,6 +116,7 @@ const MainBrowserView: React.FC = () => {
         prevTab,
         switchToTabByIndex,
         closeActiveTab,
+        reorderTabs,
     } = useTabManager();
 
     // Cookie blocking (badge count + polling)
@@ -319,19 +342,22 @@ const MainBrowserView: React.FC = () => {
                 }
                 const suggestion = event.data.suggestion;
                 if (suggestion && userTypedText && isEditingAddress) {
-                    // Only show autocomplete if suggestion starts with current input
+                    // Show inline autocomplete if suggestion starts with typed text
                     if (suggestion.toLowerCase().startsWith(userTypedText.toLowerCase())) {
                         const autocompletePart = suggestion.slice(userTypedText.length);
                         setAutocompleteText(autocompletePart);
-                        // Update the full address to include autocomplete
                         setAddress(suggestion);
                     } else {
+                        // Arrow-key selected item that doesn't prefix-match — show it directly
                         setAutocompleteText('');
-                        setAddress(userTypedText);
+                        setAddress(suggestion);
                     }
-                } else {
+                } else if (!suggestion && isEditingAddress) {
+                    // Empty suggestion (arrow back to -1) — revert to typed text
                     setAutocompleteText('');
                     setAddress(userTypedText);
+                } else {
+                    setAutocompleteText('');
                 }
             }
         };
@@ -393,8 +419,8 @@ const MainBrowserView: React.FC = () => {
             const url = normalizeUrl(input);
             navigate(url);
         } else {
-            // It's a search query - search Google
-            const searchUrl = toGoogleSearchUrl(input);
+            // It's a search query - use configured search engine
+            const searchUrl = toSearchUrl(input, searchEngine);
             navigate(searchUrl);
         }
     };
@@ -420,6 +446,7 @@ const MainBrowserView: React.FC = () => {
                 onCreateTab={createTab}
                 onCloseTab={closeTab}
                 onSwitchTab={switchToTab}
+                onReorderTabs={reorderTabs}
             />
 
             {/* Top Navigation Bar */}
@@ -538,11 +565,18 @@ const MainBrowserView: React.FC = () => {
                                 // Suppress autocomplete re-fill after deletion
                                 suppressAutocompleteRef.current = true;
                                 setAutocompleteText('');
-                            } else if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
-                                // Any non-modifier key clears the suppression
+                            } else if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta'
+                                && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') {
+                                // Any non-modifier, non-arrow key clears the suppression
                                 suppressAutocompleteRef.current = false;
                             }
-                            if (e.key === 'Enter') {
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                window.cefMessage?.send('omnibox_select', 'down');
+                            } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                window.cefMessage?.send('omnibox_select', 'up');
+                            } else if (e.key === 'Enter') {
                                 const navigatedAddress = address;
                                 // Snapshot old tab URL so tab sync can suppress stale updates
                                 const activeTab = tabs.find(t => t.id === activeTabId);

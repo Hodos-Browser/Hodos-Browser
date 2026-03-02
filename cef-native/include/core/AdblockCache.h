@@ -158,6 +158,7 @@ public:
     void incrementBlockedCount(int browserId) {
         std::lock_guard<std::mutex> lock(countMutex_);
         blockedCounts_[browserId]++;
+        totalSessionBlocked_.fetch_add(1, std::memory_order_relaxed);
     }
 
     int getBlockedCount(int browserId) const {
@@ -174,6 +175,11 @@ public:
     void removeBrowser(int browserId) {
         std::lock_guard<std::mutex> lock(countMutex_);
         blockedCounts_.erase(browserId);
+    }
+
+    // Session-total blocked count (never resets, cumulative since browser launch)
+    int getTotalSessionBlocked() const {
+        return totalSessionBlocked_.load(std::memory_order_relaxed);
     }
 
     // Check if adblock is enabled for a specific domain.
@@ -375,6 +381,7 @@ private:
     }
 
     std::atomic<bool> global_enabled_{true};  // Master switch — no mutex needed
+    std::atomic<int> totalSessionBlocked_{0};  // Cumulative blocks since browser launch
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, bool> cache_;

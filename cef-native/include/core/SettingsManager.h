@@ -7,11 +7,12 @@
 // Browser settings (general browsing behavior)
 struct BrowserSettings {
     std::string homepage = "about:blank";
-    std::string searchEngine = "google";  // google, bing, duckduckgo, brave
+    std::string searchEngine = "duckduckgo";  // duckduckgo, google
     double zoomLevel = 0.0;
     bool showBookmarkBar = false;
     std::string downloadsPath;  // Empty = system default
     bool restoreSessionOnStart = false;
+    bool askWhereToSave = true;
 };
 
 // Privacy settings (ad blocking, tracking, etc.)
@@ -33,8 +34,8 @@ struct WalletSettings {
 
 // JSON serialization
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
-    homepage, searchEngine, zoomLevel, showBookmarkBar, 
-    downloadsPath, restoreSessionOnStart)
+    homepage, searchEngine, zoomLevel, showBookmarkBar,
+    downloadsPath, restoreSessionOnStart, askWhereToSave)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
@@ -71,6 +72,7 @@ public:
     void SetShowBookmarkBar(bool show);
     void SetDownloadsPath(const std::string& path);
     void SetRestoreSessionOnStart(bool restore);
+    void SetAskWhereToSave(bool ask);
 
     // Privacy settings
     void SetAdBlockEnabled(bool enabled);

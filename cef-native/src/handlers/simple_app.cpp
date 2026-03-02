@@ -12,7 +12,11 @@
 #include <fstream>
 
 #include "../../include/core/TabManager.h"
+#include "../../include/core/SettingsManager.h"
+#include "../../include/core/ProfileManager.h"
 #include "../../include/core/Logger.h"
+#include <nlohmann/json.hpp>
+#include <filesystem>
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_APP(msg) Logger::Log(msg, 0, 2)
@@ -195,7 +199,7 @@ void SimpleApp::OnContextInitialized() {
     int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
     int tabHeight = height - shellHeight;
 
-    LOG_INFO_APP("📑 Creating initial tab with TabManager...");
+    LOG_INFO_APP("📑 Creating initial tab(s) with TabManager...");
 
     std::ofstream log4("startup_log.txt", std::ios::app);
     log4 << "📊 Tab setup:\n";
@@ -204,27 +208,102 @@ void SimpleApp::OnContextInitialized() {
     log4 << "→ tabHeight: " << tabHeight << "\n";
     log4.close();
 
-    try {
-        int initial_tab_id = TabManager::GetInstance().CreateTab(
-            "https://coingeek.com/",
-            g_hwnd,
-            0,              // x position
-            shellHeight,    // y position (below header)
-            width,
-            tabHeight
-        );
+    // ── Session Restore Logic ──
+    bool sessionRestored = false;
+    auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
 
-        LOG_INFO_APP("✅ Initial tab created: ID " + std::to_string(initial_tab_id));
-        std::cout << "Initial tab created: ID " << initial_tab_id << std::endl;
+    if (browserSettings.restoreSessionOnStart) {
+        std::string profilePath = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+        if (!profilePath.empty()) {
+#ifdef _WIN32
+            std::string sessionPath = profilePath + "\\session.json";
+#else
+            std::string sessionPath = profilePath + "/session.json";
+#endif
+            try {
+                if (std::filesystem::exists(sessionPath)) {
+                    std::ifstream inFile(sessionPath);
+                    if (inFile.is_open()) {
+                        nlohmann::json sessionJson = nlohmann::json::parse(inFile);
+                        inFile.close();
 
-        std::ofstream log5("startup_log.txt", std::ios::app);
-        log5 << "✅ Initial tab creation result: ID = " << initial_tab_id << "\n";
-        log5.close();
-    } catch (...) {
-        std::ofstream errLog("startup_log.txt", std::ios::app);
-        errLog << "❌ Initial tab creation threw an exception!\n";
-        errLog.close();
-        LOG(ERROR) << "Failed to create initial tab";
+                        if (sessionJson.contains("tabs") && sessionJson["tabs"].is_array()
+                            && !sessionJson["tabs"].empty()) {
+
+                            int activeIndex = 0;
+                            if (sessionJson.contains("activeTabIndex") && sessionJson["activeTabIndex"].is_number()) {
+                                activeIndex = sessionJson["activeTabIndex"].get<int>();
+                            }
+
+                            int createdCount = 0;
+                            int activeTabId = -1;
+
+                            for (size_t i = 0; i < sessionJson["tabs"].size(); i++) {
+                                auto& tabEntry = sessionJson["tabs"][i];
+                                if (!tabEntry.contains("url") || !tabEntry["url"].is_string()) continue;
+
+                                std::string url = tabEntry["url"].get<std::string>();
+                                if (url.empty()) continue;
+
+                                int tabId = TabManager::GetInstance().CreateTab(
+                                    url, g_hwnd, 0, shellHeight, width, tabHeight
+                                );
+
+                                if (static_cast<int>(i) == activeIndex) {
+                                    activeTabId = tabId;
+                                }
+                                createdCount++;
+                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + ": " + url);
+                            }
+
+                            if (createdCount > 0) {
+                                sessionRestored = true;
+                                // Switch to the saved active tab
+                                if (activeTabId >= 0) {
+                                    TabManager::GetInstance().SwitchToTab(activeTabId);
+                                }
+                                LOG_INFO_APP("✅ Session restored: " + std::to_string(createdCount) + " tabs");
+                            }
+                        }
+                    }
+
+                    // Delete session.json after restore attempt (prevent stale restores)
+                    try {
+                        std::filesystem::remove(sessionPath);
+                        LOG_INFO_APP("📋 Deleted session.json after restore");
+                    } catch (...) {
+                        LOG_WARNING_APP("📋 Failed to delete session.json");
+                    }
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR_APP("📋 Session restore failed: " + std::string(e.what()));
+            }
+        }
+    }
+
+    // ── Fallback: Create single NTP tab ──
+    if (!sessionRestored) {
+        try {
+            int initial_tab_id = TabManager::GetInstance().CreateTab(
+                "http://127.0.0.1:5137/newtab",
+                g_hwnd,
+                0,              // x position
+                shellHeight,    // y position (below header)
+                width,
+                tabHeight
+            );
+
+            LOG_INFO_APP("✅ Initial NTP tab created: ID " + std::to_string(initial_tab_id));
+
+            std::ofstream log5("startup_log.txt", std::ios::app);
+            log5 << "✅ Initial tab creation result: ID = " << initial_tab_id << "\n";
+            log5.close();
+        } catch (...) {
+            std::ofstream errLog("startup_log.txt", std::ios::app);
+            errLog << "❌ Initial tab creation threw an exception!\n";
+            errLog.close();
+            LOG(ERROR) << "Failed to create initial tab";
+        }
     }
 
 #elif defined(__APPLE__)

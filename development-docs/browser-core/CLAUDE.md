@@ -36,6 +36,7 @@
 | 10 | Scriptlet Compatibility System | **Complete** (10a-10c) |
 | 11 | Menu Button UX + Full-Page Settings | **Complete** (11a-11b) |
 | 12 | Fingerprint Protection | **Complete** (12c-12e) |
+| 13 | Tab Tear-Off (Multi-Window) | **Planning** |
 
 ---
 
@@ -194,6 +195,13 @@ React → cefMessage.send("command_name", data)
 - Filter lists stored in `%APPDATA%/HodosBrowser/adblock/`.
 - Non-critical: if engine fails to start, browsing works without ad blocking.
 - **Performance note**: CefResponseFilter buffering adds YouTube page load latency. Optimization opportunities tracked in `ux-ui-cleanup.md`.
+
+### Sprint 13 (Tab Tear-Off / Multi-Window) — Planning
+- **Goal**: Allow users to drag a tab out of the browser window to create a new independent window, and drag tabs between windows.
+- **Key findings from research**: HWND reparenting works in CEF (confirmed). Must stay single-process (SingletonLock). All singletons shared automatically. `Tab.window_id` field is minimal approach.
+- **Architecture needed**: `BrowserWindow` class to encapsulate per-window state + `WindowManager` singleton to track all windows. Current global HWNDs (`g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`) must be refactored into per-window instances.
+- **macOS**: Needs NSWindow management equivalent in `cef_browser_shell_mac.mm`.
+- **Depends on**: No hard blockers, but benefits from stable overlay system (Sprints 10-12 complete).
 
 ---
 

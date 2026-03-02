@@ -78,3 +78,19 @@ export function toGoogleSearchUrl(query: string): string {
   const trimmed = query.trim();
   return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
 }
+
+/**
+ * Search URL templates by engine
+ */
+const SEARCH_URLS: Record<string, string> = {
+  duckduckgo: 'https://duckduckgo.com/?q=',
+  google: 'https://www.google.com/search?q=',
+};
+
+/**
+ * Converts a search query to a search URL for the given engine
+ */
+export function toSearchUrl(query: string, engine: string): string {
+  const base = SEARCH_URLS[engine] || SEARCH_URLS.duckduckgo;
+  return base + encodeURIComponent(query.trim());
+}

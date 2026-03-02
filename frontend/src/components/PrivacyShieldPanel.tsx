@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -9,9 +9,11 @@ import {
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { usePrivacyShield } from '../hooks/usePrivacyShield';
+import { useSettings } from '../hooks/useSettings';
 
 interface PrivacyShieldPanelProps {
   domain: string;
+  showCount?: number;
 }
 
 const InfoTip: React.FC<{ tip: string }> = ({ tip }) => (
@@ -20,7 +22,7 @@ const InfoTip: React.FC<{ tip: string }> = ({ tip }) => (
   </Tooltip>
 );
 
-const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
+const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCount }) => {
   const {
     masterEnabled,
     toggleMaster,
@@ -33,6 +35,21 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
     cookieBlockedCount,
     toggleCookieBlocking,
   } = usePrivacyShield(domain);
+
+  const { settings, refresh } = useSettings();
+
+  // Re-fetch global settings each time the panel is shown
+  // showCount increments on every open, even if domain is the same
+  useEffect(() => {
+    if (domain) {
+      refresh();
+    }
+  }, [domain, showCount, refresh]);
+
+  // Global toggles from Settings > Privacy — when OFF, per-site toggles are ineffective
+  const globalAdblockOff = !settings.privacy.adBlockEnabled;
+  const globalCookieOff = !settings.privacy.thirdPartyCookieBlocking;
+  const globalOverrideText = 'Disabled globally in Privacy Settings. Per-site toggle has no effect.';
 
   const handleMasterToggle = () => {
     if (domain) {
@@ -83,12 +100,14 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
           <Typography variant="body1" sx={{ fontWeight: 600, fontSize: '0.9rem' }}>
             Protection enabled
           </Typography>
-          <InfoTip tip="Master switch for all privacy protections on this site." />
+          <InfoTip tip={globalAdblockOff && globalCookieOff
+            ? globalOverrideText
+            : "Master switch for all privacy protections on this site."} />
         </Box>
         <Switch
           checked={masterEnabled}
           onChange={handleMasterToggle}
-          disabled={!domain}
+          disabled={!domain || (globalAdblockOff && globalCookieOff)}
           size="small"
         />
       </Box>
@@ -107,17 +126,17 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem' }}>
-            {adblockBlockedCount > 0
+          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? 'text.disabled' : 'text.primary' }}>
+            {adblockBlockedCount > 0 && !globalAdblockOff
               ? `${adblockBlockedCount} tracker${adblockBlockedCount !== 1 ? 's' : ''} blocked`
               : 'Tracker blocking'}
           </Typography>
-          <InfoTip tip="Blocks ads and tracking requests. Turning off may show more ads." />
+          <InfoTip tip={globalAdblockOff ? globalOverrideText : "Blocks ads and tracking requests. Turning off may show more ads."} />
         </Box>
         <Switch
-          checked={adblockEnabled}
+          checked={adblockEnabled && !globalAdblockOff}
           onChange={handleAdblockToggle}
-          disabled={!domain}
+          disabled={!domain || globalAdblockOff}
           size="small"
         />
       </Box>
@@ -134,15 +153,15 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem' }}>
+          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? 'text.disabled' : 'text.primary' }}>
             Scriptlet injection
           </Typography>
-          <InfoTip tip="Overrides ad scripts on the page. Disable if a site behaves oddly." />
+          <InfoTip tip={globalAdblockOff ? globalOverrideText : "Overrides ad scripts on the page. Disable if a site behaves oddly."} />
         </Box>
         <Switch
-          checked={scriptletsEnabled}
+          checked={scriptletsEnabled && !globalAdblockOff}
           onChange={handleScriptletToggle}
-          disabled={!domain || !adblockEnabled}
+          disabled={!domain || !adblockEnabled || globalAdblockOff}
           size="small"
         />
       </Box>
@@ -159,17 +178,17 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain }) => {
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem' }}>
-            {cookieBlockedCount > 0
+          <Typography sx={{ fontSize: '0.85rem', color: globalCookieOff ? 'text.disabled' : 'text.primary' }}>
+            {cookieBlockedCount > 0 && !globalCookieOff
               ? `${cookieBlockedCount} cookie${cookieBlockedCount !== 1 ? 's' : ''} blocked`
               : 'Cookie blocking'}
           </Typography>
-          <InfoTip tip="Blocks third-party tracking cookies. Disable if login fails." />
+          <InfoTip tip={globalCookieOff ? globalOverrideText : "Blocks third-party tracking cookies. Disable if login fails."} />
         </Box>
         <Switch
-          checked={cookieBlockingEnabled}
+          checked={cookieBlockingEnabled && !globalCookieOff}
           onChange={handleCookieToggle}
-          disabled={!domain}
+          disabled={!domain || globalCookieOff}
           size="small"
         />
       </Box>

@@ -14,29 +14,6 @@ const GeneralSettings: React.FC = () => {
 
       <SettingsCard title="Startup">
         <SettingRow
-          label="Homepage"
-          description="The page that opens when you click the home button"
-          control={
-            <input
-              type="text"
-              value={settings.browser.homepage}
-              onChange={(e) => updateSetting('browser.homepage', e.target.value)}
-              style={{
-                width: 240,
-                padding: '6px 10px',
-                border: '1px solid #444',
-                borderRadius: 4,
-                backgroundColor: '#2a2a2a',
-                color: '#e0e0e0',
-                fontSize: '0.85rem',
-                outline: 'none',
-              }}
-              onFocus={(e) => (e.target.style.borderColor = '#a67c00')}
-              onBlur={(e) => (e.target.style.borderColor = '#444')}
-            />
-          }
-        />
-        <SettingRow
           label="Restore previous session"
           description="Reopen tabs from your last browsing session on startup"
           control={
@@ -71,25 +48,9 @@ const GeneralSettings: React.FC = () => {
                 PaperProps: { sx: { bgcolor: '#2a2a2a', color: '#e0e0e0' } },
               }}
             >
-              <MenuItem value="google">Google</MenuItem>
-              <MenuItem value="bing">Bing</MenuItem>
               <MenuItem value="duckduckgo">DuckDuckGo</MenuItem>
-              <MenuItem value="brave">Brave Search</MenuItem>
+              <MenuItem value="google">Google</MenuItem>
             </Select>
-          }
-        />
-      </SettingsCard>
-
-      <SettingsCard title="Appearance">
-        <SettingRow
-          label="Show bookmark bar"
-          description="Display the bookmark bar below the address bar"
-          control={
-            <Switch
-              checked={settings.browser.showBookmarkBar}
-              onChange={(e) => updateSetting('browser.showBookmarkBar', e.target.checked)}
-              size="small"
-            />
           }
         />
       </SettingsCard>

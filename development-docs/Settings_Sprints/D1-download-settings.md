@@ -1,113 +1,59 @@
 # D1: Download Settings
 
-**Status**: Not Started
+**Status**: **COMPLETE** (2026-03-01)
 **Complexity**: Low-Medium
-**Estimated Phases**: 2
 
 ---
 
-## Current State
+## Summary
 
-- UI exists in `DownloadSettings.tsx` — text input for download folder path
-- Setting persists to `settings.json` via `SettingsManager::SetDownloadsPath()`
-- **Not wired**: `OnBeforeDownload()` in `simple_handler.cpp` calls `callback->Continue("", true)` — empty path (system default) and always shows Save As dialog
-- No "Ask where to save" toggle exists in UI
-- No folder picker button — user must type path manually
+Wired download folder selection and "Ask where to save" toggle to actual behavior. Users can browse for a folder via native Win32 dialog, and the setting controls both silent downloads and Save As dialog initial directory.
 
 ---
 
-## What Needs to Happen
+## What Was Done
 
-### Phase 1: Wire Settings + Folder Picker
+### C++ — SettingsManager
+- [x] Added `bool askWhereToSave = true` to `BrowserSettings` struct
+- [x] Added `SetAskWhereToSave()` setter + JSON serialization
 
-**Goal**: Default download folder is used, and users can browse for a folder via native file dialog.
+### C++ — OnBeforeDownload (simple_handler.cpp)
+- [x] Reads `downloadsPath` and `askWhereToSave` from SettingsManager
+- [x] **Ask ON + custom folder**: Win32 `IFileSaveDialog` opens in configured folder (bypasses CEF's dialog which ignores the directory)
+- [x] **Ask OFF + custom folder**: Silent download to configured folder
+- [x] **Ask ON + no folder**: CEF's default Save As dialog (system Downloads)
+- [x] **Ask OFF + no folder**: Silent download to system default
+- [x] Invalid/deleted folder → falls back to CEF Save As
 
-**Changes needed**:
+### C++ — Folder Picker (download_browse_folder IPC)
+- [x] Win32 `IFileOpenDialog` with `FOS_PICKFOLDERS` — button says "Select Folder" (not CEF's "Upload")
+- [x] Runs on detached thread to avoid blocking CEF UI thread
+- [x] Result relayed via `download_folder_selected` IPC → renderer → `window.onDownloadFolderSelected()` → `updateSetting()`
 
-**C++ — Read settings in OnBeforeDownload**:
-- [ ] In `OnBeforeDownload()`, read `SettingsManager::GetBrowserSettings().downloadsPath`
-- [ ] If path is set and valid, use it as the base path: `callback->Continue(downloadsPath + "/" + suggested_name, show_dialog)`
-- [ ] If path is empty, fall back to current behavior (empty string = system default)
-
-**C++ — Folder picker IPC**:
-- [ ] Add `download_browse_folder` IPC handler in `OnProcessMessageReceived()`
-- [ ] Use `CefBrowserHost::RunFileDialog()` with `FILE_DIALOG_OPEN_FOLDER` mode
-- [ ] Return selected path to frontend via response message
-- [ ] Frontend updates the text input with the selected path
-
-**Frontend — Add Browse button**:
-- [ ] Add "Browse" button next to the download path text input in `DownloadSettings.tsx`
-- [ ] Button sends `download_browse_folder` IPC
-- [ ] Listen for response and update input + save setting
-
-**Design decisions**:
-- Validate folder exists before saving? (Recommended: yes, or at least warn)
-- What if saved folder no longer exists at download time? (Fall back to system default + show Save As)
-
-### Phase 2: "Ask where to save" Toggle
-
-**Goal**: Toggle controls whether Save As dialog appears on every download.
-
-**Changes needed**:
-
-**C++ — Read setting in OnBeforeDownload**:
-- [ ] Read `SettingsManager::GetBrowserSettings().askWhereToSave` (new field, default: `true`)
-- [ ] Pass as `show_dialog` parameter: `callback->Continue(path, askWhereToSave)`
-- [ ] If `askWhereToSave` is false, downloads go silently to the default folder
-
-**Frontend — Add toggle**:
-- [ ] Add "Ask where to save each file" toggle in `DownloadSettings.tsx`
-- [ ] Persists via `updateSetting('browser.askWhereToSave', value)`
-
-**SettingsManager — New field**:
-- [ ] Add `askWhereToSave` bool to `BrowserSettings` struct (default: `true`)
-- [ ] Add getter/setter in `SettingsManager`
-- [ ] Add to JSON serialization/deserialization
-
-**Design decisions**:
-- If "ask" is off but no default folder is set, should we force the dialog? (Recommended: yes — need a valid path for silent downloads)
-- Should the toggle be disabled until a default folder is set? (Good UX hint)
+### Frontend — DownloadSettings.tsx
+- [x] Browse button with `FolderOpenIcon` — opens native folder picker
+- [x] "Ask where to save each file" toggle (Switch, default ON)
+- [x] Displays current path or "System default (Downloads folder)"
 
 ---
 
-## Architecture Notes
+## Key Gotcha: CEF Save As Dialog Ignores Directory
 
-**CEF folder picker**: `CefBrowserHost::RunFileDialog(FILE_DIALOG_OPEN_FOLDER, title, default_path, accept_filters, callback)` — async, returns selected path via `CefRunFileDialogCallback::OnFileDialogDismissed()`. Must run on UI thread.
+CEF's `CefBeforeDownloadCallback::Continue(path, showDialog=true)` does NOT honor the directory component of the path — the Save As dialog always opens in Chromium's internal default. Neither `download.default_directory` nor `savefile.default_directory` preferences fix this.
 
-**OnBeforeDownload flow**:
-```cpp
-void SimpleHandler::OnBeforeDownload(
-    CefRefPtr<CefBrowser> browser,
-    CefRefPtr<CefDownloadItem> download_item,
-    const CefString& suggested_file_name,
-    CefRefPtr<CefBeforeDownloadCallback> callback) {
-
-    auto& settings = SettingsManager::GetInstance().GetBrowserSettings();
-    std::string path = settings.downloadsPath;
-    bool show_dialog = settings.askWhereToSave;
-
-    if (!path.empty()) {
-        // Append suggested filename to folder path
-        path += "/" + suggested_file_name.ToString();
-    }
-
-    callback->Continue(path, show_dialog);
-}
-```
+**Solution**: Bypass CEF's dialog entirely on Windows. Use Win32 `IFileSaveDialog` with `SetFolder()` for the initial directory, then call `Continue(selectedPath, false)` to start the download silently to the user's chosen location.
 
 ---
 
-## Test Checklist
+## Test Results
 
-- [ ] Set download folder via Browse button → folder picker opens → selected path appears in input
-- [ ] Download a file → Save As dialog starts in the selected folder (not system default)
-- [ ] Clear download folder → downloads use system default folder again
-- [ ] Toggle "Ask where to save" OFF → download goes silently to default folder
-- [ ] Toggle "Ask where to save" ON → Save As dialog appears again
-- [ ] "Ask" OFF with no folder set → Save As dialog appears anyway (fallback)
-- [ ] Settings persist across browser restart
-- [ ] Invalid/deleted folder path → graceful fallback to Save As dialog
+- [x] Browse button opens native folder picker with "Select Folder" button
+- [x] Selected folder appears in settings and persists
+- [x] Save As dialog opens in the configured folder
+- [x] "Ask where to save" OFF → download goes silently to set folder
+- [x] "Ask where to save" ON → Save As dialog appears in correct folder
+- [x] Settings persist across restart
 
 ---
 
-**Last Updated**: 2026-02-28
+**Last Updated**: 2026-03-01

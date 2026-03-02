@@ -38,6 +38,7 @@ Assess what we have, identify gaps, research how Chrome and Brave handle core br
 | 10 | Scriptlet Compatibility System (10a-10c) | ✅ Complete (2026-02-25) |
 | 11 | Menu Button UX + Full-Page Settings (11a-11b) | ✅ Complete (2026-02-25) |
 | 12 | Fingerprint Protection (12c-12e) | ✅ Complete (2026-02-25) |
+| 13 | Tab Tear-Off (Multi-Window) | Planning |
 
 ---
 

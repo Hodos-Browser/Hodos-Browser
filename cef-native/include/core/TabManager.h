@@ -123,9 +123,16 @@ public:
 
     /**
      * @brief Get all tabs
-     * @return Vector of pointers to all tabs (in creation order)
+     * @return Vector of pointers to all tabs (in display order)
      */
     std::vector<Tab*> GetAllTabs();
+
+    /**
+     * @brief Reorder tabs to match the given ID sequence
+     * @param order Vector of tab IDs in desired display order
+     * @return true if all IDs exist and reorder succeeded
+     */
+    bool ReorderTabs(const std::vector<int>& order);
 
     /**
      * @brief Get ID of active tab
@@ -228,6 +235,9 @@ private:
 
     // Map of tab ID to Tab struct
     std::map<int, Tab> tabs_;
+
+    // Explicit display order of tab IDs
+    std::vector<int> tab_order_;
 
     // ID of currently active (visible) tab
     int active_tab_id_;

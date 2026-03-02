@@ -202,17 +202,188 @@ void HandleFullscreenChange(bool fullscreen) {
     }
 }
 
+// Save current session tabs to session.json (called before browsers are closed)
+void SaveSession() {
+    // Only save if session restore is enabled
+    auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
+    if (!browserSettings.restoreSessionOnStart) {
+        LOG_INFO("📋 Session restore disabled — skipping session save");
+        return;
+    }
+
+    std::string profilePath = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+    if (profilePath.empty()) {
+        LOG_WARNING("📋 No profile path — cannot save session");
+        return;
+    }
+
+    std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+    int activeTabId = TabManager::GetInstance().GetActiveTabId();
+
+    nlohmann::json sessionJson;
+    sessionJson["version"] = 1;
+    sessionJson["tabs"] = nlohmann::json::array();
+    sessionJson["activeTabIndex"] = 0;
+
+    int tabIndex = 0;
+    int activeIndex = 0;
+    for (Tab* tab : tabs) {
+        if (!tab) continue;
+
+        std::string url = tab->url;
+        // Filter out internal URLs — don't save NTP, about:blank, or empty
+        if (url.empty() || url == "about:blank") continue;
+        if (url.find("127.0.0.1:5137") != std::string::npos) continue;
+
+        nlohmann::json tabEntry;
+        tabEntry["url"] = url;
+        tabEntry["title"] = tab->title;
+        sessionJson["tabs"].push_back(tabEntry);
+
+        if (tab->id == activeTabId) {
+            activeIndex = tabIndex;
+        }
+        tabIndex++;
+    }
+
+    sessionJson["activeTabIndex"] = activeIndex;
+
+    // Only save if we have actual tabs to restore
+    if (sessionJson["tabs"].empty()) {
+        LOG_INFO("📋 No restorable tabs — skipping session save");
+        return;
+    }
+
+#ifdef _WIN32
+    std::string sessionPath = profilePath + "\\session.json";
+#else
+    std::string sessionPath = profilePath + "/session.json";
+#endif
+
+    try {
+        std::ofstream out(sessionPath);
+        if (out.is_open()) {
+            out << sessionJson.dump(2);
+            out.close();
+            LOG_INFO("📋 Session saved: " + std::to_string(sessionJson["tabs"].size()) + " tabs to " + sessionPath);
+        } else {
+            LOG_ERROR("📋 Failed to open session.json for writing: " + sessionPath);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("📋 Failed to save session: " + std::string(e.what()));
+    }
+}
+
+// Clear browsing data on exit (PS3) — called after SaveSession, before browsers close
+void ClearBrowsingDataOnExit() {
+    auto privacySettings = SettingsManager::GetInstance().GetPrivacySettings();
+    if (!privacySettings.clearDataOnExit) {
+        return;
+    }
+
+    LOG_INFO("🧹 Clear-on-exit enabled — clearing browsing data...");
+
+    // 1. Clear history (synchronous SQLite)
+    try {
+        LOG_INFO("🧹 Step 1: Clearing history...");
+        if (HistoryManager::GetInstance().DeleteAllHistory()) {
+            LOG_INFO("🧹 History cleared");
+        } else {
+            LOG_WARNING("🧹 Failed to clear history (returned false)");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("🧹 History clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("🧹 History clear unknown exception");
+    }
+
+    // 2. Clear cookies (async, fire-and-forget — CEF processes pending tasks during shutdown)
+    try {
+        LOG_INFO("🧹 Step 2: Clearing cookies...");
+        CefRefPtr<CefCookieManager> cookieMgr = CefCookieManager::GetGlobalManager(nullptr);
+        if (cookieMgr) {
+            cookieMgr->DeleteCookies("", "", nullptr);
+            LOG_INFO("🧹 Cookie deletion requested");
+        } else {
+            LOG_WARNING("🧹 No cookie manager available");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("🧹 Cookie clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("🧹 Cookie clear unknown exception");
+    }
+
+    // 3. Clear cache via CDP (requires a live browser)
+    try {
+        LOG_INFO("🧹 Step 3: Clearing cache...");
+        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+        if (header_browser) {
+            header_browser->GetHost()->ExecuteDevToolsMethod(0, "Network.clearBrowserCache", nullptr);
+            LOG_INFO("🧹 Cache clear requested via CDP");
+        } else {
+            LOG_WARNING("🧹 No header browser for cache clear");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("🧹 Cache clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("🧹 Cache clear unknown exception");
+    }
+
+    // 4. Clear cookie block log (synchronous SQLite)
+    try {
+        LOG_INFO("🧹 Step 4: Clearing cookie block log...");
+        if (CookieBlockManager::GetInstance().ClearBlockLog()) {
+            LOG_INFO("🧹 Cookie block log cleared");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("🧹 Block log clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("🧹 Block log clear unknown exception");
+    }
+
+    // 5. Delete session.json so stale sessions aren't restored (G2 conflict resolution)
+    try {
+        LOG_INFO("🧹 Step 5: Deleting session.json...");
+        std::string profilePath = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+        if (!profilePath.empty()) {
+#ifdef _WIN32
+            std::string sessionPath = profilePath + "\\session.json";
+#else
+            std::string sessionPath = profilePath + "/session.json";
+#endif
+            if (std::filesystem::exists(sessionPath)) {
+                std::filesystem::remove(sessionPath);
+                LOG_INFO("🧹 session.json deleted (clear-on-exit overrides session restore)");
+            } else {
+                LOG_INFO("🧹 No session.json to delete");
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("🧹 Session delete exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("🧹 Session delete unknown exception");
+    }
+
+    LOG_INFO("🧹 Clear-on-exit complete");
+}
+
 // Graceful shutdown function
 void ShutdownApplication() {
     LOG_INFO("🛑 Starting graceful application shutdown...");
 
-    // Step 0: Stop child servers first (to prevent orphaned processes)
+    // Step 0a: Save session tabs before anything is closed
+    SaveSession();
+
+    // Step 0b: Clear browsing data if "clear on exit" is enabled (PS3)
+    ClearBrowsingDataOnExit();
+
+    // Step 0c: Stop child servers (to prevent orphaned processes)
     LOG_INFO("🔄 Stopping wallet server...");
     StopWalletServer();
     LOG_INFO("🔄 Stopping adblock engine...");
     StopAdblockServer();
 
-    // Step 1: Close all CEF browsers first
+    // Step 1: Close all CEF browsers
     LOG_INFO("🔄 Closing CEF browsers...");
     CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
     CefRefPtr<CefBrowser> webview_browser = SimpleHandler::GetWebviewBrowser();

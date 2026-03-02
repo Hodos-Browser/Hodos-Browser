@@ -450,6 +450,58 @@ HistoryEntry HistoryManager::GetHistoryEntryByUrl(const std::string& url) {
     return entry;
 }
 
+std::vector<HistoryEntry> HistoryManager::GetTopSites(int limit) {
+    std::vector<HistoryEntry> entries;
+
+    if (!history_db_ && !OpenDatabase()) {
+        LOG_INFO_HISTORY("⚠️ History database not available for GetTopSites");
+        return entries;
+    }
+
+    if (!history_db_) {
+        return entries;
+    }
+
+    const char* sql = R"(
+        SELECT id, url, title, visit_count, last_visit_time, 0, 0
+        FROM urls WHERE hidden = 0 AND visit_count > 0
+        ORDER BY visit_count DESC, last_visit_time DESC LIMIT ?
+    )";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(history_db_, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_HISTORY("❌ Failed to prepare GetTopSites query: " + std::string(sqlite3_errmsg(history_db_)));
+        return entries;
+    }
+
+    sqlite3_bind_int(stmt, 1, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        HistoryEntry entry;
+        entry.id = sqlite3_column_int64(stmt, 0);
+
+        const unsigned char* url_text = sqlite3_column_text(stmt, 1);
+        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+
+        const unsigned char* title_text = sqlite3_column_text(stmt, 2);
+        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+
+        entry.visit_count = sqlite3_column_int(stmt, 3);
+        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        entry.visit_time = entry.last_visit_time;
+        entry.transition = 0;
+
+        entries.push_back(entry);
+    }
+
+    sqlite3_finalize(stmt);
+
+    LOG_INFO_HISTORY("📊 GetTopSites returned " + std::to_string(entries.size()) + " entries");
+    return entries;
+}
+
 bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {

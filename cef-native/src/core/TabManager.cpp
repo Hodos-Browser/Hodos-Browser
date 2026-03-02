@@ -53,7 +53,7 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     CEF_REQUIRE_UI_THREAD();
 
     int tab_id = GetNextTabId();
-    std::string tab_url = url.empty() ? "https://metanetapps.com/" : url;
+    std::string tab_url = url.empty() ? "http://127.0.0.1:5137/newtab" : url;
 
     LOG(INFO) << "Creating tab " << tab_id << " with URL: " << tab_url;
     LOG(INFO) << "Tab position: x=" << x << ", y=" << y << ", width=" << width << ", height=" << height;
@@ -94,6 +94,7 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     // This is important because OnAfterCreated will be called asynchronously
     // and it needs to find the tab in the map
     tabs_[tab_id] = new_tab;
+    tab_order_.push_back(tab_id);
 
     // Notify frontend immediately so tab UI renders before page navigation starts
     // This prevents the jarring effect where the page loads before the tab appears
@@ -213,7 +214,8 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
         LOG(INFO) << "Tab " << tab_id << " HWND destruction queued";
     }
 
-    // Remove from map now that resources are queued for cleanup
+    // Remove from display order and map
+    tab_order_.erase(std::remove(tab_order_.begin(), tab_order_.end(), tab_id), tab_order_.end());
     tabs_.erase(it);
 
     LOG(INFO) << "Tab " << tab_id << " removed from map. Remaining tabs: " << tabs_.size();
@@ -286,11 +288,42 @@ std::vector<Tab*> TabManager::GetAllTabs() {
     std::vector<Tab*> all_tabs;
     all_tabs.reserve(tabs_.size());
 
-    for (auto& pair : tabs_) {
-        all_tabs.push_back(&pair.second);
+    // Return tabs in explicit display order
+    for (int id : tab_order_) {
+        auto it = tabs_.find(id);
+        if (it != tabs_.end()) {
+            all_tabs.push_back(&it->second);
+        }
+    }
+
+    // Safety: include any tabs not in tab_order_ (shouldn't happen, but defensive)
+    if (all_tabs.size() < tabs_.size()) {
+        for (auto& pair : tabs_) {
+            if (std::find(tab_order_.begin(), tab_order_.end(), pair.first) == tab_order_.end()) {
+                all_tabs.push_back(&pair.second);
+            }
+        }
     }
 
     return all_tabs;
+}
+
+bool TabManager::ReorderTabs(const std::vector<int>& order) {
+    // Validate: all IDs must exist and count must match
+    if (order.size() != tabs_.size()) {
+        LOG(WARNING) << "ReorderTabs: size mismatch - order has " << order.size()
+                     << " but " << tabs_.size() << " tabs exist";
+        return false;
+    }
+    for (int id : order) {
+        if (tabs_.find(id) == tabs_.end()) {
+            LOG(WARNING) << "ReorderTabs: tab ID " << id << " not found";
+            return false;
+        }
+    }
+    tab_order_ = order;
+    LOG(INFO) << "Tabs reordered successfully";
+    return true;
 }
 
 // ========== Tab State Update Methods ==========

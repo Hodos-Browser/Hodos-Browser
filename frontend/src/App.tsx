@@ -10,6 +10,7 @@ import DownloadsOverlayRoot from './pages/DownloadsOverlayRoot';
 import ProfilePickerOverlayRoot from './pages/ProfilePickerOverlayRoot';
 import MenuOverlayRoot from './pages/MenuOverlayRoot';
 import MainBrowserView from './pages/MainBrowserView';
+import NewTabPage from './pages/NewTabPage';
 import HistoryPage from './pages/HistoryPage';
 import SettingsPage from './pages/SettingsPage';
 import CertErrorPage from './pages/CertErrorPage';
@@ -166,6 +167,7 @@ const App = () => {
       <Routes>
         {/* <Route path="/" element={walletExists ? <MainBrowserView /> : <OverlayRoot />} /> */}
         <Route path="/" element={<MainBrowserView />} />
+        <Route path="/newtab" element={<NewTabPage />} />
         <Route path="/browser-data" element={<HistoryPage />} />
         <Route path="/settings-page" element={<SettingsPage />} />
         <Route path="/settings-page/:section" element={<SettingsPage />} />

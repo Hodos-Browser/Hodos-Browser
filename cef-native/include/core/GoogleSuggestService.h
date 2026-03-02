@@ -11,8 +11,9 @@ class GoogleSuggestService {
 public:
     static GoogleSuggestService& GetInstance();
 
-    // Fetch suggestions from Google - returns empty vector on failure
-    std::vector<std::string> fetchSuggestions(const std::string& query);
+    // Fetch suggestions from search engine - returns empty vector on failure
+    // engine: "google" or "duckduckgo" (default)
+    std::vector<std::string> fetchSuggestions(const std::string& query, const std::string& engine = "duckduckgo");
 
 private:
     GoogleSuggestService();

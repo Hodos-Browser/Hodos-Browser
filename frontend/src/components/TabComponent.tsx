@@ -11,6 +11,11 @@ interface TabComponentProps {
   showDivider: boolean;
   onClose: (e: React.MouseEvent) => void;
   onClick: () => void;
+  /** Ref callback so TabBar can measure this element's position */
+  tabRef?: (el: HTMLDivElement | null) => void;
+  isDragged?: boolean;
+  dropIndicator?: 'left' | 'right' | null;
+  onPointerDown?: (e: React.PointerEvent) => void;
 }
 
 export const TabComponent: React.FC<TabComponentProps> = ({
@@ -19,10 +24,16 @@ export const TabComponent: React.FC<TabComponentProps> = ({
   showDivider,
   onClose,
   onClick,
+  tabRef,
+  isDragged,
+  dropIndicator,
+  onPointerDown,
 }) => {
   return (
     <Box
+      ref={tabRef}
       onClick={onClick}
+      onPointerDown={onPointerDown}
       sx={{
         display: 'flex',
         alignItems: 'center',
@@ -32,12 +43,41 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         minWidth: 48,
         maxWidth: 200,
         height: 32,
+        boxSizing: 'border-box',
+        opacity: isDragged ? 0.4 : 1,
         backgroundColor: isActive ? '#ffffff' : 'transparent',
         borderRadius: isActive ? '7px' : '6px',
         cursor: 'pointer',
-        transition: 'background-color 0.15s ease',
+        transition: isDragged !== undefined ? 'background-color 0.15s ease' : 'background-color 0.15s ease',
         position: 'relative',
         userSelect: 'none',
+
+        // Gold drop indicator bar
+        ...(dropIndicator === 'left' ? {
+          '&::before': {
+            content: '""',
+            position: 'absolute',
+            left: -1,
+            top: 4,
+            bottom: 4,
+            width: 2,
+            backgroundColor: '#a67c00',
+            borderRadius: 1,
+            zIndex: 10,
+          },
+        } : dropIndicator === 'right' ? {
+          '&::before': {
+            content: '""',
+            position: 'absolute',
+            right: -1,
+            top: 4,
+            bottom: 4,
+            width: 2,
+            backgroundColor: '#a67c00',
+            borderRadius: 1,
+            zIndex: 10,
+          },
+        } : {}),
 
         // Divider pipe between inactive tabs
         '&::after': showDivider ? {

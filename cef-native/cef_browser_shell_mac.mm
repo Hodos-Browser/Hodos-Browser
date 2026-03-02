@@ -1373,6 +1373,12 @@ void CreateSettingsMenuOverlay() {
 void ShutdownApplication() {
     LOG_INFO("🛑 Starting graceful application shutdown (macOS)...");
 
+    // TODO: Save session when macOS tab system is implemented
+    // (Windows implementation: SaveSession() in cef_browser_shell.cpp)
+
+    // TODO: Clear browsing data on exit (PS3) when macOS tab system is implemented
+    // (Windows implementation: ClearBrowsingDataOnExit() in cef_browser_shell.cpp)
+
     // Step 1: Close all CEF browsers
     LOG_INFO("🔄 Closing CEF browsers...");
 

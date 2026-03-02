@@ -45,6 +45,7 @@ public:
     std::vector<HistoryEntry> SearchHistory(const HistorySearchParams& params);
     std::vector<HistoryEntryWithScore> SearchHistoryWithFrecency(const std::string& query, int limit = 6);
     HistoryEntry GetHistoryEntryByUrl(const std::string& url);
+    std::vector<HistoryEntry> GetTopSites(int limit = 8);
 
     // Test function to debug schema
     std::vector<HistoryEntry> GetHistorySimple(int limit);

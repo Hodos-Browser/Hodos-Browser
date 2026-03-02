@@ -1,65 +1,84 @@
 # PS1: Global Shield Toggles
 
-**Status**: Not Started
+**Status**: Complete
 **Complexity**: Low-Medium
-**Estimated Phases**: 2
+**Completed**: 2026-03-01
 
 ---
 
-## Current State
+## Summary
 
-- UI exists in `PrivacySettings.tsx` — two toggle switches under "Shields" card
-- Settings persist to `settings.json` via `SettingsManager`
-- **Ad & tracker blocking toggle**: `privacy.adBlockEnabled` is stored but **never read** — ad blocking is always on globally, controlled only per-site via `AdblockCache::isSiteEnabled()`
-- **Third-party cookie blocking toggle**: `privacy.thirdPartyCookieBlocking` is stored but **never read** — `EphemeralCookieManager` always enforces ephemeral third-party cookies with no off switch
+Wired the two global privacy toggles (Ad & tracker blocking, Third-party cookie blocking) in Settings > Privacy so they function as master switches over all blocking code paths. Added UI feedback in the Privacy Shield panel — per-site toggles are greyed out and disabled when the corresponding global toggle is OFF, with tooltip explanation.
 
 ---
 
-## What Needs to Happen
+## What Was Done
 
-### Phase 1: Global Ad-Block Toggle
+### C++ Backend — Global Ad-Block Toggle
 
-**Goal**: When the global toggle is OFF, disable all ad blocking (network, cosmetic, scriptlet) regardless of per-site settings.
+- Added `std::atomic<bool> global_enabled_` to `AdblockCache` singleton with `SetGlobalEnabled()`/`IsGlobalEnabled()` methods (lock-free reads)
+- Synced on startup: `AdblockCache::SetGlobalEnabled()` called after `Initialize()` in `cef_browser_shell.cpp`, reading from `SettingsManager::GetPrivacySettings().adBlockEnabled`
+- Synced on change: `settings_set` IPC handler in `simple_handler.cpp` calls `AdblockCache::SetGlobalEnabled()` when `privacy.adBlockEnabled` changes
+- Added `IsGlobalEnabled()` guard to all 5 ad-blocking code paths:
+  1. Network blocking (`GetResourceRequestHandler`)
+  2. Scriptlet pre-cache (`OnBeforeBrowse`)
+  3. Scriptlet pre-cache (`OnLoadingStateChange` — loading start)
+  4. Cosmetic CSS + scriptlet injection (`OnLoadingStateChange` — loading end)
+  5. YouTube response filter (`GetResourceResponseFilter`)
 
-**Changes needed**:
-- [ ] Read `SettingsManager::GetAdBlockEnabled()` in the ad-block check path
-- [ ] In `simple_handler.cpp` where `AdblockCache::GetInstance().isSiteEnabled()` is checked, add a guard: if global is off, skip all blocking
-- [ ] In cosmetic CSS injection (`OnLoadEnd`), check global setting before injecting
-- [ ] In scriptlet injection (`OnContextCreated`), check global setting before injecting
-- [ ] When `settings_set` IPC fires for `privacy.adBlockEnabled`, could optionally call `AdblockCache::SetGlobalEnabled(bool)` for fast in-memory access
+### C++ Backend — Global Cookie Blocking Toggle
 
-**Design decisions**:
-- Should global OFF override per-site ON? (Recommended: yes — global is the master switch)
-- Should the Privacy Shield panel reflect global state? (e.g., show "Protection disabled globally" when off)
-- Should per-site settings be preserved when global is off? (Recommended: yes — just skip checking them)
+- Added `SettingsManager` include to `CookieBlockManager.cpp`
+- Inserted early-return guard in both `CanSendCookie()` and `CanSaveCookie()` — after blocked domain check, before `IsThirdParty()` check
+- When `thirdPartyCookieBlocking` is false: all non-blocked third-party cookies are allowed
+- Known tracker domains (doubleclick.net, etc.) are **still blocked** regardless of toggle state
 
-### Phase 2: Global Third-Party Cookie Toggle
+### Frontend — Privacy Shield Panel Feedback
 
-**Goal**: When the toggle is OFF, allow all third-party cookies (disable EphemeralCookieManager enforcement).
+- `PrivacyShieldPanel.tsx`: imports `useSettings` to read global toggle state
+- When global adblock is OFF: tracker blocking + scriptlet rows are greyed out, switches disabled and unchecked, tooltip says "Disabled globally in Privacy Settings. Per-site toggle has no effect."
+- When global cookie blocking is OFF: cookie blocking row gets same treatment
+- When both globals are OFF: master toggle also disabled
+- Blocked counts hidden when global is off (prevents showing stale "N trackers blocked")
+- `showCount` prop (from `PrivacyShieldOverlayRoot`) ensures settings refresh on every panel open, even for the same domain
 
-**Changes needed**:
-- [ ] Add `IsEnabled()` / `SetEnabled(bool)` to `EphemeralCookieManager`
-- [ ] Read `SettingsManager::GetThirdPartyCookieBlocking()` during initialization
-- [ ] In `CookieBlockManager::ShouldBlockCookie()`, check the global setting — if off, allow all third-party cookies
-- [ ] When `settings_set` IPC fires for `privacy.thirdPartyCookieBlocking`, sync to `EphemeralCookieManager::SetEnabled()`
+### Files Modified
 
-**Design decisions**:
-- When toggled off, should existing ephemeral cookies be promoted to persistent? (Probably not — just stop enforcing going forward)
-- Should `blocked_domains` (known trackers) still be blocked even when third-party toggle is off? (Recommended: yes — tracker domains are a separate concern)
-
----
-
-## Test Checklist
-
-- [ ] Toggle ad-block OFF globally → visit youtube.com → ads appear
-- [ ] Toggle ad-block ON globally → visit youtube.com → ads blocked
-- [ ] Per-site exception still works: global ON, site-specific OFF → ads appear on that site only
-- [ ] Toggle third-party cookies OFF → visit site with third-party cookies → cookies allowed
-- [ ] Toggle third-party cookies ON → third-party cookies are ephemeral again
-- [ ] Known tracker domains (doubleclick.net) still blocked even with third-party toggle OFF
-- [ ] Settings persist across browser restart
-- [ ] Privacy Shield panel reflects global state correctly
+| File | Changes |
+|------|---------|
+| `cef-native/include/core/AdblockCache.h` | `atomic<bool> global_enabled_`, `SetGlobalEnabled()`, `IsGlobalEnabled()` |
+| `cef-native/src/handlers/simple_handler.cpp` | 5 guard checks + settings_set sync |
+| `cef-native/src/core/CookieBlockManager.cpp` | SettingsManager include + guard in CanSendCookie/CanSaveCookie |
+| `cef-native/cef_browser_shell.cpp` | Startup sync of global flag |
+| `frontend/src/components/PrivacyShieldPanel.tsx` | useSettings, greyed-out UI, showCount refresh |
+| `frontend/src/pages/PrivacyShieldOverlayRoot.tsx` | showCount state + prop |
 
 ---
 
-**Last Updated**: 2026-02-28
+## Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Global OFF overrides per-site ON? | Yes | Global is the master switch — per-site settings are preserved but ineffective |
+| Shield panel reflects global state? | Yes | Greyed-out toggles + tooltip prevents confusion |
+| Blocked domains still blocked when cookie toggle OFF? | Yes | Known trackers (doubleclick.net) are a separate concern from generic third-party cookies |
+| Cookie toggle reads from SettingsManager directly? | Yes | Simple `GetPrivacySettings()` call — one mutex lock per cookie check is acceptable since cookie checks are less frequent than ad-block URL checks |
+| Ad-block toggle uses atomic bool? | Yes | Avoids mutex lock on every network request — performance critical path |
+
+---
+
+## Test Results
+
+- [x] Toggle ad-block OFF globally → youtube.com shows ads
+- [x] Toggle ad-block ON globally → youtube.com ads blocked
+- [x] Per-site exception works: global ON, site-specific OFF → ads appear on that site only
+- [x] Toggle third-party cookies OFF → third-party cookies flow freely
+- [x] Toggle third-party cookies ON → ephemeral cookie blocking resumes
+- [x] Known tracker domains still blocked with cookie toggle OFF
+- [x] Settings persist across restart
+- [x] Shield panel toggles greyed out when global is OFF
+- [x] Shield panel updates immediately when reopened after global change
+
+---
+
+**Last Updated**: 2026-03-01

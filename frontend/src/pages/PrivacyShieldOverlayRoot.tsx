@@ -11,11 +11,13 @@ declare global {
 
 const PrivacyShieldOverlayRoot: React.FC = () => {
   const [domain, setDomain] = useState<string>('');
+  const [showCount, setShowCount] = useState(0);
 
   // Register callback for C++ JS injection (keep-alive pattern)
   useEffect(() => {
     window.setShieldDomain = (d: string) => {
       setDomain(d);
+      setShowCount(c => c + 1);  // Force refresh even if domain unchanged
     };
 
     // Fallback: read from URL param on first load
@@ -90,7 +92,7 @@ const PrivacyShieldOverlayRoot: React.FC = () => {
 
       {/* Panel content */}
       <Box sx={{ flex: 1, overflow: 'hidden' }}>
-        <PrivacyShieldPanel domain={domain} />
+        <PrivacyShieldPanel domain={domain} showCount={showCount} />
       </Box>
     </Box>
   );

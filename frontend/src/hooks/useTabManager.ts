@@ -22,7 +22,7 @@ export const useTabManager = () => {
   // Create a new tab
   const createTab = useCallback((url?: string) => {
     if (window.cefMessage) {
-      window.cefMessage.send('tab_create', url || 'https://metanetapps.com/');
+      window.cefMessage.send('tab_create', url || 'http://127.0.0.1:5137/newtab');
       // Refresh tab list after a short delay to get updated state
       setTimeout(refreshTabList, 500);
     }
@@ -85,6 +85,19 @@ export const useTabManager = () => {
     }
   }, [state.activeTabId, closeTab]);
 
+  // Reorder tabs (drag-and-drop)
+  const reorderTabs = useCallback((fromIndex: number, toIndex: number) => {
+    setState(prev => {
+      const newTabs = [...prev.tabs];
+      const [moved] = newTabs.splice(fromIndex, 1);
+      newTabs.splice(toIndex, 0, moved);
+      // Send new order to C++ backend
+      const newOrder = newTabs.map(t => t.id);
+      window.cefMessage?.send('tab_reorder', JSON.stringify(newOrder));
+      return { ...prev, tabs: newTabs };
+    });
+  }, []);
+
   // Listen for tab list updates from C++
   useEffect(() => {
     const handleTabListResponse = (event: MessageEvent) => {
@@ -127,6 +140,7 @@ export const useTabManager = () => {
     prevTab,
     switchToTabByIndex,
     closeActiveTab,
+    reorderTabs,
     refreshTabList,
   };
 };

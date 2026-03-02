@@ -60,7 +60,7 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
     CEF_REQUIRE_UI_THREAD();
 
     int tab_id = GetNextTabId();
-    std::string tab_url = url.empty() ? "https://metanetapps.com/" : url;
+    std::string tab_url = url.empty() ? "http://127.0.0.1:5137/newtab" : url;
 
     LOG_INFO("Creating tab " + std::to_string(tab_id) + " with URL: " + tab_url);
     LOG_INFO("Tab position: x=" + std::to_string(x) + ", y=" + std::to_string(y) +
@@ -99,6 +99,7 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
     // Add tab to map BEFORE creating browser
     // OnAfterCreated will be called asynchronously and needs to find the tab
     tabs_[tab_id] = new_tab;
+    tab_order_.push_back(tab_id);
 
     // Notify frontend that tab list changed
     SimpleHandler::NotifyTabListChanged();
@@ -203,7 +204,8 @@ bool TabManager::CloseTab(int tab_id) {
     tab.browser = nullptr;
     LOG_INFO("Browser reference cleared");
 
-    // Remove from map immediately
+    // Remove from display order and map
+    tab_order_.erase(std::remove(tab_order_.begin(), tab_order_.end(), tab_id), tab_order_.end());
     tabs_.erase(it);
     LOG_INFO("Tab " + std::to_string(tab_id) + " removed from map. Remaining: " + std::to_string(tabs_.size()));
 
@@ -295,11 +297,42 @@ std::vector<Tab*> TabManager::GetAllTabs() {
     std::vector<Tab*> all_tabs;
     all_tabs.reserve(tabs_.size());
 
-    for (auto& pair : tabs_) {
-        all_tabs.push_back(&pair.second);
+    // Return tabs in explicit display order
+    for (int id : tab_order_) {
+        auto it = tabs_.find(id);
+        if (it != tabs_.end()) {
+            all_tabs.push_back(&it->second);
+        }
+    }
+
+    // Safety: include any tabs not in tab_order_ (shouldn't happen, but defensive)
+    if (all_tabs.size() < tabs_.size()) {
+        for (auto& pair : tabs_) {
+            if (std::find(tab_order_.begin(), tab_order_.end(), pair.first) == tab_order_.end()) {
+                all_tabs.push_back(&pair.second);
+            }
+        }
     }
 
     return all_tabs;
+}
+
+bool TabManager::ReorderTabs(const std::vector<int>& order) {
+    // Validate: all IDs must exist and count must match
+    if (order.size() != tabs_.size()) {
+        LOG_WARNING("ReorderTabs: size mismatch - order has " + std::to_string(order.size())
+                    + " but " + std::to_string(tabs_.size()) + " tabs exist");
+        return false;
+    }
+    for (int id : order) {
+        if (tabs_.find(id) == tabs_.end()) {
+            LOG_WARNING("ReorderTabs: tab ID " + std::to_string(id) + " not found");
+            return false;
+        }
+    }
+    tab_order_ = order;
+    LOG_INFO("Tabs reordered successfully");
+    return true;
 }
 
 // ========== Tab State Update Methods ==========
@@ -372,7 +405,8 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
     // ONLY clear browser reference (view already removed in CloseTab)
     tab.browser = nullptr;
 
-    // Remove from map (view cleanup already done)
+    // Remove from display order and map
+    tab_order_.erase(std::remove(tab_order_.begin(), tab_order_.end(), tab_id), tab_order_.end());
     tabs_.erase(it);
     LOG_INFO("Tab " + std::to_string(tab_id) + " removed from map. Remaining: " + std::to_string(tabs_.size()));
 

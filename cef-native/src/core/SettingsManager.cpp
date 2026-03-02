@@ -245,6 +245,14 @@ void SettingsManager::SetRestoreSessionOnStart(bool restore) {
     Save();
 }
 
+void SettingsManager::SetAskWhereToSave(bool ask) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        browser_.askWhereToSave = ask;
+    }
+    Save();
+}
+
 // Privacy settings setters
 void SettingsManager::SetAdBlockEnabled(bool enabled) {
     {

@@ -9,13 +9,16 @@
 
 | Priority | Sprint | Effort | Rationale |
 |----------|--------|--------|-----------|
-| 1 | **PS1** (Global Shield Toggles) | Low | Broken UI — toggles do nothing. Must-fix. |
-| 2 | **D1** (Download Settings) | Low | Quick win, basic expected functionality. |
-| 3 | **G1** (Search Engine + Suggest Swap) | Low | ~30 min, unblocks G4, includes suggest API swap. |
-| 4 | **G4 Phase 1** (New Tab Page) | Medium | Highest brand impact. |
-| 5 | **G2 Phase 1+2** (Session Restore) | Medium | Core browser expectation. Lazy tab loading. |
-| 6 | **PS3** (Clear on Exit) | Medium | Privacy feature. |
-| 7 | **OB1** (Omnibox Arrow Keys) | Low | Keyboard navigation through dropdown. |
+| ~~1~~ | ~~**PS1** (Global Shield Toggles)~~ | ~~Low~~ | **Done** (2026-03-01) |
+| ~~2~~ | ~~**D1** (Download Settings)~~ | ~~Low~~ | **Done** (2026-03-01) |
+| ~~3~~ | ~~**G1** (Search Engine + Suggest Swap)~~ | ~~Low~~ | **Done** (2026-03-02) |
+| ~~4~~ | ~~**G4 Phase 1** (New Tab Page)~~ | ~~Medium~~ | **Done** (2026-03-02) |
+| ~~4a~~ | ~~**G4 Phases 1b-3** (Ctrl+T fix, Homepage separation, Set as Homepage)~~ | ~~Medium~~ | **Done** (2026-03-02) |
+| ~~4b~~ | ~~**G4 Phase 4** (Tab Drag-Reorder)~~ | ~~Low-Medium~~ | **Done** (2026-03-02) |
+| 4c | **G4 Phase 5** (Tab Tear-Off) | High | Drag tab out → new window. Multi-window architecture refactor. |
+| ~~5~~ | ~~**G2 Phase 1+2** (Session Restore)~~ | ~~Medium~~ | **Done** (2026-03-02) |
+| ~~6~~ | ~~**PS3** (Clear on Exit)~~ | ~~Medium~~ | **Done** (2026-03-02) |
+| ~~7~~ | ~~**OB1** (Omnibox Arrow Keys)~~ | ~~Low~~ | **Done** (2026-03-02) |
 | — | ~~**G3**~~ (Bookmark Bar) | ~~High~~ | **Deferred** — remove placeholder toggle. |
 | — | ~~**G5**~~ (Default Browser) | ~~Low~~ | **Deferred** — needs installer first (see working-notes.md A3). |
 
@@ -26,23 +29,23 @@
 | Setting | UI Exists | Persists | Behavior Works | Sprint | Status |
 |---------|-----------|----------|---------------|--------|--------|
 | **Homepage** | Yes | Yes | Yes (launch only) | N/A — complete (Sprint 11b) | Done |
-| **Search Engine** | Yes | Yes | **No** — hardcoded to Google | G1 | Not Started |
-| **Restore Previous Session** | Yes | Yes | **No** — no save/restore logic | G2 | Not Started |
-| **Bookmark Bar** | Yes | Yes | **No** — no bookmark bar UI | ~~G3~~ | **Deferred** — remove placeholder |
-| **New Tab Page** | No | No | **No** — new tabs open external URL, no branded page | G4 | Not Started |
+| **Search Engine** | Yes | Yes | Yes — DDG default, Google option | ~~G1~~ | **Done** (2026-03-02) |
+| **Restore Previous Session** | Yes | Yes | Yes — save on shutdown, restore on startup | ~~G2~~ | **Done** (2026-03-02) |
+| **Bookmark Bar** | No | Yes | **No** — no bookmark bar UI | ~~G3~~ | **Deferred** — placeholder toggle removed |
+| **New Tab Page** | Yes | Yes (cache) | Yes — branded NTP with search + tiles + favicon cache | ~~G4 Phase 1~~ | **Done** (2026-03-02) |
 | **Set as Default Browser** | No | N/A | **No** — no button to open OS default browser settings | ~~G5~~ | **Deferred** — needs installer |
-| **Right-click "Set as Homepage"** | No | N/A | **No** — no context menu option | G4 (Phase 3) | Not Started |
+| **Right-click "Set as Homepage"** | Yes | Yes | Yes — context menu calls `SettingsManager::SetHomepage()` | ~~G4 (Phase 3)~~ | **Done** (2026-03-02) |
 
 ## Privacy & Security Tab
 
 | Setting | UI Exists | Persists | Behavior Works | Sprint | Status |
 |---------|-----------|----------|---------------|--------|--------|
-| **Ad & tracker blocking** | Yes | Yes | **No** — global toggle ignored; only per-site toggle works | PS1 | Not Started |
-| **Third-party cookie blocking** | Yes | Yes | **No** — always on (ephemeral CM); toggle has no effect | PS1 | Not Started |
+| **Ad & tracker blocking** | Yes | Yes | Yes — global master switch + per-site toggle | PS1 | **Done** |
+| **Third-party cookie blocking** | Yes | Yes | Yes — global master switch, trackers always blocked | PS1 | **Done** |
 | **Fingerprint protection** | Yes | Yes | Yes | N/A — complete (Sprint 12) | Done |
 | **Do Not Track / GPC headers** | Yes | Yes | Yes | N/A — complete (Sprint 11b) | Done |
 | **Manage browsing data** | Yes (link) | N/A | **Needs testing** — links to Browser Data page | N/A | **Test needed** |
-| **Clear data on exit** | Yes | Yes | **No** — stored but never read on shutdown | PS3 | Not Started |
+| **Clear data on exit** | Yes | Yes | Yes — clears history, cookies, cache, session on clean shutdown | ~~PS3~~ | **Done** (2026-03-02) |
 | **Blocked Domains list** | Yes | Yes | Yes | N/A — complete (Sprint 12) | Done |
 | **Block Log** | Yes | Yes | Yes | N/A — complete (Sprint 12) | Done |
 
@@ -50,9 +53,9 @@
 
 | Setting | UI Exists | Persists | Behavior Works | Sprint | Status |
 |---------|-----------|----------|---------------|--------|--------|
-| **Default download folder** | Yes (text input) | Yes | **No** — stored but never read by OnBeforeDownload | D1 | Not Started |
-| **Folder picker (Browse)** | No | N/A | **No** — user must type path manually | D1 | Not Started |
-| **Ask where to save each file** | No | No | **No** — hardcoded to always show Save As | D1 | Not Started |
+| **Default download folder** | Yes (Browse) | Yes | Yes — Win32 IFileSaveDialog opens in configured folder | D1 | **Done** |
+| **Folder picker (Browse)** | Yes | N/A | Yes — Win32 IFileOpenDialog with "Select Folder" | D1 | **Done** |
+| **Ask where to save each file** | Yes (toggle) | Yes | Yes — controls Save As vs silent download | D1 | **Done** |
 
 ---
 
@@ -63,7 +66,7 @@
 | **G1** | Default Search Engine + Suggest Swap | [G1-search-engine.md](./G1-search-engine.md) | Low | None. DDG default, Google fallback. Drop Bing/Brave. |
 | **G2** | Session Restore | [G2-session-restore.md](./G2-session-restore.md) | Medium | None. Lazy tab loading for Phase 2. |
 | ~~**G3**~~ | ~~Bookmark Bar~~ | ~~[G3-bookmark-bar.md](./G3-bookmark-bar.md)~~ | ~~High~~ | **Deferred** — remove placeholder toggle from settings UI. |
-| **G4** | New Tab Page & Homepage | [G4-new-tab-page.md](./G4-new-tab-page.md) | Medium-High (4 phases) | G1 (search engine for search bar), HistoryManager |
+| **G4** | New Tab Page, Tab Drag-Reorder & Tear-Off | [G4-new-tab-page.md](./G4-new-tab-page.md) | High (6 phases) | G1 (done), HistoryManager, TabManager multi-window |
 | ~~**G5**~~ | ~~Set as Default Browser~~ | ~~[G5-default-browser.md](./G5-default-browser.md)~~ | ~~Low~~ | **Deferred** — needs installer plan first (see working-notes.md A3). |
 
 ## Sprint Docs — Privacy & Security
@@ -84,7 +87,7 @@
 
 | Sprint | Feature | Doc | Complexity | Dependencies |
 |--------|---------|-----|------------|--------------|
-| **OB1** | Arrow Key Navigation | (inline — no separate doc) | Low | None. Add Up/Down arrow key navigation through omnibox dropdown. |
+| ~~**OB1**~~ | ~~Arrow Key Navigation~~ | ~~(inline — no separate doc)~~ | ~~Low~~ | **Done** (2026-03-02) |
 
 ---
 
@@ -111,6 +114,11 @@ Each sprint follows this lifecycle:
 | 2026-03-01 | Defer default browser (G5) | Useless without installer. Bundle with installer sprint. |
 | 2026-03-01 | PS3 + G2 conflict resolution | If both "clear on exit" and "restore session" enabled, disable restore and warn. Don't allow both simultaneously. |
 
+| 2026-03-02 | G1 done — DDG default, Google fallback | DDG search + suggest API wired to behavior. Bing/Brave removed. |
+| 2026-03-02 | Tab drag-reorder + tear-off added to G4 | User request. Phases 4-5 added. Tear-off uses HWND reparenting within same process (not multi-instance). |
+| 2026-03-02 | G4 Phase 1 done — branded NTP | Logo, search bar, most-visited tiles (8 max), localStorage cache for instant render, base64 favicon caching. Default BSV tiles for first-time users. |
+| 2026-03-02 | G2 Phases 1+2 done — Session Restore | SaveSession() in ShutdownApplication(), restore in OnContextInitialized(). All tabs load immediately (lazy deferred). session.json deleted after restore. |
+
 ---
 
-**Last Updated**: 2026-03-01
+**Last Updated**: 2026-03-02

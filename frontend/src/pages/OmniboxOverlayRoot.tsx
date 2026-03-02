@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography, CircularProgress } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
@@ -9,11 +9,17 @@ import type { Suggestion } from '../types/omnibox';
  * OmniboxOverlayRoot - Renders the omnibox autocomplete suggestions.
  *
  * Receives query updates via 'omniboxQueryUpdate' window event from address bar.
+ * Receives arrow key navigation via 'omniboxSelect' window event.
  * Sends autocomplete suggestion back via cefMessage.
  */
 const OmniboxOverlayRoot: React.FC = () => {
   const [query, setQuery] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(-1);
   const { suggestions, loading, search } = useOmniboxSuggestions();
+
+  // Track suggestions length for arrow key clamping
+  const suggestionsRef = useRef(suggestions);
+  suggestionsRef.current = suggestions;
 
   // Set body data attribute for CEF-level cursor fix
   useEffect(() => {
@@ -28,7 +34,7 @@ const OmniboxOverlayRoot: React.FC = () => {
     const handleQueryUpdate = (event: Event) => {
       const customEvent = event as CustomEvent<{ query: string }>;
       const newQuery = customEvent.detail.query;
-      console.log('🔍 Omnibox received query update:', newQuery);
+      console.log('Omnibox received query update:', newQuery);
       setQuery(newQuery);
       search(newQuery);
     };
@@ -38,6 +44,50 @@ const OmniboxOverlayRoot: React.FC = () => {
       window.removeEventListener('omniboxQueryUpdate', handleQueryUpdate);
     };
   }, [search]);
+
+  // Reset selectedIndex when suggestions change (user typed new text)
+  useEffect(() => {
+    setSelectedIndex(-1);
+  }, [suggestions]);
+
+  // Listen for arrow key navigation from address bar
+  useEffect(() => {
+    const handleSelect = (event: Event) => {
+      const customEvent = event as CustomEvent<{ direction: string }>;
+      const direction = customEvent.detail.direction;
+      const maxIndex = suggestionsRef.current.length - 1;
+
+      setSelectedIndex(prev => {
+        let next: number;
+        if (direction === 'down') {
+          next = prev < maxIndex ? prev + 1 : maxIndex;
+        } else {
+          next = prev > -1 ? prev - 1 : -1;
+        }
+        return next;
+      });
+    };
+
+    window.addEventListener('omniboxSelect', handleSelect);
+    return () => {
+      window.removeEventListener('omniboxSelect', handleSelect);
+    };
+  }, []);
+
+  // Send selected suggestion back to address bar via IPC when selectedIndex changes
+  useEffect(() => {
+    if (!window.cefMessage) return;
+
+    if (selectedIndex >= 0 && selectedIndex < suggestions.length) {
+      const selected = suggestions[selectedIndex];
+      // For history: send URL. For search suggestions: send the title (query text).
+      const text = selected.type === 'history' ? selected.url : selected.title;
+      window.cefMessage.send('omnibox_autocomplete', text);
+    } else if (selectedIndex === -1) {
+      // Back to user-typed text — send empty to clear autocomplete
+      window.cefMessage.send('omnibox_autocomplete', '');
+    }
+  }, [selectedIndex, suggestions]);
 
   // Reset focus when query changes (clears any persistent MUI focus states)
   useEffect(() => {
@@ -84,6 +134,7 @@ const OmniboxOverlayRoot: React.FC = () => {
               suggestion={suggestion}
               query={query}
               isFirst={index === 0}
+              isSelected={index === selectedIndex}
             />
           ))}
         </List>
@@ -126,12 +177,13 @@ interface SuggestionItemProps {
   suggestion: Suggestion;
   query: string;
   isFirst: boolean;
+  isSelected: boolean;
 }
 
 /**
  * Individual suggestion item with icon and highlighted text
  */
-const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst }) => {
+const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected }) => {
   const handleClick = () => {
     // Navigate to the suggestion URL
     if (window.cefMessage) {
@@ -165,17 +217,18 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
           px: 1.5,
           cursor: 'pointer !important',
           userSelect: 'none',
+          backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
           '&:hover': {
-            backgroundColor: 'action.hover',
+            backgroundColor: isSelected ? '#e0e0e0' : 'action.hover',
           },
           '&:focus': {
-            backgroundColor: 'transparent',
+            backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
           },
           '&:active': {
             backgroundColor: 'action.hover',
           },
           '&.Mui-focusVisible': {
-            backgroundColor: 'transparent',
+            backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
           },
         }}
       >
@@ -193,7 +246,7 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
           primaryTypographyProps={{
             variant: 'body2',
             noWrap: true,
-            sx: { fontWeight: isFirst ? 500 : 400, cursor: 'pointer' }
+            sx: { fontWeight: isFirst || isSelected ? 500 : 400, cursor: 'pointer' }
           }}
           secondaryTypographyProps={{
             variant: 'caption',
