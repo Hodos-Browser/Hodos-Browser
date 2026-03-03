@@ -67,15 +67,16 @@ public:
      * @param y Y position within parent window (typically below header)
      * @param width Width of the tab's browser
      * @param height Height of the tab's browser
+     * @param window_id Which BrowserWindow owns this tab (0 = main window)
      * @return ID of the created tab
      *
      * @note The browser is created asynchronously. The CefRefPtr<CefBrowser>
      *       will be set later in RegisterTabBrowser() when OnAfterCreated is called
      */
 #ifdef _WIN32
-    int CreateTab(const std::string& url, HWND parent_hwnd, int x, int y, int width, int height);
+    int CreateTab(const std::string& url, HWND parent_hwnd, int x, int y, int width, int height, int window_id = 0);
 #else
-    int CreateTab(const std::string& url, void* parent_view, int x, int y, int width, int height);
+    int CreateTab(const std::string& url, void* parent_view, int x, int y, int width, int height, int window_id = 0);
 #endif
 
     /**
@@ -135,10 +136,38 @@ public:
     bool ReorderTabs(const std::vector<int>& order);
 
     /**
-     * @brief Get ID of active tab
+     * @brief Move a tab from one window to another (tab tear-off / merge)
+     *
+     * Reparents the tab's HWND to the target window, updates ownership,
+     * retargets the handler's window_id, switches to the tab in the target
+     * window, and auto-closes the source window if it becomes empty.
+     *
+     * @param tab_id ID of tab to move
+     * @param target_window_id Window to move the tab into
+     * @param insert_index Position in target window's tab order (-1 = append)
+     * @return true if move succeeded
+     */
+    bool MoveTabToWindow(int tab_id, int target_window_id, int insert_index = -1);
+
+    /**
+     * @brief Get ID of active tab (global — prefers per-window when available)
      * @return Active tab ID, or -1 if no tabs exist
      */
     int GetActiveTabId() const { return active_tab_id_; }
+
+    /**
+     * @brief Get ID of the active tab for a specific window
+     * @param window_id The window to query
+     * @return Active tab ID for that window, or -1 if none
+     */
+    int GetActiveTabIdForWindow(int window_id) const;
+
+    /**
+     * @brief Get the active tab for a specific window
+     * @param window_id The window to query
+     * @return Pointer to the active Tab, or nullptr
+     */
+    Tab* GetActiveTabForWindow(int window_id);
 
     /**
      * @brief Get number of tabs
@@ -239,8 +268,11 @@ private:
     // Explicit display order of tab IDs
     std::vector<int> tab_order_;
 
-    // ID of currently active (visible) tab
+    // ID of currently active (visible) tab (global)
     int active_tab_id_;
+
+    // Per-window active tab tracking (window_id -> active_tab_id)
+    std::map<int, int> active_tab_per_window_;
 
     // Next tab ID to assign (monotonically increasing)
     int next_tab_id_;

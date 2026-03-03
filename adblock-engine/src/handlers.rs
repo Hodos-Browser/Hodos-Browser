@@ -26,6 +26,17 @@ pub async fn health(engine: web::Data<AdblockEngine>) -> HttpResponse {
     }))
 }
 
+/// POST /shutdown — Graceful shutdown requested by CEF browser
+pub async fn shutdown() -> HttpResponse {
+    log::info!("Shutdown requested — exiting");
+    // Spawn a delayed exit so this response can be sent first
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        std::process::exit(0);
+    });
+    HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
+}
+
 // ============================================================================
 // Request Check
 // ============================================================================

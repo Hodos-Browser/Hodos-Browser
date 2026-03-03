@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type {
   BlockedDomainEntry,
   BlockLogEntry,
@@ -290,6 +290,21 @@ export const useCookieBlocking = () => {
       window.cefMessage?.send('cookie_reset_blocked_count', []);
     });
   }, []);
+
+  // Poll blocked count periodically (every 2s while mounted) — matches useAdblock pattern
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    fetchBlockedCount();
+    pollRef.current = setInterval(() => {
+      fetchBlockedCount();
+    }, 2000);
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+      }
+    };
+  }, [fetchBlockedCount]);
 
   return {
     blockedDomains,

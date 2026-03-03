@@ -4,7 +4,8 @@ import AddIcon from '@mui/icons-material/Add';
 import type { Tab } from '../types/TabTypes';
 import { TabComponent } from './TabComponent';
 
-const DRAG_THRESHOLD = 5; // px before drag starts
+const DRAG_THRESHOLD = 5; // px before horizontal drag starts
+const TEAROFF_THRESHOLD_Y = 40; // px below tab bar to trigger tear-off
 
 interface TabBarProps {
   tabs: Tab[];
@@ -14,6 +15,7 @@ interface TabBarProps {
   onCloseTab: (tabId: number) => void;
   onSwitchTab: (tabId: number) => void;
   onReorderTabs?: (fromIndex: number, toIndex: number) => void;
+  onTearOff?: (tabId: number, screenX: number, screenY: number) => void;
 }
 
 export const TabBar: React.FC<TabBarProps> = ({
@@ -24,14 +26,18 @@ export const TabBar: React.FC<TabBarProps> = ({
   onCloseTab,
   onSwitchTab,
   onReorderTabs,
+  onTearOff,
 }) => {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [ghostX, setGhostX] = useState(0); // cursor X for floating ghost
+  const [ghostY, setGhostY] = useState(0); // cursor Y for floating ghost (tear-off)
+  const [isTearingOff, setIsTearingOff] = useState(false);
 
   // Refs for pointer-event-based dragging
-  const pointerDownRef = useRef<{ index: number; startX: number; pointerId: number; tabRect: DOMRect | null } | null>(null);
+  const pointerDownRef = useRef<{ index: number; startX: number; startY: number; pointerId: number; tabRect: DOMRect | null } | null>(null);
   const isDraggingRef = useRef(false);
+  const isTearingOffRef = useRef(false);
   const tabRectsRef = useRef<DOMRect[]>([]);
   const tabElsRef = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -69,15 +75,54 @@ export const TabBar: React.FC<TabBarProps> = ({
     if (!onReorderTabs || tabs.length < 2) return;
     // Only primary button
     if (e.button !== 0) return;
+    // Don't start drag when clicking the close button
+    if ((e.target as HTMLElement).closest('.tab-close-btn')) return;
     const el = tabElsRef.current[index];
     const tabRect = el ? el.getBoundingClientRect() : null;
-    pointerDownRef.current = { index, startX: e.clientX, pointerId: e.pointerId, tabRect };
+    pointerDownRef.current = { index, startX: e.clientX, startY: e.clientY, pointerId: e.pointerId, tabRect };
+    // Capture pointer so events continue even when cursor leaves the header HWND
+    // (CEF windowed mode: sibling HWNDs steal mouse events without capture)
+    if (el) {
+      try { el.setPointerCapture(e.pointerId); } catch {}
+    }
   }, [onReorderTabs, tabs.length]);
 
   // Track dropIndex in a ref so pointerup can read it synchronously
   const dropIndexRef = useRef<number | null>(null);
   const onReorderTabsRef = useRef(onReorderTabs);
   onReorderTabsRef.current = onReorderTabs;
+  const onTearOffRef = useRef(onTearOff);
+  onTearOffRef.current = onTearOff;
+
+  // Helper to release pointer capture safely
+  const releaseCapture = useCallback(() => {
+    const down = pointerDownRef.current;
+    if (down) {
+      const el = tabElsRef.current[down.index];
+      if (el) {
+        try { el.releasePointerCapture(down.pointerId); } catch {}
+      }
+    }
+  }, []);
+
+  // Helper to reset all drag state
+  const resetDragState = useCallback(() => {
+    releaseCapture();
+    // Hide native ghost if it was showing
+    if (isTearingOffRef.current) {
+      window.cefMessage?.send('tab_ghost_hide');
+    }
+    pointerDownRef.current = null;
+    isDraggingRef.current = false;
+    isTearingOffRef.current = false;
+    dropIndexRef.current = null;
+    setDragIndex(null);
+    setDropIndex(null);
+    setIsTearingOff(false);
+  }, [releaseCapture]);
+
+  // Track last known screen coords for lostpointercapture fallback
+  const lastScreenRef = useRef({ x: 0, y: 0 });
 
   // Global pointermove + pointerup via useEffect
   useEffect(() => {
@@ -85,43 +130,101 @@ export const TabBar: React.FC<TabBarProps> = ({
       const down = pointerDownRef.current;
       if (!down) return;
 
-      const dx = Math.abs(e.clientX - down.startX);
+      // Track screen coords for fallback
+      lastScreenRef.current = { x: e.screenX, y: e.screenY };
 
-      // Start dragging after threshold
-      if (!isDraggingRef.current && dx >= DRAG_THRESHOLD) {
+      const dx = Math.abs(e.clientX - down.startX);
+      const dy = e.clientY - down.startY;
+
+      // Start dragging after threshold (horizontal or vertical)
+      if (!isDraggingRef.current && (dx >= DRAG_THRESHOLD || dy > TEAROFF_THRESHOLD_Y)) {
         isDraggingRef.current = true;
         setDragIndex(down.index);
         snapshotRects();
       }
 
       if (isDraggingRef.current) {
-        const newDrop = getDropIndex(e.clientX);
-        dropIndexRef.current = newDrop;
-        setDropIndex(newDrop);
+        // Check for tear-off: pointer moved far enough below the tab bar
+        if (dy > TEAROFF_THRESHOLD_Y && tabs.length > 1) {
+          if (!isTearingOffRef.current) {
+            isTearingOffRef.current = true;
+            setIsTearingOff(true);
+            // Show native ghost window (floats above all HWNDs)
+            const tab = tabs[down.index];
+            const rect = down.tabRect;
+            if (tab && rect) {
+              const dpr = window.devicePixelRatio || 1;
+              window.cefMessage?.send('tab_ghost_show',
+                tab.title || 'New Tab',
+                Math.round(rect.width * dpr),
+                Math.round(rect.height * dpr));
+            }
+          }
+        } else if (dy <= TEAROFF_THRESHOLD_Y) {
+          // Dragged back into tab bar area — cancel tear-off, resume reorder
+          if (isTearingOffRef.current) {
+            isTearingOffRef.current = false;
+            setIsTearingOff(false);
+            window.cefMessage?.send('tab_ghost_hide');
+          }
+        }
+
+        if (!isTearingOffRef.current) {
+          // Normal reorder: update drop index
+          const newDrop = getDropIndex(e.clientX);
+          dropIndexRef.current = newDrop;
+          setDropIndex(newDrop);
+        }
+
         setGhostX(e.clientX);
+        setGhostY(e.clientY);
       }
     };
 
-    const handlePointerUp = () => {
+    const handlePointerUp = (e: PointerEvent) => {
       const down = pointerDownRef.current;
-      const drop = dropIndexRef.current;
-      if (isDraggingRef.current && down !== null && drop !== null && drop !== down.index) {
-        onReorderTabsRef.current?.(down.index, drop);
+
+      if (isDraggingRef.current && down !== null) {
+        if (isTearingOffRef.current) {
+          // Tear-off: send IPC with screen coordinates
+          const tabId = tabs[down.index]?.id;
+          if (tabId !== undefined) {
+            onTearOffRef.current?.(tabId, e.screenX, e.screenY);
+          }
+        } else {
+          // Normal reorder
+          const drop = dropIndexRef.current;
+          if (drop !== null && drop !== down.index) {
+            onReorderTabsRef.current?.(down.index, drop);
+          }
+        }
       }
-      pointerDownRef.current = null;
-      isDraggingRef.current = false;
-      dropIndexRef.current = null;
-      setDragIndex(null);
-      setDropIndex(null);
+
+      resetDragState();
+    };
+
+    // Fallback: if pointer capture is lost (e.g. CEF HWND boundary edge case),
+    // fire the tear-off immediately using last known screen position
+    const handleLostCapture = () => {
+      const down = pointerDownRef.current;
+      if (isDraggingRef.current && down !== null && isTearingOffRef.current) {
+        const tabId = tabs[down.index]?.id;
+        if (tabId !== undefined) {
+          onTearOffRef.current?.(tabId, lastScreenRef.current.x, lastScreenRef.current.y);
+        }
+      }
+      resetDragState();
     };
 
     document.addEventListener('pointermove', handlePointerMove);
     document.addEventListener('pointerup', handlePointerUp);
+    document.addEventListener('lostpointercapture', handleLostCapture);
     return () => {
       document.removeEventListener('pointermove', handlePointerMove);
       document.removeEventListener('pointerup', handlePointerUp);
+      document.removeEventListener('lostpointercapture', handleLostCapture);
     };
-  }, [snapshotRects, getDropIndex]);
+  }, [snapshotRects, getDropIndex, tabs, resetDragState]);
 
   return (
     <Box
@@ -171,7 +274,7 @@ export const TabBar: React.FC<TabBarProps> = ({
 
         // Drop indicator: show on the side closest to where the dragged tab is coming from
         let dropIndicator: 'left' | 'right' | null = null;
-        if (dropIndex === index && dragIndex !== null && dragIndex !== index) {
+        if (!isTearingOff && dropIndex === index && dragIndex !== null && dragIndex !== index) {
           dropIndicator = dragIndex < index ? 'right' : 'left';
         }
 
@@ -199,21 +302,27 @@ export const TabBar: React.FC<TabBarProps> = ({
         );
       })}
 
-      {/* Floating ghost tab follows cursor during drag */}
-      {dragIndex !== null && tabs[dragIndex] && pointerDownRef.current?.tabRect && (
+      {/* Floating ghost tab follows cursor during drag (hidden during tear-off — native ghost takes over) */}
+      {dragIndex !== null && !isTearingOff && tabs[dragIndex] && pointerDownRef.current?.tabRect && (
         <Box
           sx={{
             position: 'fixed',
-            top: pointerDownRef.current.tabRect.top,
+            top: isTearingOff
+              ? ghostY - (pointerDownRef.current.tabRect.height / 2)
+              : pointerDownRef.current.tabRect.top,
             left: ghostX - (pointerDownRef.current.tabRect.width / 2),
             width: pointerDownRef.current.tabRect.width,
             height: pointerDownRef.current.tabRect.height,
-            opacity: 0.75,
+            opacity: isTearingOff ? 0.85 : 0.75,
             pointerEvents: 'none',
             zIndex: 9999,
             backgroundColor: '#ffffff',
             borderRadius: '7px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+            boxShadow: isTearingOff
+              ? '0 8px 24px rgba(0,0,0,0.35)'
+              : '0 2px 8px rgba(0,0,0,0.2)',
+            transform: isTearingOff ? 'scale(1.05)' : 'scale(1)',
+            transition: 'box-shadow 0.15s, transform 0.15s, opacity 0.15s',
             display: 'flex',
             alignItems: 'center',
             gap: '6px',

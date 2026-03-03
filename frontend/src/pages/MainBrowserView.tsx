@@ -117,6 +117,7 @@ const MainBrowserView: React.FC = () => {
         switchToTabByIndex,
         closeActiveTab,
         reorderTabs,
+        tearOffTab,
     } = useTabManager();
 
     // Cookie blocking (badge count + polling)
@@ -447,6 +448,7 @@ const MainBrowserView: React.FC = () => {
                 onCloseTab={closeTab}
                 onSwitchTab={switchToTab}
                 onReorderTabs={reorderTabs}
+                onTearOff={tearOffTab}
             />
 
             {/* Top Navigation Bar */}

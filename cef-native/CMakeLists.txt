@@ -162,6 +162,8 @@ elseif(WIN32)
     # Windows-specific files
     list(APPEND SOURCES
         cef_browser_shell.cpp
+        src/core/BrowserWindow.cpp
+        src/core/WindowManager.cpp
         src/core/WalletService.cpp
         src/core/IdentityHandler.cpp
         src/core/NavigationHandler.cpp

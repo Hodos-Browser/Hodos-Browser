@@ -45,6 +45,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(engine_data.clone())
             .route("/health", web::get().to(handlers::health))
+            .route("/shutdown", web::post().to(handlers::shutdown))
             .route("/check", web::post().to(handlers::check))
             .route("/status", web::get().to(handlers::status))
             .route("/toggle", web::post().to(handlers::toggle))

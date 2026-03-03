@@ -156,6 +156,13 @@ pub async fn health() -> HttpResponse {
     }))
 }
 
+// Graceful shutdown — called by CEF browser before process termination
+pub async fn shutdown(data: web::Data<crate::AppState>) -> HttpResponse {
+    log::info!("🛑 /shutdown received — initiating graceful shutdown");
+    data.shutdown.cancel();
+    HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
+}
+
 // BRC-100 status check
 pub async fn brc100_status() -> HttpResponse {
     log::info!("📋 /brc100/status called");

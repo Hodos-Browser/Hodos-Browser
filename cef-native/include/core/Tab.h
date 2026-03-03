@@ -29,6 +29,9 @@ struct Tab {
     // Unique identifier for this tab
     int id;
 
+    // Which BrowserWindow owns this tab (0 = main window)
+    int window_id = 0;
+
     // Current page title (updated from OnTitleChange)
     std::string title;
 

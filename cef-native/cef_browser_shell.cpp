@@ -35,6 +35,7 @@
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
 #include "include/core/AdblockCache.h"
+#include "include/core/WindowManager.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -203,6 +204,7 @@ void HandleFullscreenChange(bool fullscreen) {
 }
 
 // Save current session tabs to session.json (called before browsers are closed)
+// Version 2 format supports multi-window layout.
 void SaveSession() {
     // Only save if session restore is enabled
     auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
@@ -217,39 +219,67 @@ void SaveSession() {
         return;
     }
 
-    std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
+    std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
     int activeTabId = TabManager::GetInstance().GetActiveTabId();
+    std::vector<BrowserWindow*> windows = WindowManager::GetInstance().GetAllWindows();
 
     nlohmann::json sessionJson;
-    sessionJson["version"] = 1;
-    sessionJson["tabs"] = nlohmann::json::array();
-    sessionJson["activeTabIndex"] = 0;
+    sessionJson["version"] = 2;
+    sessionJson["windows"] = nlohmann::json::array();
 
-    int tabIndex = 0;
-    int activeIndex = 0;
-    for (Tab* tab : tabs) {
-        if (!tab) continue;
+    int totalSavedTabs = 0;
 
-        std::string url = tab->url;
-        // Filter out internal URLs — don't save NTP, about:blank, or empty
-        if (url.empty() || url == "about:blank") continue;
-        if (url.find("127.0.0.1:5137") != std::string::npos) continue;
+    for (BrowserWindow* bw : windows) {
+        if (!bw) continue;
 
-        nlohmann::json tabEntry;
-        tabEntry["url"] = url;
-        tabEntry["title"] = tab->title;
-        sessionJson["tabs"].push_back(tabEntry);
+        nlohmann::json winJson;
+        winJson["tabs"] = nlohmann::json::array();
+        winJson["activeTabIndex"] = 0;
 
-        if (tab->id == activeTabId) {
-            activeIndex = tabIndex;
+        // Save window position/size
+#ifdef _WIN32
+        if (bw->hwnd && IsWindow(bw->hwnd)) {
+            RECT wr;
+            GetWindowRect(bw->hwnd, &wr);
+            winJson["x"] = static_cast<int>(wr.left);
+            winJson["y"] = static_cast<int>(wr.top);
+            winJson["width"] = static_cast<int>(wr.right - wr.left);
+            winJson["height"] = static_cast<int>(wr.bottom - wr.top);
         }
-        tabIndex++;
+#endif
+
+        int tabIndex = 0;
+        int activeIndex = 0;
+        for (Tab* tab : allTabs) {
+            if (!tab || tab->window_id != bw->window_id) continue;
+
+            std::string url = tab->url;
+            // Filter out internal URLs — don't save NTP, about:blank, or empty
+            if (url.empty() || url == "about:blank") continue;
+            if (url.find("127.0.0.1:5137") != std::string::npos) continue;
+
+            nlohmann::json tabEntry;
+            tabEntry["url"] = url;
+            tabEntry["title"] = tab->title;
+            winJson["tabs"].push_back(tabEntry);
+
+            if (tab->id == activeTabId) {
+                activeIndex = tabIndex;
+            }
+            tabIndex++;
+        }
+
+        winJson["activeTabIndex"] = activeIndex;
+
+        // Only include windows that have restorable tabs
+        if (!winJson["tabs"].empty()) {
+            sessionJson["windows"].push_back(winJson);
+            totalSavedTabs += static_cast<int>(winJson["tabs"].size());
+        }
     }
 
-    sessionJson["activeTabIndex"] = activeIndex;
-
     // Only save if we have actual tabs to restore
-    if (sessionJson["tabs"].empty()) {
+    if (totalSavedTabs == 0) {
         LOG_INFO("📋 No restorable tabs — skipping session save");
         return;
     }
@@ -265,7 +295,8 @@ void SaveSession() {
         if (out.is_open()) {
             out << sessionJson.dump(2);
             out.close();
-            LOG_INFO("📋 Session saved: " + std::to_string(sessionJson["tabs"].size()) + " tabs to " + sessionPath);
+            LOG_INFO("📋 Session saved: " + std::to_string(totalSavedTabs) + " tabs across " +
+                     std::to_string(sessionJson["windows"].size()) + " windows to " + sessionPath);
         } else {
             LOG_ERROR("📋 Failed to open session.json for writing: " + sessionPath);
         }
@@ -554,6 +585,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             LOG_DEBUG("🔄 Main window moved to: " + std::to_string(mainRect.left) + ", " + std::to_string(mainRect.top));
 
+            // Overlays only exist on the primary window (window 0).
+            // Skip overlay repositioning for secondary windows.
+            BrowserWindow* moveBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            if (moveBw && moveBw->window_id != 0) {
+                break;  // Secondary window — no overlays to reposition
+            }
+
             // Move settings overlay if it exists and is visible (right-side popup)
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
                 RECT headerRect;
@@ -679,13 +717,17 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
 
+            // Get BrowserWindow for this HWND (works for primary + secondary windows)
+            BrowserWindow* bw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            HWND thisHeaderHwnd = bw ? bw->header_hwnd : g_header_hwnd;
+
             // Resize header window
-            if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-                SetWindowPos(g_header_hwnd, nullptr, 0, 0, width, shellHeight,
+            if (thisHeaderHwnd && IsWindow(thisHeaderHwnd)) {
+                SetWindowPos(thisHeaderHwnd, nullptr, 0, 0, width, shellHeight,
                     SWP_NOZORDER | SWP_NOACTIVATE);
 
                 // Resize the CEF browser in the header window
-                CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+                CefRefPtr<CefBrowser> header_browser = bw ? bw->header_browser : SimpleHandler::GetHeaderBrowser();
                 if (header_browser) {
                     HWND header_cef_hwnd = header_browser->GetHost()->GetWindowHandle();
                     if (header_cef_hwnd && IsWindow(header_cef_hwnd)) {
@@ -713,10 +755,11 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Resize all tab windows and browsers (NEW for tab management)
+            // Resize tab windows belonging to this window
+            int thisWindowId = bw ? bw->window_id : 0;
             std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
             for (Tab* tab : tabs) {
-                if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
+                if (tab && tab->window_id == thisWindowId && tab->hwnd && IsWindow(tab->hwnd)) {
                     // Position tab window below header
                     SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
                                 SWP_NOZORDER | SWP_NOACTIVATE);
@@ -731,6 +774,12 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         }
                     }
                 }
+            }
+
+            // Overlays only exist on the primary window (window 0).
+            // Skip overlay repositioning for secondary windows.
+            if (bw && bw->window_id != 0) {
+                return 0;
             }
 
             // Resize overlay windows if they exist and are visible
@@ -869,7 +918,23 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
 
+        case WM_ACTIVATE: {
+            // Track which window is active for per-window operations (Ctrl+T, etc.)
+            if (LOWORD(wParam) != WA_INACTIVE) {
+                BrowserWindow* activatedBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+                if (activatedBw) {
+                    WindowManager::GetInstance().SetActiveWindowId(activatedBw->window_id);
+                    LOG_DEBUG("🪟 Active window set to " + std::to_string(activatedBw->window_id));
+                }
+            }
+            break;
+        }
+
         case WM_ACTIVATEAPP: {
+            // Only the primary window manages overlay dismissal on focus loss
+            BrowserWindow* activeBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            if (activeBw && activeBw->window_id != 0) break;
+
             // wParam is TRUE if app is being activated, FALSE if deactivated
             if (!wParam) {
                 // App is losing focus
@@ -881,14 +946,15 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
-                // Close wallet overlay if it's open
+                // Close wallet overlay if it's open (use stored BrowserWindow* for correct browser)
                 LOG_DEBUG("📱 App losing focus - closing wallet overlay if open");
                 if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                     LOG_INFO("💰 Closing wallet overlay due to app focus loss");
-                    // Hide immediately for instant visual feedback
                     ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
-                    // Then close the browser and destroy window
-                    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+                    // Get wallet browser from HWND user data (correct for any window)
+                    BrowserWindow* walletBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA));
+                    CefRefPtr<CefBrowser> wallet_browser = (walletBw && walletBw->wallet_browser)
+                        ? walletBw->wallet_browser : SimpleHandler::GetWalletBrowser();
                     if (wallet_browser) {
                         wallet_browser->GetHost()->CloseBrowser(false);
                     }
@@ -912,15 +978,56 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             break;
         }
 
-        case WM_CLOSE:
-            LOG_INFO("🛑 Main shell window received WM_CLOSE - starting graceful shutdown...");
-            ShutdownApplication();
-            PostQuitMessage(0);
+        case WM_CLOSE: {
+            // Determine which BrowserWindow this HWND belongs to
+            BrowserWindow* bw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            int wid = bw ? bw->window_id : 0;
+
+            if (wid == 0 || WindowManager::GetInstance().GetWindowCount() <= 1) {
+                // Primary window or last window — full graceful shutdown
+                LOG_INFO("🛑 Last/primary window received WM_CLOSE - starting graceful shutdown...");
+                ShutdownApplication();
+                PostQuitMessage(0);
+            } else {
+                // Secondary window — close only this window's tabs and clean up
+                LOG_INFO("🛑 Window " + std::to_string(wid) + " received WM_CLOSE - closing window...");
+
+                // Close tabs belonging to this window
+                std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+                for (Tab* tab : allTabs) {
+                    if (tab && tab->window_id == wid) {
+                        TabManager::GetInstance().CloseTab(tab->id);
+                    }
+                }
+
+                // Close header browser
+                if (bw->header_browser) {
+                    bw->header_browser->GetHost()->CloseBrowser(false);
+                }
+
+                // Destroy header HWND
+                if (bw->header_hwnd && IsWindow(bw->header_hwnd)) {
+                    DestroyWindow(bw->header_hwnd);
+                }
+
+                // Remove from WindowManager
+                WindowManager::GetInstance().RemoveWindow(wid);
+
+                // Destroy the shell window
+                DestroyWindow(hwnd);
+
+                // Notify remaining windows of tab list change
+                SimpleHandler::NotifyTabListChanged();
+            }
             return 0;
+        }
 
         case WM_DESTROY:
-            LOG_INFO("🛑 Main shell window received WM_DESTROY");
-            PostQuitMessage(0);
+            // Only post quit if no windows remain
+            if (WindowManager::GetInstance().GetWindowCount() == 0) {
+                LOG_INFO("🛑 Last window destroyed - posting quit message");
+                PostQuitMessage(0);
+            }
             break;
     }
 
@@ -1015,6 +1122,14 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 }
 
 LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Get the wallet browser from the BrowserWindow* stored in GWLP_USERDATA.
+    // This correctly routes to the window that opened the wallet (not always window 0).
+    auto getWalletBrowser = [hwnd]() -> CefRefPtr<CefBrowser> {
+        BrowserWindow* bw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+        if (bw && bw->wallet_browser) return bw->wallet_browser;
+        return SimpleHandler::GetWalletBrowser();  // fallback to window 0
+    };
+
     switch (msg) {
         case WM_MOUSEACTIVATE:
             LOG_DEBUG("👆 Wallet Overlay HWND received WM_MOUSEACTIVATE");
@@ -1026,17 +1141,15 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetFocus(hwnd);
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            // Translate to CEF MouseEvent
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
             mouse_event.modifiers = 0;
 
-            // Find the wallet browser
-            CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
-                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);  // mouse down
-                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);   // mouse up
+                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
                 LOG_DEBUG("🧠 Left-click sent to wallet overlay browser");
             } else {
                 LOG_DEBUG("⚠️ No wallet overlay browser to send left-click");
@@ -1050,17 +1163,15 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetFocus(hwnd);
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            // Translate to CEF MouseEvent
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
             mouse_event.modifiers = 0;
 
-            // Find the wallet browser
-            CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
-                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);  // mouse down
-                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);   // mouse up
+                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+                wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
                 LOG_DEBUG("🧠 Right-click sent to wallet overlay browser");
             } else {
                 LOG_DEBUG("⚠️ No wallet overlay browser to send right-click");
@@ -1073,17 +1184,14 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             LOG_DEBUG("⌨️ Wallet Overlay received WM_KEYDOWN - key: " + std::to_string(wParam));
             SetFocus(hwnd);
 
-            // Find the wallet browser
-            CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
-                // Create CEF key event
                 CefKeyEvent key_event;
                 key_event.type = KEYEVENT_KEYDOWN;
                 key_event.windows_key_code = wParam;
                 key_event.native_key_code = lParam;
                 key_event.is_system_key = false;
 
-                // Check for modifier keys
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
@@ -1104,17 +1212,14 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             LOG_DEBUG("⌨️ Wallet Overlay received WM_KEYUP - key: " + std::to_string(wParam));
             SetFocus(hwnd);
 
-            // Find the wallet browser
-            CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
-                // Create CEF key event
                 CefKeyEvent key_event;
                 key_event.type = KEYEVENT_KEYUP;
                 key_event.windows_key_code = wParam;
                 key_event.native_key_code = lParam;
                 key_event.is_system_key = false;
 
-                // Check for modifier keys
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
@@ -1135,17 +1240,14 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             LOG_DEBUG("⌨️ Wallet Overlay received WM_CHAR - char: " + std::to_string(wParam));
             SetFocus(hwnd);
 
-            // Find the wallet browser
-            CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
-                // Create CEF key event
                 CefKeyEvent key_event;
                 key_event.type = KEYEVENT_CHAR;
                 key_event.windows_key_code = wParam;
                 key_event.native_key_code = lParam;
                 key_event.is_system_key = false;
 
-                // Check for modifier keys
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
@@ -1162,6 +1264,20 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
 
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
+            if (wallet_browser) {
+                wallet_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
         case WM_CLOSE:
             LOG_DEBUG("❌ Wallet Overlay received WM_CLOSE - destroying window");
             DestroyWindow(hwnd);
@@ -1169,15 +1285,25 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
         case WM_DESTROY:
             LOG_DEBUG("❌ Wallet Overlay received WM_DESTROY - cleaning up");
-            // Clean up any resources if needed
             return 0;
 
         case WM_ACTIVATE:
             LOG_DEBUG("⚡ Wallet HWND activated with state: " + std::to_string(LOWORD(wParam)));
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                // Wallet lost focus — close it (cross-window click-outside)
+                LOG_INFO("💰 Closing wallet overlay — lost activation (click-outside)");
+                ShowWindow(hwnd, SW_HIDE);
+                CefRefPtr<CefBrowser> wallet_close_browser = getWalletBrowser();
+                if (wallet_close_browser) {
+                    wallet_close_browser->GetHost()->CloseBrowser(false);
+                }
+                DestroyWindow(hwnd);
+                g_wallet_overlay_hwnd = nullptr;
+                return 0;
+            }
             break;
 
         case WM_WINDOWPOSCHANGING:
-            // Allow normal z-order changes for better window management
             break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -2104,6 +2230,39 @@ static bool QuickHealthCheck() {
 }
 
 // Start the Rust wallet server as a subprocess (or detect if already running)
+// Send POST /shutdown to a localhost service. Returns true if the request succeeded.
+// Used for graceful shutdown of wallet (3301) and adblock (3302) servers.
+static bool SendShutdownRequest(int port) {
+    HINTERNET hSession = WinHttpOpen(L"HodosBrowser/Shutdown",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    DWORD timeout = 2000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", static_cast<INTERNET_PORT>(port), 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/shutdown",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    BOOL ok = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    bool success = false;
+    if (ok) {
+        success = WinHttpReceiveResponse(hRequest, nullptr) == TRUE;
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return success;
+}
+
 void StartWalletServer() {
     // First check if wallet server is already running (dev workflow: cargo run separately)
     if (QuickHealthCheck()) {
@@ -2182,14 +2341,33 @@ void StartWalletServer() {
     g_walletServerRunning = true;  // Process was launched, just slow to start
 }
 
-// Stop the Rust wallet server subprocess
+// Stop the Rust wallet server subprocess — graceful first, forceful fallback
 void StopWalletServer() {
     if (!g_walletServerRunning) return;
 
     if (g_walletServerProcess.hProcess) {
-        LOG_INFO("Terminating wallet server (PID: " + std::to_string(g_walletServerProcess.dwProcessId) + ")");
-        TerminateProcess(g_walletServerProcess.hProcess, 0);
-        WaitForSingleObject(g_walletServerProcess.hProcess, 3000);
+        // Step 1: Try graceful shutdown via HTTP (lets wallet flush SQLite WAL)
+        LOG_INFO("Requesting graceful wallet server shutdown (PID: " +
+                 std::to_string(g_walletServerProcess.dwProcessId) + ")...");
+        bool shutdownSent = SendShutdownRequest(3301);
+
+        if (shutdownSent) {
+            // Wait up to 5 seconds for graceful exit
+            DWORD waitResult = WaitForSingleObject(g_walletServerProcess.hProcess, 5000);
+            if (waitResult == WAIT_OBJECT_0) {
+                LOG_INFO("Wallet server exited gracefully");
+            } else {
+                LOG_WARNING("Wallet server did not exit within 5s — force terminating");
+                TerminateProcess(g_walletServerProcess.hProcess, 0);
+                WaitForSingleObject(g_walletServerProcess.hProcess, 2000);
+            }
+        } else {
+            // Step 2: Graceful request failed — force terminate
+            LOG_WARNING("Graceful shutdown request failed — force terminating wallet server");
+            TerminateProcess(g_walletServerProcess.hProcess, 0);
+            WaitForSingleObject(g_walletServerProcess.hProcess, 2000);
+        }
+
         CloseHandle(g_walletServerProcess.hProcess);
         CloseHandle(g_walletServerProcess.hThread);
         ZeroMemory(&g_walletServerProcess, sizeof(PROCESS_INFORMATION));
@@ -2334,14 +2512,30 @@ void StartAdblockServer() {
     g_adblockServerRunning = true;
 }
 
-// Stop the adblock engine subprocess
+// Stop the adblock engine subprocess — graceful first, forceful fallback
 void StopAdblockServer() {
     if (!g_adblockServerRunning) return;
 
     if (g_adblockServerProcess.hProcess) {
-        LOG_INFO("Terminating adblock engine (PID: " + std::to_string(g_adblockServerProcess.dwProcessId) + ")");
-        TerminateProcess(g_adblockServerProcess.hProcess, 0);
-        WaitForSingleObject(g_adblockServerProcess.hProcess, 3000);
+        LOG_INFO("Requesting graceful adblock engine shutdown (PID: " +
+                 std::to_string(g_adblockServerProcess.dwProcessId) + ")...");
+        bool shutdownSent = SendShutdownRequest(3302);
+
+        if (shutdownSent) {
+            DWORD waitResult = WaitForSingleObject(g_adblockServerProcess.hProcess, 3000);
+            if (waitResult == WAIT_OBJECT_0) {
+                LOG_INFO("Adblock engine exited gracefully");
+            } else {
+                LOG_WARNING("Adblock engine did not exit within 3s — force terminating");
+                TerminateProcess(g_adblockServerProcess.hProcess, 0);
+                WaitForSingleObject(g_adblockServerProcess.hProcess, 2000);
+            }
+        } else {
+            LOG_WARNING("Graceful shutdown request failed — force terminating adblock engine");
+            TerminateProcess(g_adblockServerProcess.hProcess, 0);
+            WaitForSingleObject(g_adblockServerProcess.hProcess, 2000);
+        }
+
         CloseHandle(g_adblockServerProcess.hProcess);
         CloseHandle(g_adblockServerProcess.hThread);
         ZeroMemory(&g_adblockServerProcess, sizeof(PROCESS_INFORMATION));
@@ -2358,6 +2552,11 @@ void StopAdblockServer() {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
+
+    // Create the primary BrowserWindow (window 0) in WindowManager.
+    // This must happen before any code that accesses MAIN_WINDOW().
+    WindowManager::GetInstance().CreateWindowRecord();  // returns 0
+
     CefMainArgs main_args(hInstance);
     CefRefPtr<SimpleApp> app(new SimpleApp());
 
@@ -2611,10 +2810,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         WS_CHILD, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
     // Note: Removed WS_VISIBLE - this window was blocking input to tabs!
 
-    // 🌍 Assign to globals
+    // 🌍 Assign to globals + sync to BrowserWindow 0
     g_hwnd = hwnd;
     g_header_hwnd = header_hwnd;
     g_webview_hwnd = webview_hwnd;
+
+    // Mirror into BrowserWindow 0 for WindowManager-based lookups
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) {
+        mainWin->hwnd = hwnd;
+        mainWin->header_hwnd = header_hwnd;
+        mainWin->webview_hwnd = webview_hwnd;
+    }
+
+    // Store BrowserWindow* in HWND user data so ShellWindowProc can find it
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(mainWin));
 
     ShowWindow(hwnd, SW_SHOW);        UpdateWindow(hwnd);
     ShowWindow(header_hwnd, SW_SHOW); UpdateWindow(header_hwnd);

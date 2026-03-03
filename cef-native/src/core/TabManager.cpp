@@ -1,6 +1,7 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/SessionManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
+#include "../../include/core/WindowManager.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
 #include "include/wrapper/cef_helpers.h"
@@ -8,6 +9,7 @@
 #include "include/base/cef_bind.h"
 #include "include/cef_task.h"
 #include <algorithm>
+#include <set>
 #include <sstream>
 
 // External global variables from cef_browser_shell.cpp
@@ -49,17 +51,18 @@ TabManager::~TabManager() {
 
 // ========== Tab Lifecycle Methods ==========
 
-int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y, int width, int height) {
+int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y, int width, int height, int window_id) {
     CEF_REQUIRE_UI_THREAD();
 
     int tab_id = GetNextTabId();
     std::string tab_url = url.empty() ? "http://127.0.0.1:5137/newtab" : url;
 
-    LOG(INFO) << "Creating tab " << tab_id << " with URL: " << tab_url;
+    LOG(INFO) << "Creating tab " << tab_id << " with URL: " << tab_url << " in window " << window_id;
     LOG(INFO) << "Tab position: x=" << x << ", y=" << y << ", width=" << width << ", height=" << height;
 
     // Create Tab struct
     Tab new_tab(tab_id, tab_url);
+    new_tab.window_id = window_id;
 
     // Create HWND for this tab's browser
     // Use same window style as header (which works correctly)
@@ -87,7 +90,7 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     role_ss << "tab_" << tab_id;
     std::string role = role_ss.str();
 
-    new_tab.handler = new SimpleHandler(role);
+    new_tab.handler = new SimpleHandler(role, window_id);
     LOG(INFO) << "Created SimpleHandler for tab " << tab_id << " with role: " << role;
 
     // Add tab to map BEFORE creating browser
@@ -96,9 +99,9 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     tabs_[tab_id] = new_tab;
     tab_order_.push_back(tab_id);
 
-    // Notify frontend immediately so tab UI renders before page navigation starts
-    // This prevents the jarring effect where the page loads before the tab appears
-    SimpleHandler::NotifyTabListChanged();
+    // Notify the owning window's frontend so tab UI renders before page navigation starts.
+    // Uses per-window notification to avoid triggering unnecessary re-renders in other windows.
+    SimpleHandler::NotifyWindowTabListChanged(window_id);
 
     // Configure CEF browser settings
     RECT cef_rect;
@@ -155,10 +158,12 @@ bool TabManager::CloseTab(int tab_id) {
     }
 
     Tab& tab = it->second;
-    LOG(INFO) << "Closing tab " << tab_id << " (URL: " << tab.url << ")";
+    int win_id = tab.window_id;
+    LOG(INFO) << "Closing tab " << tab_id << " (URL: " << tab.url << ") in window " << win_id;
 
-    // If this is the active tab, switch to another tab BEFORE closing
-    if (tab_id == active_tab_id_ && tabs_.size() > 1) {
+    // If this is the active tab for its window, switch to another tab in the same window
+    int activeForWindow = GetActiveTabIdForWindow(win_id);
+    if (tab_id == activeForWindow) {
         int new_active_id = FindTabToSwitchTo(tab_id);
         if (new_active_id != -1) {
             SwitchToTab(new_active_id);
@@ -194,6 +199,7 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
     }
 
     Tab& tab = it->second;
+    int closed_window_id = tab.window_id;
     LOG(INFO) << "Browser closed callback for tab " << tab_id << " - cleaning up resources";
 
     // Clear the browser reference first (safe)
@@ -225,6 +231,22 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
         active_tab_id_ = -1;
         LOG(INFO) << "All tabs closed";
     }
+
+    // Auto-close window when its last tab closes (matches Chrome/Brave behavior)
+    int remaining_in_window = 0;
+    for (const auto& pair : tabs_) {
+        if (pair.second.window_id == closed_window_id) {
+            remaining_in_window++;
+        }
+    }
+
+    if (remaining_in_window == 0) {
+        BrowserWindow* bw = WindowManager::GetInstance().GetWindow(closed_window_id);
+        if (bw && bw->hwnd && IsWindow(bw->hwnd)) {
+            LOG(INFO) << "Last tab closed in window " << closed_window_id << " — closing window";
+            PostMessage(bw->hwnd, WM_CLOSE, 0, 0);
+        }
+    }
 }
 
 bool TabManager::SwitchToTab(int tab_id) {
@@ -236,15 +258,16 @@ bool TabManager::SwitchToTab(int tab_id) {
         return false;
     }
 
-    LOG(INFO) << "Switching to tab " << tab_id;
+    int target_window = it->second.window_id;
+    LOG(INFO) << "Switching to tab " << tab_id << " in window " << target_window;
 
-    // Hide all tabs
+    // Hide only tabs in the same window (don't affect other windows)
     for (auto& pair : tabs_) {
         Tab& tab = pair.second;
-        if (tab.hwnd && IsWindow(tab.hwnd)) {
+        if (tab.window_id == target_window && tab.hwnd && IsWindow(tab.hwnd)) {
             ShowWindow(tab.hwnd, SW_HIDE);
+            tab.is_visible = false;
         }
-        tab.is_visible = false;
     }
 
     // Show the selected tab
@@ -262,6 +285,7 @@ bool TabManager::SwitchToTab(int tab_id) {
     }
 
     active_tab_id_ = tab_id;
+    active_tab_per_window_[target_window] = tab_id;
     LOG(INFO) << "Switched to tab " << tab_id << " (URL: " << tab.url << ")";
 
     return true;
@@ -309,20 +333,122 @@ std::vector<Tab*> TabManager::GetAllTabs() {
 }
 
 bool TabManager::ReorderTabs(const std::vector<int>& order) {
-    // Validate: all IDs must exist and count must match
-    if (order.size() != tabs_.size()) {
-        LOG(WARNING) << "ReorderTabs: size mismatch - order has " << order.size()
-                     << " but " << tabs_.size() << " tabs exist";
-        return false;
-    }
+    // Validate: all IDs in the order must exist in tabs_
     for (int id : order) {
         if (tabs_.find(id) == tabs_.end()) {
             LOG(WARNING) << "ReorderTabs: tab ID " << id << " not found";
             return false;
         }
     }
-    tab_order_ = order;
-    LOG(INFO) << "Tabs reordered successfully";
+
+    // Multi-window safe: the frontend sends only its window's tab IDs.
+    // Rebuild tab_order_ keeping tabs NOT in this reorder set in their
+    // original positions, then append the reordered tabs at end.
+    std::set<int> reordered_set(order.begin(), order.end());
+    std::vector<int> new_order;
+    new_order.reserve(tab_order_.size());
+
+    for (int id : tab_order_) {
+        if (reordered_set.find(id) == reordered_set.end()) {
+            new_order.push_back(id);
+        }
+    }
+    for (int id : order) {
+        new_order.push_back(id);
+    }
+
+    tab_order_ = new_order;
+    LOG(INFO) << "Tabs reordered successfully (" << order.size() << " tabs in subset)";
+    return true;
+}
+
+// ========== Tab Move (Tear-off / Merge) ==========
+
+bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_index) {
+    CEF_REQUIRE_UI_THREAD();
+
+    Tab* tab = GetTab(tab_id);
+    if (!tab) {
+        LOG(WARNING) << "MoveTabToWindow: tab " << tab_id << " not found";
+        return false;
+    }
+
+    int source_window_id = tab->window_id;
+    if (source_window_id == target_window_id) {
+        LOG(WARNING) << "MoveTabToWindow: tab " << tab_id << " already in window " << target_window_id;
+        return false;
+    }
+
+    BrowserWindow* target_bw = WindowManager::GetInstance().GetWindow(target_window_id);
+    if (!target_bw) {
+        LOG(WARNING) << "MoveTabToWindow: target window " << target_window_id << " not found";
+        return false;
+    }
+
+#ifdef _WIN32
+    // 1. Reparent the HWND to the target window
+    if (tab->hwnd && target_bw->hwnd) {
+        SetParent(tab->hwnd, target_bw->hwnd);
+
+        // Resize tab to fit target window
+        RECT r;
+        GetClientRect(target_bw->hwnd, &r);
+        int totalH = r.bottom - r.top;
+        int shellH = (std::max)(100, static_cast<int>(totalH * 0.12));
+        int tabH = totalH - shellH;
+        SetWindowPos(tab->hwnd, nullptr, 0, shellH, r.right - r.left, tabH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+#endif
+
+    // 2. Update tab ownership
+    LOG(INFO) << "MoveTabToWindow: moving tab " << tab_id
+              << " from window " << source_window_id << " to window " << target_window_id;
+    tab->window_id = target_window_id;
+
+    // 3. Update handler's window_id so IPC routes correctly
+    if (tab->handler) {
+        tab->handler->SetWindowId(target_window_id);
+    }
+
+    // 4. If this was the active tab in the source window, switch source to another tab
+    int source_active = GetActiveTabIdForWindow(source_window_id);
+    if (source_active == tab_id) {
+        int replacement = -1;
+        for (auto& [id, t] : tabs_) {
+            if (id != tab_id && t.window_id == source_window_id) {
+                replacement = id;
+                break;
+            }
+        }
+        if (replacement != -1) {
+            SwitchToTab(replacement);
+        }
+        active_tab_per_window_.erase(source_window_id);
+    }
+
+    // 5. Switch to the moved tab in the target window (show it, hide others)
+    SwitchToTab(tab_id);
+
+    // 6. Notify both windows
+    SimpleHandler::NotifyWindowTabListChanged(source_window_id);
+    SimpleHandler::NotifyWindowTabListChanged(target_window_id);
+
+    // 7. Auto-close source window if it has no tabs left
+    int remaining = 0;
+    for (auto& [id, t] : tabs_) {
+        if (t.window_id == source_window_id) remaining++;
+    }
+    if (remaining == 0) {
+        BrowserWindow* src_bw = WindowManager::GetInstance().GetWindow(source_window_id);
+        if (src_bw && src_bw->hwnd && IsWindow(src_bw->hwnd)) {
+            LOG(INFO) << "MoveTabToWindow: source window " << source_window_id
+                      << " has no tabs left — closing";
+            PostMessage(src_bw->hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+
+    LOG(INFO) << "MoveTabToWindow: tab " << tab_id << " moved successfully";
     return true;
 }
 
@@ -396,19 +522,23 @@ int TabManager::FindTabToSwitchTo(int closing_tab_id) {
         return -1;
     }
 
-    // If closing a tab that's not active, keep current active tab
-    if (closing_tab_id != active_tab_id_) {
-        return active_tab_id_;
+    auto closing_it = tabs_.find(closing_tab_id);
+    if (closing_it == tabs_.end()) return -1;
+    int closing_window = closing_it->second.window_id;
+
+    // If closing a tab that's not the active tab for its window, keep the window's active tab
+    int activeForWindow = GetActiveTabIdForWindow(closing_window);
+    if (closing_tab_id != activeForWindow) {
+        return activeForWindow;
     }
 
-    // Find most recently accessed tab (excluding the one being closed)
+    // Find most recently accessed tab in the SAME WINDOW (excluding the one being closed)
     int most_recent_tab_id = -1;
     std::chrono::system_clock::time_point most_recent_time;
 
     for (const auto& pair : tabs_) {
-        if (pair.first == closing_tab_id) {
-            continue; // Skip the tab being closed
-        }
+        if (pair.first == closing_tab_id) continue;
+        if (pair.second.window_id != closing_window) continue;
 
         const Tab& tab = pair.second;
         if (most_recent_tab_id == -1 || tab.last_accessed > most_recent_time) {
@@ -418,4 +548,25 @@ int TabManager::FindTabToSwitchTo(int closing_tab_id) {
     }
 
     return most_recent_tab_id;
+}
+
+int TabManager::GetActiveTabIdForWindow(int window_id) const {
+    auto it = active_tab_per_window_.find(window_id);
+    if (it != active_tab_per_window_.end()) {
+        return it->second;
+    }
+    // Fallback: if no per-window tracking yet, check if global active tab is in this window
+    if (active_tab_id_ != -1) {
+        auto tab_it = tabs_.find(active_tab_id_);
+        if (tab_it != tabs_.end() && tab_it->second.window_id == window_id) {
+            return active_tab_id_;
+        }
+    }
+    return -1;
+}
+
+Tab* TabManager::GetActiveTabForWindow(int window_id) {
+    int id = GetActiveTabIdForWindow(window_id);
+    if (id == -1) return nullptr;
+    return GetTab(id);
 }

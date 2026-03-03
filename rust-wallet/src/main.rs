@@ -419,6 +419,7 @@ async fn main() -> std::io::Result<()> {
 
             // Health check
             .route("/health", web::get().to(handlers::health))
+            .route("/shutdown", web::post().to(handlers::shutdown))
             .route("/brc100/status", web::get().to(handlers::brc100_status))
 
             // BRC-100 standard endpoints

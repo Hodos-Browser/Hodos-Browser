@@ -85,6 +85,11 @@ export const useTabManager = () => {
     }
   }, [state.activeTabId, closeTab]);
 
+  // Tear off tab to new window or merge into another window
+  const tearOffTab = useCallback((tabId: number, screenX: number, screenY: number) => {
+    window.cefMessage?.send('tab_tearoff', tabId, screenX, screenY);
+  }, []);
+
   // Reorder tabs (drag-and-drop)
   const reorderTabs = useCallback((fromIndex: number, toIndex: number) => {
     setState(prev => {
@@ -141,6 +146,7 @@ export const useTabManager = () => {
     switchToTabByIndex,
     closeActiveTab,
     reorderTabs,
+    tearOffTab,
     refreshTabList,
   };
 };

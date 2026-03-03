@@ -57,6 +57,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/WindowManager.h"
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_BROWSER(msg) Logger::Log(msg, 0, 2)
@@ -70,7 +71,7 @@ extern std::string g_pendingModalDomain;
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
 #ifdef _WIN32
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
-    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0);
+    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
 #else
     // macOS global views
@@ -92,10 +93,147 @@ void setBackupModalShown(bool shown) {
     LOG_DEBUG_BROWSER("💾 Backup modal state set to: " + std::to_string(shown));
 }
 
+// ===== Ghost Tab Window for Tear-off Preview =====
+// A lightweight top-level popup that follows the cursor during tab tear-off.
+// Not a CEF browser — just a GDI-painted HWND with title text and transparency.
+#ifdef _WIN32
+static HWND s_ghost_hwnd = nullptr;
+static UINT_PTR s_ghost_timer_id = 0;
+static std::wstring s_ghost_title;
+static int s_ghost_width = 200;
+static int s_ghost_height = 36;
+static bool s_ghost_class_registered = false;
+
+static LRESULT CALLBACK GhostTabWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT r;
+        GetClientRect(hwnd, &r);
+
+        // White background
+        HBRUSH bg = CreateSolidBrush(RGB(255, 255, 255));
+        FillRect(hdc, &r, bg);
+        DeleteObject(bg);
+
+        // Grey rounded border
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
+        SelectObject(hdc, pen);
+        SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        RoundRect(hdc, 0, 0, r.right, r.bottom, 14, 14);
+        DeleteObject(pen);
+
+        // Title text
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(60, 60, 60));
+        HFONT font = CreateFontW(-12, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT oldFont = (HFONT)SelectObject(hdc, font);
+
+        RECT textRect = { 12, 0, r.right - 12, r.bottom };
+        DrawTextW(hdc, s_ghost_title.c_str(), -1, &textRect,
+                  DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+
+        SelectObject(hdc, oldFont);
+        DeleteObject(font);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wParam == 1) {
+            POINT pt;
+            GetCursorPos(&pt);
+            SetWindowPos(hwnd, HWND_TOPMOST,
+                         pt.x - s_ghost_width / 2, pt.y - 10,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        return 0;
+    case WM_DESTROY:
+        if (s_ghost_timer_id) {
+            KillTimer(hwnd, s_ghost_timer_id);
+            s_ghost_timer_id = 0;
+        }
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static void EnsureGhostWindowClass() {
+    if (s_ghost_class_registered) return;
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = GhostTabWndProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"HodosGhostTab";
+    RegisterClassExW(&wc);
+    s_ghost_class_registered = true;
+}
+
+static void HideGhostTab() {
+    if (s_ghost_hwnd) {
+        if (s_ghost_timer_id) {
+            KillTimer(s_ghost_hwnd, s_ghost_timer_id);
+            s_ghost_timer_id = 0;
+        }
+        DestroyWindow(s_ghost_hwnd);
+        s_ghost_hwnd = nullptr;
+        LOG_DEBUG_BROWSER("Ghost tab hidden");
+    }
+}
+
+static void ShowGhostTab(const std::string& title, int width, int height) {
+    HideGhostTab();
+    EnsureGhostWindowClass();
+
+    // Convert UTF-8 title to wide string
+    int len = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, nullptr, 0);
+    s_ghost_title.resize(len);
+    MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, &s_ghost_title[0], len);
+
+    s_ghost_width = (width > 60) ? width : 200;
+    s_ghost_height = (height > 10) ? height : 36;
+
+    POINT pt;
+    GetCursorPos(&pt);
+
+    s_ghost_hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"HodosGhostTab", nullptr, WS_POPUP,
+        pt.x - s_ghost_width / 2, pt.y - 10,
+        s_ghost_width, s_ghost_height,
+        nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+
+    if (s_ghost_hwnd) {
+        SetLayeredWindowAttributes(s_ghost_hwnd, 0, 217, LWA_ALPHA);  // ~85% opaque
+        ShowWindow(s_ghost_hwnd, SW_SHOWNOACTIVATE);
+        s_ghost_timer_id = SetTimer(s_ghost_hwnd, 1, 16, nullptr);  // ~60fps cursor tracking
+        LOG_DEBUG_BROWSER("Ghost tab shown: \"" + title + "\" (" +
+                          std::to_string(s_ghost_width) + "x" + std::to_string(s_ghost_height) + ")");
+    }
+}
+#else
+static void HideGhostTab() {}
+static void ShowGhostTab(const std::string&, int, int) {}
+#endif
+// ===== End Ghost Tab Window =====
+
 std::string SimpleHandler::pending_panel_;
 bool SimpleHandler::needs_overlay_reload_ = false;
 
-SimpleHandler::SimpleHandler(const std::string& role) : role_(role) {}
+SimpleHandler::SimpleHandler(const std::string& role, int window_id)
+    : role_(role), window_id_(window_id) {}
+
+BrowserWindow* SimpleHandler::GetOwnerWindow() const {
+    return WindowManager::GetInstance().GetWindow(window_id_);
+}
+
+SimpleHandler* SimpleHandler::GetHandlerForBrowser(int browser_id) {
+    auto it = browser_handler_map_.find(browser_id);
+    return (it != browser_handler_map_.end()) ? it->second : nullptr;
+}
 
 // Static helper to extract tab ID from role string (format: "tab_1", "tab_2", etc.)
 int SimpleHandler::ExtractTabIdFromRole(const std::string& role) {
@@ -136,54 +274,61 @@ CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::omnibox_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::cookie_panel_browser_ = nullptr;
 
+// Static getters — redirect to WindowManager window 0 for backwards compatibility.
+// Cross-browser IPC within a handler should use GetOwnerWindow() instead.
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
-    return overlay_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->overlay_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetHeaderBrowser() {
-    return header_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->header_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetWebviewBrowser() {
-    return webview_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->webview_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetWalletPanelBrowser() {
-    return wallet_panel_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->wallet_panel_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsBrowser() {
-    return settings_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->settings_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetWalletBrowser() {
-    return wallet_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->wallet_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
-    return backup_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->backup_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
-    return brc100_auth_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->brc100_auth_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetNotificationBrowser() {
-    return notification_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->notification_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
-    return settings_menu_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->settings_menu_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxBrowser() {
-    return omnibox_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->omnibox_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
-    return cookie_panel_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->cookie_panel_browser : nullptr;
 }
 
 // Download handler static storage
 std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_;
 std::set<uint32_t> SimpleHandler::paused_downloads_;
+std::map<int, SimpleHandler*> SimpleHandler::browser_handler_map_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
@@ -203,15 +348,16 @@ CefRefPtr<CefJSDialogHandler> SimpleHandler::GetJSDialogHandler() {
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
-    return download_panel_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->download_panel_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
-    return profile_panel_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->profile_panel_browser : nullptr;
 }
-
 CefRefPtr<CefBrowser> SimpleHandler::GetMenuBrowser() {
-    return menu_browser_;
+    auto* win = WindowManager::GetInstance().GetWindow(0);
+    return win ? win->menu_browser : nullptr;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -226,24 +372,26 @@ void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
 }
 
 // Static method to notify frontend of tab list changes (called from TabManager)
-// Available on both platforms now
-void SimpleHandler::NotifyTabListChanged() {
-    CEF_REQUIRE_UI_THREAD();
+// Sends per-window filtered tab lists to each window's header browser.
+// Send tab list to a single window's header browser
+static void SendTabListToWindow(BrowserWindow* bw) {
+    if (!bw || !bw->header_browser) return;
 
-    std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
-    int active_tab_id = TabManager::GetInstance().GetActiveTabId();
+    std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+    int activeForWindow = TabManager::GetInstance().GetActiveTabIdForWindow(bw->window_id);
 
-    // Build JSON response using nlohmann::json (handles escaping automatically)
     nlohmann::json response;
-    response["activeTabId"] = active_tab_id;
+    response["activeTabId"] = activeForWindow;
     response["tabs"] = nlohmann::json::array();
 
-    for (Tab* tab : tabs) {
+    for (Tab* tab : allTabs) {
+        if (tab->window_id != bw->window_id) continue;
+
         nlohmann::json tab_json;
         tab_json["id"] = tab->id;
         tab_json["title"] = tab->title;
         tab_json["url"] = tab->url;
-        tab_json["isActive"] = (tab->id == active_tab_id);
+        tab_json["isActive"] = (tab->id == activeForWindow);
         tab_json["isLoading"] = tab->is_loading;
         tab_json["hasCertError"] = tab->has_cert_error;
         if (!tab->favicon_url.empty()) {
@@ -254,15 +402,27 @@ void SimpleHandler::NotifyTabListChanged() {
 
     std::string json_str = response.dump();
 
-    // Send response to header browser
-    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
-    if (header) {
-        CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
-        CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
-        response_args->SetString(0, json_str);
-        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
-        LOG_DEBUG_BROWSER("📑 Tab list updated and sent to header: " + json_str);
+    CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
+    CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
+    response_args->SetString(0, json_str);
+    bw->header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
+    LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(bw->window_id) + ": " + json_str);
+}
+
+void SimpleHandler::NotifyTabListChanged() {
+    CEF_REQUIRE_UI_THREAD();
+
+    std::vector<BrowserWindow*> windows = WindowManager::GetInstance().GetAllWindows();
+    for (BrowserWindow* bw : windows) {
+        SendTabListToWindow(bw);
     }
+}
+
+void SimpleHandler::NotifyWindowTabListChanged(int window_id) {
+    CEF_REQUIRE_UI_THREAD();
+
+    BrowserWindow* bw = WindowManager::GetInstance().GetWindow(window_id);
+    SendTabListToWindow(bw);
 }
 
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
@@ -776,6 +936,9 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
 
+    // Register handler in static map for overlay retargeting
+    browser_handler_map_[browser->GetIdentifier()] = this;
+
     LOG_DEBUG_BROWSER("✅ OnAfterCreated for role: " + role_);
 
     // Check if this is a tab browser - register with TabManager (both platforms)
@@ -800,8 +963,13 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         return;  // Tab browsers don't need the overlay/header/webview handling below
     }
 
+    // Store browser ref in BrowserWindow via WindowManager
+    BrowserWindow* owner_win = GetOwnerWindow();
+    if (owner_win) {
+        owner_win->SetBrowserForRole(role_, browser);
+    }
+
     if (role_ == "webview") {
-        webview_browser_ = browser;
         LOG_DEBUG_BROWSER("📡 WebView browser reference stored.");
         LOG_DEBUG_BROWSER("📡 WebView browser reference stored. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -809,7 +977,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         browser->GetHost()->WasResized();
         LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for webview browser");
     } else if (role_ == "header") {
-        header_browser_ = browser;
         LOG_DEBUG_BROWSER("🧭 header browser initialized.");
         LOG_DEBUG_BROWSER("🧭 header browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -851,7 +1018,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         CefPostDelayedTask(TID_UI, base::BindOnce([]() {
             auto& pm = ProfileManager::GetInstance();
             if (pm.ShouldShowPickerOnStartup() && pm.GetAllProfiles().size() >= 2) {
-                extern void ShowProfilePanelOverlay(int);
+                extern void ShowProfilePanelOverlay(int, BrowserWindow* targetWin = nullptr);
                 extern void CreateProfilePanelOverlay(HINSTANCE, bool, int);
                 extern HWND g_profile_panel_overlay_hwnd;
                 extern HINSTANCE g_hInstance;
@@ -864,18 +1031,15 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }), 500);
 #endif
     } else if (role_ == "wallet_panel") {
-        wallet_panel_browser_ = browser;
         LOG_DEBUG_BROWSER("💰 Wallet panel browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         // Trigger initial resize
         browser->GetHost()->WasResized();
         LOG_DEBUG_BROWSER("🔄 Initial WasResized() called for wallet panel browser");
     } else if (role_ == "overlay") {
-        overlay_browser_ = browser;
         LOG_DEBUG_BROWSER("🪟 Overlay browser initialized.");
         LOG_DEBUG_BROWSER("🪟 Overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
     } else if (role_ == "settings") {
-        settings_browser_ = browser;
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized.");
         LOG_DEBUG_BROWSER("⚙️ Settings browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -893,7 +1057,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
 
     } else if (role_ == "wallet") {
-        wallet_browser_ = browser;
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized.");
         LOG_DEBUG_BROWSER("💰 Wallet browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -911,7 +1074,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
 
     } else if (role_ == "backup") {
-        backup_browser_ = browser;
         LOG_DEBUG_BROWSER("💾 Backup browser initialized.");
         LOG_DEBUG_BROWSER("💾 Backup browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -929,7 +1091,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
 
     } else if (role_ == "brc100auth") {
-        brc100_auth_browser_ = browser;
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
@@ -948,7 +1109,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
 
     } else if (role_ == "notification") {
-        notification_browser_ = browser;
         LOG_DEBUG_BROWSER("🔔 Notification browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         browser->GetHost()->SetFocus(true);
@@ -962,7 +1122,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
 
     } else if (role_ == "settings_menu") {
-        settings_menu_browser_ = browser;
         LOG_DEBUG_BROWSER("📋 Settings menu browser initialized.");
         LOG_DEBUG_BROWSER("📋 Settings menu browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -975,7 +1134,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
     } else if (role_ == "omnibox") {
-        omnibox_browser_ = browser;
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized.");
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
@@ -992,11 +1150,9 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
     } else if (role_ == "cookiepanel") {
-        cookie_panel_browser_ = browser;
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized.");
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
     } else if (role_ == "downloadpanel") {
-        download_panel_browser_ = browser;
         LOG_DEBUG_BROWSER("📥 Download panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         // CRITICAL: Set focus so interactions work
@@ -1012,7 +1168,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
     } else if (role_ == "profilepanel") {
-        profile_panel_browser_ = browser;
         LOG_DEBUG_BROWSER("👤 Profile panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         browser->GetHost()->SetFocus(true);
@@ -1026,7 +1181,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
     } else if (role_ == "menu") {
-        menu_browser_ = browser;
         LOG_DEBUG_BROWSER("Menu overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
         CefRefPtr<CefBrowser> browser_ref = browser;
@@ -1043,6 +1197,9 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
 void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
+
+    // Unregister from handler map
+    browser_handler_map_.erase(browser->GetIdentifier());
 
     std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
     std::cout << "  Role: " << role_ << std::endl;
@@ -1075,54 +1232,18 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     std::cout << "  → Not a tab, checking overlays..." << std::endl;
 
-    // Handle overlay browser cleanup
-    if (role_ == "settings" && browser == settings_browser_) {
-        std::cout << "  → Settings browser cleanup" << std::endl;
-        settings_browser_ = nullptr;
-    } else if (role_ == "wallet" && browser == wallet_browser_) {
-        std::cout << "  → Wallet browser cleanup" << std::endl;
-        wallet_browser_ = nullptr;
-    } else if (role_ == "backup" && browser == backup_browser_) {
-        std::cout << "  → Backup browser cleanup" << std::endl;
-        backup_browser_ = nullptr;
-    } else if (role_ == "brc100auth" && browser == brc100_auth_browser_) {
-        std::cout << "  → BRC100 auth browser cleanup" << std::endl;
-        brc100_auth_browser_ = nullptr;
-    } else if (role_ == "notification" && browser == notification_browser_) {
-        std::cout << "  → Notification browser cleanup" << std::endl;
-        notification_browser_ = nullptr;
-    } else if (role_ == "overlay" && browser == overlay_browser_) {
-        std::cout << "  → Overlay browser cleanup" << std::endl;
-        overlay_browser_ = nullptr;
-    } else if (role_ == "webview" && browser == webview_browser_) {
-        std::cout << "  → Webview browser cleanup" << std::endl;
-        webview_browser_ = nullptr;
-    } else if (role_ == "wallet_panel" && browser == wallet_panel_browser_) {
-        std::cout << "  → Wallet panel browser cleanup" << std::endl;
-        wallet_panel_browser_ = nullptr;
-    } else if (role_ == "header" && browser == header_browser_) {
-        std::cout << "  → Header browser cleanup" << std::endl;
-        header_browser_ = nullptr;
-    } else if (role_ == "settings_menu" && browser == settings_menu_browser_) {
-        std::cout << "  → Settings menu browser cleanup" << std::endl;
-        settings_menu_browser_ = nullptr;
-    } else if (role_ == "omnibox" && browser == omnibox_browser_) {
-        std::cout << "  → Omnibox overlay browser cleanup" << std::endl;
-        omnibox_browser_ = nullptr;
-    } else if (role_ == "cookiepanel" && browser == cookie_panel_browser_) {
-        std::cout << "  → Cookie panel overlay browser cleanup" << std::endl;
-        cookie_panel_browser_ = nullptr;
-    } else if (role_ == "downloadpanel" && browser == download_panel_browser_) {
-        std::cout << "  → Download panel overlay browser cleanup" << std::endl;
-        download_panel_browser_ = nullptr;
-    } else if (role_ == "profilepanel" && browser == profile_panel_browser_) {
-        std::cout << "  → Profile panel overlay browser cleanup" << std::endl;
-        profile_panel_browser_ = nullptr;
-    } else if (role_ == "menu" && browser == menu_browser_) {
-        std::cout << "  → Menu overlay browser cleanup" << std::endl;
-        menu_browser_ = nullptr;
+    // Handle overlay browser cleanup via WindowManager
+    BrowserWindow* owner_win = GetOwnerWindow();
+    if (owner_win) {
+        CefRefPtr<CefBrowser> existing = owner_win->GetBrowserForRole(role_);
+        if (existing && existing->GetIdentifier() == browser->GetIdentifier()) {
+            std::cout << "  → Clearing " << role_ << " browser from BrowserWindow" << std::endl;
+            owner_win->ClearBrowserForRole(role_);
+        } else {
+            std::cout << "  → No matching browser for role (might be DevTools)" << std::endl;
+        }
     } else {
-        std::cout << "  → No matching browser type (might be DevTools)" << std::endl;
+        std::cout << "  → No owner window found for window_id " << window_id_ << std::endl;
     }
 
     std::cout << "🔴 OnBeforeClose EXITING (overlay)" << std::endl;
@@ -1189,17 +1310,23 @@ bool SimpleHandler::OnBeforePopup(
         // Create new tab for ANY browser (tab browser, webview, etc.)
         LOG_DEBUG_BROWSER("📑 Converting popup to new tab: " + url + " (disposition: " + disposition_str + ", role: " + role_ + ")");
 
-        // Get main window dimensions
-        extern HWND g_hwnd;
+        // Use the owning window for this browser
+        BrowserWindow* popupWin = GetOwnerWindow();
+        HWND popupHwnd = popupWin ? popupWin->hwnd : nullptr;
+        int popupWid = popupWin ? popupWin->window_id : 0;
+        if (!popupHwnd) {
+            extern HWND g_hwnd;
+            popupHwnd = g_hwnd;
+        }
         RECT rect;
-        GetClientRect(g_hwnd, &rect);
+        GetClientRect(popupHwnd, &rect);
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
         int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
         int tabHeight = height - shellHeight;
 
-        // Create new tab with the popup URL
-        TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+        // Create new tab with the popup URL in the same window
+        TabManager::GetInstance().CreateTab(url, popupHwnd, 0, shellHeight, width, tabHeight, popupWid);
 
         // Return true to cancel the popup window creation (we handled it with a new tab)
         return true;
@@ -1238,10 +1365,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Empty URL flows through to TabManager::CreateTab which defaults to NTP
 
 #ifdef _WIN32
-        // Windows: Get main window dimensions for tab size
-        extern HWND g_hwnd;
+        // Determine which window this request came from
+        BrowserWindow* ownerWin = GetOwnerWindow();
+        HWND parentHwnd = ownerWin ? ownerWin->hwnd : nullptr;
+
+        // Fallback to global g_hwnd if owner not found
+        if (!parentHwnd) {
+            extern HWND g_hwnd;
+            parentHwnd = g_hwnd;
+        }
+
         RECT rect;
-        GetClientRect(g_hwnd, &rect);
+        GetClientRect(parentHwnd, &rect);
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
 
@@ -1249,7 +1384,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
         int tabHeight = height - shellHeight;
 
-        int tab_id = TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+        int tab_id = TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, window_id_);
 #else
         // macOS: Get webview dimensions through helper function
         // g_webview_view is already void*, no bridge cast needed
@@ -1264,9 +1399,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         );
 #endif
 
-        LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id));
+        LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id) + " in window " + std::to_string(window_id_));
 
-        // TODO: Send tab list update to frontend
+        // Notify the owning window of tab list change
+        NotifyWindowTabListChanged(window_id_);
         return true;
     }
 
@@ -1316,22 +1452,110 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-    // Helper function to send tab list to frontend (used by get_tab_list and after tab creation)
-    auto SendTabListToFrontend = []() {
-        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
-        int active_tab_id = TabManager::GetInstance().GetActiveTabId();
+    if (message_name == "tab_ghost_show") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 3) {
+            std::string title = args->GetString(0).ToString();
+            int width = args->GetInt(1);
+            int height = args->GetInt(2);
+            ShowGhostTab(title, width, height);
+        }
+        return true;
+    }
 
-        // Build JSON response using nlohmann::json (handles escaping automatically)
+    if (message_name == "tab_ghost_hide") {
+        HideGhostTab();
+        return true;
+    }
+
+    if (message_name == "tab_tearoff") {
+        HideGhostTab();  // Always hide ghost when tear-off fires
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 3) {
+            int tab_id = args->GetInt(0);
+            int screen_x = args->GetInt(1);
+            int screen_y = args->GetInt(2);
+
+            Tab* tab = TabManager::GetInstance().GetTab(tab_id);
+            if (!tab) {
+                LOG_WARNING_BROWSER("tab_tearoff: tab " + std::to_string(tab_id) + " not found");
+                return true;
+            }
+
+            int source_window_id = tab->window_id;
+
+            // Don't tear off if it's the only tab in the window
+            int tabs_in_window = 0;
+            for (auto* t : TabManager::GetInstance().GetAllTabs()) {
+                if (t->window_id == source_window_id) tabs_in_window++;
+            }
+            if (tabs_in_window <= 1) {
+                LOG_DEBUG_BROWSER("tab_tearoff: can't tear off last tab in window " + std::to_string(source_window_id));
+                return true;
+            }
+
+#ifdef _WIN32
+            // Check if drop point is over another Hodos browser window
+            POINT pt = { screen_x, screen_y };
+            HWND target_hwnd = WindowFromPoint(pt);
+
+            // Walk up parent chain to find the top-level shell window
+            if (target_hwnd) {
+                HWND top = GetAncestor(target_hwnd, GA_ROOT);
+                if (top) target_hwnd = top;
+            }
+
+            BrowserWindow* target_bw = nullptr;
+            if (target_hwnd) {
+                target_bw = WindowManager::GetInstance().GetWindowByHwnd(target_hwnd);
+            }
+
+            // Don't merge into the same window we're tearing from
+            if (target_bw && target_bw->window_id == source_window_id) {
+                target_bw = nullptr;
+            }
+
+            if (target_bw) {
+                // MERGE: Move tab into the existing target window
+                LOG_INFO_BROWSER("tab_tearoff: merging tab " + std::to_string(tab_id) +
+                                 " into window " + std::to_string(target_bw->window_id));
+                TabManager::GetInstance().MoveTabToWindow(tab_id, target_bw->window_id);
+            } else {
+                // TEAR-OFF: Create new window at drop position, move tab into it
+                LOG_INFO_BROWSER("tab_tearoff: tearing off tab " + std::to_string(tab_id) +
+                                 " to new window at (" + std::to_string(screen_x) + "," + std::to_string(screen_y) + ")");
+                BrowserWindow* new_bw = WindowManager::GetInstance().CreateFullWindow(false);
+                if (new_bw) {
+                    // Position the new window at the drop point (offset so title bar is near cursor)
+                    SetWindowPos(new_bw->hwnd, nullptr, screen_x - 100, screen_y - 50,
+                                 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                    TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
+                }
+            }
+#endif
+        }
+        return true;
+    }
+
+    if (message_name == "get_tab_list") {
+        // Send per-window filtered tab list back to the requesting browser
+        BrowserWindow* win = GetOwnerWindow();
+        int wid = win ? win->window_id : 0;
+
+        std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+        int activeForWindow = TabManager::GetInstance().GetActiveTabIdForWindow(wid);
+
         nlohmann::json response;
-        response["activeTabId"] = active_tab_id;
+        response["activeTabId"] = activeForWindow;
         response["tabs"] = nlohmann::json::array();
 
-        for (Tab* tab : tabs) {
+        for (Tab* tab : allTabs) {
+            if (tab->window_id != wid) continue;
             nlohmann::json tab_json;
             tab_json["id"] = tab->id;
             tab_json["title"] = tab->title;
             tab_json["url"] = tab->url;
-            tab_json["isActive"] = (tab->id == active_tab_id);
+            tab_json["isActive"] = (tab->id == activeForWindow);
             tab_json["isLoading"] = tab->is_loading;
             tab_json["hasCertError"] = tab->has_cert_error;
             if (!tab->favicon_url.empty()) {
@@ -1341,20 +1565,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         std::string json_str = response.dump();
-
-        // Send response to header browser
-        CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
-        if (header) {
-            CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
-            CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
-            response_args->SetString(0, json_str);
-            header->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
-            LOG_DEBUG_BROWSER("📑 Tab list sent to header: " + json_str);
-        }
-    };
-
-    if (message_name == "get_tab_list") {
-        SendTabListToFrontend();
+        CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
+        cef_response->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
+        LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(wid) + " (on-demand): " + json_str);
         return true;
     }
 
@@ -1376,13 +1590,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             path = "http://" + path;
         }
 
-        // Use TabManager to get active tab
-        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        // Use per-window active tab for navigation
+        BrowserWindow* nav_win = GetOwnerWindow();
+        int nav_wid = nav_win ? nav_win->window_id : 0;
+        Tab* active_tab = TabManager::GetInstance().GetActiveTabForWindow(nav_wid);
         if (active_tab && active_tab->browser && active_tab->browser->GetMainFrame()) {
             active_tab->browser->GetMainFrame()->LoadURL(path);
-            LOG_DEBUG_BROWSER("🔁 Navigate to " + path + " on active tab " + std::to_string(active_tab->id));
+            LOG_DEBUG_BROWSER("🔁 Navigate to " + path + " on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(nav_wid) + ")");
         } else {
-            LOG_DEBUG_BROWSER("⚠️ No active tab available for navigation");
+            LOG_DEBUG_BROWSER("⚠️ No active tab available for navigation in window " + std::to_string(nav_wid));
         }
 
         return true;
@@ -1391,12 +1607,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_back") {
         LOG_DEBUG_BROWSER("🔙 navigate_back message received from role: " + role_);
 
-        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* back_win = GetOwnerWindow();
+        int back_wid = back_win ? back_win->window_id : 0;
+        Tab* active_tab = TabManager::GetInstance().GetActiveTabForWindow(back_wid);
         if (active_tab && active_tab->browser) {
             active_tab->browser->GoBack();
-            LOG_DEBUG_BROWSER("🔙 GoBack() called on active tab " + std::to_string(active_tab->id));
+            LOG_DEBUG_BROWSER("🔙 GoBack() called on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(back_wid) + ")");
         } else {
-            LOG_WARNING_BROWSER("⚠️ No active tab available for GoBack");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for GoBack in window " + std::to_string(back_wid));
         }
         return true;
     }
@@ -1404,12 +1622,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_forward") {
         LOG_DEBUG_BROWSER("🔜 navigate_forward message received from role: " + role_);
 
-        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* fwd_win = GetOwnerWindow();
+        int fwd_wid = fwd_win ? fwd_win->window_id : 0;
+        Tab* active_tab = TabManager::GetInstance().GetActiveTabForWindow(fwd_wid);
         if (active_tab && active_tab->browser) {
             active_tab->browser->GoForward();
-            LOG_DEBUG_BROWSER("🔜 GoForward() called on active tab " + std::to_string(active_tab->id));
+            LOG_DEBUG_BROWSER("🔜 GoForward() called on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(fwd_wid) + ")");
         } else {
-            LOG_WARNING_BROWSER("⚠️ No active tab available for GoForward");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for GoForward in window " + std::to_string(fwd_wid));
         }
         return true;
     }
@@ -1417,12 +1637,14 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "navigate_reload") {
         LOG_DEBUG_BROWSER("🔄 navigate_reload message received from role: " + role_);
 
-        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* rl_win = GetOwnerWindow();
+        int rl_wid = rl_win ? rl_win->window_id : 0;
+        Tab* active_tab = TabManager::GetInstance().GetActiveTabForWindow(rl_wid);
         if (active_tab && active_tab->browser) {
             active_tab->browser->Reload();
-            LOG_DEBUG_BROWSER("🔄 Reload() called on active tab " + std::to_string(active_tab->id));
+            LOG_DEBUG_BROWSER("🔄 Reload() called on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(rl_wid) + ")");
         } else {
-            LOG_WARNING_BROWSER("⚠️ No active tab available for Reload");
+            LOG_WARNING_BROWSER("⚠️ No active tab available for Reload in window " + std::to_string(rl_wid));
         }
         return true;
     }
@@ -1512,15 +1734,15 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
-        extern void ShowOmniboxOverlay();
+        extern void ShowOmniboxOverlay(BrowserWindow* targetWin = nullptr);
         extern HWND g_omnibox_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
-        // Create if doesn't exist, otherwise show
+        // Create if doesn't exist, otherwise show (positioned relative to requesting window)
         if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
             CreateOmniboxOverlay(g_hInstance, true);
         } else {
-            ShowOmniboxOverlay();
+            ShowOmniboxOverlay(GetOwnerWindow());
         }
 
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay shown with query: " + query);
@@ -1556,17 +1778,17 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-        extern void ShowCookiePanelOverlay(int iconRightOffset);
+        extern void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
         extern HWND g_cookie_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         bool alreadyExists = g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd);
 
-        // Create if doesn't exist, otherwise show
+        // Create if doesn't exist, otherwise show (positioned relative to requesting window)
         if (!alreadyExists) {
             CreateCookiePanelOverlay(g_hInstance, true, iconRightOffset);
         } else {
-            ShowCookiePanelOverlay(iconRightOffset);
+            ShowCookiePanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         // Inject domain into overlay via JS callback
@@ -1581,17 +1803,31 @@ bool SimpleHandler::OnProcessMessageReceived(
                         ++i;
                     }
                 }
-                std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); }";
+                std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); } else { console.warn('setShieldDomain not found'); }";
                 cookie_browser->GetMainFrame()->ExecuteJavaScript(js, cookie_browser->GetMainFrame()->GetURL(), 0);
-                LOG_DEBUG_BROWSER("Injected domain into privacy shield overlay: " + shieldDomain);
+                LOG_INFO_BROWSER("🛡️ Shield domain injected immediately: " + shieldDomain);
+
+                // Delayed retry: ensure domain is set even if React hasn't re-rendered
+                CefRefPtr<CefBrowser> retry_browser = cookie_browser;
+                std::string retry_domain = escapedDomain;
+                CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string d) {
+                    if (b && b->GetMainFrame()) {
+                        std::string retryJs = "if (window.setShieldDomain) { window.setShieldDomain('" + d + "'); }";
+                        b->GetMainFrame()->ExecuteJavaScript(retryJs, b->GetMainFrame()->GetURL(), 0);
+                    }
+                }, retry_browser, retry_domain), 200);
+            } else {
+                LOG_WARNING_BROWSER("🛡️ Shield domain injection FAILED - cookie browser or frame null (domain=" + shieldDomain + ")");
             }
             // Also store as pending for deferred injection (defense-in-depth):
             // If the browser was just created (pre-created hidden), React may not
             // have mounted yet when ExecuteJavaScript runs above.
             pending_shield_domain_ = shieldDomain;
+        } else {
+            LOG_WARNING_BROWSER("🛡️ Shield domain is EMPTY in cookie_panel_show IPC");
         }
 
-        LOG_DEBUG_BROWSER("Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #else
         LOG_DEBUG_BROWSER("Privacy shield not implemented on macOS");
 #endif
@@ -1619,14 +1855,14 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-        extern void ShowProfilePanelOverlay(int iconRightOffset);
+        extern void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
         extern HWND g_profile_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
             CreateProfilePanelOverlay(g_hInstance, true, iconRightOffset);
         } else {
-            ShowProfilePanelOverlay(iconRightOffset);
+            ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
@@ -1657,19 +1893,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-        extern void ShowMenuOverlay(int iconRightOffset);
+        extern void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
         extern HWND g_menu_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         if (!g_menu_overlay_hwnd || !IsWindow(g_menu_overlay_hwnd)) {
             CreateMenuOverlay(g_hInstance, true, iconRightOffset);
         } else {
-            ShowMenuOverlay(iconRightOffset);
+            ShowMenuOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         // Inject current zoom level into menu overlay
         CefRefPtr<CefBrowser> menu_browser = GetMenuBrowser();
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* menu_zoom_win = GetOwnerWindow();
+        int menu_zoom_wid = menu_zoom_win ? menu_zoom_win->window_id : 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(menu_zoom_wid);
         if (menu_browser && menu_browser->GetMainFrame() && active_tab && active_tab->browser) {
             double zoomLevel = active_tab->browser->GetHost()->GetZoomLevel();
             // Convert CEF zoom level to percentage (0.0 = 100%, each 0.5 step ≈ +25%)
@@ -1713,15 +1951,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         // Helper lambda to create a tab with current window dimensions
 #ifdef _WIN32
-        auto createTabHelper = [](const std::string& url) {
-            extern HWND g_hwnd;
+        auto createTabHelper = [this](const std::string& url) {
+            BrowserWindow* menuWin = GetOwnerWindow();
+            HWND menuHwnd = menuWin ? menuWin->hwnd : nullptr;
+            int menuWid = menuWin ? menuWin->window_id : 0;
+            if (!menuHwnd) {
+                extern HWND g_hwnd;
+                menuHwnd = g_hwnd;
+            }
             RECT rect;
-            GetClientRect(g_hwnd, &rect);
+            GetClientRect(menuHwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
             int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
             int tabHeight = height - shellHeight;
-            TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+            TabManager::GetInstance().CreateTab(url, menuHwnd, 0, shellHeight, width, tabHeight, menuWid);
         };
 #endif
 
@@ -1748,14 +1992,14 @@ bool SimpleHandler::OnProcessMessageReceived(
 #endif
         } else if (action == "downloads") {
 #ifdef _WIN32
-            extern void ShowDownloadPanelOverlay(int iconRightOffset);
+            extern void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
             extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
             extern HWND g_download_panel_overlay_hwnd;
             extern HINSTANCE g_hInstance;
             if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
                 CreateDownloadPanelOverlay(g_hInstance, true, 100);
             } else {
-                ShowDownloadPanelOverlay(100);
+                ShowDownloadPanelOverlay(100, GetOwnerWindow());
             }
             NotifyDownloadStateChanged();
 #endif
@@ -2774,7 +3018,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "wallet") {
             extern HWND g_wallet_overlay_hwnd;
             target_hwnd = g_wallet_overlay_hwnd;
-            target_browser = GetWalletBrowser();
+            // Use per-window wallet browser (not always window 0)
+            BrowserWindow* walletOwnerWin = GetOwnerWindow();
+            target_browser = (walletOwnerWin && walletOwnerWin->wallet_browser)
+                ? walletOwnerWin->wallet_browser : GetWalletBrowser();
             LOG_DEBUG_BROWSER("✅ Found wallet overlay window (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "backup") {
             target_hwnd = FindWindow(L"CEFBackupOverlayWindow", L"Backup Overlay");
@@ -2926,7 +3173,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance);
+        CreateWalletOverlayWithSeparateProcess(g_hInstance, 0, GetOwnerWindow());
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess();
 #endif
@@ -3452,7 +3699,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance, iconRightOffset);
+        CreateWalletOverlayWithSeparateProcess(g_hInstance, iconRightOffset, GetOwnerWindow());
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess(iconRightOffset);
 #else
@@ -4113,9 +4360,11 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_get_blocked_count") {
-        // Use active TAB's browser ID, not header browser's ID
+        // Use per-window active tab's browser ID
         int browser_id = 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* cookie_cnt_win = GetOwnerWindow();
+        int cookie_cnt_wid = cookie_cnt_win ? cookie_cnt_win->window_id : 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(cookie_cnt_wid);
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
@@ -4169,9 +4418,11 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
     if (message_name == "adblock_get_blocked_count") {
-        // Use active TAB's browser ID, not header browser's ID
+        // Use per-window active tab's browser ID
         int browser_id = 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* adblock_cnt_win = GetOwnerWindow();
+        int adblock_cnt_wid = adblock_cnt_win ? adblock_cnt_win->window_id : 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(adblock_cnt_wid);
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
@@ -4187,9 +4438,11 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "adblock_reset_blocked_count") {
-        // Use active TAB's browser ID
+        // Use per-window active tab's browser ID
         int browser_id = 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* adblock_rst_win = GetOwnerWindow();
+        int adblock_rst_wid = adblock_rst_win ? adblock_rst_win->window_id : 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(adblock_rst_wid);
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
@@ -4767,14 +5020,14 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-        extern void ShowDownloadPanelOverlay(int iconRightOffset);
+        extern void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
         extern HWND g_download_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
             CreateDownloadPanelOverlay(g_hInstance, true, iconRightOffset);
         } else {
-            ShowDownloadPanelOverlay(iconRightOffset);
+            ShowDownloadPanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         // Push current state to the overlay
@@ -4802,7 +5055,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔍 find_text: query='" + query + "' forward=" + std::to_string(forward) +
                               " findNext=" + std::to_string(findNext));
 
-            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            BrowserWindow* find_win = GetOwnerWindow();
+            int find_wid = find_win ? find_win->window_id : 0;
+            auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(find_wid);
             if (active_tab && active_tab->browser) {
                 CefRefPtr<CefFrame> frame = active_tab->browser->GetMainFrame();
                 if (frame) {
@@ -4915,7 +5170,9 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "find_stop") {
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        BrowserWindow* fstop_win = GetOwnerWindow();
+        int fstop_wid = fstop_win ? fstop_win->window_id : 0;
+        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(fstop_wid);
         if (active_tab && active_tab->browser) {
             CefRefPtr<CefFrame> frame = active_tab->browser->GetMainFrame();
             if (frame) {
@@ -5355,6 +5612,21 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #endif
         }
 
+        // Ctrl+N / Cmd+N — New window
+        if (event.windows_key_code == 'N') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+N: Creating new window");
+#ifdef _WIN32
+                WindowManager::GetInstance().CreateFullWindow();
+#endif
+                return true;
+            }
+        }
+
         // Ctrl+T / Cmd+T — New tab (intercept chrome://newtab)
         if (event.windows_key_code == 'T') {
 #ifdef __APPLE__
@@ -5376,12 +5648,19 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #else
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
-                int activeTabId = TabManager::GetInstance().GetActiveTabId();
+                BrowserWindow* ctrlw_win = GetOwnerWindow();
+                int ctrlw_wid = ctrlw_win ? ctrlw_win->window_id : 0;
+                int activeTabId = TabManager::GetInstance().GetActiveTabIdForWindow(ctrlw_wid);
                 if (activeTabId != -1) {
-                    LOG_INFO_BROWSER("⌨️ Ctrl+W: Closing active tab " + std::to_string(activeTabId));
+                    LOG_INFO_BROWSER("⌨️ Ctrl+W: Closing tab " + std::to_string(activeTabId) + " in window " + std::to_string(ctrlw_wid));
                     TabManager::GetInstance().CloseTab(activeTabId);
                     SimpleHandler::NotifyTabListChanged();
-                    if (TabManager::GetInstance().GetTabCount() == 0) {
+                    // Check if this window still has tabs
+                    bool windowHasTabs = false;
+                    for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+                        if (t->window_id == ctrlw_wid) { windowHasTabs = true; break; }
+                    }
+                    if (!windowHasTabs) {
                         CreateNewTabWithUrl("");  // Never leave window empty
                         SimpleHandler::NotifyTabListChanged();
                     }
@@ -5414,14 +5693,14 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 LOG_INFO_BROWSER("⌨️ Ctrl+J: Showing download panel");
 #ifdef _WIN32
                 extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-                extern void ShowDownloadPanelOverlay(int iconRightOffset);
+                extern void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
                 extern HWND g_download_panel_overlay_hwnd;
                 extern HINSTANCE g_hInstance;
 
                 if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
                     CreateDownloadPanelOverlay(g_hInstance, true, 0);
                 } else {
-                    ShowDownloadPanelOverlay(0);
+                    ShowDownloadPanelOverlay(0, GetOwnerWindow());
                 }
                 NotifyDownloadStateChanged();
 #endif
@@ -5617,17 +5896,26 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                       " img:" + std::to_string(isImage));
 }
 
-/// Helper: create a new tab with the given URL (cross-platform)
+/// Helper: create a new tab with the given URL in the active window (cross-platform)
 static void CreateNewTabWithUrl(const std::string& url) {
 #ifdef _WIN32
-    extern HWND g_hwnd;
+    // Use active window, falling back to window 0
+    BrowserWindow* activeWin = WindowManager::GetInstance().GetActiveWindow();
+    HWND parentHwnd = activeWin ? activeWin->hwnd : nullptr;
+    int winId = activeWin ? activeWin->window_id : 0;
+
+    if (!parentHwnd) {
+        extern HWND g_hwnd;
+        parentHwnd = g_hwnd;
+    }
+
     RECT rect;
-    GetClientRect(g_hwnd, &rect);
+    GetClientRect(parentHwnd, &rect);
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
     int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
     int tabHeight = height - shellHeight;
-    TabManager::GetInstance().CreateTab(url, g_hwnd, 0, shellHeight, width, tabHeight);
+    TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else
     extern void* g_webview_view;
     ViewDimensions dims = GetViewDimensions(g_webview_view);

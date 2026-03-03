@@ -15,6 +15,7 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/WindowManager.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 
@@ -227,42 +228,127 @@ void SimpleApp::OnContextInitialized() {
                         nlohmann::json sessionJson = nlohmann::json::parse(inFile);
                         inFile.close();
 
-                        if (sessionJson.contains("tabs") && sessionJson["tabs"].is_array()
-                            && !sessionJson["tabs"].empty()) {
+                        int version = 1;
+                        if (sessionJson.contains("version") && sessionJson["version"].is_number()) {
+                            version = sessionJson["version"].get<int>();
+                        }
 
-                            int activeIndex = 0;
-                            if (sessionJson.contains("activeTabIndex") && sessionJson["activeTabIndex"].is_number()) {
-                                activeIndex = sessionJson["activeTabIndex"].get<int>();
-                            }
-
+                        // Helper lambda: restore tabs from a tabs array into a given parent HWND
+                        auto restoreTabsForWindow = [&](const nlohmann::json& tabsArray, int activeIndex,
+                                                        HWND parentHwnd, int sHeight, int w, int tHeight, int winId) {
                             int createdCount = 0;
                             int activeTabId = -1;
-
-                            for (size_t i = 0; i < sessionJson["tabs"].size(); i++) {
-                                auto& tabEntry = sessionJson["tabs"][i];
+                            for (size_t i = 0; i < tabsArray.size(); i++) {
+                                auto& tabEntry = tabsArray[i];
                                 if (!tabEntry.contains("url") || !tabEntry["url"].is_string()) continue;
-
                                 std::string url = tabEntry["url"].get<std::string>();
                                 if (url.empty()) continue;
 
                                 int tabId = TabManager::GetInstance().CreateTab(
-                                    url, g_hwnd, 0, shellHeight, width, tabHeight
+                                    url, parentHwnd, 0, sHeight, w, tHeight, winId
                                 );
 
                                 if (static_cast<int>(i) == activeIndex) {
                                     activeTabId = tabId;
                                 }
                                 createdCount++;
-                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + ": " + url);
+                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + " (win " + std::to_string(winId) + "): " + url);
                             }
+                            if (createdCount > 0 && activeTabId >= 0) {
+                                TabManager::GetInstance().SwitchToTab(activeTabId);
+                            }
+                            return createdCount;
+                        };
+
+                        if (version >= 2 && sessionJson.contains("windows") && sessionJson["windows"].is_array()) {
+                            // Version 2: multi-window restore
+                            int totalRestored = 0;
+                            for (size_t wi = 0; wi < sessionJson["windows"].size(); wi++) {
+                                auto& winEntry = sessionJson["windows"][wi];
+                                if (!winEntry.contains("tabs") || !winEntry["tabs"].is_array() || winEntry["tabs"].empty())
+                                    continue;
+
+                                int aIdx = 0;
+                                if (winEntry.contains("activeTabIndex") && winEntry["activeTabIndex"].is_number()) {
+                                    aIdx = winEntry["activeTabIndex"].get<int>();
+                                }
+
+                                if (wi == 0) {
+                                    // First window = primary window (already created)
+                                    // Apply saved window position/size
+                                    if (winEntry.contains("x") && winEntry.contains("y") &&
+                                        winEntry.contains("width") && winEntry.contains("height")) {
+                                        int wx = winEntry["x"].get<int>();
+                                        int wy = winEntry["y"].get<int>();
+                                        int ww = winEntry["width"].get<int>();
+                                        int wh = winEntry["height"].get<int>();
+                                        if (ww > 0 && wh > 0) {
+                                            SetWindowPos(g_hwnd, nullptr, wx, wy, ww, wh,
+                                                SWP_NOZORDER | SWP_NOACTIVATE);
+                                            // Recalculate dimensions after resize
+                                            RECT cr;
+                                            GetClientRect(g_hwnd, &cr);
+                                            width = cr.right - cr.left;
+                                            int h = cr.bottom - cr.top;
+                                            shellHeight = (std::max)(100, static_cast<int>(h * 0.12));
+                                            tabHeight = h - shellHeight;
+                                            LOG_INFO_APP("📋 Restored primary window position: " +
+                                                std::to_string(wx) + "," + std::to_string(wy) +
+                                                " " + std::to_string(ww) + "x" + std::to_string(wh));
+                                        }
+                                    }
+                                    totalRestored += restoreTabsForWindow(winEntry["tabs"], aIdx,
+                                        g_hwnd, shellHeight, width, tabHeight, 0);
+                                } else {
+                                    // Additional windows — create without NTP (tabs restored below)
+                                    BrowserWindow* newWin = WindowManager::GetInstance().CreateFullWindow(false);
+                                    if (newWin && newWin->hwnd) {
+                                        // Apply saved window position/size
+                                        if (winEntry.contains("x") && winEntry.contains("y") &&
+                                            winEntry.contains("width") && winEntry.contains("height")) {
+                                            int wx = winEntry["x"].get<int>();
+                                            int wy = winEntry["y"].get<int>();
+                                            int ww = winEntry["width"].get<int>();
+                                            int wh = winEntry["height"].get<int>();
+                                            if (ww > 0 && wh > 0) {
+                                                SetWindowPos(newWin->hwnd, nullptr, wx, wy, ww, wh,
+                                                    SWP_NOZORDER | SWP_NOACTIVATE);
+                                                LOG_INFO_APP("📋 Restored window " + std::to_string(wi) +
+                                                    " position: " + std::to_string(wx) + "," + std::to_string(wy) +
+                                                    " " + std::to_string(ww) + "x" + std::to_string(wh));
+                                            }
+                                        }
+
+                                        RECT nwr;
+                                        GetClientRect(newWin->hwnd, &nwr);
+                                        int nw = nwr.right - nwr.left;
+                                        int nh = nwr.bottom - nwr.top;
+                                        int nsh = (std::max)(100, static_cast<int>(nh * 0.12));
+                                        int nth = nh - nsh;
+
+                                        totalRestored += restoreTabsForWindow(winEntry["tabs"], aIdx,
+                                            newWin->hwnd, nsh, nw, nth, newWin->window_id);
+                                    }
+                                }
+                            }
+                            if (totalRestored > 0) {
+                                sessionRestored = true;
+                                LOG_INFO_APP("✅ Session restored (v2): " + std::to_string(totalRestored) + " tabs");
+                            }
+                        } else if (sessionJson.contains("tabs") && sessionJson["tabs"].is_array()
+                            && !sessionJson["tabs"].empty()) {
+                            // Version 1: single-window restore (backward compatible)
+                            int activeIndex = 0;
+                            if (sessionJson.contains("activeTabIndex") && sessionJson["activeTabIndex"].is_number()) {
+                                activeIndex = sessionJson["activeTabIndex"].get<int>();
+                            }
+
+                            int createdCount = restoreTabsForWindow(sessionJson["tabs"], activeIndex,
+                                g_hwnd, shellHeight, width, tabHeight, 0);
 
                             if (createdCount > 0) {
                                 sessionRestored = true;
-                                // Switch to the saved active tab
-                                if (activeTabId >= 0) {
-                                    TabManager::GetInstance().SwitchToTab(activeTabId);
-                                }
-                                LOG_INFO_APP("✅ Session restored: " + std::to_string(createdCount) + " tabs");
+                                LOG_INFO_APP("✅ Session restored (v1): " + std::to_string(createdCount) + " tabs");
                             }
                         }
                     }
@@ -454,6 +540,10 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
     extern int g_settings_icon_right_offset;
     g_settings_icon_right_offset = iconRightOffset;
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->settings_icon_right_offset = g_settings_icon_right_offset;
+
     // Get main window and header dimensions for positioning
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
@@ -511,6 +601,9 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
 
     g_settings_overlay_hwnd = settings_hwnd;
 
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->settings_overlay_hwnd = g_settings_overlay_hwnd;
+
     // Create CEF browser with windowless rendering
     CefWindowInfo window_info;
     window_info.windowless_rendering_enabled = true;
@@ -545,6 +638,7 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
         // Install global mouse hook for click-outside detection
         extern LRESULT CALLBACK SettingsPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
         g_settings_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, SettingsPanelMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->settings_mouse_hook = g_settings_mouse_hook;
         if (g_settings_mouse_hook) {
             LOG_INFO_APP("✅ Settings panel mouse hook installed for click-outside detection");
         } else {
@@ -557,16 +651,21 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
 #endif // _WIN32
 
 #ifdef _WIN32
-void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
+void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO_APP("Creating wallet overlay with iconRightOffset=" + std::to_string(iconRightOffset));
 
     // Store offset globally for repositioning
     extern int g_wallet_icon_right_offset;
     g_wallet_icon_right_offset = iconRightOffset;
 
-    // Get main window dimensions for positioning
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->wallet_icon_right_offset = g_wallet_icon_right_offset;
+
+    // Get target window dimensions for positioning (fall back to globals)
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
     int width = mainRect.right - mainRect.left;
     int height = mainRect.bottom - mainRect.top;
 
@@ -592,7 +691,7 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
         L"Wallet Overlay",
         WS_POPUP | WS_VISIBLE,
         mainRect.left, mainRect.top, width, height,
-        g_hwnd, nullptr, hInstance, nullptr);
+        posHwnd, nullptr, hInstance, nullptr);
 
     if (!wallet_hwnd) {
         std::cout << "❌ Failed to create wallet overlay HWND. Error: " << GetLastError() << std::endl;
@@ -627,6 +726,15 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     // Store HWND for shutdown cleanup
     g_wallet_overlay_hwnd = wallet_hwnd;
 
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->wallet_overlay_hwnd = g_wallet_overlay_hwnd;
+
+    // Store target BrowserWindow* in HWND user data for WndProc to find the right wallet browser
+    BrowserWindow* walletOwnerWin = targetWin ? targetWin : mainWin;
+    if (walletOwnerWin) {
+        SetWindowLongPtr(wallet_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(walletOwnerWin));
+    }
+
     std::ofstream debugLog3("debug_output.log", std::ios::app);
     debugLog3 << "✅ Wallet overlay HWND created: " << wallet_hwnd << std::endl;
     debugLog3.close();
@@ -645,8 +753,9 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
 
     // Note: DevTools is enabled through context menu handler, not browser settings
 
-    // Create new handler for wallet overlay
-    CefRefPtr<SimpleHandler> wallet_handler(new SimpleHandler("wallet"));
+    // Create new handler for wallet overlay (with correct window_id for IPC routing)
+    int walletWinId = targetWin ? targetWin->window_id : 0;
+    CefRefPtr<SimpleHandler> wallet_handler(new SimpleHandler("wallet", walletWinId));
 
     // Set render handler for wallet overlay (same as settings overlay)
     CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(wallet_hwnd, width, height);
@@ -716,6 +825,10 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     // Store HWND for shutdown cleanup
     g_backup_overlay_hwnd = backup_hwnd;
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->backup_overlay_hwnd = g_backup_overlay_hwnd;
 
     std::ofstream debugLog3("debug_output.log", std::ios::app);
     debugLog3 << "✅ Backup overlay HWND created: " << backup_hwnd << std::endl;
@@ -804,6 +917,10 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     // Store HWND for shutdown cleanup
     g_brc100_auth_overlay_hwnd = auth_hwnd;
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->brc100_auth_overlay_hwnd = g_brc100_auth_overlay_hwnd;
 
     std::ofstream debugLog3("debug_output.log", std::ios::app);
     debugLog3 << "✅ BRC-100 auth overlay HWND created: " << auth_hwnd << std::endl;
@@ -955,6 +1072,10 @@ void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, con
 
     g_notification_overlay_hwnd = notif_hwnd;
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->notification_overlay_hwnd = g_notification_overlay_hwnd;
+
     // Windowless CEF browser with render handler
     CefWindowInfo window_info;
     window_info.windowless_rendering_enabled = true;
@@ -1046,6 +1167,11 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     g_settings_menu_overlay_hwnd = menu_hwnd;
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->settings_menu_overlay_hwnd = g_settings_menu_overlay_hwnd;
+
     LOG_INFO_APP("✅ Settings menu HWND created: " + std::to_string(reinterpret_cast<intptr_t>(menu_hwnd)));
 
     // Create CEF browser for the menu
@@ -1143,6 +1269,11 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
 
     // Store HWND globally
     g_omnibox_overlay_hwnd = omnibox_hwnd;
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->omnibox_overlay_hwnd = g_omnibox_overlay_hwnd;
+
     LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)) +
                  " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
 
@@ -1175,7 +1306,7 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     }
 }
 
-void ShowOmniboxOverlay() {
+void ShowOmniboxOverlay(BrowserWindow* targetWin) {
     // Guard: verify HWND exists
     if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
         LOG_WARNING_APP("⚠️ Cannot show omnibox overlay - HWND does not exist");
@@ -1187,8 +1318,10 @@ void ShowOmniboxOverlay() {
     // Install global mouse hook for click-outside detection
     extern HHOOK g_omnibox_mouse_hook;
     extern LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
     if (!g_omnibox_mouse_hook) {
         g_omnibox_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, OmniboxMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->omnibox_mouse_hook = g_omnibox_mouse_hook;
         if (g_omnibox_mouse_hook) {
             LOG_INFO_APP("✅ Omnibox mouse hook installed for click-outside detection");
         } else {
@@ -1196,11 +1329,15 @@ void ShowOmniboxOverlay() {
         }
     }
 
-    // Recalculate position in case address bar moved
+    // Use target window's HWNDs for positioning (fall back to globals)
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    // Recalculate position relative to the requesting window
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
 
     int overlayX = mainRect.left + 160;
     int overlayY = headerRect.top + 104;
@@ -1216,17 +1353,26 @@ void ShowOmniboxOverlay() {
     LONG exStyle = GetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
-    // Clear any persistent focus states by executing blur on active element
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
-    if (omnibox_browser && omnibox_browser->GetMainFrame()) {
-        omnibox_browser->GetHost()->WasResized();
-        omnibox_browser->GetHost()->Invalidate(PET_VIEW);
+    if (omnibox_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(omnibox_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+            LOG_INFO_APP("🔍 Retargeted omnibox handler to window " + std::to_string(targetWindowId));
+        }
 
-        // Execute JavaScript to blur any focused elements
-        std::string blurJs = "if (document.activeElement) { document.activeElement.blur(); }";
-        omnibox_browser->GetMainFrame()->ExecuteJavaScript(blurJs, "about:blank", 0);
+        // Clear any persistent focus states by executing blur on active element
+        if (omnibox_browser->GetMainFrame()) {
+            omnibox_browser->GetHost()->WasResized();
+            omnibox_browser->GetHost()->Invalidate(PET_VIEW);
 
-        LOG_INFO_APP("🔍 Cleared focus states in omnibox browser");
+            std::string blurJs = "if (document.activeElement) { document.activeElement.blur(); }";
+            omnibox_browser->GetMainFrame()->ExecuteJavaScript(blurJs, "about:blank", 0);
+
+            LOG_INFO_APP("🔍 Cleared focus states in omnibox browser");
+        }
     }
 
     LOG_INFO_APP("✅ Omnibox overlay shown");
@@ -1259,18 +1405,25 @@ void HideOmniboxOverlay() {
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
 
-    // Return focus to header browser
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    // Return focus to the correct window's header browser
+    // The omnibox handler's window_id tells us which window to refocus
+    int targetWinId = 0;
+    if (omnibox_browser) {
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(omnibox_browser->GetIdentifier());
+        if (handler) targetWinId = handler->GetWindowId();
+    }
+    BrowserWindow* focusWin = WindowManager::GetInstance().GetWindow(targetWinId);
+    CefRefPtr<CefBrowser> header_browser = focusWin ? focusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
-        LOG_INFO_APP("✅ Returned focus to header browser");
+        LOG_INFO_APP("✅ Returned focus to header browser (window " + std::to_string(targetWinId) + ")");
     }
 
     LOG_INFO_APP("✅ Omnibox overlay hidden");
 }
 
 // Forward declarations for cookie panel overlay functions
-void ShowCookiePanelOverlay(int iconRightOffset = 0);
+void ShowCookiePanelOverlay(int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
 void HideCookiePanelOverlay();
 
 void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
@@ -1283,6 +1436,10 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
     if (iconRightOffset > 0) {
         g_cookie_icon_right_offset = iconRightOffset;
     }
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->cookie_icon_right_offset = g_cookie_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
     if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd)) {
@@ -1341,6 +1498,10 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
 
     // Store HWND globally
     g_cookie_panel_overlay_hwnd = cookie_panel_hwnd;
+
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->cookie_panel_overlay_hwnd = g_cookie_panel_overlay_hwnd;
+
     LOG_INFO_APP("✅ Cookie panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(cookie_panel_hwnd)) +
                  " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
 
@@ -1376,6 +1537,7 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
 
             if (!g_cookie_panel_mouse_hook) {
                 g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
+                if (mainWin) mainWin->cookie_panel_mouse_hook = g_cookie_panel_mouse_hook;
                 if (g_cookie_panel_mouse_hook) {
                     LOG_INFO_APP("✅ Cookie panel mouse hook installed for click-outside detection");
                 } else {
@@ -1393,7 +1555,7 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
     }
 }
 
-void ShowCookiePanelOverlay(int iconRightOffset) {
+void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     // Guard: verify HWND exists
     if (!g_cookie_panel_overlay_hwnd || !IsWindow(g_cookie_panel_overlay_hwnd)) {
         LOG_WARNING_APP("Cannot show cookie panel overlay - HWND does not exist");
@@ -1406,6 +1568,10 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
         g_cookie_icon_right_offset = iconRightOffset;
     }
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->cookie_icon_right_offset = g_cookie_icon_right_offset;
+
     LOG_INFO_APP("Showing cookie panel overlay with iconRightOffset=" + std::to_string(g_cookie_icon_right_offset));
 
     // Install global mouse hook for click-outside detection
@@ -1413,6 +1579,7 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
     extern LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     if (!g_cookie_panel_mouse_hook) {
         g_cookie_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, CookiePanelMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->cookie_panel_mouse_hook = g_cookie_panel_mouse_hook;
         if (g_cookie_panel_mouse_hook) {
             LOG_INFO_APP("Cookie panel mouse hook installed");
         } else {
@@ -1420,10 +1587,14 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
         }
     }
 
+    // Use target window's HWNDs for positioning (fall back to globals)
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
     int panelWidth = 450;
@@ -1445,12 +1616,22 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
     LONG exStyle = GetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
-    // Trigger render update
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
-    if (cookie_browser && cookie_browser->GetHost()) {
-        cookie_browser->GetHost()->WasResized();
-        cookie_browser->GetHost()->Invalidate(PET_VIEW);
-        LOG_INFO_APP("🍪 Triggered render update for cookie panel browser");
+    if (cookie_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(cookie_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+            LOG_INFO_APP("🍪 Retargeted cookie panel handler to window " + std::to_string(targetWindowId));
+        }
+
+        // Trigger render update
+        if (cookie_browser->GetHost()) {
+            cookie_browser->GetHost()->WasResized();
+            cookie_browser->GetHost()->Invalidate(PET_VIEW);
+            LOG_INFO_APP("🍪 Triggered render update for cookie panel browser");
+        }
     }
 
     LOG_INFO_APP("✅ Cookie panel overlay shown");
@@ -1475,19 +1656,23 @@ void HideCookiePanelOverlay() {
 
     // Clear focus from cookie panel browser before hiding
     CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
+    int targetWinId = 0;
     if (cookie_browser) {
         cookie_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(cookie_browser->GetIdentifier());
+        if (handler) targetWinId = handler->GetWindowId();
         LOG_INFO_APP("✅ Cleared focus from cookie panel browser");
     }
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_cookie_panel_overlay_hwnd, SW_HIDE);
 
-    // Return focus to header browser
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    // Return focus to the correct window's header browser
+    BrowserWindow* focusWin = WindowManager::GetInstance().GetWindow(targetWinId);
+    CefRefPtr<CefBrowser> header_browser = focusWin ? focusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
-        LOG_INFO_APP("✅ Returned focus to header browser");
+        LOG_INFO_APP("✅ Returned focus to header browser (window " + std::to_string(targetWinId) + ")");
     }
 
     LOG_INFO_APP("✅ Cookie panel overlay hidden");
@@ -1496,7 +1681,7 @@ void HideCookiePanelOverlay() {
 // ========== DOWNLOAD PANEL OVERLAY ==========
 
 // Forward declaration
-void ShowDownloadPanelOverlay(int iconRightOffset);
+void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 
 void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
     LOG_INFO_APP("Creating download panel overlay (showImmediately=" +
@@ -1508,6 +1693,10 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     if (iconRightOffset > 0) {
         g_download_icon_right_offset = iconRightOffset;
     }
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->download_icon_right_offset = g_download_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
     extern HWND g_download_panel_overlay_hwnd;
@@ -1569,6 +1758,10 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
 
     // Store HWND globally
     g_download_panel_overlay_hwnd = download_panel_hwnd;
+
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->download_panel_overlay_hwnd = g_download_panel_overlay_hwnd;
+
     LOG_INFO_APP("Download panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(download_panel_hwnd)) +
                  " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
 
@@ -1604,6 +1797,7 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
 
             if (!g_download_panel_mouse_hook) {
                 g_download_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, DownloadPanelMouseHookProc, nullptr, 0);
+                if (mainWin) mainWin->download_panel_mouse_hook = g_download_panel_mouse_hook;
                 if (g_download_panel_mouse_hook) {
                     LOG_INFO_APP("Download panel mouse hook installed for click-outside detection");
                 } else {
@@ -1620,7 +1814,7 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     }
 }
 
-void ShowDownloadPanelOverlay(int iconRightOffset) {
+void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     // Guard: verify HWND exists
     extern HWND g_download_panel_overlay_hwnd;
     if (!g_download_panel_overlay_hwnd || !IsWindow(g_download_panel_overlay_hwnd)) {
@@ -1634,6 +1828,10 @@ void ShowDownloadPanelOverlay(int iconRightOffset) {
         g_download_icon_right_offset = iconRightOffset;
     }
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->download_icon_right_offset = g_download_icon_right_offset;
+
     LOG_INFO_APP("Showing download panel overlay with iconRightOffset=" + std::to_string(g_download_icon_right_offset));
 
     // Install global mouse hook for click-outside detection
@@ -1641,6 +1839,7 @@ void ShowDownloadPanelOverlay(int iconRightOffset) {
     extern LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     if (!g_download_panel_mouse_hook) {
         g_download_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, DownloadPanelMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->download_panel_mouse_hook = g_download_panel_mouse_hook;
         if (g_download_panel_mouse_hook) {
             LOG_INFO_APP("Download panel mouse hook installed");
         } else {
@@ -1648,12 +1847,16 @@ void ShowDownloadPanelOverlay(int iconRightOffset) {
         }
     }
 
+    // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
     extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
     int panelWidth = 380;
@@ -1675,11 +1878,20 @@ void ShowDownloadPanelOverlay(int iconRightOffset) {
     LONG exStyle = GetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
-    // Trigger render update
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
-    if (dl_browser && dl_browser->GetHost()) {
-        dl_browser->GetHost()->WasResized();
-        dl_browser->GetHost()->Invalidate(PET_VIEW);
+    if (dl_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(dl_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+        }
+
+        // Trigger render update
+        if (dl_browser->GetHost()) {
+            dl_browser->GetHost()->WasResized();
+            dl_browser->GetHost()->Invalidate(PET_VIEW);
+        }
     }
 
     LOG_INFO_APP("Download panel overlay shown");
@@ -1705,15 +1917,19 @@ void HideDownloadPanelOverlay() {
 
     // Clear focus from download panel browser before hiding
     CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
+    int dlTargetWinId = 0;
     if (dl_browser) {
         dl_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(dl_browser->GetIdentifier());
+        if (handler) dlTargetWinId = handler->GetWindowId();
     }
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_download_panel_overlay_hwnd, SW_HIDE);
 
-    // Return focus to header browser
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    // Return focus to the correct window's header browser
+    BrowserWindow* dlFocusWin = WindowManager::GetInstance().GetWindow(dlTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = dlFocusWin ? dlFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }
@@ -1723,7 +1939,7 @@ void HideDownloadPanelOverlay() {
 
 // ==================== MENU OVERLAY ====================
 
-void ShowMenuOverlay(int iconRightOffset = 0);
+void ShowMenuOverlay(int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
 void HideMenuOverlay();
 
 void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
@@ -1736,6 +1952,10 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
     if (iconRightOffset > 0) {
         g_menu_icon_right_offset = iconRightOffset;
     }
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->menu_icon_right_offset = g_menu_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
     extern HWND g_menu_overlay_hwnd;
@@ -1797,6 +2017,10 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
 
     // Store HWND globally
     g_menu_overlay_hwnd = menu_hwnd;
+
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->menu_overlay_hwnd = g_menu_overlay_hwnd;
+
     LOG_INFO_APP("Menu overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(menu_hwnd)));
 
     // Create CEF browser subprocess for menu overlay
@@ -1829,6 +2053,7 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
 
             if (!g_menu_mouse_hook) {
                 g_menu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, MenuMouseHookProc, nullptr, 0);
+                if (mainWin) mainWin->menu_mouse_hook = g_menu_mouse_hook;
                 if (g_menu_mouse_hook) {
                     LOG_INFO_APP("Menu mouse hook installed for click-outside detection");
                 }
@@ -1842,7 +2067,7 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
     }
 }
 
-void ShowMenuOverlay(int iconRightOffset) {
+void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     extern HWND g_menu_overlay_hwnd;
     if (!g_menu_overlay_hwnd || !IsWindow(g_menu_overlay_hwnd)) {
         LOG_WARNING_APP("Cannot show menu overlay - HWND does not exist");
@@ -1854,6 +2079,10 @@ void ShowMenuOverlay(int iconRightOffset) {
         g_menu_icon_right_offset = iconRightOffset;
     }
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->menu_icon_right_offset = g_menu_icon_right_offset;
+
     LOG_INFO_APP("Showing menu overlay");
 
     // Install mouse hook
@@ -1861,14 +2090,19 @@ void ShowMenuOverlay(int iconRightOffset) {
     extern LRESULT CALLBACK MenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     if (!g_menu_mouse_hook) {
         g_menu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, MenuMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->menu_mouse_hook = g_menu_mouse_hook;
     }
 
+    // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
     extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
 
     int panelWidth = 280;
     int panelHeight = 450;
@@ -1886,10 +2120,19 @@ void ShowMenuOverlay(int iconRightOffset) {
     LONG exStyle = GetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
-    if (menu_browser && menu_browser->GetHost()) {
-        menu_browser->GetHost()->WasResized();
-        menu_browser->GetHost()->Invalidate(PET_VIEW);
+    if (menu_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(menu_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+        }
+
+        if (menu_browser->GetHost()) {
+            menu_browser->GetHost()->WasResized();
+            menu_browser->GetHost()->Invalidate(PET_VIEW);
+        }
     }
 
     LOG_INFO_APP("Menu overlay shown");
@@ -1910,13 +2153,17 @@ void HideMenuOverlay() {
     }
 
     CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
+    int menuTargetWinId = 0;
     if (menu_browser) {
         menu_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(menu_browser->GetIdentifier());
+        if (handler) menuTargetWinId = handler->GetWindowId();
     }
 
     ShowWindow(g_menu_overlay_hwnd, SW_HIDE);
 
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    BrowserWindow* menuFocusWin = WindowManager::GetInstance().GetWindow(menuTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = menuFocusWin ? menuFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }
@@ -1924,7 +2171,7 @@ void HideMenuOverlay() {
 
 // ==================== PROFILE PANEL OVERLAY ====================
 
-void ShowProfilePanelOverlay(int iconRightOffset = 0);
+void ShowProfilePanelOverlay(int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
 void HideProfilePanelOverlay();
 
 void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
@@ -1937,6 +2184,10 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
     if (iconRightOffset > 0) {
         g_profile_icon_right_offset = iconRightOffset;
     }
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
     extern HWND g_profile_panel_overlay_hwnd;
@@ -1999,6 +2250,10 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
 
     // Store HWND globally
     g_profile_panel_overlay_hwnd = profile_panel_hwnd;
+
+    // Sync to BrowserWindow 0
+    if (mainWin) mainWin->profile_panel_overlay_hwnd = g_profile_panel_overlay_hwnd;
+
     LOG_INFO_APP("Profile panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(profile_panel_hwnd)));
 
     // Create CEF browser subprocess for profile panel overlay
@@ -2034,6 +2289,7 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
 
             if (!g_profile_panel_mouse_hook) {
                 g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+                if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
                 if (g_profile_panel_mouse_hook) {
                     LOG_INFO_APP("Profile panel mouse hook installed");
                 }
@@ -2047,7 +2303,7 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
     }
 }
 
-void ShowProfilePanelOverlay(int iconRightOffset) {
+void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     extern HWND g_profile_panel_overlay_hwnd;
     if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
         LOG_WARNING_APP("Cannot show profile panel overlay - HWND does not exist");
@@ -2059,6 +2315,10 @@ void ShowProfilePanelOverlay(int iconRightOffset) {
         g_profile_icon_right_offset = iconRightOffset;
     }
 
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
+
     LOG_INFO_APP("Showing profile panel overlay");
 
     // Install mouse hook
@@ -2066,14 +2326,19 @@ void ShowProfilePanelOverlay(int iconRightOffset) {
     extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     if (!g_profile_panel_mouse_hook) {
         g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
     }
 
+    // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
     extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
 
     int panelWidth = 380;   // Wider for profile management UI
     int panelHeight = 380;  // Reduced from 500 to match actual content height
@@ -2097,11 +2362,17 @@ void ShowProfilePanelOverlay(int iconRightOffset) {
     SetForegroundWindow(g_profile_panel_overlay_hwnd);
     SetFocus(g_profile_panel_overlay_hwnd);
 
-    // Then set CEF browser focus so text inputs work
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     if (profile_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(profile_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+        }
+
+        // Set CEF browser focus so text inputs work
         profile_browser->GetHost()->SetFocus(true);
-        // Force invalidate to ensure focus state is rendered
         profile_browser->GetHost()->Invalidate(PET_VIEW);
         LOG_INFO_APP("Profile panel browser focus set to true");
     }
@@ -2122,13 +2393,17 @@ void HideProfilePanelOverlay() {
     }
 
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+    int profTargetWinId = 0;
     if (profile_browser) {
         profile_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(profile_browser->GetIdentifier());
+        if (handler) profTargetWinId = handler->GetWindowId();
     }
 
     ShowWindow(g_profile_panel_overlay_hwnd, SW_HIDE);
 
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    BrowserWindow* profFocusWin = WindowManager::GetInstance().GetWindow(profTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = profFocusWin ? profFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }

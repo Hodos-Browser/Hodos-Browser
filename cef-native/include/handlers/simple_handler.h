@@ -21,6 +21,7 @@
 // Forward declarations to avoid circular dependency
 struct Tab;
 class TabManager;
+class BrowserWindow;
 
 class SimpleHandler : public CefClient,
                       public CefLifeSpanHandler,
@@ -35,7 +36,7 @@ class SimpleHandler : public CefClient,
                       public CefFindHandler,
                       public CefJSDialogHandler {
 public:
-    explicit SimpleHandler(const std::string& role);
+    explicit SimpleHandler(const std::string& role, int window_id = 0);
 
     // CefClient methods
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override;
@@ -71,7 +72,8 @@ public:
     static std::string pending_shield_domain_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
-    static void NotifyTabListChanged();  // Notify frontend of tab list changes
+    static void NotifyTabListChanged();  // Notify ALL windows' frontends of tab list changes
+    static void NotifyWindowTabListChanged(int window_id);  // Notify ONE window's frontend only
 
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
@@ -222,8 +224,24 @@ public:
     static std::set<uint32_t> paused_downloads_;
     static void NotifyDownloadStateChanged();
 
+    // Get the BrowserWindow that owns this handler
+    BrowserWindow* GetOwnerWindow() const;
+
+    // Get this handler's window id
+    int GetWindowId() const { return window_id_; }
+
+    // Set this handler's window id (used to retarget shared overlay handlers)
+    void SetWindowId(int id) { window_id_ = id; }
+
+    // Look up a handler by its browser ID (for retargeting overlay window_id)
+    static SimpleHandler* GetHandlerForBrowser(int browser_id);
+
 private:
     std::string role_;
+    int window_id_ = 0;
+
+    // Static map: browser_id → handler pointer (for overlay retargeting)
+    static std::map<int, SimpleHandler*> browser_handler_map_;
 
     /**
      * @brief Show DevTools for browser or focus if already open

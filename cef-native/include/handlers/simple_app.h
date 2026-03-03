@@ -41,7 +41,7 @@
     void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
     void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true);
-    void ShowOmniboxOverlay();
+    void ShowOmniboxOverlay(BrowserWindow* targetWin = nullptr);
     void HideOmniboxOverlay();
 
 #elif defined(__APPLE__)
