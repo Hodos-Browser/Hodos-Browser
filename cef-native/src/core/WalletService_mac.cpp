@@ -24,7 +24,7 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 // ========== Constructor/Destructor ==========
 
 WalletService::WalletService()
-    : baseUrl_("http://localhost:3301")
+    : baseUrl_("http://localhost:31301")
     , daemonPath_("")
     , connected_(false)
     , daemonRunning_(false) {

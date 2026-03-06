@@ -1,8 +1,39 @@
-# Build Instructions - Bitcoin Browser
+# Build Instructions - Hodos Browser
+
+## ⚡ Quick Start (TL;DR)
+
+**Prerequisites:** Visual Studio 2022, CMake 3.20+, Rust, Node.js 18+, vcpkg
+
+**Build steps:**
+1. Download CEF binaries → extract to `cef-binaries/`
+2. Build CEF wrapper: `cd cef-binaries/libcef_dll/wrapper && mkdir build && cd build && cmake .. && cmake --build . --config Release`
+3. Build Rust wallet: `cd rust-wallet && cargo build --release`
+4. Build adblock engine: `cd adblock-engine && cargo build --release`
+5. Install frontend deps: `cd frontend && npm install`
+6. Build C++ shell: `cd cef-native && cmake -S . -B build -G "Visual Studio 17 2022" -A x64 && cmake --build build --config Release`
+
+**Run the browser:**
+```bash
+cd frontend && npm run dev          # Terminal 1: Start frontend dev server
+cd cef-native/build/bin/Release && ./HodosBrowserShell.exe   # Terminal 2: Launch browser
+```
+
+The browser **auto-launches** the Rust wallet and adblock-engine. You only need the frontend dev server running.
+
+---
 
 ## 🎯 Overview
 
-This document provides step-by-step instructions for building the Bitcoin Browser project. The build process involves multiple components: CEF binaries, C++ native shell, Rust wallet backend, and Vite React frontend (TypeScript).
+This document provides step-by-step instructions for building Hodos Browser. The build process involves multiple components:
+
+| Component | Language | Port | Auto-launched? |
+|-----------|----------|------|----------------|
+| CEF Native Shell | C++ | — | — (main app) |
+| Rust Wallet | Rust | 3301 | ✅ Yes |
+| Adblock Engine | Rust | 3302 | ✅ Yes |
+| Frontend | TypeScript/React | 5137 | ❌ No (run manually) |
+
+**Note:** The C++ shell automatically starts `rust-wallet` and `adblock-engine` executables on launch. You only need to run them manually if you want to see their logs or are debugging those components.
 
 ## 📋 Prerequisites
 
@@ -86,8 +117,6 @@ CEF binaries are too large for Git and are gitignored. You must download them se
 The CEF wrapper library (`libcef_dll_wrapper`) must be built from source. The wrapper CMakeLists.txt is located in the CEF binaries directory and builds a static library that the native shell links against.
 
 **CMakeLists.txt Location**: `cef-binaries/libcef_dll/wrapper/CMakeLists.txt`
-
-**Note**: A reference copy of this CMakeLists.txt is available at `build-reference/CEF_WRAPPER_CMakeLists.txt` for documentation purposes. The actual file will be present in the CEF binaries when you download them.
 
 **Important**: The wrapper must be built in-place within the `cef-binaries` directory structure. The build output contains paths specific to your system, so each developer must build their own wrapper. You cannot share the built wrapper library between systems.
 
@@ -174,6 +203,47 @@ The wallet data is stored in a SQLite database at: `%APPDATA%/HodosBrowser/walle
 Invoke-RestMethod -Uri "http://localhost:3301/wallet/status" -Method GET
 ```
 
+### Step 2.5: Adblock Engine Setup
+
+The adblock engine provides ad and tracker blocking using Brave's `adblock-rust` library. It runs as a separate Rust microservice on port 3302.
+
+**Note:** The browser auto-launches this on startup. You only need to build it — running manually is optional (for debugging).
+
+#### Build Adblock Engine
+
+```bash
+cd adblock-engine
+cargo build --release
+```
+
+**Output:** `adblock-engine/target/release/hodos-adblock.exe`
+
+#### Version Constraints
+
+The adblock engine has specific version pins due to Rust compatibility:
+
+| Dependency | Pinned Version | Reason |
+|------------|----------------|--------|
+| `actix-web` | 4.11.0 | 4.13+ requires Rust 1.88 |
+| `adblock` | 0.10.3 | 0.10.4+ requires nightly Rust |
+| `rmp` | 0.8.14 | Required by adblock 0.10.x |
+
+**Rust version:** Use stable Rust 1.85. Do not upgrade adblock crate without checking compatibility.
+
+#### Run Manually (Optional)
+
+```bash
+cd adblock-engine
+cargo run --release
+# Server starts on http://127.0.0.1:3302
+```
+
+#### Adblock Engine Endpoints
+
+- `POST http://localhost:3302/check` — Check if URL should be blocked
+- `POST http://localhost:3302/cosmetic` — Get cosmetic filter rules for a page
+- `GET http://localhost:3302/stats` — Blocking statistics
+
 ### Step 3: Vite React Frontend Setup
 
 The frontend is built with **Vite** and **TypeScript**.
@@ -257,22 +327,50 @@ cmake --build . --config Debug
 
 The build process automatically copies required CEF runtime files (DLLs, resources) to the output directory.
 
-### Step 5: Integration Testing
+### Step 5: Run the Browser
 
-#### Start Rust Wallet Daemon
+The browser auto-launches the Rust wallet (port 3301) and adblock engine (port 3302). You only need to start the frontend dev server.
+
+#### Start Frontend Dev Server
 
 ```bash
-# In separate terminal
-cd rust-wallet
-cargo run --release
+cd frontend
+npm run dev
+# Serves on http://127.0.0.1:5137
 ```
 
-#### Run Native Shell
+#### Launch Browser
 
 ```bash
-# From cef-native/build/bin/Release/
+cd cef-native/build/bin/Release
 ./HodosBrowserShell.exe
 ```
+
+The browser will automatically start `rust-wallet` and `adblock-engine` from their `target/release/` directories.
+
+#### Optional: Run Backend Services Manually (for debugging)
+
+If you need to see wallet or adblock logs, run them in separate terminals before launching the browser:
+
+```bash
+# Terminal 1: Wallet (optional - for logs)
+cd rust-wallet
+cargo run --release
+
+# Terminal 2: Adblock (optional - for logs)
+cd adblock-engine
+cargo run --release
+
+# Terminal 3: Frontend (required)
+cd frontend
+npm run dev
+
+# Terminal 4: Browser
+cd cef-native/build/bin/Release
+./HodosBrowserShell.exe
+```
+
+When running services manually, the browser detects they're already running and uses them instead of spawning new processes.
 
 ## 🚨 Known Issues & TODOs
 
@@ -337,6 +435,7 @@ The following directories/files are gitignored and must be set up locally:
 - **`/cef-native/build/`** - CMake build output
 - **`/cef-native/bin/`** - Compiled executables
 - **`rust-wallet/target/`** - Rust build artifacts
+- **`adblock-engine/target/`** - Adblock engine build artifacts
 - **`frontend/node_modules/`** - Node.js dependencies
 - **`frontend/dist/`** - Frontend build output
 

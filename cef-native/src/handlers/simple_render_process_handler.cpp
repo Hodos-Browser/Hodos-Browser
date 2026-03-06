@@ -1694,6 +1694,13 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== WALLET PAYMENT DISMISSED (forwarded from wallet overlay) ==========
+    if (message_name == "wallet_payment_dismissed") {
+        frame->ExecuteJavaScript("window.postMessage({ type: 'wallet_payment_dismissed' }, '*');", frame->GetURL(), 0);
+        LOG_DEBUG_RENDER("wallet_payment_dismissed posted to header window");
+        return true;
+    }
+
     // ========== GOOGLE SUGGEST RESPONSE ==========
     if (message_name == "google_suggest_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();

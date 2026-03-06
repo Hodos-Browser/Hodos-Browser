@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   getCachedBalance, setCachedBalance,
   getCachedPrice, setCachedPrice,
@@ -12,10 +12,10 @@ export const calculateUsdValue = (balanceSatoshis: number, bsvPriceUsd: number):
   return (balanceSatoshis / 100000000) * bsvPriceUsd;
 };
 
-const BALANCE_POLL_MS = 30_000;   // 30s — matches Rust backend cache TTL
-
 export const useBalance = () => {
-  // Seed state from localStorage cache synchronously (instant display)
+  // Seed state from localStorage cache synchronously (instant display).
+  // The background poller in MainBrowserView keeps this cache fresh (30s).
+  // No auto-fetch on mount — cached data is already current.
   const cachedBal = getCachedBalance();
   const cachedPri = getCachedPrice();
 
@@ -25,17 +25,13 @@ export const useBalance = () => {
     calculateUsdValue(cachedBal?.balance ?? 0, cachedPri?.price ?? 0)
   );
 
-  // isLoading: true ONLY when no cached data exists (truly first load)
-  const [isLoading, setIsLoading] = useState(!cachedBal);
-  // isRefreshing: true during any background or explicit refresh
+  const [isLoading] = useState(!cachedBal);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Refs for cleanup
   const mountedRef = useRef(true);
-  const balanceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Fetch balance + price from backend (single call)
+  // Fetch balance + price via CEF bridge (used by manual refresh only)
   const fetchBalance = useCallback(async (): Promise<{ balance: number; price: number }> => {
     if (!window.hodosBrowser?.wallet) {
       throw new Error('Bitcoin Browser wallet not available');
@@ -58,8 +54,7 @@ export const useBalance = () => {
     return { balance: bal, price };
   }, []);
 
-  // Explicit refresh — for refresh button and post-send.
-  // Shows isRefreshing but keeps current values visible.
+  // Explicit refresh — for refresh button and post-send only.
   const refreshBalance = useCallback(async () => {
     setIsRefreshing(true);
     setError(null);
@@ -81,38 +76,10 @@ export const useBalance = () => {
       }
     } finally {
       if (mountedRef.current) {
-        setIsLoading(false);
         setIsRefreshing(false);
       }
     }
   }, [fetchBalance, bsvPrice]);
-
-  // On mount: initial refresh + start balance poller
-  useEffect(() => {
-    mountedRef.current = true;
-
-    // Initial refresh (cached data is already displayed, this updates silently)
-    const initTimeout = setTimeout(() => refreshBalance(), 100);
-
-    // Balance + price poller — 30s interval (price comes from backend with 5-min TTL)
-    balanceIntervalRef.current = setInterval(async () => {
-      try {
-        const { balance: bal, price } = await fetchBalance();
-        if (mountedRef.current) {
-          const effectivePrice = price > 0 ? price : bsvPrice;
-          setUsdValue(calculateUsdValue(bal, effectivePrice));
-        }
-      } catch {
-        // Silent — pollers should not surface errors
-      }
-    }, BALANCE_POLL_MS);
-
-    return () => {
-      mountedRef.current = false;
-      clearTimeout(initTimeout);
-      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
-    };
-  }, [refreshBalance, fetchBalance, bsvPrice]);
 
   return {
     balance,

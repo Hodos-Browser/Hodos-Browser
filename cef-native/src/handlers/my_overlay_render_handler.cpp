@@ -378,3 +378,4 @@ void MyOverlayRenderHandler::OnPopupShow(CefRefPtr<CefBrowser> browser, bool sho
 void MyOverlayRenderHandler::OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect& rect) {
     // Handle popup size changes
 }
+

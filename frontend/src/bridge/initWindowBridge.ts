@@ -107,7 +107,7 @@ if (!window.hodosBrowser.overlay?.toggleInput) {
   if (!window.hodosBrowser.overlay) {
     window.hodosBrowser.overlay = {} as any;
   }
-  window.hodosBrowser.overlay.toggleInput = (enable: boolean) => {
+  window.hodosBrowser.overlay.toggleInput = (_enable: boolean) => {
     console.log("⚠️ overlay.toggleInput called but not implemented on this platform");
   };
 }

@@ -27,7 +27,7 @@ const WalletPanelLayout: React.FC<Props> = ({ onClose, open }) => {
       sx={{
         '& .MuiDrawer-paper': {
           width: '36%',  // Reduced to 36% for better balance
-          bgcolor: '#2d5016', // Dark green background
+          bgcolor: '#a67c00', // Hodos gold background
           color: 'white',
         },
       }}
@@ -41,7 +41,7 @@ const WalletPanelLayout: React.FC<Props> = ({ onClose, open }) => {
           <CloseIcon />
         </IconButton>
       </Box>
-      <Divider sx={{ bgcolor: '#d4c4a8' }} />
+      <Divider sx={{ bgcolor: '#a67c00' }} />
 
       {/* Add wallet UI content here */}
       <Box p={2}>

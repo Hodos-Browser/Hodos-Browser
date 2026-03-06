@@ -30,7 +30,7 @@ React Frontend (Port 5137)
     │ window.hodosBrowser.*
     ▼
 C++ CEF Shell
-    │ HTTP interception & forwarding → localhost:3301 for wallet functions
+    │ HTTP interception & forwarding → localhost:31301 for wallet functions
     ▼
 Rust Wallet Backend (Port 3301)
     │
@@ -82,6 +82,71 @@ All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
 - Address bar input
 - Toolbar icon buttons (that TRIGGER overlays)
 - Find bar (inline exception)
+
+---
+
+## ⚠️ Overlay Lifecycle & Close Prevention (IMPORTANT)
+
+Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a different close/destroy pattern. Understanding these is critical for UX work.
+
+### Overlay Close Mechanisms
+
+| Mechanism | Where | Overlays Affected |
+|-----------|-------|-------------------|
+| **Click-outside (React)** | `handleBackgroundClick()` in overlay page | Wallet, Settings (full-page overlays with transparent backdrop) |
+| **Click-outside (Mouse hook)** | `WH_MOUSE_LL` hook in C++ | Cookie, Download, Menu, Profile, Omnibox (dropdown-style overlays) |
+| **IPC `overlay_close`** | React → `simple_handler.cpp` | All overlays (explicit close from React) |
+| **Focus loss (`WM_ACTIVATEAPP`)** | `cef_browser_shell.cpp` WndProc | Omnibox only. **Wallet is exempt** (user may switch apps to paste mnemonic) |
+| **Old overlay cleanup** | `CreateXxxOverlay()` functions | Destroys existing overlay before creating new one |
+
+### Close Prevention Patterns
+
+**1. `g_file_dialog_active` (C++ synchronous guard)**
+- Set to `true` in `OnFileDialog()` (C++ side, synchronous — before dialog opens)
+- Cleared on `WM_ACTIVATEAPP(TRUE)` (app regains focus)
+- Guards ALL overlays during native file dialog
+- **Works because it's set synchronously in C++ before focus loss can fire**
+
+**2. `g_wallet_overlay_prevent_close` (React → C++ IPC flag)**
+- Set via `wallet_prevent_close` / `wallet_allow_close` IPC messages from React
+- Guards React's `handleBackgroundClick()` (click-outside in React code)
+- **⚠️ Cannot guard `WM_ACTIVATEAPP`** — IPC is async, flag may not be set before focus loss fires
+- Auto-cleared on `overlay_close` IPC
+
+**3. Wallet creation-time default (flag set in C++, cleared by React)**
+- `g_wallet_overlay_prevent_close` is set to `true` in `CreateWalletOverlayWithSeparateProcess()` (synchronous, no race)
+- React sends `wallet_allow_close` IPC once user reaches a safe state (live wallet, loading, locked)
+- React sends `wallet_prevent_close` IPC when entering unsafe state (mnemonic display, PIN entry)
+- Result: new overlay survives focus loss by default; React opts in to allow close once ready
+
+### Key Rule: Synchronous vs Async Guards
+
+> **If you need to prevent overlay close during a C++ event (like `WM_ACTIVATEAPP`), the guard flag MUST be set synchronously from C++.** React → IPC → C++ flags have a race condition because `WM_ACTIVATEAPP` fires immediately when the user clicks another window, before async IPC messages arrive.
+
+**Safe pattern:** Set flag in `CreateXxxOverlay()` or in `OnFileDialog()` (C++ side)
+**Unsafe pattern:** Set flag via React `useEffect` → `cefMessage.send()` → IPC handler (async, race condition)
+
+### Destruction Paths for Wallet Overlay (5 total)
+
+1. **`WM_ACTIVATE(WA_INACTIVE)` in `WalletOverlayWndProc`** — THE PRIMARY close path. Fires when wallet HWND loses activation (click outside, Alt+Tab, click another app). Guarded by `g_wallet_overlay_prevent_close`. This is the WndProc for the overlay HWND itself (`cef_browser_shell.cpp` ~line 1297).
+2. **`WM_ACTIVATEAPP` in main WndProc** — App-level focus loss. Also guarded by `g_wallet_overlay_prevent_close`. (`cef_browser_shell.cpp` ~line 952).
+3. **IPC `overlay_close`** from React → `simple_handler.cpp` destroys HWND
+4. **Old overlay cleanup** in `CreateWalletOverlayWithSeparateProcess()` → destroys existing before creating new
+5. **Application shutdown** → `ShutdownApplication()` cleanup
+
+> **Key lesson:** Overlays have BOTH app-level (`WM_ACTIVATEAPP`) AND HWND-level (`WM_ACTIVATE`) close paths. Both must be guarded. The HWND-level `WM_ACTIVATE` in the overlay's own WndProc is typically the one that actually fires first.
+
+### Code Locations
+
+| What | File | Line Reference |
+|------|------|----------------|
+| Overlay globals & flags | `cef_browser_shell.cpp` | Lines 51-90 (globals section) |
+| `WalletOverlayWndProc` (`WM_ACTIVATE`) | `cef_browser_shell.cpp` | ~line 1297 (**primary close path**) |
+| `WM_ACTIVATEAPP` handler (main WndProc) | `cef_browser_shell.cpp` | ~line 952 |
+| `overlay_close` IPC | `simple_handler.cpp` | ~line 3020 |
+| Wallet overlay creation + flag init | `simple_app.cpp` | `CreateWalletOverlayWithSeparateProcess()` ~line 654 |
+| Prevent-close IPC handlers | `simple_handler.cpp` | `wallet_prevent_close` / `wallet_allow_close` ~line 3005 |
+| React preventClose logic | `WalletPanelPage.tsx` | `preventClose` derived state + `useEffect` |
 
 ---
 
@@ -180,7 +245,7 @@ browser->GetHost()->SetFocus(true);
    ```powershell
    cd rust-wallet
    cargo run --release
-   # Runs on localhost:3301
+   # Runs on localhost:31301
    ```
 
 2. **Frontend dev server**:
@@ -261,17 +326,19 @@ First-time setup (requires CEF binaries already downloaded):
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | 68+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, and more |
+| `rust-wallet/src/handlers.rs` | 72+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), and more |
 | `rust-wallet/src/crypto/` | 11 modules: `brc42`, `brc43`, `signing`, `aesgcm_custom`, `dpapi` (Windows DPAPI / macOS Keychain stub), `pin` (PBKDF2+AES-GCM), `keys`, `brc2`, `ghash`, plus tests |
-| `rust-wallet/src/database/` | 23 files, 18+ repos: `wallet_repo`, `address_repo`, `output_repo`, `certificate_repo`, `proven_tx_repo`, `domain_permission_repo`, `user_repo`, `settings_repo`, `backup`, `migrations`, `connection`, and more |
+| `rust-wallet/src/authfetch.rs` | BRC-103 AuthFetch HTTP client: 401 challenge-response with ECDSA signing, server/client nonce exchange, authenticated requests to external BRC-103 servers (MessageBox) |
+| `rust-wallet/src/messagebox.rs` | MessageBox API client: BRC-2 encrypted message send/receive/acknowledge via `messagebox.babbage.systems`, deterministic HMAC message IDs, uses AuthFetch for authentication |
+| `rust-wallet/src/database/` | 24 files, 19+ repos: `wallet_repo`, `address_repo`, `output_repo`, `certificate_repo`, `proven_tx_repo`, `domain_permission_repo`, `peerpay_repo`, `user_repo`, `settings_repo`, `backup`, `migrations`, `connection`, and more |
 | `rust-wallet/src/recovery.rs` | BIP32 legacy key derivation (`derive_private_key_bip32`), wallet recovery from mnemonic |
 | `rust-wallet/src/price_cache.rs` | BSV/USD price cache (CryptoCompare primary + CoinGecko fallback, 5-min TTL) |
-| `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending` |
+| `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending`, `TaskCheckPeerPay` (BRC-103 AuthFetch + BRC-2 encrypted MessageBox polling + auto-accept via `internalize_action`) |
 | `cef-native/cef_browser_shell.cpp` | Windows entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs (incl. `g_download_panel_overlay_hwnd`); class: `Logger`; overlay functions: `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` |
 | `cef-native/cef_browser_shell_mac.mm` | macOS entry point (1754 lines); NSWindow/NSView hierarchy, 5 overlay types, event forwarding |
 | `adblock-engine/src/engine.rs` | AdblockEngine wrapper: filter list downloading, engine compilation, serialization, `RwLock<Engine>` thread-safe checking. 4 filter lists (EasyList, EasyPrivacy, uBlock Filters, uBlock Privacy) + 6 bundled extra scriptlets. Auto-update every 6 hours. |
-| `adblock-engine/src/handlers.rs` | HTTP endpoints on port 3302: `/health`, `/check`, `/status`, `/toggle`, `/cosmetic-resources`, `/cosmetic-hidden-ids` |
-| `cef-native/include/core/AdblockCache.h` | `AdblockCache` singleton: sync WinHTTP to port 3302, URL result cache, per-browser blocked counts, cosmetic resource fetching. `AdblockBlockHandler` cancels blocked requests. `AdblockResponseFilter` (CefResponseFilter) buffers YouTube responses and renames ad-configuration JSON keys. `CookieFilterResourceHandler` returns cookie filter + response filter for YouTube. |
+| `adblock-engine/src/handlers.rs` | HTTP endpoints on port 31302: `/health`, `/check`, `/status`, `/toggle`, `/cosmetic-resources`, `/cosmetic-hidden-ids` |
+| `cef-native/include/core/AdblockCache.h` | `AdblockCache` singleton: sync WinHTTP to port 31302, URL result cache, per-browser blocked counts, cosmetic resource fetching. `AdblockBlockHandler` cancels blocked requests. `AdblockResponseFilter` (CefResponseFilter) buffers YouTube responses and renames ad-configuration JSON keys. `CookieFilterResourceHandler` returns cookie filter + response filter for YouTube. |
 | `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (12 interfaces incl. CefDownloadHandler, CefFindHandler, CefJSDialogHandler); IPC dispatch, keyboard shortcuts (Ctrl+F/H/J/D, Alt+Left/Right), context menus (5 context types, all custom `MENU_ID_USER_FIRST` IDs — see working-notes.md #8), download tracking, find-in-page (JS `window.find()` — CEF Find API non-functional in CEF 136), beforeunload trap suppression, `OnBeforeBrowse` scriptlet pre-cache + fingerprint seed IPC, cosmetic CSS/scriptlet injection, menu IPC (print/devtools/zoom/exit), DNT/GPC header injection, settings_set dispatch. Helpers: `CreateNewTabWithUrl()`, `CopyTextToClipboard()`. Cross-platform wrapped. |
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs`; scriptlet pre-cache (`s_scriptCache` + `OnContextCreated` early injection); cosmetic CSS/script IPC handlers; fingerprint seed cache (`s_domainSeeds`) + fingerprint script injection in `OnContextCreated` |
 | `cef-native/include/core/FingerprintProtection.h` | `FingerprintProtection` singleton: platform CSPRNG session token, per-domain seed generation via hash mixing, enable/disable toggle |
@@ -298,7 +365,10 @@ First-time setup (requires CEF binaries already downloaded):
 | BRC-42 | ECDH-based child key derivation (master key + counterparty public key → child key) |
 | BRC-43 | Invoice number format: `{securityLevel}-{protocolID}-{keyID}` |
 | BRC-52 | Identity certificate format with selective disclosure |
-| BRC-103/104 | Mutual authentication protocol |
+| BRC-2 | Symmetric encryption using BRC-42-derived AES-256-GCM keys. Used for MessageBox message encryption |
+| BRC-29 | PeerPay direct payment protocol: sender derives recipient key via BRC-42, creates P2PKH output, sends PaymentToken via encrypted MessageBox. Protocol ID: `3241645161d8` |
+| BRC-103/104 | Mutual authentication protocol. Client side (`authfetch.rs`): 401 challenge → sign nonces+request → re-send with auth headers |
+| MessageBox | Remote message relay service at `messagebox.babbage.systems`. BRC-103 authenticated, BRC-2 encrypted. Used for PeerPay payment delivery |
 | BEEF | Background Evaluation Extended Format - atomic transaction format with SPV proofs |
 | BUMP | BRC-74 Binary Merkle Proof format. Used inside BEEF for SPV verification |
 | CEF | Chromium Embedded Framework |

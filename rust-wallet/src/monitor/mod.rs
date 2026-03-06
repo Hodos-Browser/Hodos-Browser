@@ -24,6 +24,7 @@ pub mod task_unfail;
 pub mod task_review_status;
 pub mod task_purge;
 pub mod task_sync_pending;
+pub mod task_check_peerpay;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -44,6 +45,7 @@ struct TaskSchedule {
     review_status: u64,
     purge: u64,
     sync_pending: u64,
+    check_peerpay: u64,
 }
 
 impl Default for TaskSchedule {
@@ -56,6 +58,7 @@ impl Default for TaskSchedule {
             review_status: 60,        // 1 minute
             purge: 3600,              // 1 hour
             sync_pending: 30,         // 30 seconds
+            check_peerpay: 60,        // 1 minute
         }
     }
 }
@@ -118,7 +121,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 7 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 8 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -126,6 +129,7 @@ impl Monitor {
         info!("   TaskReviewStatus: every {}s", self.schedule.review_status);
         info!("   TaskPurge: every {}s", self.schedule.purge);
         info!("   TaskSyncPending: every {}s (pending addresses only)", self.schedule.sync_pending);
+        info!("   TaskCheckPeerPay: every {}s", self.schedule.check_peerpay);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -135,6 +139,7 @@ impl Monitor {
         let mut last_review_status: u64 = 0;
         let mut last_purge: u64 = 0;
         let mut last_sync_pending: u64 = 0;
+        let mut last_check_peerpay: u64 = 0;
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -220,6 +225,15 @@ impl Monitor {
                 if let Err(e) = task_sync_pending::run(&self.state).await {
                     error!("   ❌ TaskSyncPending failed: {}", e);
                     self.log_event("TaskSyncPending:error", Some(&e));
+                }
+            }
+
+            // TaskCheckPeerPay
+            if now - last_check_peerpay >= self.schedule.check_peerpay {
+                last_check_peerpay = now;
+                if let Err(e) = task_check_peerpay::run(&self.state, &self.client).await {
+                    error!("   ❌ TaskCheckPeerPay failed: {}", e);
+                    self.log_event("TaskCheckPeerPay:error", Some(&e));
                 }
             }
         }

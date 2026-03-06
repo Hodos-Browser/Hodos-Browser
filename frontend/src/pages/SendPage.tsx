@@ -4,7 +4,7 @@ import { BalanceDisplay } from '../components/BalanceDisplay';
 import { TransactionHistory } from '../components/TransactionHistory';
 import { useTransaction } from '../hooks/useTransaction';
 import { useBalance } from '../hooks/useBalance';
-import type { TransactionData, TransactionResponse } from '../types/transaction';
+import type { TransactionResponse } from '../types/transaction';
 
 export const SendPage: React.FC = () => {
   const { balance, usdValue, bsvPrice, isLoading: balanceLoading, isRefreshing: balanceRefreshing, refreshBalance } = useBalance();
@@ -12,9 +12,7 @@ export const SendPage: React.FC = () => {
     transactions,
     isLoading: transactionLoading,
     error: transactionError,
-    createTransaction,
-    getTransactionHistory,
-    clearError
+    sendTransaction: _sendTransaction,
   } = useTransaction();
 
   const [showHistory, setShowHistory] = useState(false);
@@ -51,25 +49,18 @@ Status: ${result.status}`);
 
       // Refresh balance and transaction history (non-blocking)
       console.log('🔄 Refreshing balance...');
-      refreshBalance().catch(err => console.error('Balance refresh failed:', err));
-      console.log('🔄 Refreshing transaction history...');
-      getTransactionHistory().catch(err => console.error('History refresh failed:', err));
+      refreshBalance().catch((err: unknown) => console.error('Balance refresh failed:', err));
       console.log('✅ Refresh operations started (non-blocking)');
 
     } catch (error) {
       console.error('❌ Transaction creation failed:', error);
       // Error is already handled by the hook and displayed in the form
     }
-  }, [refreshBalance, getTransactionHistory]);
+  }, [refreshBalance]);
 
   const handleRefresh = useCallback(async () => {
     await refreshBalance();
-    await getTransactionHistory();
-  }, [refreshBalance, getTransactionHistory]);
-
-  const handleClearError = useCallback(() => {
-    clearError();
-  }, [clearError]);
+  }, [refreshBalance]);
 
   return (
     <div className="send-page">
@@ -146,7 +137,6 @@ Status: ${result.status}`);
           <div className="error-message">
             <span className="error-icon">⚠️</span>
             <span className="error-text">{transactionError}</span>
-            <button className="error-close" onClick={handleClearError}>×</button>
           </div>
         </div>
       )}

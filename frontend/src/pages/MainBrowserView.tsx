@@ -68,16 +68,31 @@ const MainBrowserView: React.FC = () => {
     useBackgroundBalancePoller();
 
     // Keep wallet-exists cache in sync so the overlay opens instantly with correct state.
+    // Also fetch and cache the identity key so the wallet panel has it immediately.
     // Runs once on mount — if wallet.db was deleted, clears the stale cache before
     // the user ever opens the wallet panel.
     useEffect(() => {
-        fetch('http://localhost:3301/wallet/status')
+        fetch('http://localhost:31301/wallet/status')
             .then(r => r.json())
             .then(data => {
                 if (data.exists) {
                     localStorage.setItem('hodos_wallet_exists', 'true');
+                    // Fetch and cache identity key for wallet panel
+                    fetch('http://127.0.0.1:31301/getPublicKey', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ identityKey: true }),
+                    })
+                        .then(r => r.json())
+                        .then(keyData => {
+                            if (keyData.publicKey) {
+                                localStorage.setItem('hodos_identity_key', keyData.publicKey);
+                            }
+                        })
+                        .catch(() => {});
                 } else {
                     localStorage.removeItem('hodos_wallet_exists');
+                    localStorage.removeItem('hodos_identity_key');
                 }
                 localStorage.removeItem('hodos_wallet_locked');
             })
@@ -167,6 +182,52 @@ const MainBrowserView: React.FC = () => {
     // Downloads — only need icon visibility state; overlay handles controls
     const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
 
+    // PeerPay notification state — green dot on wallet button
+    const [hasUnreadPayments, setHasUnreadPayments] = useState(false);
+    const [unreadPaymentCount, setUnreadPaymentCount] = useState(0);
+    const [unreadPaymentAmount, setUnreadPaymentAmount] = useState(0);
+
+    // Poll /wallet/peerpay/status every 60s + listen for IPC dismiss events
+    useEffect(() => {
+        const checkPeerpayStatus = async () => {
+            try {
+                const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.unread_count > 0) {
+                        setHasUnreadPayments(true);
+                        setUnreadPaymentCount(data.unread_count);
+                        setUnreadPaymentAmount(data.unread_amount || 0);
+                    } else {
+                        setHasUnreadPayments(false);
+                        setUnreadPaymentCount(0);
+                        setUnreadPaymentAmount(0);
+                    }
+                }
+            } catch {
+                // Wallet server not running — ignore
+            }
+        };
+        // Initial check after short delay (let wallet server start)
+        const initialTimer = setTimeout(checkPeerpayStatus, 5000);
+        // Periodic check every 60s
+        const interval = setInterval(checkPeerpayStatus, 60000);
+
+        const handlePaymentDismissed = (event: MessageEvent) => {
+            if (event.data?.type === 'wallet_payment_dismissed') {
+                setHasUnreadPayments(false);
+                setUnreadPaymentCount(0);
+                setUnreadPaymentAmount(0);
+            }
+        };
+        window.addEventListener('message', handlePaymentDismissed);
+        return () => {
+            clearTimeout(initialTimer);
+            clearInterval(interval);
+            window.removeEventListener('message', handlePaymentDismissed);
+        };
+    }, []);
+
     // Track download IDs to detect new starts and completions for toast notifications
     const prevDownloadIdsRef = useRef<Set<number>>(new Set());
     const prevCompleteIdsRef = useRef<Set<number>>(new Set());
@@ -252,7 +313,7 @@ const MainBrowserView: React.FC = () => {
 
     // Toast state (for misc actions)
     const [toastOpen, setToastOpen] = useState(false);
-    const [toastMessage, setToastMessage] = useState('');
+    const [toastMessage, _setToastMessage] = useState('');
 
     // Extract current domain from address bar
     const currentDomain = useMemo(() => {
@@ -786,7 +847,11 @@ const MainBrowserView: React.FC = () => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const dpr = window.devicePixelRatio || 1;
                         const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
-                        window.cefMessage?.send('toggle_wallet_panel', iconRightOffset.toString());
+                        window.cefMessage?.send('toggle_wallet_panel', [
+                            iconRightOffset.toString(),
+                            unreadPaymentCount.toString(),
+                            unreadPaymentAmount.toString()
+                        ].join(','));
                     }}
                     size="small"
                     sx={{
@@ -798,7 +863,20 @@ const MainBrowserView: React.FC = () => {
                         }
                     }}
                 >
-                    <AccountBalanceWalletIcon fontSize="small" />
+                    <Badge
+                        variant="dot"
+                        invisible={!hasUnreadPayments}
+                        sx={{
+                            '& .MuiBadge-badge': {
+                                backgroundColor: '#2e7d32',
+                                minWidth: 8,
+                                height: 8,
+                                borderRadius: '50%',
+                            }
+                        }}
+                    >
+                        <AccountBalanceWalletIcon fontSize="small" />
+                    </Badge>
                 </IconButton>
 
                 {/* Profile Button - shows current profile avatar, triggers overlay */}

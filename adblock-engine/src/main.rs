@@ -1,6 +1,6 @@
 //! Hodos Adblock Engine — Standalone ad & tracker blocking service
 //!
-//! Separate process from the wallet backend. Runs on port 3302.
+//! Separate process from the wallet backend. Runs on port 31302.
 //! C++ starts this via CreateProcessA + Job Object (auto-kill on browser exit).
 //!
 //! Two-phase startup:
@@ -15,7 +15,7 @@ mod handlers;
 use actix_web::{web, App, HttpServer};
 use std::path::PathBuf;
 
-const ADBLOCK_PORT: u16 = 3302;
+const ADBLOCK_PORT: u16 = 31302;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {

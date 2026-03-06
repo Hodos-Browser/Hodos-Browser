@@ -114,7 +114,7 @@ private:
                                          WINHTTP_NO_PROXY_BYPASS, 0);
         if (!hSession) return result;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return result;
@@ -229,7 +229,7 @@ private:
                                          WINHTTP_NO_PROXY_BYPASS, 0);
         if (!hSession) return false;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return false;
@@ -341,7 +341,7 @@ private:
                                          WINHTTP_NO_PROXY_BYPASS, 0);
         if (!hSession) return -1.0;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return -1.0;
@@ -425,7 +425,7 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
                                      WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return result;
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
     if (!hConnect) {
         WinHttpCloseHandle(hSession);
         return result;
@@ -1249,7 +1249,7 @@ public:
 
         // Create request
         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-        cefRequest->SetURL("http://localhost:3301/domain/permissions");
+        cefRequest->SetURL("http://localhost:31301/domain/permissions");
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -1297,7 +1297,7 @@ public:
         LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
 
         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-        cefRequest->SetURL("http://localhost:3301/domain/permissions");
+        cefRequest->SetURL("http://localhost:31301/domain/permissions");
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -1571,7 +1571,7 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
 
     // Create CEF HTTP request
     CefRefPtr<CefRequest> httpRequest = CefRequest::Create();
-    std::string fullUrl = "http://localhost:3301" + endpoint_;
+    std::string fullUrl = "http://localhost:31301" + endpoint_;
     httpRequest->SetURL(fullUrl);
     httpRequest->SetMethod(method_);
 
@@ -1602,11 +1602,16 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
 
     httpRequest->SetHeaderMap(headers);
 
-    // Set POST body if needed
-    if (method_ == "POST" && !body_.empty()) {
+    // Set POST body — always include at least one PostData element for POST requests.
+    // CefURLRequest with zero-element PostData may not fire OnDownloadData callbacks.
+    if (method_ == "POST") {
         CefRefPtr<CefPostData> postData = CefPostData::Create();
         CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
-        element->SetToBytes(body_.length(), body_.c_str());
+        if (!body_.empty()) {
+            element->SetToBytes(body_.length(), body_.c_str());
+        } else {
+            element->SetToBytes(0, "");
+        }
         postData->AddElement(element);
         httpRequest->SetPostData(postData);
     }
@@ -1651,15 +1656,15 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
 
     LOG_DEBUG_HTTP("🌐 HTTP Request intercepted: " + method + " " + url);
 
-    // Normalize BRC-100 wallet requests to our standard port 3301
+    // Normalize BRC-100 wallet requests to our standard port 31301
     std::string originalUrl = url;
 
     // Handle localhost port redirection
     std::regex localhostPortPattern(R"(localhost:\d{4})");
     if (std::regex_search(url, localhostPortPattern)) {
-        // Only redirect if it's not already port 3301
-        if (url.find("localhost:3301") == std::string::npos) {
-            url = std::regex_replace(url, localhostPortPattern, "localhost:3301");
+        // Only redirect if it's not already port 31301
+        if (url.find("localhost:31301") == std::string::npos) {
+            url = std::regex_replace(url, localhostPortPattern, "localhost:31301");
             LOG_DEBUG_HTTP("🌐 localhost Port redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
         }
@@ -1668,9 +1673,9 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     // Handle 127.0.0.1 port redirection
     std::regex localhostIPPattern(R"(127\.0\.0\.1:\d{4})");
     if (std::regex_search(url, localhostIPPattern)) {
-        // Only redirect if it's not already port 3301
-        if (url.find("127.0.0.1:3301") == std::string::npos) {
-            url = std::regex_replace(url, localhostIPPattern, "127.0.0.1:3301");
+        // Only redirect if it's not already port 31301
+        if (url.find("127.0.0.1:31301") == std::string::npos) {
+            url = std::regex_replace(url, localhostIPPattern, "127.0.0.1:31301");
             LOG_DEBUG_HTTP("🌐 127.0.0.1 Port redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
         }
@@ -1699,9 +1704,9 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
                 }
             }
 
-            // Replace the domain with localhost:3301
+            // Replace the domain with localhost:31301
             std::regex domainPattern(R"(https?://[^/]+)");
-            url = std::regex_replace(url, domainPattern, "http://localhost:3301");
+            url = std::regex_replace(url, domainPattern, "http://localhost:31301");
 
             LOG_DEBUG_HTTP("🌐 BRC-104 auth redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
@@ -1953,7 +1958,7 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 
 bool HttpRequestInterceptor::isSocketIOConnection(const std::string& url) {
     // Check if this is a Socket.IO connection to our daemon or Babbage messagebox
-    bool isLocalhost = url.find("localhost:3301") != std::string::npos;
+    bool isLocalhost = url.find("localhost:31301") != std::string::npos;
     bool isBabbageMessagebox = url.find("messagebox.babbage.systems/socket.io/") != std::string::npos;
     bool isSocketIO = url.find("/socket.io/") != std::string::npos;
 

@@ -726,6 +726,13 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     // Store HWND for shutdown cleanup
     g_wallet_overlay_hwnd = wallet_hwnd;
 
+    // Default to prevent-close on new overlay creation. React will clear
+    // this flag (wallet_allow_close IPC) once the user reaches a safe state
+    // (e.g. live wallet view). This avoids race conditions — the flag is set
+    // synchronously here in C++ before any WM_ACTIVATEAPP can fire.
+    extern bool g_wallet_overlay_prevent_close;
+    g_wallet_overlay_prevent_close = true;
+
     // Sync to BrowserWindow 0
     if (mainWin) mainWin->wallet_overlay_hwnd = g_wallet_overlay_hwnd;
 
@@ -762,7 +769,12 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     wallet_handler->SetRenderHandler(render_handler);
 
     // Create new browser with subprocess (pass icon offset as URL param for CSS positioning)
+    extern int g_peerpay_count;
+    extern int g_peerpay_amount;
     std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
+    if (g_peerpay_count > 0) {
+        walletUrl += "&ppc=" + std::to_string(g_peerpay_count) + "&ppa=" + std::to_string(g_peerpay_amount);
+    }
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         wallet_handler,

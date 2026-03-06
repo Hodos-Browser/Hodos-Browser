@@ -3,13 +3,13 @@ import React, { useState } from 'react';
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 const COLORS = {
-  gold: '#d4c4a8',
+  gold: '#a67c00',
   textDark: '#111111',
   textMuted: '#666666',
-  borderLight: '#e8dcc0',
+  borderLight: '#d0d0d0',
   white: '#ffffff',
   warningBg: '#fef9e7',
-  warningBorder: '#d4c4a8',
+  warningBorder: '#e6a200',
   warningText: '#8a6d3b',
 };
 

@@ -3,13 +3,13 @@
   /* Primary Colors */
   --wallet-primary: #000000;
   --wallet-primary-hover: #111111;
-  --wallet-subdued-gold: #f5f1e8;
-  --wallet-gold-accent: #d4c4a8;
+  --wallet-subdued-gold: #f5f5f5;
+  --wallet-gold-accent: #a67c00;
 
   /* Supporting Colors */
   --wallet-text-dark: #111111;
-  --wallet-text-light: #f5f1e8;
-  --wallet-border-light: #e8dcc0;
+  --wallet-text-light: #f5f5f5;
+  --wallet-border-light: #d0d0d0;
   --wallet-shadow: rgba(0, 0, 0, 0.15);
   --wallet-shadow-hover: rgba(0, 0, 0, 0.25);
 }
@@ -50,7 +50,7 @@
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -59,8 +59,7 @@
 .refresh-button:hover:not(:disabled) {
   background: var(--wallet-text-light);
   border-color: var(--wallet-gold-accent);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px var(--wallet-shadow);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .wallet-header .refresh-button:disabled,
@@ -73,8 +72,8 @@
 
 .wallet-header .refresh-button:active:not(:disabled),
 .refresh-button:active:not(:disabled) {
-  transform: scale(0.95);
-  box-shadow: 0 1px 4px var(--wallet-shadow);
+  transform: scale(0.97);
+  box-shadow: none;
   background: var(--wallet-text-light);
 }
 
@@ -225,7 +224,7 @@
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   min-width: 140px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -240,34 +239,22 @@
 
 .receive-button:hover:not(:disabled) {
   background: var(--wallet-primary-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px var(--wallet-shadow-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   border-color: var(--wallet-text-light);
 }
 
 .receive-button:active:not(:disabled) {
-  transform: scale(0.95) translateY(0);
-  box-shadow: 0 2px 6px var(--wallet-shadow);
+  transform: scale(0.97);
+  box-shadow: none;
   background: var(--wallet-primary-hover);
 }
 
-/* Receive button click animation - keep active state during processing */
+/* Receive button click state - keep active state during processing */
 .receive-button.clicked:not(:disabled) {
   background: var(--wallet-gold-accent);
   color: var(--wallet-text-dark);
   border-color: var(--wallet-text-light);
-  transform: scale(0.95);
-  box-shadow: 0 0 0 3px rgba(212, 196, 168, 0.3);
-  animation: receiveButtonPulse 1s ease-in-out infinite;
-}
-
-@keyframes receiveButtonPulse {
-  0%, 100% {
-    box-shadow: 0 0 0 3px rgba(212, 196, 168, 0.3);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(212, 196, 168, 0.2);
-  }
+  transform: scale(0.97);
 }
 
 .send-button {
@@ -278,14 +265,13 @@
 
 .send-button:hover {
   background: var(--wallet-text-light);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px var(--wallet-shadow-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   border-color: var(--wallet-primary);
 }
 
 .send-button:active {
-  transform: scale(0.95) translateY(0);
-  box-shadow: 0 2px 6px var(--wallet-shadow);
+  transform: scale(0.97);
+  box-shadow: none;
   background: var(--wallet-text-light);
 }
 
@@ -297,18 +283,7 @@
   box-shadow: 0 0 0 3px rgba(212, 196, 168, 0.3);
 }
 
-/* Button click animation */
-@keyframes buttonClick {
-  0% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(0.95);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
+/* (buttonClick animation removed — unified scale(0.97) active state used instead) */
 
 /* Transaction Form */
 .transaction-form {
@@ -358,7 +333,7 @@
   font-size: 16px;
   background: var(--wallet-subdued-gold);
   color: var(--wallet-text-dark);
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
 .form-group input:focus {
@@ -382,14 +357,19 @@
   font-weight: 600;
   color: var(--wallet-text-dark);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
 .max-button:hover:not(:disabled) {
   background: var(--wallet-text-light);
-  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.max-button:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .max-button:disabled {
@@ -407,7 +387,7 @@
   font-weight: 700;
   color: var(--wallet-text-light);
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   width: 100%;
@@ -416,8 +396,12 @@
 
 .submit-button:hover:not(:disabled) {
   background: var(--wallet-primary-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px var(--wallet-shadow-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.submit-button:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .submit-button:disabled {
@@ -444,7 +428,7 @@
   font-weight: 600;
   color: var(--wallet-text-dark);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -575,40 +559,27 @@
   margin: 8px;
   font-size: 14px;
   font-weight: 600;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
 .copy-button:hover {
   background: var(--wallet-primary-hover);
-  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .copy-button:active {
-  transform: scale(0.95);
+  transform: scale(0.97);
+  box-shadow: none;
+  background: var(--wallet-primary-hover);
+}
+
+/* Copy button clicked feedback (Copied! state) */
+.copy-button.clicked {
   background: var(--wallet-gold-accent);
   border-color: var(--wallet-text-light);
-}
-
-/* Copy button click animation */
-.copy-button.clicked {
-  animation: copyFeedback 0.4s ease;
-}
-
-@keyframes copyFeedback {
-  0% {
-    transform: scale(1);
-    background: var(--wallet-primary);
-  }
-  50% {
-    transform: scale(0.9);
-    background: var(--wallet-gold-accent);
-  }
-  100% {
-    transform: scale(1);
-    background: var(--wallet-primary);
-  }
+  color: var(--wallet-text-dark);
 }
 
 .close-button {
@@ -621,18 +592,19 @@
   margin: 8px;
   font-size: 14px;
   font-weight: 600;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
 .close-button:hover {
   background: var(--wallet-text-light);
-  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .close-button:active {
-  transform: scale(0.95);
+  transform: scale(0.97);
+  box-shadow: none;
   background: var(--wallet-text-light);
 }
 
@@ -645,7 +617,7 @@
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-weight: 600;
@@ -653,12 +625,12 @@
 
 .copy-link-button:hover {
   background-color: var(--wallet-text-light);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 4px var(--wallet-shadow);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .copy-link-button:active {
-  transform: scale(0.95);
+  transform: scale(0.97);
+  box-shadow: none;
   background-color: var(--wallet-primary);
   color: var(--wallet-text-light);
 }
@@ -708,7 +680,7 @@
   font-weight: 600;
   color: var(--wallet-text-dark);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-align: center;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -716,35 +688,22 @@
 
 .nav-grid-button:hover {
   background: var(--wallet-gold-accent);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px var(--wallet-shadow);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .nav-grid-button:active {
-  transform: scale(0.95);
+  transform: scale(0.97);
   background: var(--wallet-primary);
   color: var(--wallet-text-light);
   border-color: var(--wallet-gold-accent);
-  box-shadow: 0 1px 4px var(--wallet-shadow);
+  box-shadow: none;
 }
 
-/* Navigation button click animation */
+/* Nav button clicked feedback */
 .nav-grid-button.clicked {
-  animation: navButtonClick 0.3s ease;
-}
-
-@keyframes navButtonClick {
-  0% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(0.92);
-    background: var(--wallet-primary);
-    color: var(--wallet-text-light);
-  }
-  100% {
-    transform: scale(1);
-  }
+  background: var(--wallet-primary);
+  color: var(--wallet-text-light);
+  transform: scale(0.97);
 }
 
 /* Dynamic Content Area */
@@ -822,9 +781,9 @@
     0 0 8px 3px rgba(120, 120, 120, 0.25),
     0 0 16px 6px rgba(60, 60, 60, 0.15);
   padding: 16px;
-  width: auto;
-  min-width: 300px;
-  max-width: 420px;
+  width: 340px;
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   position: relative;
   cursor: default;
@@ -845,7 +804,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   z-index: 10;
 }
 
@@ -855,7 +814,7 @@
 }
 
 .wallet-panel-close-button:active {
-  transform: scale(0.95);
+  transform: scale(0.97);
   background: #d0d0d0;
 }
 
@@ -923,11 +882,16 @@
   font-weight: 600;
   color: var(--wallet-text-light);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
 .refresh-button-light:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.3);
+}
+
+.refresh-button-light:active:not(:disabled) {
+  transform: scale(0.97);
+  background: rgba(255, 255, 255, 0.4);
 }
 
 .refresh-button-light:disabled {
@@ -979,6 +943,90 @@
   margin-bottom: 12px;
 }
 
+/* Identity Key Section */
+.identity-key-section-light {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--wallet-bg-secondary, #1a1a1a);
+  border-radius: 8px;
+  border: 1px solid var(--wallet-border, #333);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.identity-key-actions-light {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.identity-key-copy-button-light {
+  flex: 1;
+  padding: 6px 12px;
+  border: 1px solid var(--wallet-gold-accent, #a67c00);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wallet-gold-accent, #a67c00);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.identity-key-copy-button-light:hover {
+  background: var(--wallet-gold-accent, #a67c00);
+  color: var(--wallet-text-dark, #000);
+}
+
+.identity-key-copy-button-light:active {
+  transform: scale(0.97);
+}
+
+.identity-key-copy-button-light.copied {
+  background: #2e7d32;
+  border-color: #2e7d32;
+  color: #fff;
+}
+
+.identity-key-show-button-light {
+  padding: 6px 12px;
+  border: 1px solid var(--wallet-border, #333);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wallet-text-secondary, #999);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.identity-key-show-button-light:hover {
+  border-color: var(--wallet-text-secondary, #999);
+  color: var(--wallet-text-light, #fff);
+}
+
+.identity-key-show-button-light:active {
+  transform: scale(0.97);
+}
+
+.identity-key-display-light {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--wallet-primary, #000);
+  border-radius: 4px;
+  border: 1px solid var(--wallet-border, #333);
+  overflow-x: hidden;
+}
+
+.identity-key-display-light code {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: var(--wallet-gold-accent, #a67c00);
+  word-break: break-all;
+  overflow-wrap: break-word;
+  user-select: all;
+}
+
 .wallet-button-light {
   flex: 1;
   padding: 10px 16px;
@@ -987,7 +1035,7 @@
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
@@ -1000,12 +1048,16 @@
 
 .receive-button-light:hover:not(:disabled) {
   background: var(--wallet-primary-hover);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px var(--wallet-shadow);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.receive-button-light:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .receive-button-light:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
   transform: none;
 }
@@ -1013,7 +1065,7 @@
 .receive-button-light.clicked {
   background: var(--wallet-gold-accent);
   color: var(--wallet-text-dark);
-  transform: scale(0.98);
+  transform: scale(0.97);
 }
 
 .send-button-light {
@@ -1024,8 +1076,12 @@
 
 .send-button-light:hover {
   background: var(--wallet-gold-accent);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px var(--wallet-shadow);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.send-button-light:active {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .send-button-light.active {
@@ -1100,6 +1156,17 @@
   font-weight: 500;
 }
 
+/* QR Code Container */
+.qr-code-container-light {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 10px;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+}
+
 .address-display-light {
   background: #ffffff;
   border: 1px solid var(--wallet-border-light);
@@ -1129,7 +1196,7 @@
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
 .copy-button-light {
@@ -1140,6 +1207,12 @@
 
 .copy-button-light:hover {
   background: var(--wallet-primary-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.copy-button-light:active {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .copy-button-light.clicked {
@@ -1155,6 +1228,13 @@
 
 .close-button-light:hover {
   background: #e0e0e0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.close-button-light:active {
+  transform: scale(0.97);
+  box-shadow: none;
+  background: #d0d0d0;
 }
 
 /* Success/Error Messages - Light */
@@ -1228,11 +1308,17 @@
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
 .copy-link-button-light:hover {
   background: var(--wallet-text-light);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.copy-link-button-light:active {
+  transform: scale(0.97);
+  box-shadow: none;
 }
 
 .copy-link-button-light.clicked {
@@ -1339,10 +1425,117 @@
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
 .sync-dismiss-button:hover {
   background: var(--wallet-text-light);
-  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.sync-dismiss-button:active {
+  transform: scale(0.97);
+  box-shadow: none;
+}
+
+/* PeerPay Notification Banner */
+.peerpay-banner-light {
+  border-left: 3px solid #2e7d32;
+  background: #f1f8e9;
+  border-radius: 0 8px 8px 0;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #1b5e20;
+  animation: fadeInLight 0.3s ease-in;
+}
+
+.peerpay-banner-content {
+  margin-bottom: 6px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.peerpay-dismiss-button {
+  padding: 4px 12px;
+  background: #2e7d32;
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.peerpay-dismiss-button:hover {
+  background: #1b5e20;
+}
+
+.peerpay-dismiss-button:active {
+  transform: scale(0.97);
+}
+
+.peerpay-link {
+  color: #2e7d32;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.peerpay-link:hover {
+  color: #1b5e20;
+}
+
+/* Advanced Button - Light */
+.advanced-button-light {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid #a67c00;
+  border-radius: 6px;
+  color: #a67c00;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.advanced-button-light:hover {
+  background: rgba(166, 124, 0, 0.06);
+  border-color: #8a6700;
+  color: #8a6700;
+}
+
+.advanced-button-light:active {
+  transform: scale(0.97);
+  background: rgba(166, 124, 0, 0.12);
+}
+
+/* Manage Approved Sites Link */
+.manage-sites-link-light {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 6px 0 2px;
+  width: 100%;
+  text-align: center;
+  text-decoration: underline;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.manage-sites-link-light:hover {
+  color: #a67c00;
+}
+
+.manage-sites-link-light:active {
+  transform: scale(0.97);
 }

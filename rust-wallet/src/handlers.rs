@@ -157,7 +157,7 @@ pub async fn health() -> HttpResponse {
 }
 
 // Graceful shutdown — called by CEF browser before process termination
-pub async fn shutdown(data: web::Data<crate::AppState>) -> HttpResponse {
+pub async fn shutdown(data: web::Data<crate::AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🛑 /shutdown received — initiating graceful shutdown");
     data.shutdown.cancel();
     HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
@@ -183,7 +183,7 @@ pub async fn brc100_status() -> HttpResponse {
 }
 
 // /getVersion - BRC-100 endpoint
-pub async fn get_version() -> HttpResponse {
+pub async fn get_version(_body: web::Bytes) -> HttpResponse {
     log::info!("📋 /getVersion called");
     HttpResponse::Ok().json(serde_json::json!({
         "version": "HodosWallet-Rust v0.0.1",
@@ -389,7 +389,7 @@ pub async fn get_public_key(
 }
 
 // /isAuthenticated - BRC-100 endpoint
-pub async fn is_authenticated() -> HttpResponse {
+pub async fn is_authenticated(_body: web::Bytes) -> HttpResponse {
     log::info!("📋 /isAuthenticated called");
     HttpResponse::Ok().json(serde_json::json!({
         "authenticated": true
@@ -399,7 +399,7 @@ pub async fn is_authenticated() -> HttpResponse {
 // /waitForAuthentication - BRC-100 endpoint (Call Code 24)
 // Waits for wallet to be initialized and returns once ready.
 // Unlike wrapper implementations, this IS the actual wallet - so we validate state.
-pub async fn wait_for_authentication(state: web::Data<AppState>) -> HttpResponse {
+pub async fn wait_for_authentication(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("📋 /waitForAuthentication called");
 
     // Verify wallet exists in database
@@ -1877,6 +1877,104 @@ pub async fn wallet_create(
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+// Delete a just-created wallet (cancel during mnemonic backup)
+//
+// Safety: refuses to delete if the wallet has any spendable satoshis.
+// Deletes all rows from every table in FK-safe order, clears cached mnemonic,
+// and invalidates balance cache. Returns to no-wallet state.
+pub async fn wallet_delete(
+    state: web::Data<AppState>,
+    _body: web::Bytes,  // Must consume request body to prevent HTTP/1.1 keep-alive corruption
+) -> HttpResponse {
+    log::info!("🗑️ /wallet/delete called");
+
+    let mut db = state.database.lock().unwrap();
+
+    // 1. Check wallet exists
+    {
+        use crate::database::WalletRepository;
+        let wallet_repo = WalletRepository::new(db.connection());
+        if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) == false {
+            return HttpResponse::NotFound().json(serde_json::json!({"error": "No wallet exists"}));
+        }
+    }
+
+    // 2. Safety check: refuse if wallet has funds
+    {
+        let conn = db.connection();
+        let has_funds: bool = conn.query_row(
+            "SELECT COALESCE(SUM(satoshis), 0) FROM outputs WHERE spendable = 1",
+            [],
+            |row| {
+                let total: i64 = row.get(0)?;
+                Ok(total > 0)
+            }
+        ).unwrap_or(false);
+
+        if has_funds {
+            log::warn!("   ⚠️  Refusing to delete wallet with spendable funds");
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "Cannot delete a wallet that has funds. Send your coins elsewhere first."
+            }));
+        }
+    }
+
+    // 3. Delete all rows from every table in FK-safe order (children before parents)
+    let delete_order = [
+        "cert_field_permissions",
+        "domain_permissions",
+        "monitor_events",
+        "sync_states",
+        "settings",
+        "commissions",
+        "tx_labels_map",
+        "tx_labels",
+        "output_tag_map",
+        "output_tags",
+        "certificate_fields",
+        "certificates",
+        "output_baskets",
+        "outputs",
+        "proven_tx_reqs",
+        "transactions",
+        "proven_txs",
+        "derived_key_cache",
+        "users",
+        "relay_messages",
+        "messages",
+        "transaction_outputs",
+        "transaction_inputs",
+        "block_headers",
+        "parent_transactions",
+        "addresses",
+        "wallets",
+    ];
+
+    {
+        let conn = db.connection();
+        for table in &delete_order {
+            if let Err(e) = conn.execute(&format!("DELETE FROM {}", table), []) {
+                // Some tables may have been dropped in migrations — that's fine
+                log::debug!("   Skipping {}: {}", table, e);
+            }
+        }
+    }
+
+    log::info!("   ✅ All wallet data deleted");
+
+    // 4. Clear cached mnemonic from memory
+    db.clear_cached_mnemonic();
+
+    // 5. Invalidate balance cache
+    drop(db);
+    state.balance_cache.invalidate();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "message": "Wallet deleted successfully"
+    }))
 }
 
 // Unlock a PIN-protected wallet (one-time per session)
@@ -5492,19 +5590,16 @@ fn verify_output_matches_derived_address(script_bytes: &[u8], expected_pubkey_ha
 /// - Positive indices (0, 1, 2, ...): HD wallet addresses (m/{index})
 /// - Index -1: Master public key address
 /// - Negative indices (-2, -3, ...): BRC-42 derived addresses (payments, etc.)
-fn store_derived_utxo(
+pub fn store_derived_utxo(
     db: &crate::database::WalletDatabase,
     txid: &str,
     vout: u32,
     satoshis: i64,
     script_hex: &str,
-    derived_pubkey: &[u8],
+    _derived_pubkey: &[u8],
     custom_instructions: &serde_json::Value,
 ) -> Result<(), String> {
-    use crate::database::WalletRepository;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use sha2::{Sha256, Digest};
-    use ripemd::Ripemd160;
 
     let conn = db.connection();
     let now = SystemTime::now()
@@ -5512,121 +5607,80 @@ fn store_derived_utxo(
         .unwrap()
         .as_secs() as i64;
 
-    // Get wallet ID
-    let wallet_repo = WalletRepository::new(conn);
-    let wallet = wallet_repo.get_primary_wallet()
-        .map_err(|e| format!("Failed to get wallet: {}", e))?
-        .ok_or("No wallet found")?;
-    let wallet_id = wallet.id.ok_or("Wallet has no ID")?;
-
-    // Calculate pubkey hash: RIPEMD160(SHA256(pubkey))
-    let sha_hash = Sha256::digest(derived_pubkey);
-    let pubkey_hash = Ripemd160::digest(&sha_hash);
-
-    // Convert pubkey hash to Bitcoin address (mainnet P2PKH: version byte 0x00)
-    let mut address_bytes = vec![0x00]; // Mainnet version byte
-    address_bytes.extend_from_slice(&pubkey_hash);
-
-    // Double SHA256 for checksum
-    let checksum_hash1 = Sha256::digest(&address_bytes);
-    let checksum_hash2 = Sha256::digest(&checksum_hash1);
-    address_bytes.extend_from_slice(&checksum_hash2[0..4]);
-
-    // Base58 encode
-    let bitcoin_address = bs58::encode(&address_bytes).into_string();
-    let pubkey_hex = hex::encode(derived_pubkey);
-
-    log::info!("      Derived Bitcoin address: {}", bitcoin_address);
-    log::info!("      Derived public key: {}", pubkey_hex);
-
-    // Check if this address already exists (by address string)
-    let existing_address_id: Option<i64> = conn.query_row(
-        "SELECT id FROM addresses WHERE wallet_id = ?1 AND address = ?2",
-        rusqlite::params![wallet_id, bitcoin_address],
+    // Get user_id (default user = 1)
+    let user_id: i64 = conn.query_row(
+        "SELECT userId FROM users LIMIT 1",
+        [],
         |row| row.get(0),
-    ).ok();
+    ).map_err(|e| format!("Failed to get user: {}", e))?;
 
-    let address_id = if let Some(id) = existing_address_id {
-        log::info!("      Address already exists (ID: {}), updating balance", id);
-        // Update balance
-        conn.execute(
-            "UPDATE addresses SET balance = balance + ?1, used = 1 WHERE id = ?2",
-            rusqlite::params![satoshis, id],
-        ).map_err(|e| format!("Failed to update address balance: {}", e))?;
-        id
-    } else {
-        // Find next available negative index (starting from -2, since -1 is master)
-        let next_derived_index: i32 = conn.query_row(
-            "SELECT COALESCE(MIN(\"index\"), 0) - 1 FROM addresses WHERE wallet_id = ?1 AND \"index\" < 0",
-            rusqlite::params![wallet_id],
-            |row| row.get(0),
-        ).unwrap_or(-2);
+    // Extract derivation info from custom_instructions for BRC-42 counterparty derivation
+    // BRC-29 invoice format: "2-3241645161d8-{prefix} {suffix}"
+    // Stored as: derivation_prefix="2-3241645161d8", derivation_suffix="{prefix} {suffix}"
+    // derive_key_for_output reconstructs: format!("{}-{}", prefix, suffix) → correct invoice
+    let sender_identity_key = custom_instructions["senderIdentityKey"].as_str()
+        .ok_or("Missing senderIdentityKey in custom_instructions")?;
+    let derivation_prefix_token = custom_instructions["derivationPrefix"].as_str()
+        .ok_or("Missing derivationPrefix in custom_instructions")?;
+    let derivation_suffix_token = custom_instructions["derivationSuffix"].as_str()
+        .ok_or("Missing derivationSuffix in custom_instructions")?;
 
-        // Ensure we start at -2 or lower (not -1 which is master)
-        let derived_index = if next_derived_index > -2 { -2 } else { next_derived_index };
+    // DB fields for derive_key_for_output to reconstruct the BRC-29 invoice
+    let db_derivation_prefix = "2-3241645161d8";
+    let db_derivation_suffix = format!("{} {}", derivation_prefix_token, derivation_suffix_token);
 
-        log::info!("      Using derived index: {}", derived_index);
+    let locking_script = hex::decode(script_hex)
+        .map_err(|e| format!("Invalid script hex: {}", e))?;
 
-        // Insert the derived address with real Bitcoin address and pubkey
-        conn.execute(
-            "INSERT INTO addresses (wallet_id, \"index\", address, public_key, used, balance, created_at, pending_utxo_check)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0)",
-            rusqlite::params![
-                wallet_id,
-                derived_index,
-                bitcoin_address,
-                pubkey_hex,
-                satoshis,
-                now
-            ],
-        ).map_err(|e| format!("Failed to insert derived address: {}", e))?;
-
-        // Get the inserted address ID
-        conn.query_row(
-            "SELECT id FROM addresses WHERE wallet_id = ?1 AND address = ?2",
-            rusqlite::params![wallet_id, bitcoin_address],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to get derived address ID: {}", e))?
-    };
-
-    // Check if UTXO already exists
-    let utxo_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM utxos WHERE txid = ?1 AND vout = ?2)",
+    // Check if output already exists (UNIQUE on txid+vout)
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outputs WHERE txid = ?1 AND vout = ?2)",
         rusqlite::params![txid, vout as i32],
         |row| row.get(0),
     ).unwrap_or(false);
 
-    if utxo_exists {
-        log::info!("      UTXO {}:{} already exists, updating custom_instructions", txid, vout);
+    if exists {
+        log::info!("      Output {}:{} already exists, updating", txid, vout);
         conn.execute(
-            "UPDATE utxos SET custom_instructions = ?1, last_updated = ?2, address_id = ?3 WHERE txid = ?4 AND vout = ?5",
+            "UPDATE outputs SET
+                sender_identity_key = ?1, derivation_prefix = ?2, derivation_suffix = ?3,
+                custom_instructions = ?4, spendable = 1, updated_at = ?5
+             WHERE txid = ?6 AND vout = ?7",
             rusqlite::params![
+                sender_identity_key,
+                db_derivation_prefix,
+                db_derivation_suffix,
                 custom_instructions.to_string(),
                 now,
-                address_id,
                 txid,
-                vout as i32
+                vout as i32,
             ],
-        ).map_err(|e| format!("Failed to update UTXO: {}", e))?;
+        ).map_err(|e| format!("Failed to update output: {}", e))?;
     } else {
-        // Insert the UTXO with derivation info
         conn.execute(
-            "INSERT INTO utxos (address_id, txid, vout, satoshis, script, first_seen, last_updated, is_spent, custom_instructions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+            "INSERT INTO outputs (
+                user_id, txid, vout, satoshis, locking_script,
+                sender_identity_key, derivation_prefix, derivation_suffix,
+                custom_instructions, spendable, change, provided_by, purpose, type,
+                created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, 'you', 'receive', 'P2PKH', ?10, ?11)",
             rusqlite::params![
-                address_id,
+                user_id,
                 txid,
                 vout as i32,
                 satoshis,
-                script_hex,
+                locking_script,
+                sender_identity_key,
+                db_derivation_prefix,
+                db_derivation_suffix,
+                custom_instructions.to_string(),
                 now,
                 now,
-                custom_instructions.to_string()
             ],
-        ).map_err(|e| format!("Failed to insert UTXO: {}", e))?;
+        ).map_err(|e| format!("Failed to insert output: {}", e))?;
     }
 
-    log::info!("      ✅ Stored derived UTXO with real address and custom_instructions");
+    log::info!("      Stored PeerPay output {}:{} ({} sats) with counterparty derivation", txid, vout, satoshis);
     Ok(())
 }
 
@@ -7694,7 +7748,7 @@ fn pubkey_to_address(pubkey: &[u8]) -> Result<String, String> {
     Ok(bs58::encode(&addr_bytes).into_string())
 }
 
-pub async fn generate_address(state: web::Data<AppState>) -> HttpResponse {
+pub async fn generate_address(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🔑 /wallet/address/generate called");
 
     // Get current index and master keys from database
@@ -9852,7 +9906,7 @@ pub struct ListActionsResponse {
 }
 
 /// Manual endpoint to update confirmation status for all transactions
-pub async fn update_confirmations_endpoint(state: web::Data<AppState>) -> HttpResponse {
+pub async fn update_confirmations_endpoint(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🔄 /updateConfirmations called");
 
     match update_confirmations(state).await {
@@ -10213,7 +10267,7 @@ pub async fn get_sync_status(state: web::Data<AppState>) -> HttpResponse {
 }
 
 /// POST /wallet/sync-status/seen — marks the completion summary as consumed
-pub async fn mark_sync_seen(state: web::Data<AppState>) -> HttpResponse {
+pub async fn mark_sync_seen(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     let mut status = state.sync_status.write().unwrap();
     status.result_seen = true;
     HttpResponse::Ok().json(serde_json::json!({"success": true}))
@@ -11167,7 +11221,7 @@ pub struct GetHeaderForHeightRequest {
 
 /// POST /getHeight - BRC-100 Call Code 25
 /// Returns the current blockchain height (chain tip)
-pub async fn get_height() -> HttpResponse {
+pub async fn get_height(_body: web::Bytes) -> HttpResponse {
     log::info!("📋 /getHeight called");
 
     // Fetch current blockchain height from WhatsOnChain API
@@ -11406,7 +11460,7 @@ pub async fn get_header_for_height(
 
 /// POST /getNetwork - BRC-100 Call Code 27
 /// Returns the network name ("mainnet" or "testnet")
-pub async fn get_network() -> HttpResponse {
+pub async fn get_network(_body: web::Bytes) -> HttpResponse {
     log::info!("📋 /getNetwork called");
 
     // For now, return hardcoded "mainnet"
@@ -11420,7 +11474,7 @@ pub async fn get_network() -> HttpResponse {
 ///
 /// Checks all unspent UTXOs against the blockchain and removes any that
 /// don't exist on-chain (ghost UTXOs from failed broadcasts).
-pub async fn wallet_cleanup(state: web::Data<AppState>) -> HttpResponse {
+pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🧹 /wallet/cleanup called - scanning for ghost UTXOs...");
 
     // Get all unspent UTXOs
@@ -11429,7 +11483,7 @@ pub async fn wallet_cleanup(state: web::Data<AppState>) -> HttpResponse {
         let conn = db.connection();
 
         let mut stmt = match conn.prepare(
-            "SELECT txid, vout, satoshis, address_id FROM utxos WHERE is_spent = 0"
+            "SELECT txid, vout, satoshis, user_id FROM outputs WHERE spendable = 1"
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -11717,3 +11771,342 @@ pub async fn wallet_import(
     }))
 }
 
+// =============================================================================
+// PeerPay endpoints (BRC-29 via MessageBox)
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PeerpaySendRequest {
+    pub recipient_identity_key: String,
+    pub amount_satoshis: i64,
+}
+
+/// POST /wallet/peerpay/send — Send BSV to an identity key via BRC-29 + MessageBox
+///
+/// Correct implementation:
+/// 1. Generate random derivation nonces (base64)
+/// 2. Derive recipient's child public key via BRC-42
+/// 3. Create transaction with P2PKH output to derived address
+/// 4. Build PaymentToken with Atomic BEEF
+/// 5. Send encrypted message via MessageBox API (BRC-2 + BRC-103)
+pub async fn peerpay_send(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("💸 /wallet/peerpay/send called");
+
+    let req: PeerpaySendRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse request: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid request: {}", e)
+            }));
+        }
+    };
+
+    // Validate recipient identity key (33-byte compressed pubkey = 66 hex chars)
+    let recipient_key = &req.recipient_identity_key;
+    if recipient_key.len() != 66 || (!recipient_key.starts_with("02") && !recipient_key.starts_with("03")) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid identity key. Must be 66-char hex starting with 02 or 03."
+        }));
+    }
+
+    let recipient_pubkey = match hex::decode(recipient_key) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid hex: {}", e)
+            }));
+        }
+    };
+
+    if req.amount_satoshis <= 0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Amount must be greater than 0"
+        }));
+    }
+
+    // Get our master keys
+    let (master_privkey, master_pubkey) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("No wallet: {}", e)
+                }));
+            }
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to get public key: {}", e)
+                }));
+            }
+        };
+        (privkey, pubkey)
+    };
+
+    // Generate random derivation nonces (16 bytes each → base64)
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    let prefix_bytes: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
+    let suffix_bytes: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
+    let derivation_prefix = BASE64.encode(&prefix_bytes);
+    let derivation_suffix = BASE64.encode(&suffix_bytes);
+
+    // BRC-43 invoice number: "2-3241645161d8-{prefix} {suffix}"
+    let invoice_number = format!("2-3241645161d8-{} {}", derivation_prefix, derivation_suffix);
+
+    // Derive child public key for recipient using BRC-42
+    let child_pubkey = match derive_child_public_key(&master_privkey, &recipient_pubkey, &invoice_number) {
+        Ok(k) => k,
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {:?}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Key derivation failed: {:?}", e)
+            }));
+        }
+    };
+
+    // Create P2PKH locking script from derived public key
+    let locking_script_hex = hex::encode(create_p2pkh_script_from_pubkey(&child_pubkey));
+
+    log::info!("   PeerPay: {} sats to {} (derived key)", req.amount_satoshis, &recipient_key[..16]);
+
+    // Build transaction via createAction (noSend=true to get Atomic BEEF without broadcasting)
+    let create_req = CreateActionRequest {
+        inputs: None,
+        outputs: vec![CreateActionOutput {
+            satoshis: Some(req.amount_satoshis),
+            script: Some(locking_script_hex),
+            address: None,
+            custom_instructions: None,
+            output_description: Some(format!("PeerPay to {}...", &recipient_key[..8])),
+            basket: None,
+            tags: None,
+        }],
+        description: Some(format!("PeerPay {} sats", req.amount_satoshis)),
+        labels: Some(vec!["peerpay".to_string(), "send".to_string()]),
+        options: Some(CreateActionOptions {
+            sign_and_process: Some(true),
+            accept_delayed_broadcast: Some(false),
+            return_txid_only: Some(false),
+            no_send: Some(true),
+            randomize_outputs: Some(true),
+            send_max: None,
+            send_with: None,
+        }),
+        input_beef: None,
+    };
+
+    let create_body = match serde_json::to_vec(&create_req) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Serialization failed: {}", e)
+            }));
+        }
+    };
+
+    let internal_req = actix_web::test::TestRequest::default().to_http_request();
+    let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
+
+    if !create_response.status().is_success() {
+        let body_bytes = actix_web::body::to_bytes(create_response.into_body()).await.ok();
+        let error_msg = body_bytes.and_then(|b| {
+            serde_json::from_slice::<serde_json::Value>(&b).ok()
+                .and_then(|j| j["error"].as_str().map(String::from))
+        }).unwrap_or_else(|| "Transaction creation failed".to_string());
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": error_msg
+        }));
+    }
+
+    let resp_bytes = match actix_web::body::to_bytes(create_response.into_body()).await {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response read failed: {}", e)
+            }));
+        }
+    };
+
+    let json_resp: serde_json::Value = match serde_json::from_slice(&resp_bytes) {
+        Ok(j) => j,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response parse failed: {}", e)
+            }));
+        }
+    };
+
+    let txid = json_resp["txid"].as_str().unwrap_or("").to_string();
+
+    // Extract Atomic BEEF bytes from createAction response
+    let atomic_beef_bytes: Vec<u8> = if let Some(s) = json_resp["tx"].as_str() {
+        // Could be hex or base64
+        hex::decode(s).unwrap_or_else(|_| {
+            BASE64.decode(s).unwrap_or_default()
+        })
+    } else if let Some(arr) = json_resp["tx"].as_array() {
+        arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+    } else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Missing tx data"
+        }));
+    };
+
+    let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
+
+    // Broadcast the transaction
+    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(msg) => {
+            log::info!("   ✅ PeerPay broadcast OK: {} - {}", txid, msg);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+            drop(db);
+        }
+        Err(e) => {
+            log::error!("   ❌ PeerPay broadcast failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Broadcast failed: {}", e)
+            }));
+        }
+    }
+
+    // Build PaymentToken (the content sent via MessageBox)
+    let payment_token = serde_json::json!({
+        "customInstructions": {
+            "derivationPrefix": derivation_prefix,
+            "derivationSuffix": derivation_suffix
+        },
+        "transaction": BASE64.encode(&atomic_beef_bytes),
+        "amount": req.amount_satoshis
+    });
+
+    let payload_bytes = serde_json::to_vec(&payment_token).unwrap_or_default();
+
+    // Send via encrypted MessageBox (BRC-2 + BRC-103)
+    let mb_client = crate::messagebox::MessageBoxClient::new(master_privkey, master_pubkey);
+    match mb_client.send_message(&recipient_pubkey, "payment_inbox", &payload_bytes).await {
+        Ok(_) => {
+            log::info!("   ✅ PeerPay message sent via MessageBox (encrypted)");
+        }
+        Err(e) => {
+            // Non-fatal — transaction is already broadcast on-chain
+            log::warn!("   ⚠️  MessageBox delivery failed (tx still broadcast): {}", e);
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    log::info!("   ✅ PeerPay complete: txid={}", txid);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "message": "Sent via PeerPay",
+        "whatsOnChainUrl": format!("https://whatsonchain.com/tx/{}", txid)
+    }))
+}
+
+/// POST /wallet/peerpay/check — Trigger immediate poll for incoming PeerPay payments
+///
+/// Runs the same logic as the background poller (TaskCheckPeerPay) on demand.
+/// Returns the list of undismissed received payments from the database.
+pub async fn peerpay_check(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📬 /wallet/peerpay/check called");
+
+    // Trigger immediate poll (same as background task)
+    let dummy_client = reqwest::Client::new();
+    if let Err(e) = crate::monitor::task_check_peerpay::run(&state, &dummy_client).await {
+        log::warn!("   peerpay_check poll error: {}", e);
+    }
+
+    // Return undismissed payments from DB
+    let payments = {
+        let db = state.database.lock().unwrap();
+        match crate::database::PeerPayRepository::get_undismissed(db.connection()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("   Failed to get undismissed payments: {}", e);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": true, "payments": [], "count": 0
+                }));
+            }
+        }
+    };
+
+    let payment_json: Vec<serde_json::Value> = payments.iter().map(|p| {
+        serde_json::json!({
+            "message_id": p.message_id,
+            "sender": p.sender_identity_key,
+            "amount_satoshis": p.amount_satoshis,
+            "txid": p.txid,
+            "accepted_at": p.accepted_at,
+        })
+    }).collect();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "payments": payment_json,
+        "count": payment_json.len(),
+    }))
+}
+
+/// GET /wallet/peerpay/status — Notification badge data
+///
+/// Returns count and total of undismissed received payments from the database.
+/// Used by the frontend green dot badge on the wallet toolbar icon.
+pub async fn peerpay_status(
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let db = state.database.lock().unwrap();
+
+    let (unread_count, unread_amount) = match crate::database::PeerPayRepository::get_undismissed_summary(db.connection()) {
+        Ok((count, total)) => (count, total),
+        Err(_) => (0, 0),
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "unread_count": unread_count,
+        "unread_amount": unread_amount,
+        "auto_accept": true,
+    }))
+}
+
+/// POST /wallet/peerpay/dismiss — Clear unread notifications
+///
+/// Marks all undismissed payments as dismissed in the database.
+pub async fn peerpay_dismiss(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    let db = state.database.lock().unwrap();
+
+    if let Err(e) = crate::database::PeerPayRepository::dismiss_all(db.connection()) {
+        log::error!("   Failed to dismiss payments: {}", e);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}

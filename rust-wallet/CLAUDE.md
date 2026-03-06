@@ -9,7 +9,7 @@ Actix-web HTTP server providing wallet operations, BRC-100 protocol endpoints, c
 ```powershell
 cd rust-wallet
 cargo build --release    # Build
-cargo run --release      # Run on localhost:3301
+cargo run --release      # Run on localhost:31301
 cargo test               # Run tests
 cargo check              # Fast type-check without building
 ```
@@ -28,7 +28,7 @@ Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wall
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | `main()`, initializes `AppState` (database, balance_cache, auth_sessions, shutdown token), starts Actix-web on port 3301 |
+| `src/main.rs` | `main()`, initializes `AppState` (database, balance_cache, auth_sessions, shutdown token), starts Actix-web on port 31301 |
 | `src/handlers.rs` | All HTTP endpoint handlers: `health`, `get_public_key`, `well_known_auth`, `create_action`, `sign_action`, etc. |
 
 ## Extension Points
@@ -170,6 +170,7 @@ The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler, replac
 | TaskReviewStatus | 60s | Ensure consistency across proven_tx_reqs → transactions → outputs |
 | TaskPurge | 3600s | Cleanup old monitor_events (7d) and completed proof requests (30d) |
 | TaskSyncPending | 30s | UTXO sync for addresses with `pending_utxo_check=1` (WoC API) |
+| TaskCheckPeerPay | 60s | Poll remote MessageBox API for incoming BRC-29 payments, store in local relay |
 
 ### Ghost Transaction Safety Rules
 
@@ -219,3 +220,7 @@ Transaction fees are calculated dynamically based on size (not hardcoded):
 | GET | `/wallet/status` | `wallet_status` |
 | GET | `/wallet/balance` | `get_balance` |
 | POST | `/wallet/sync` | `wallet_sync` — on-demand UTXO sync with reconciliation |
+| POST | `/wallet/peerpay/send` | `peerpay_send` — send BSV via BRC-29 to identity key |
+| POST | `/wallet/peerpay/check` | `peerpay_check` — check for incoming PeerPay payments |
+| GET | `/wallet/peerpay/status` | `peerpay_status` — notification badge data (unread count) |
+| POST | `/wallet/peerpay/dismiss` | `peerpay_dismiss` — clear unread payment notifications |

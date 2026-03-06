@@ -24,12 +24,13 @@ struct PrivacySettings {
     bool fingerprintProtection = true;  // Sprint 12e
 };
 
-// Wallet settings (auto-approve, spending limits)
+// Wallet settings (auto-approve, spending limits, PeerPay)
 struct WalletSettings {
     bool autoApproveEnabled = true;
     int defaultPerTxLimitCents = 10;       // $0.10 per transaction
     int defaultPerSessionLimitCents = 300;  // $3.00 per session
     int defaultRateLimitPerMin = 10;
+    bool peerpayAutoAccept = true;         // Auto-accept incoming PeerPay payments
 };
 
 // JSON serialization
@@ -42,8 +43,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     fingerprintProtection)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(WalletSettings,
-    autoApproveEnabled, defaultPerTxLimitCents, 
-    defaultPerSessionLimitCents, defaultRateLimitPerMin)
+    autoApproveEnabled, defaultPerTxLimitCents,
+    defaultPerSessionLimitCents, defaultRateLimitPerMin,
+    peerpayAutoAccept)
 
 class SettingsManager {
 public:
@@ -86,6 +88,7 @@ public:
     void SetDefaultPerTxLimitCents(int cents);
     void SetDefaultPerSessionLimitCents(int cents);
     void SetDefaultRateLimitPerMin(int rate);
+    void SetPeerpayAutoAccept(bool enabled);
 
     // Bulk update from JSON (for IPC from frontend)
     bool UpdateFromJson(const std::string& jsonStr);

@@ -134,5 +134,5 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 | `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose`, `CefDownloadHandler` (`CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`), `DownloadInfo` struct, `active_downloads_` map, `NotifyDownloadStateChanged`, `CefFindHandler` (`OnFindResult`), find IPC (`find_text`, `find_stop`) |
 | `src/handlers/simple_app.cpp` | `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` (overlay lifecycle) |
 | `src/core/HttpRequestInterceptor.cpp` | `DomainVerifier`, `AsyncWalletResourceHandler`, `g_pendingAuthRequest`, `isWalletEndpoint` |
-| `src/core/BRC100Bridge.cpp` | `makeHttpRequest` (WinHTTP to localhost:3301) |
+| `src/core/BRC100Bridge.cpp` | `makeHttpRequest` (WinHTTP to localhost:31301) |
 | `src/core/HistoryManager.cpp` | Browser history SQLite database; singleton with `AddVisit`, `GetHistory`, `SearchHistory`, `DeleteHistoryEntry` |

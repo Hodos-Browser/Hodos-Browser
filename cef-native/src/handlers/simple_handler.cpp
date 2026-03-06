@@ -439,6 +439,26 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString
 #endif
 }
 
+bool SimpleHandler::OnCursorChange(CefRefPtr<CefBrowser> browser,
+                                    CefCursorHandle cursor,
+                                    cef_cursor_type_t type,
+                                    const CefCursorInfo& custom_cursor_info) {
+#ifdef _WIN32
+    // For OSR overlay browsers, apply the cursor directly since they have no
+    // CEF-owned child window to handle WM_SETCURSOR.
+    // For windowed browsers (tabs, header), return false so CEF updates the
+    // window class cursor via SetClassLongPtr(GCLP_HCURSOR) — without this,
+    // WM_SETCURSOR resets the cursor to IDC_ARROW on every mouse move.
+    bool is_windowed = role_.empty() || role_ == "header" ||
+                       role_.compare(0, 4, "tab_") == 0;
+    if (!is_windowed) {
+        ::SetCursor(cursor);
+        return true;
+    }
+#endif
+    return false;  // Let CEF handle for windowed browsers (tabs, header)
+}
+
 void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<CefFrame> frame,
                                    const CefString& url) {
@@ -2188,6 +2208,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             settings.SetDefaultPerSessionLimitCents(std::stoi(value));
         } else if (key == "wallet.defaultRateLimitPerMin") {
             settings.SetDefaultRateLimitPerMin(std::stoi(value));
+        } else if (key == "wallet.peerpayAutoAccept") {
+            settings.SetPeerpayAutoAccept(value == "true");
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }
@@ -3002,6 +3024,74 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== WALLET CLOSE PREVENTION (mnemonic display / PIN entry) ==========
+    if (message_name == "wallet_prevent_close") {
+        extern bool g_wallet_overlay_prevent_close;
+        g_wallet_overlay_prevent_close = true;
+        LOG_INFO_BROWSER("🔒 Wallet overlay close prevention ENABLED (mnemonic/PIN step)");
+        return true;
+    }
+    if (message_name == "wallet_allow_close") {
+        extern bool g_wallet_overlay_prevent_close;
+        g_wallet_overlay_prevent_close = false;
+        LOG_INFO_BROWSER("🔓 Wallet overlay close prevention DISABLED");
+        return true;
+    }
+
+    // ========== WALLET DELETE (bypasses CefURLRequest proxy — uses WinHTTP directly) ==========
+    if (message_name == "wallet_delete_cancel") {
+        LOG_INFO_BROWSER("🗑️ wallet_delete_cancel — calling Rust /wallet/delete via WinHTTP");
+#ifdef _WIN32
+        HINTERNET hSession = WinHttpOpen(L"HodosBrowser/WalletDelete",
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (hSession) {
+            DWORD timeout = 5000;
+            WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+            WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+            HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+            if (hConnect) {
+                HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/wallet/delete",
+                    nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+                if (hRequest) {
+                    LPCWSTR headers = L"Content-Type: application/json\r\n";
+                    const char* body = "{}";
+                    BOOL ok = WinHttpSendRequest(hRequest, headers, -1,
+                        (LPVOID)body, 2, 2, 0);
+                    if (ok) ok = WinHttpReceiveResponse(hRequest, nullptr);
+                    if (ok) {
+                        DWORD statusCode = 0, statusSize = sizeof(statusCode);
+                        WinHttpQueryHeaders(hRequest,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
+                            WINHTTP_NO_HEADER_INDEX);
+                        LOG_INFO_BROWSER("🗑️ Wallet delete HTTP status: " + std::to_string(statusCode));
+                    } else {
+                        LOG_ERROR_BROWSER("🗑️ Wallet delete WinHTTP failed: " + std::to_string(GetLastError()));
+                    }
+                    WinHttpCloseHandle(hRequest);
+                } else {
+                    LOG_ERROR_BROWSER("🗑️ WinHttpOpenRequest failed");
+                }
+                WinHttpCloseHandle(hConnect);
+            } else {
+                LOG_ERROR_BROWSER("🗑️ WinHttpConnect failed");
+            }
+            WinHttpCloseHandle(hSession);
+        } else {
+            LOG_ERROR_BROWSER("🗑️ WinHttpOpen failed");
+        }
+        // localStorage cleanup
+        CefRefPtr<CefBrowser> hdr = SimpleHandler::GetHeaderBrowser();
+        if (hdr && hdr->GetMainFrame()) {
+            hdr->GetMainFrame()->ExecuteJavaScript(
+                "localStorage.removeItem('hodos_wallet_exists');", "", 0);
+        }
+#endif
+        // React handles overlay close separately via wallet_allow_close + handleClose()
+        return true;
+    }
+
     // ========== OVERLAY CLOSE (Cross-platform) ==========
     if (message_name == "overlay_close") {
         LOG_DEBUG_BROWSER("🧠 [SimpleHandler] overlay_close message received for role: " + role_);
@@ -3076,6 +3166,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             if (role_ == "wallet") {
                 extern HWND g_wallet_overlay_hwnd;
                 g_wallet_overlay_hwnd = nullptr;
+                // Clear close-prevention flag on overlay destruction
+                extern bool g_wallet_overlay_prevent_close;
+                g_wallet_overlay_prevent_close = false;
             } else if (role_ == "settings") {
                 extern HWND g_settings_overlay_hwnd;
                 g_settings_overlay_hwnd = nullptr;
@@ -3391,7 +3484,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
                         // Create HTTP request to generate authentication response
                         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-                        cefRequest->SetURL("http://localhost:3301" + pendingReq.endpoint);
+                        cefRequest->SetURL("http://localhost:31301" + pendingReq.endpoint);
                         cefRequest->SetMethod(pendingReq.method);
                         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -3446,7 +3539,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                             nullptr
                         );
 
-                        LOG_DEBUG_BROWSER("🔐 Authentication request sent to wallet at localhost:3301");
+                        LOG_DEBUG_BROWSER("🔐 Authentication request sent to wallet at localhost:31301");
                     } else {
                         LOG_DEBUG_BROWSER("🔐 No pending auth request found for requestId: " + requestId);
                     }
@@ -3575,7 +3668,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                             std::string jsonBody = body.dump();
 
                             CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-                            cefRequest->SetURL("http://localhost:3301/domain/permissions/certificate");
+                            cefRequest->SetURL("http://localhost:31301/domain/permissions/certificate");
                             cefRequest->SetMethod("POST");
                             cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -3689,13 +3782,34 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== WALLET PANEL TOGGLE (Cross-platform: uses separate overlay window) ==========
     if (message_name == "toggle_wallet_panel") {
-        // Parse icon right offset from args (physical pixels from right edge of header)
+        // Parse comma-separated args: "iconRightOffset,peerpayCount,peerpayAmount"
         int iconRightOffset = 0;
+        int peerpayCount = 0;
+        int peerpayAmount = 0;
         CefRefPtr<CefListValue> wallet_args = message->GetArgumentList();
         if (wallet_args->GetSize() > 0) {
-            try { iconRightOffset = std::stoi(wallet_args->GetString(0).ToString()); } catch(...) {}
+            std::string argsStr = wallet_args->GetString(0).ToString();
+            // Split by comma
+            std::istringstream ss(argsStr);
+            std::string token;
+            int idx = 0;
+            while (std::getline(ss, token, ',')) {
+                try {
+                    if (idx == 0) iconRightOffset = std::stoi(token);
+                    else if (idx == 1) peerpayCount = std::stoi(token);
+                    else if (idx == 2) peerpayAmount = std::stoi(token);
+                } catch(...) {}
+                idx++;
+            }
         }
-        LOG_DEBUG_BROWSER("Toggle wallet panel with iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_DEBUG_BROWSER("Toggle wallet panel with iconRightOffset=" + std::to_string(iconRightOffset) +
+            " peerpayCount=" + std::to_string(peerpayCount) + " peerpayAmount=" + std::to_string(peerpayAmount));
+
+        // Store peerpay data so CreateWalletOverlay can append to URL
+        extern int g_peerpay_count;
+        extern int g_peerpay_amount;
+        g_peerpay_count = peerpayCount;
+        g_peerpay_amount = peerpayAmount;
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
@@ -3705,6 +3819,17 @@ bool SimpleHandler::OnProcessMessageReceived(
 #else
         LOG_DEBUG_BROWSER("toggle_wallet_panel not implemented on this platform");
 #endif
+        return true;
+    }
+
+    // Forward wallet_payment_dismissed from wallet overlay → header browser (clears green dot)
+    if (message_name == "wallet_payment_dismissed") {
+        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+        if (header_browser && header_browser->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> forward_msg = CefProcessMessage::Create("wallet_payment_dismissed");
+            header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, forward_msg);
+            LOG_DEBUG_BROWSER("Forwarded wallet_payment_dismissed to header browser");
+        }
         return true;
     }
 
@@ -5485,7 +5610,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
     // OR if it's a BRC-104 /.well-known/auth request (standard wallet authentication endpoint)
-    if (url.find("localhost:3301") != std::string::npos ||
+    if (url.find("localhost:31301") != std::string::npos ||
         url.find("localhost:3321") != std::string::npos ||
         url.find("localhost:2121") != std::string::npos ||
         url.find("localhost:8080") != std::string::npos ||

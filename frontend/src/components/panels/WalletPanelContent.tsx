@@ -23,7 +23,7 @@ const WalletPanel = () => {
   const [copyLinkClicked, setCopyLinkClicked] = useState(false);
 
   // Refs for animation timeouts
-  const animationTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const animationTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // No wallet initialization needed - using hardcoded test address
 

@@ -69,6 +69,9 @@ HWND g_menu_overlay_hwnd = nullptr;
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
 
+// Wallet close prevention — prevents overlay close during mnemonic display / PIN creation
+bool g_wallet_overlay_prevent_close = false;
+
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
@@ -85,6 +88,8 @@ int g_download_icon_right_offset = 0;
 int g_profile_icon_right_offset = 0;
 int g_wallet_icon_right_offset = 0;
 int g_menu_icon_right_offset = 0;
+int g_peerpay_count = 0;
+int g_peerpay_amount = 0;
 
 // Fullscreen state tracking
 bool g_is_fullscreen = false;
@@ -946,12 +951,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
-                // Close wallet overlay if it's open (use stored BrowserWindow* for correct browser)
-                LOG_DEBUG("📱 App losing focus - closing wallet overlay if open");
-                if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                // Close wallet overlay on focus loss UNLESS prevent-close flag is active.
+                // Flag is set synchronously at overlay creation (C++ side) and cleared
+                // by React IPC (wallet_allow_close) when user reaches a safe state.
+                // This avoids race conditions — flag defaults to TRUE on fresh overlay.
+                LOG_DEBUG("📱 App losing focus - checking wallet overlay");
+                if (g_wallet_overlay_prevent_close) {
+                    LOG_INFO("💰 Wallet overlay prevent-close active - keeping overlay open on focus loss");
+                } else if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                     LOG_INFO("💰 Closing wallet overlay due to app focus loss");
                     ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
-                    // Get wallet browser from HWND user data (correct for any window)
                     BrowserWindow* walletBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA));
                     CefRefPtr<CefBrowser> wallet_browser = (walletBw && walletBw->wallet_browser)
                         ? walletBw->wallet_browser : SimpleHandler::GetWalletBrowser();
@@ -1041,10 +1050,8 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Prevent focus theft - matches cookie panel pattern
             return MA_NOACTIVATE;
 
-        case WM_SETCURSOR: {
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
-        }
+        // WM_SETCURSOR: intentionally not handled — OnCursorChange in
+        // MyOverlayRenderHandler sets the cursor based on CSS (pointer, text, etc.)
 
         case WM_MOUSEMOVE: {
             // Forward mouse moves to CEF for hover states
@@ -1151,10 +1158,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
                 LOG_DEBUG("🧠 Left-click sent to wallet overlay browser");
-            } else {
-                LOG_DEBUG("⚠️ No wallet overlay browser to send left-click");
             }
-
             return 0;
         }
 
@@ -1173,10 +1177,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
                 LOG_DEBUG("🧠 Right-click sent to wallet overlay browser");
-            } else {
-                LOG_DEBUG("⚠️ No wallet overlay browser to send right-click");
             }
-
             return 0;
         }
 
@@ -1290,6 +1291,11 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_ACTIVATE:
             LOG_DEBUG("⚡ Wallet HWND activated with state: " + std::to_string(LOWORD(wParam)));
             if (LOWORD(wParam) == WA_INACTIVE) {
+                // Check prevent-close flag (set at creation, cleared by React when safe)
+                if (g_wallet_overlay_prevent_close || g_file_dialog_active) {
+                    LOG_INFO("💰 Wallet overlay lost activation but prevent-close active - keeping open");
+                    return 0;
+                }
                 // Wallet lost focus — close it (cross-window click-outside)
                 LOG_INFO("💰 Closing wallet overlay — lost activation (click-outside)");
                 ShowWindow(hwnd, SW_HIDE);
@@ -1641,11 +1647,7 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // CRITICAL: Return MA_NOACTIVATE to prevent focus theft from address bar
             return MA_NOACTIVATE;
 
-        case WM_SETCURSOR: {
-            // Force hand cursor for omnibox overlay (all content is clickable)
-            SetCursor(LoadCursor(nullptr, IDC_HAND));
-            return TRUE;
-        }
+        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
 
         case WM_MOUSEMOVE: {
             // Forward mouse moves to CEF for hover states
@@ -1764,11 +1766,7 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             // CRITICAL: Return MA_NOACTIVATE to prevent focus theft
             return MA_NOACTIVATE;
 
-        case WM_SETCURSOR: {
-            // Default arrow cursor for cookie panel (has both clickable and scrollable areas)
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
-        }
+        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
 
         case WM_MOUSEMOVE: {
             // Forward mouse moves to CEF for hover states
@@ -1886,9 +1884,7 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
 
-        case WM_SETCURSOR:
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
+        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -1952,9 +1948,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             // Allow normal activation (same as wallet) - CRITICAL for keyboard focus
             return MA_ACTIVATE;
 
-        case WM_SETCURSOR:
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
+        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -2124,9 +2118,7 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
 
-        case WM_SETCURSOR:
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
+        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -2197,7 +2189,7 @@ static bool QuickHealthCheck() {
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3301, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
@@ -2231,7 +2223,7 @@ static bool QuickHealthCheck() {
 
 // Start the Rust wallet server as a subprocess (or detect if already running)
 // Send POST /shutdown to a localhost service. Returns true if the request succeeded.
-// Used for graceful shutdown of wallet (3301) and adblock (3302) servers.
+// Used for graceful shutdown of wallet (31301) and adblock (31302) servers.
 static bool SendShutdownRequest(int port) {
     HINTERNET hSession = WinHttpOpen(L"HodosBrowser/Shutdown",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -2349,7 +2341,7 @@ void StopWalletServer() {
         // Step 1: Try graceful shutdown via HTTP (lets wallet flush SQLite WAL)
         LOG_INFO("Requesting graceful wallet server shutdown (PID: " +
                  std::to_string(g_walletServerProcess.dwProcessId) + ")...");
-        bool shutdownSent = SendShutdownRequest(3301);
+        bool shutdownSent = SendShutdownRequest(31301);
 
         if (shutdownSent) {
             // Wait up to 5 seconds for graceful exit
@@ -2386,7 +2378,7 @@ void StopWalletServer() {
 // Adblock Server Management
 // ============================================================================
 
-// Health check for adblock engine — checks GET /health on port 3302
+// Health check for adblock engine — checks GET /health on port 31302
 // Returns true if response contains "ready" (engine loaded and ready to check)
 static bool QuickAdblockHealthCheck() {
     HINTERNET hSession = WinHttpOpen(L"HodosBrowser/AdblockCheck",
@@ -2399,7 +2391,7 @@ static bool QuickAdblockHealthCheck() {
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3302, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
@@ -2519,7 +2511,7 @@ void StopAdblockServer() {
     if (g_adblockServerProcess.hProcess) {
         LOG_INFO("Requesting graceful adblock engine shutdown (PID: " +
                  std::to_string(g_adblockServerProcess.dwProcessId) + ")...");
-        bool shutdownSent = SendShutdownRequest(3302);
+        bool shutdownSent = SendShutdownRequest(31302);
 
         if (shutdownSent) {
             DWORD waitResult = WaitForSingleObject(g_adblockServerProcess.hProcess, 3000);

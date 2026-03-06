@@ -78,6 +78,11 @@ public:
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
 
+    bool OnCursorChange(CefRefPtr<CefBrowser> browser,
+                        CefCursorHandle cursor,
+                        cef_cursor_type_t type,
+                        const CefCursorInfo& custom_cursor_info) override;
+
     void OnAddressChange(CefRefPtr<CefBrowser> browser,
                         CefRefPtr<CefFrame> frame,
                         const CefString& url) override;

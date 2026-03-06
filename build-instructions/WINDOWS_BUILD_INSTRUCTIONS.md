@@ -157,7 +157,22 @@ cargo run --release
 Listening on: http://127.0.0.1:3301
 ```
 
-Press `Ctrl+C` to stop. You'll run this in a separate terminal later.
+Press `Ctrl+C` to stop. The browser auto-launches this on startup.
+
+---
+
+## 🛡️ Step 3.5: Build Adblock Engine
+
+The adblock engine provides ad and tracker blocking. It's auto-launched by the browser.
+
+```bash
+cd adblock-engine
+cargo build --release
+```
+
+**Output:** `adblock-engine/target/release/hodos-adblock.exe`
+
+**Version constraints:** Uses pinned versions (actix-web 4.11.0, adblock 0.10.3) for Rust 1.85 compatibility. See main BUILD_INSTRUCTIONS.md for details.
 
 ---
 
@@ -245,38 +260,49 @@ cef-native/build/bin/Release/HodosBrowserShell.exe
 
 ## ✅ Step 6: Run the Browser
 
-You need **three terminals** running simultaneously:
+The browser **auto-launches** the Rust wallet (port 3301) and adblock engine (port 3302). You only need to run the frontend dev server manually.
 
-### Terminal 1: Rust Wallet
+### Minimal Setup (2 terminals)
 
-```bash
-cd rust-wallet
-cargo run --release
-```
-
-**Leave this running** (port 3301)
-
-### Terminal 2: Frontend Dev Server
-
+**Terminal 1: Frontend Dev Server**
 ```bash
 cd frontend
 npm run dev
 ```
-
 **Leave this running** (port 5137)
 
-### Terminal 3: CEF Browser
-
+**Terminal 2: CEF Browser**
 ```bash
 cd cef-native/build/bin/Release
 ./HodosBrowserShell.exe
 ```
+
+### Optional: Run Backend Services Manually (for debugging)
+
+If you need to see wallet or adblock logs, run them before launching the browser:
+
+```bash
+# Terminal 1 (optional): Rust Wallet - for logs
+cd rust-wallet && cargo run --release
+
+# Terminal 2 (optional): Adblock Engine - for logs  
+cd adblock-engine && cargo run --release
+
+# Terminal 3: Frontend Dev Server (required)
+cd frontend && npm run dev
+
+# Terminal 4: CEF Browser
+cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
+```
+
+When services are already running, the browser detects and uses them instead of spawning new processes.
 
 **Expected behavior:**
 - Browser window opens
 - Header loads React UI from http://127.0.0.1:5137
 - Webview displays content
 - Wallet operations work (backed by Rust on port 3301)
+- Ad blocking works (backed by adblock engine on port 3302)
 
 ---
 
@@ -403,11 +429,14 @@ cmake --build . --config Release
 
 ## 🎯 Quick Reference
 
-| Component | Port | Command |
-|-----------|------|---------|
-| **Rust Wallet** | 3301 | `cd rust-wallet && cargo run --release` |
-| **Frontend** | 5137 | `cd frontend && npm run dev` |
-| **CEF Browser** | - | `cd cef-native/build/bin/Release && ./HodosBrowserShell.exe` |
+| Component | Port | Auto-launched? | Command |
+|-----------|------|----------------|---------|
+| **Rust Wallet** | 3301 | ✅ Yes | `cd rust-wallet && cargo run --release` |
+| **Adblock Engine** | 3302 | ✅ Yes | `cd adblock-engine && cargo run --release` |
+| **Frontend** | 5137 | ❌ No | `cd frontend && npm run dev` |
+| **CEF Browser** | — | — | `cd cef-native/build/bin/Release && ./HodosBrowserShell.exe` |
+
+**Minimal run:** Start frontend (`npm run dev`), then launch browser. Wallet and adblock auto-start.
 
 ---
 

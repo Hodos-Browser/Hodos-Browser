@@ -452,3 +452,40 @@ Read HEARTBEAT.md if it exis
 
 [19:08:43] HEARTBEAT_OK
 
+
+---
+
+## Turn at 20:08:44
+
+## User Messages
+
+[14:18:17] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[15:00:41] [Tue 2026-03-03 08:00 MST] You have been creating the agent_main_main.md documents in the sessions folder in our repo, correct? Can you explain what those are to me. I want to understand how you work and to best use you.
+[message_id: dc411565-5d9f-4adf-882c-274b0fdcb214]
+
+[15:05:34] [Tue 2026-03-03 08:05 MST] You said this: ~200k tokens of context, but that has no meaning to me? What is a token of context? How are you using Shad?
+[message_id: dfb45f27-59c8-46a3-8254-7603ea55fc6b]
+
+[15:08:42] System: [2026-03-03 08:08:41 MST] Exec completed (crisp-lo, code 0) :: /sessions/2026-02-26-agent_main_main.md /mnt/c/Users/archb/Hodos-Browser/sessions/2026-02-27-agent_main_main.md /mnt/c/Users/archb/Hodos-Browser/sessions/2026-02-28-agent_main_main.md /mnt/c/Users/archb/Hodos-Browser/sessions/2026-03-01-agent_main_main.md /mnt/c/Users/archb/Hodos-Browser/sessions/2026-03-02-agent_main_main.md /mnt/c/Users/archb/Hodos-Browser/sessions/2026-03-03-agent_main_main.md
+
+Read HEARTBEAT.md if it exis
+
+[16:08:43] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[17:08:43] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[18:08:43] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[19:08:43] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+[20:08:42] Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.
+
+## Assistant Responses
+
+[18:08:43] HEARTBEAT_OK
+
+[19:08:43] HEARTBEAT_OK
+
+[20:08:42] HEARTBEAT_OK
+

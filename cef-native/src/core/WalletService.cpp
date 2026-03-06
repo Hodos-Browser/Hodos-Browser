@@ -16,7 +16,7 @@
 static WalletService* g_walletService = nullptr;
 
 WalletService::WalletService()
-    : baseUrl_("http://localhost:3301")
+    : baseUrl_("http://localhost:31301")
     , daemonPath_("")
     , hSession_(nullptr)
     , hConnect_(nullptr)

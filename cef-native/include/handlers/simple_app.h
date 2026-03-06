@@ -28,6 +28,7 @@
     extern HWND g_webview_hwnd;
     extern HWND g_settings_overlay_hwnd;
     extern HWND g_wallet_overlay_hwnd;
+    extern bool g_wallet_overlay_prevent_close;
     extern HWND g_backup_overlay_hwnd;
     extern HWND g_brc100_auth_overlay_hwnd;
     extern HWND g_settings_menu_overlay_hwnd;

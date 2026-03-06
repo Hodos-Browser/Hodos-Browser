@@ -9,7 +9,6 @@ mod handlers;
 mod crypto;
 mod transaction;
 mod utxo_fetcher;
-mod message_relay;
 mod auth_session;
 mod beef;  // NEW: BEEF parser module
 mod beef_helpers;  // BEEF building helpers for listOutputs
@@ -24,8 +23,9 @@ mod price_cache;  // BSV/USD exchange rate cache
 mod monitor;  // Phase 6: Monitor pattern (background task scheduler)
 mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // Certificate management (BRC-52)
+mod authfetch;  // BRC-103 AuthFetch client for authenticated HTTP requests
+mod messagebox;  // MessageBox API client with BRC-2 encryption
 
-use message_relay::MessageStore;
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
 use std::sync::Arc;
@@ -42,7 +42,6 @@ pub struct DerivedKeyInfo {
 // Global app state
 pub struct AppState {
     pub database: Arc<Mutex<WalletDatabase>>,  // Database storage (primary)
-    pub message_store: MessageStore,
     pub auth_sessions: Arc<AuthSessionManager>,
     pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
     pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
@@ -84,10 +83,6 @@ async fn main() -> std::io::Result<()> {
 
     // Database is now the primary storage - no JSON files needed
     println!("📁 Wallet directory: {}", wallet_dir.display());
-
-    // Initialize BRC-33 message relay
-    let message_store = MessageStore::new();
-    println!("✅ BRC-33 message relay initialized");
 
     // Initialize BRC-103/104 auth session manager
     let auth_sessions = Arc::new(AuthSessionManager::new());
@@ -313,7 +308,6 @@ async fn main() -> std::io::Result<()> {
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
-        message_store,
         auth_sessions,
         balance_cache,
         fee_rate_cache,
@@ -330,8 +324,8 @@ async fn main() -> std::io::Result<()> {
 
     println!();
     println!("🌐 Starting HTTP server...");
-    println!("   Port: 3301");
-    println!("   URL: http://localhost:3301");
+    println!("   Port: 31301");
+    println!("   URL: http://localhost:31301");
     println!();
     println!("📋 Available endpoints:");
     println!("   GET  /health");
@@ -349,10 +343,11 @@ async fn main() -> std::io::Result<()> {
     println!("   GET  /wallet/balance");
     println!("   POST /wallet/sync");
     println!();
-    println!("📬 BRC-33 Message Relay endpoints:");
-    println!("   POST /sendMessage");
-    println!("   POST /listMessages");
-    println!("   POST /acknowledgeMessage");
+    println!("📬 PeerPay (BRC-29) endpoints:");
+    println!("   POST /wallet/peerpay/send");
+    println!("   POST /wallet/peerpay/check");
+    println!("   GET  /wallet/peerpay/status");
+    println!("   POST /wallet/peerpay/dismiss");
     println!();
     println!("📊 Blockchain Query endpoints (Group C - Part 2):");
     println!("   POST /getHeight");
@@ -473,6 +468,7 @@ async fn main() -> std::io::Result<()> {
             // Custom wallet endpoints
             .route("/wallet/status", web::get().to(handlers::wallet_status))
             .route("/wallet/create", web::post().to(handlers::wallet_create))
+            .route("/wallet/delete", web::post().to(handlers::wallet_delete))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
             .route("/wallet/sync", web::post().to(handlers::wallet_sync))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
@@ -517,8 +513,14 @@ async fn main() -> std::io::Result<()> {
             .route("/listMessages", web::post().to(handlers::list_messages))
             .route("/acknowledgeMessage", web::post().to(handlers::acknowledge_message))
 
+            // PeerPay (BRC-29) endpoints
+            .route("/wallet/peerpay/send", web::post().to(handlers::peerpay_send))
+            .route("/wallet/peerpay/check", web::post().to(handlers::peerpay_check))
+            .route("/wallet/peerpay/status", web::get().to(handlers::peerpay_status))
+            .route("/wallet/peerpay/dismiss", web::post().to(handlers::peerpay_dismiss))
+
     })
-    .bind(("127.0.0.1", 3301))?
+    .bind(("127.0.0.1", 31301))?
     .run();
 
     // Spawn shutdown watcher that stops the HTTP server when Ctrl+C fires (Phase 8D)

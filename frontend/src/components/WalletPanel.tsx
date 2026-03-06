@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Button } from '@mui/material';
-import SettingsIcon from '@mui/icons-material/Settings';
+import { QRCodeSVG } from 'qrcode.react';
 import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
@@ -22,7 +21,7 @@ interface WalletPanelProps {
   onClose?: () => void;
 }
 
-export default function WalletPanel({ onClose }: WalletPanelProps) {
+export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
   const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
@@ -36,21 +35,76 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [copyAgainClicked, setCopyAgainClicked] = useState(false);
   const [copyLinkClicked, setCopyLinkClicked] = useState(false);
 
-  // Sync status state
-  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
+  // Identity key state — read from localStorage (cached by MainBrowserView at startup)
+  const [identityKey] = useState<string | null>(
+    () => localStorage.getItem('hodos_identity_key')
+  );
+  const [showIdentityKey, setShowIdentityKey] = useState(false);
+  const [identityKeyCopied, setIdentityKeyCopied] = useState(false);
+
+  // PeerPay notification state (auto-accept only)
+  // Read from URL params for instant display (passed by header via C++)
+  const [peerpayNotification, setPeerpayNotification] = useState<{
+    count: number;
+    amount: number;
+  } | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const ppc = parseInt(params.get('ppc') || '0', 10);
+    const ppa = parseInt(params.get('ppa') || '0', 10);
+    if (ppc > 0) return { count: ppc, amount: ppa };
+    return null;
+  });
+
+  const handleDismissPeerpay = () => {
+    setPeerpayNotification(null);
+    fetch('http://localhost:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
+    // Notify header to clear the green dot
+    if (window.cefMessage?.send) {
+      window.cefMessage.send('wallet_payment_dismissed', []);
+    }
+  };
+
+  const handleCopyIdentityKey = async () => {
+    if (!identityKey) return;
+    try {
+      await navigator.clipboard.writeText(identityKey);
+      setIdentityKeyCopied(true);
+      setTimeout(() => setIdentityKeyCopied(false), 2000);
+    } catch {
+      // Fallback: show the key so user can manually copy
+      setShowIdentityKey(true);
+    }
+  };
+
+  // Sync status state — seed from localStorage so banner shows instantly on reopen
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(() => {
+    if (localStorage.getItem('hodos_sync_active') === 'true') {
+      return { active: true, phase: 'scanning', addresses_scanned: 0, utxos_found: 0, total_satoshis: 0, result_seen: false, error: null };
+    }
+    return null;
+  });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Fetch sync status on mount
+  // Fetch sync status on mount (deferred to let overlay become interactive first)
   useEffect(() => {
     const fetchStatus = () => {
-      fetch('http://localhost:3301/wallet/sync-status')
+      fetch('http://localhost:31301/wallet/sync-status')
         .then(r => r.json())
-        .then((data: SyncStatusData) => setSyncStatus(data))
+        .then((data: SyncStatusData) => {
+          setSyncStatus(data);
+          // Keep localStorage flag in sync
+          if (data.active) {
+            localStorage.setItem('hodos_sync_active', 'true');
+          } else {
+            localStorage.removeItem('hodos_sync_active');
+          }
+        })
         .catch(() => {});
     };
-    fetchStatus();
+    const timer = setTimeout(fetchStatus, 1500);
 
     return () => {
+      clearTimeout(timer);
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
@@ -60,13 +114,18 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     if (syncStatus?.active) {
       if (!pollRef.current) {
         pollRef.current = setInterval(() => {
-          fetch('http://localhost:3301/wallet/sync-status')
+          fetch('http://localhost:31301/wallet/sync-status')
             .then(r => r.json())
             .then((data: SyncStatusData) => {
               setSyncStatus(data);
-              // When sync completes, refresh balance and stop polling
+              // When sync completes, refresh balance, auto-dismiss, and stop polling
               if (!data.active) {
+                localStorage.removeItem('hodos_sync_active');
                 refreshBalance();
+                if (!data.error) {
+                  // Auto-dismiss successful sync (no "Continue to wallet" needed)
+                  fetch('http://localhost:31301/wallet/sync-status/seen', { method: 'POST' }).catch(() => {});
+                }
                 if (pollRef.current) {
                   clearInterval(pollRef.current);
                   pollRef.current = null;
@@ -85,7 +144,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   }, [syncStatus?.active]);
 
   const handleDismissSyncSummary = () => {
-    fetch('http://localhost:3301/wallet/sync-status/seen', { method: 'POST' })
+    fetch('http://localhost:31301/wallet/sync-status/seen', { method: 'POST' })
       .then(() => setSyncStatus(prev => prev ? { ...prev, result_seen: true } : null))
       .catch(() => {});
   };
@@ -277,18 +336,6 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       )}
 
-      {syncStatus && !syncStatus.active && !syncStatus.result_seen && syncStatus.utxos_found > 0 && (
-        <div className="sync-banner-light sync-complete">
-          <strong>Sync Complete</strong>
-          <p className="sync-banner-detail">
-            Found {syncStatus.utxos_found} UTXOs totaling {(syncStatus.total_satoshis / 100000000).toFixed(8)} BSV
-          </p>
-          <button className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
-            Continue to wallet
-          </button>
-        </div>
-      )}
-
       {syncStatus && !syncStatus.active && !syncStatus.result_seen && syncStatus.error && (
         <div className="sync-banner-light sync-error">
           <strong>Sync completed with error</strong>
@@ -296,6 +343,46 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           <button className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
             Dismiss
           </button>
+        </div>
+      )}
+
+      {/* PeerPay Notification Banner (auto-accept only) */}
+      {peerpayNotification && peerpayNotification.count > 0 && (
+        <div className="peerpay-banner-light">
+          <div className="peerpay-banner-content">
+            <span>
+              Received {peerpayNotification.count} payment{peerpayNotification.count > 1 ? 's' : ''} totaling{' '}
+              {(peerpayNotification.amount / 100_000_000).toFixed(8)} BSV
+            </span>
+          </div>
+          <button className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Identity Key Section */}
+      {identityKey && (
+        <div className="identity-key-section-light">
+          <div className="identity-key-actions-light">
+            <button
+              className={`identity-key-copy-button-light ${identityKeyCopied ? 'copied' : ''}`}
+              onClick={handleCopyIdentityKey}
+            >
+              {identityKeyCopied ? 'Copied!' : 'Copy Identity Key'}
+            </button>
+            <button
+              className="identity-key-show-button-light"
+              onClick={() => setShowIdentityKey(!showIdentityKey)}
+            >
+              {showIdentityKey ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          {showIdentityKey && (
+            <div className="identity-key-display-light">
+              <code>{identityKey}</code>
+            </div>
+          )}
         </div>
       )}
 
@@ -330,6 +417,16 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           <div className="receive-address-container-light">
             <h3>Receive Bitcoin SV</h3>
             <p>Address copied to clipboard!</p>
+            {currentAddress && (
+              <div className="qr-code-container-light">
+                <QRCodeSVG
+                  value={`bitcoin:${currentAddress}`}
+                  size={160}
+                  level="M"
+                  marginSize={4}
+                />
+              </div>
+            )}
             <div className="address-display-light">
               <code>{currentAddress || 'Generating...'}</code>
             </div>
@@ -417,39 +514,15 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       </div>
 
       {/* Advanced Button */}
-      <Button
-        variant="outlined"
-        startIcon={<SettingsIcon />}
+      <button
         onClick={handleAdvanced}
-        size="small"
-        fullWidth
-        sx={{
-          marginTop: '8px',
-          fontSize: '12px',
-          borderColor: '#2d5016',
-          color: '#2d5016',
-          '&:hover': {
-            borderColor: '#3a641e',
-            backgroundColor: 'rgba(45, 80, 22, 0.04)',
-          }
-        }}
+        className="advanced-button-light"
       >
         Advanced
-      </Button>
+      </button>
       <button
         onClick={handleManageSites}
-        style={{
-          background: 'none',
-          border: 'none',
-          color: '#666',
-          fontSize: '11px',
-          cursor: 'pointer',
-          padding: '6px 0 2px',
-          width: '100%',
-          textAlign: 'center',
-          textDecoration: 'underline',
-          fontFamily: 'inherit',
-        }}
+        className="manage-sites-link-light"
       >
         Manage approved sites
       </button>

@@ -142,7 +142,7 @@ const WalletOverlayRoot: React.FC = () => {
     fetchActions();
   }, []);
 
-  const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
+  const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
 
     // Lazy load data when tab is selected
@@ -168,7 +168,7 @@ const WalletOverlayRoot: React.FC = () => {
       setActionsError(null);
 
       console.log('Fetching actions from Rust backend...');
-      const response = await fetch('http://localhost:3301/listActions', {
+      const response = await fetch('http://localhost:31301/listActions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -204,7 +204,7 @@ const WalletOverlayRoot: React.FC = () => {
       setAddressesError(null);
 
       console.log('Fetching addresses from Rust backend...');
-      const response = await fetch('http://localhost:3301/wallet/addresses', {
+      const response = await fetch('http://localhost:31301/wallet/addresses', {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -236,7 +236,7 @@ const WalletOverlayRoot: React.FC = () => {
       console.log('Fetching UTXOs directly from database...');
 
       // First get all addresses
-      const addressesResp = await fetch('http://localhost:3301/wallet/addresses', {
+      const addressesResp = await fetch('http://localhost:31301/wallet/addresses', {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -254,7 +254,6 @@ const WalletOverlayRoot: React.FC = () => {
 
       // For now, query each address's UTXOs individually
       // TODO: Add a proper endpoint to get all UTXOs for a wallet
-      const allOutputs: Output[] = [];
 
       // Since we don't have a direct endpoint, we'll need to use a workaround
       // The balance is calculated from UTXOs, so they exist in the database
@@ -280,7 +279,7 @@ const WalletOverlayRoot: React.FC = () => {
       setCertificatesError(null);
 
       console.log('Fetching certificates from Rust backend...');
-      const response = await fetch('http://localhost:3301/listCertificates', {
+      const response = await fetch('http://localhost:31301/listCertificates', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -341,7 +340,7 @@ const WalletOverlayRoot: React.FC = () => {
     setExporting(true);
     setExportError(null);
     try {
-      const res = await fetch('http://localhost:3301/wallet/export', {
+      const res = await fetch('http://localhost:31301/wallet/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: exportPassword }),

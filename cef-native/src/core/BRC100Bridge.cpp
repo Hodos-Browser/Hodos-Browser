@@ -3,7 +3,7 @@
 #include <sstream>
 
 BRC100Bridge::BRC100Bridge()
-    : baseUrl_("http://localhost:3301"),
+    : baseUrl_("http://localhost:31301"),
       hSession_(nullptr),
       hConnect_(nullptr),
       connected_(false),

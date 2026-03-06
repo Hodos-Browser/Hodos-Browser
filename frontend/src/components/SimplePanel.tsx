@@ -33,7 +33,7 @@ const SimplePanel: React.FC<SimplePanelProps> = ({ isOpen, onClose }) => {
       right: 0,
       width: '400px',
       height: '100vh',
-      background: '#2d5016', // Dark green
+      background: '#a67c00', // Hodos gold
       color: 'white',
       zIndex: 2147483647, // Maximum z-index value (same as CEF)
       transform: 'translateX(0)',
@@ -50,7 +50,7 @@ const SimplePanel: React.FC<SimplePanelProps> = ({ isOpen, onClose }) => {
         justifyContent: 'space-between',
         alignItems: 'center',
         marginBottom: '20px',
-        borderBottom: '1px solid #d4c4a8',
+        borderBottom: '1px solid #a67c00',
         paddingBottom: '10px'
       }}>
         <h2 style={{ margin: 0, fontSize: '1.5em' }}>Test Panel</h2>
@@ -87,7 +87,7 @@ const SimplePanel: React.FC<SimplePanelProps> = ({ isOpen, onClose }) => {
           padding: '15px',
           background: 'rgba(255,255,255,0.1)',
           borderRadius: '8px',
-          border: '1px solid #d4c4a8'
+          border: '1px solid #a67c00'
         }}>
           <h4 style={{ margin: '0 0 10px 0' }}>Panel Status:</h4>
           <p style={{ margin: 0 }}>✅ Panel is open and visible</p>

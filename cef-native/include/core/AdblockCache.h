@@ -4,7 +4,7 @@
 // Sprint 8: Ad & tracker blocking — C++ integration
 //
 // AdblockCache: Singleton that caches adblock check results and calls the
-// standalone adblock engine (localhost:3302) via sync WinHTTP.
+// standalone adblock engine (localhost:31302) via sync WinHTTP.
 //
 // AdblockBlockHandler: Minimal CefResourceRequestHandler that cancels blocked requests.
 //
@@ -403,7 +403,7 @@ private:
 
 #ifdef _WIN32
 
-    // Sync WinHTTP POST to localhost:3302/check
+    // Sync WinHTTP POST to localhost:31302/check
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
         HINTERNET hSession = WinHttpOpen(L"AdblockCache/1.0",
@@ -416,7 +416,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return false;
@@ -486,7 +486,7 @@ private:
         return blocked;
     }
 
-    // Sync WinHTTP POST to localhost:3302/cosmetic-resources
+    // Sync WinHTTP POST to localhost:31302/cosmetic-resources
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
         CosmeticResult result;
 
@@ -500,7 +500,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return result;
@@ -622,7 +622,7 @@ private:
         return result;
     }
 
-    // Sync WinHTTP POST to localhost:3302/cosmetic-hidden-ids
+    // Sync WinHTTP POST to localhost:31302/cosmetic-hidden-ids
     // Phase 2: generic selectors matching DOM class names and element IDs
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
@@ -637,7 +637,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 3302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return "";

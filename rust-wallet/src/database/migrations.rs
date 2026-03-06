@@ -585,3 +585,26 @@ pub fn migrate_v5_to_v6(_conn: &Connection) -> Result<()> {
     info!("   ✅ V6 migration — no-op (scriptlet settings moved to C++ AdblockCache)");
     Ok(())
 }
+
+/// Migrate V6 → V7: Add peerpay_received table for persistent PeerPay payment tracking
+pub fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
+    info!("   Adding peerpay_received table...");
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS peerpay_received (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL UNIQUE,
+            sender_identity_key TEXT NOT NULL,
+            amount_satoshis INTEGER NOT NULL,
+            derivation_prefix TEXT NOT NULL,
+            derivation_suffix TEXT NOT NULL,
+            txid TEXT,
+            accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            dismissed INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_peerpay_dismissed ON peerpay_received(dismissed);
+    ")?;
+
+    info!("   ✅ V7 migration applied (peerpay_received table)");
+    Ok(())
+}

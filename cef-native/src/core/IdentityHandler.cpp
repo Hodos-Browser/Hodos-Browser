@@ -68,7 +68,7 @@ bool IdentityHandler::Execute(const CefString& name,
 
     // Check if Go daemon is running
     if (!walletService.isConnected()) {
-        std::cerr << "❌ Cannot connect to Go wallet daemon. Make sure it's running on port 3301." << std::endl;
+        std::cerr << "❌ Cannot connect to Go wallet daemon. Make sure it's running on port 31301." << std::endl;
         exception = "Go wallet daemon is not running. Please start the wallet daemon first.";
         return false;
     }

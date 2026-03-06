@@ -204,6 +204,11 @@ impl WalletDatabase {
         }
     }
 
+    /// Clear the cached mnemonic from memory (used after wallet deletion).
+    pub fn clear_cached_mnemonic(&mut self) {
+        self.cached_mnemonic = None;
+    }
+
     /// Get the cached plaintext mnemonic. Returns error if wallet is locked.
     pub fn get_cached_mnemonic(&self) -> Result<&str> {
         self.cached_mnemonic.as_deref()
@@ -663,6 +668,13 @@ impl WalletDatabase {
             migrations::migrate_v5_to_v6(&self.conn)?;
             self.conn.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
             info!("   ✅ Schema V6 applied");
+        }
+
+        if current_version < 7 {
+            info!("   Applying migration V7 (PeerPay received tracking)...");
+            migrations::migrate_v6_to_v7(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (7)", [])?;
+            info!("   ✅ Schema V7 applied");
         }
 
         Ok(())

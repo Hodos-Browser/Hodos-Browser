@@ -13,7 +13,7 @@ import { useProfiles } from '../hooks/useProfiles';
 
 // Predefined color palette for new profiles
 const PROFILE_COLORS = [
-    '#1a73e8', // Blue
+    '#a67c00', // Blue
     '#188038', // Green
     '#a142f4', // Purple
     '#ea4335', // Red
@@ -224,7 +224,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 {/* Visible file input - CEF handles these better than hidden ones */}
                                 <div style={{
                                     background: '#f5f5f5',
-                                    border: `1px solid ${avatarImage ? '#1a73e8' : 'rgba(0,0,0,0.12)'}`,
+                                    border: `1px solid ${avatarImage ? '#a67c00' : 'rgba(0,0,0,0.12)'}`,
                                     borderRadius: '4px',
                                     padding: '6px 8px',
                                     marginBottom: avatarImage ? '4px' : '0',
@@ -245,7 +245,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 {avatarImage && (
                                     <Typography
                                         variant="caption"
-                                        sx={{ color: '#1a73e8', cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
+                                        sx={{ color: '#a67c00', cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
                                         onClick={() => {
                                             setAvatarImage(null);
                                             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -275,7 +275,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 boxSizing: 'border-box',
                                 outline: 'none',
                             }}
-                            onFocus={(e) => e.target.style.borderColor = '#1a73e8'}
+                            onFocus={(e) => e.target.style.borderColor = '#a67c00'}
                             onBlur={(e) => e.target.style.borderColor = 'rgba(0,0,0,0.23)'}
                         />
                         
@@ -325,7 +325,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                     fontSize: '13px',
                                     border: 'none',
                                     borderRadius: '4px',
-                                    background: newProfileName.trim() ? '#1a73e8' : '#ccc',
+                                    background: newProfileName.trim() ? '#a67c00' : '#ccc',
                                     color: 'white',
                                     cursor: newProfileName.trim() ? 'pointer' : 'not-allowed',
                                 }}

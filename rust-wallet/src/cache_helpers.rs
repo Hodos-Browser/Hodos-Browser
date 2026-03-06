@@ -208,7 +208,7 @@ pub fn get_utxo_id_from_db(
     vout: u32,
 ) -> Result<Option<i64>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM utxos WHERE txid = ? AND vout = ? AND is_spent = 0"
+        "SELECT outputId FROM outputs WHERE txid = ? AND vout = ? AND spendable = 1"
     )?;
 
     match stmt.query_row([txid, &vout.to_string()], |row| row.get::<_, i64>(0)) {

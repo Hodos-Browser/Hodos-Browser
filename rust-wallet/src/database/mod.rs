@@ -27,6 +27,7 @@ pub mod commission_repo;
 pub mod settings_repo;
 pub mod sync_state_repo;
 pub mod domain_permission_repo;
+pub mod peerpay_repo;
 
 pub use connection::WalletDatabase;
 pub use models::{Wallet, User, Address, Output, ParentTransaction, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
@@ -55,3 +56,4 @@ pub use commission_repo::CommissionRepository;
 pub use settings_repo::SettingsRepository;
 pub use sync_state_repo::SyncStateRepository;
 pub use domain_permission_repo::DomainPermissionRepository;
+pub use peerpay_repo::PeerPayRepository;
