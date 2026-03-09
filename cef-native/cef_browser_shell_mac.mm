@@ -1865,23 +1865,41 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
-    // App is losing focus - close all overlays (matches Windows WM_ACTIVATEAPP behavior)
-    LOG_DEBUG("📱 Main window resigned key - closing overlays if open");
+    // This fires when the main window loses key status, which happens both when:
+    // (a) Focus moves to one of our own overlay windows (should NOT close overlays)
+    // (b) Focus moves to another application (may close overlays)
+    //
+    // Check if the new key window is one of our overlay windows. If so, do nothing.
+    // This prevents a self-destruction loop where creating an overlay and making it
+    // key triggers this handler, which then destroys the overlay.
+    NSWindow* newKeyWindow = [NSApp keyWindow];
+    if (newKeyWindow == g_wallet_overlay_window ||
+        newKeyWindow == g_settings_overlay_window ||
+        newKeyWindow == g_backup_overlay_window ||
+        newKeyWindow == g_brc100_auth_overlay_window ||
+        newKeyWindow == g_settings_menu_overlay_window) {
+        LOG_DEBUG("Main window resigned key to our own overlay - not closing anything");
+        return;
+    }
 
-    // Close wallet overlay
+    LOG_DEBUG("Main window resigned key - checking if overlays should close");
+
+    // Respect prevent-close flag (matches Windows g_wallet_overlay_prevent_close behavior)
+    if (g_wallet_overlay_prevent_close) {
+        LOG_DEBUG("Wallet overlay prevent-close flag is set - not closing wallet");
+        return;
+    }
+
+    // Close wallet overlay if focus moved outside our app
     if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        LOG_INFO("💰 Closing wallet overlay due to app focus loss");
+        LOG_INFO("Closing wallet overlay due to focus loss");
         CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
         if (wallet_browser) {
             wallet_browser->GetHost()->CloseBrowser(false);
         }
-        // No removeChildWindow needed - wallet overlay is not a child window
         [g_wallet_overlay_window close];
         g_wallet_overlay_window = nullptr;
     }
-
-    // Note: Settings and other overlays can remain open when app loses focus
-    // Only wallet overlay auto-closes for security (matches Windows behavior)
 }
 
 @end
@@ -2375,8 +2393,10 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
         return;
     }
 
-    // CRITICAL: Resign main window first so overlay can become key
-    [g_main_window resignKeyWindow];
+    // NOTE: Do NOT call [g_main_window resignKeyWindow] here.
+    // resignKeyWindow triggers MainWindowDelegate::windowDidResignKey synchronously,
+    // which would destroy the wallet overlay that was just created (self-destruction loop).
+    // makeKeyAndOrderFront already handles focus transfer for floating windows.
 
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
 
