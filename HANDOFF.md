@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-09
 **Branch**: `macos-port/http-backend` (Track A work, based on `john`)
-**Status**: ALL Track A issues complete. Wallet, adblock, singletons, and process auto-launch all working on macOS. Needs user testing (GATE #28) and Track B work (overlays + keyboard shortcuts).
+**Status**: ALL Track A issues complete + notification overlay fix. Wallet domain approval, adblock, singletons, process auto-launch, and notification overlay all working on macOS. Needs user testing (GATE #28) and Track B work (remaining overlays + keyboard shortcuts).
 
 ---
 
@@ -53,6 +53,15 @@
    - `StopServers()` on shutdown: HTTP /shutdown → SIGTERM → waitpid cleanup
    - Called before `CreateMainWindow()`, cleanup before `CefShutdown()`
 
+8. **Notification overlay** (#20, moved from Track B) — in `cef_browser_shell_mac.mm`
+   - `NotificationOverlayView` NSView subclass with mouse/key forwarding to notification browser
+   - `CreateNotificationOverlay()` — NSWindow + OSR CEF browser loading `/brc100-auth?type=...&domain=...`
+   - Keep-alive pattern (hides instead of destroying, JS injection for instant re-show)
+   - `HideNotificationOverlayWindow()` C-linkage helper
+   - Fixed `handleAuthResponse` calls — removed `#ifdef _WIN32` guards (now cross-platform)
+   - Fixed `overlay_close` handler for notification role on macOS
+   - **Root cause of wallet hang**: overlay was Windows-only, domain approval never appeared → 60s timeout
+
 ### Verified in Logs
 - All 4 singletons initializing correctly
 - Wallet server detected (dev mode)
@@ -77,6 +86,7 @@ These are on the `macos-port/ui-overlays` branch (or to be created):
 | 17 | Cookie Panel overlay | BLOCKED by #11 |
 | 18 | Download Panel overlay | BLOCKED by #11 |
 | 19 | Profile Panel overlay | BLOCKED by #11 |
+| ~~20~~ | ~~Notification overlay~~ | **DONE** (moved to Track A) |
 | 20 | Notification overlay | BLOCKED by #11 |
 
 ### Milestone 3 — Multi-Window (BOTH)
@@ -110,7 +120,8 @@ These are on the `macos-port/ui-overlays` branch (or to be created):
 | `src/core/HttpRequestInterceptor.cpp` | Replaced 4 `#else` stubs, fixed include path |
 | `src/handlers/simple_handler.cpp` | Removed `#ifdef` guard, added `__APPLE__` include |
 | `include/core/AdblockCache.h` | Replaced 3 macOS stubs, moved `escapeJson` cross-platform |
-| `cef_browser_shell_mac.mm` | Health checks, server launch, singleton init, 6 includes added |
+| `cef_browser_shell_mac.mm` | Health checks, server launch, singleton init, 6 includes added, NotificationOverlayView, CreateNotificationOverlay, HideNotificationOverlayWindow |
+| `include/handlers/simple_app.h` | Added `g_notification_overlay_window` extern + `CreateNotificationOverlay` declaration for macOS |
 | `CMakeLists.txt` | Added SyncHttpClient.cpp + HttpRequestInterceptor.cpp, Security framework |
 
 ---

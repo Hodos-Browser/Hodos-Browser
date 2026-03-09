@@ -31,7 +31,7 @@
 | 17 | Cookie Panel overlay | B | BLOCKED by #11 | — | — |
 | 18 | Download Panel overlay | B | BLOCKED by #11 | — | — |
 | 19 | Profile Panel overlay | B | BLOCKED by #11 | — | — |
-| 20 | Notification overlay | B | BLOCKED by #11 | — | — |
+| 20 | Notification overlay | ~~B~~ A | DONE | 2026-03-09 | 2026-03-09 |
 | 29 | **GATE**: Full single-window verified | — | NOT STARTED | — | — |
 
 ## Milestone 3: Multi-Window (Target: Apr 11)
@@ -59,17 +59,18 @@
 |------|---------|-----------------|-------|
 | 2026-03-09 | Setup | 0 | Created 25 GitHub issues, 4 milestones, branch structure |
 | 2026-03-09 | Track A - S1 | 7 | #7, #8, #27, #9, #12, #13, #14 — ALL Track A issues complete! |
+| 2026-03-09 | Track A - S2 | 1 | #20 (Notification overlay) — fixed wallet hang, moved from Track B to A |
 
-**Average velocity**: 7 issues/session
+**Average velocity**: 8 issues/2 sessions
 **Milestone 1 code**: COMPLETE (pending user test)
-**Milestone 2 Track A**: COMPLETE (all 3 Track A issues done)
-**Track A status**: ALL DONE. Only Track B issues remain for M2.
+**Milestone 2 Track A**: COMPLETE (all 3 Track A issues + notification overlay done)
+**Track A status**: ALL DONE + bonus #20. Only Track B issues remain for M2.
 
 ---
 
 ## Current Focus
 
-**Person A (this branch)**: ALL TRACK A ISSUES COMPLETE
+**Person A (this branch)**: ALL TRACK A ISSUES COMPLETE + NOTIFICATION OVERLAY
 - SyncHttpClient abstraction (WinHTTP + libcurl)
 - 4 wallet singletons ported to SyncHttpClient
 - Health check + shutdown functions added to macOS
@@ -78,6 +79,8 @@
 - 4 singletons initialized (AdblockCache, FingerprintProtection, CookieBlockManager, BookmarkManager)
 - Process auto-launch (posix_spawn wallet + adblock) with graceful shutdown
 - Security framework linked for SecRandomCopyBytes
+- Notification overlay (domain approval, no-wallet, payment confirmation) — fixed wallet hang
+- handleAuthResponse calls now cross-platform
 
 **Person B**: Starting on #10 (keyboard shortcuts) and #11 (click-outside detection)
 
