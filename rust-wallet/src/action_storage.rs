@@ -236,6 +236,11 @@ pub struct StoredAction {
     pub lock_time: u32,
     pub inputs: Vec<ActionInput>,
     pub outputs: Vec<ActionOutput>,
+
+    /// BSV/USD price in cents at transaction time (e.g. 4523 = $45.23/BSV)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub price_usd_cents: Option<i64>,
 }
 
 /// Storage for transaction actions
@@ -457,6 +462,7 @@ mod tests {
             lock_time: 0,
             inputs: vec![],
             outputs: vec![],
+            price_usd_cents: None,
         };
 
         storage.add_action(action.clone()).unwrap();
@@ -493,6 +499,7 @@ mod tests {
             lock_time: 0,
             inputs: vec![],
             outputs: vec![],
+            price_usd_cents: None,
         };
 
         storage.add_action(action).unwrap();
@@ -530,6 +537,7 @@ mod tests {
             lock_time: 0,
             inputs: vec![],
             outputs: vec![],
+            price_usd_cents: None,
         };
 
         let action2 = StoredAction {
@@ -548,6 +556,7 @@ mod tests {
             lock_time: 0,
             inputs: vec![],
             outputs: vec![],
+            price_usd_cents: None,
         };
 
         storage.add_action(action1).unwrap();

@@ -72,6 +72,20 @@ This is the high-security section for sensitive operations (Phase 4 final sprint
 
 ---
 
+## 4b. Settings — Wallet Preferences
+
+### Sender Display Name
+
+The wallet stores a `sender_display_name` in the `settings` table (default: `"Anonymous"`). This name is sent to paymail recipients as the "from" label (formatted as `"{name}'s Hodos Wallet"`).
+
+**Phase 4 UI task**: Add a "Display Name" text field to the Wallet settings tab in the full wallet dashboard. Include an info icon (tooltip/hover) explaining:
+
+> *"This name is shown to paymail recipients when you send them BSV. It tells them who the payment came from. Currently formatted as '{Your Name}'s Hodos Wallet'."*
+
+**Future (Open Paymail)**: When the Open Paymail protocol is implemented, the sender label will transition to the user's registered paymail alias (e.g. `alice@paymail`) and the "Hodos Wallet" suffix will be removed. The same `sender_display_name` field will serve as the registration alias, so no schema change is needed — only the formatting logic changes.
+
+---
+
 ## 5. Implementation Roadmap (Sprint 4.1: Dashboard)
 
 1.  **[ ] Phase 4.1a: Layout Shell**

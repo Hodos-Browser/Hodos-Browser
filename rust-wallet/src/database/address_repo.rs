@@ -248,6 +248,27 @@ impl<'a> AddressRepository<'a> {
         Ok(())
     }
 
+    /// Set pending_utxo_check flag for ALL addresses in a wallet.
+    /// Used by wallet rescan to restart the monitoring window.
+    pub fn set_all_pending_utxo_check(&self, wallet_id: i64) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE addresses SET pending_utxo_check = 1, created_at = ?1
+             WHERE wallet_id = ?2",
+            rusqlite::params![now, wallet_id],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   🔄 Re-enabled UTXO monitoring for {} address(es)", rows_affected);
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Clear pending_utxo_check flag for addresses older than max_age_hours
     ///
     /// This prevents addresses from being pending forever if no UTXOs are ever

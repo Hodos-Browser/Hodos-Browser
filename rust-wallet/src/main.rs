@@ -25,6 +25,8 @@ mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // Certificate management (BRC-52)
 mod authfetch;  // BRC-103 AuthFetch client for authenticated HTTP requests
 mod messagebox;  // MessageBox API client with BRC-2 encryption
+mod paymail;  // Paymail (bsvalias) client for human-readable address resolution
+mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 certificates)
 
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
@@ -349,6 +351,10 @@ async fn main() -> std::io::Result<()> {
     println!("   GET  /wallet/peerpay/status");
     println!("   POST /wallet/peerpay/dismiss");
     println!();
+    println!("📧 Paymail (bsvalias) endpoints:");
+    println!("   POST /wallet/paymail/send");
+    println!("   GET  /wallet/paymail/resolve");
+    println!();
     println!("📊 Blockchain Query endpoints (Group C - Part 2):");
     println!("   POST /getHeight");
     println!("   POST /getHeaderForHeight");
@@ -479,6 +485,7 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/unlock", web::post().to(handlers::wallet_unlock))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))
             .route("/wallet/recover-external", web::post().to(handlers::wallet_recover_external))
+            .route("/wallet/rescan", web::post().to(handlers::wallet_rescan))
             .route("/wallet/cleanup", web::post().to(handlers::wallet_cleanup))
             .route("/wallet/export", web::post().to(handlers::wallet_export))
             .service(
@@ -518,6 +525,22 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/peerpay/check", web::post().to(handlers::peerpay_check))
             .route("/wallet/peerpay/status", web::get().to(handlers::peerpay_status))
             .route("/wallet/peerpay/dismiss", web::post().to(handlers::peerpay_dismiss))
+
+            // Paymail (bsvalias) endpoints
+            .route("/wallet/paymail/send", web::post().to(handlers::paymail_send))
+            .route("/wallet/paymail/resolve", web::get().to(handlers::paymail_resolve))
+
+            // Unified recipient resolution (identity key, paymail, BSV address)
+            .route("/wallet/recipient/resolve", web::get().to(handlers::recipient_resolve))
+
+            // Unified activity feed (sent + received transactions)
+            .route("/wallet/activity", web::get().to(handlers::wallet_activity))
+
+            // Wallet settings (Phase 4 - Advanced Wallet Dashboard)
+            .route("/wallet/settings", web::get().to(handlers::wallet_settings_get))
+            .route("/wallet/settings", web::post().to(handlers::wallet_settings_set))
+            .route("/wallet/reveal-mnemonic", web::post().to(handlers::reveal_mnemonic))
+            .route("/domain/permissions/reset-all", web::post().to(handlers::domain_permissions_reset_all))
 
     })
     .bind(("127.0.0.1", 31301))?

@@ -1923,6 +1923,7 @@ pub async fn wallet_delete(
 
     // 3. Delete all rows from every table in FK-safe order (children before parents)
     let delete_order = [
+        "peerpay_received",
         "cert_field_permissions",
         "domain_permissions",
         "monitor_events",
@@ -2180,8 +2181,8 @@ pub async fn wallet_sync(
         let wid = wallet.id.unwrap();
         let address_repo = AddressRepository::new(db.connection());
 
-        // Clear stale pending addresses (older than 10 days)
-        const PENDING_TIMEOUT_HOURS: i64 = 240;
+        // Clear stale pending addresses (older than 90 days)
+        const PENDING_TIMEOUT_HOURS: i64 = 2160; // 90 days (matches task_sync_pending.rs)
         if let Err(e) = address_repo.clear_stale_pending_addresses(PENDING_TIMEOUT_HOURS) {
             log::warn!("   Failed to clear stale pending addresses: {}", e);
         }
@@ -2315,11 +2316,9 @@ pub async fn wallet_sync(
                     }
                 }
 
-                // Only clear pending flag if UTXOs were found for this address.
-                // If no UTXOs found, keep checking until 10-day stale timeout.
-                if addr.pending_utxo_check && !addr_utxos.is_empty() {
-                    let _ = address_repo.clear_pending_utxo_check(addr_id);
-                }
+                // Don't clear pending flag here — the 90-day stale timeout
+                // in clear_stale_pending_addresses handles expiry. Clearing early
+                // would stop monitoring addresses that haven't received UTXOs yet.
                 synced_count += 1;
             }
         }
@@ -4680,6 +4679,11 @@ pub async fn create_action(
         }
     }).collect();
 
+    // Snapshot current BSV/USD price for historical display
+    let price_usd_cents = state.price_cache.get_cached()
+        .or_else(|| state.price_cache.get_stale())
+        .map(|p| (p * 100.0) as i64);
+
     let stored_action = StoredAction {
         txid: txid.clone(),
         reference_number: reference.clone(),
@@ -4701,6 +4705,7 @@ pub async fn create_action(
             script: Some(hex::encode(&output.script_pubkey)),
             address: parse_address_from_script(&output.script_pubkey),
         }).collect(),
+        price_usd_cents,
     };
 
     // Store the action in database and link outputs to the transaction
@@ -9789,6 +9794,11 @@ pub async fn internalize_action(
 
     let reference = format!("action-{}", uuid::Uuid::new_v4());
 
+    // Snapshot current BSV/USD price for historical display
+    let internalize_price_usd_cents = state.price_cache.get_cached()
+        .or_else(|| state.price_cache.get_stale())
+        .map(|p| (p * 100.0) as i64);
+
     let stored_action = StoredAction {
         txid: txid.clone(),
         reference_number: reference.clone(),
@@ -9815,6 +9825,7 @@ pub async fn internalize_action(
             script: Some(hex::encode(&output.script)),
             address: parse_address_from_script(&output.script),
         }).collect(),
+        price_usd_cents: internalize_price_usd_cents,
     };
 
     // Store the action in database (idempotent - check if exists first)
@@ -10008,6 +10019,218 @@ pub async fn list_actions(
         total_actions: total,
         actions: actions_json,
     })
+}
+
+// ============================================================================
+// Unified Activity Feed — Sent + Received Transactions
+// ============================================================================
+
+/// GET /wallet/activity?page=1&limit=10&filter=all
+///
+/// Merges `transactions` (sent) and `peerpay_received` (received) into a single
+/// chronologically sorted list with pagination and direction filtering.
+pub async fn wallet_activity(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let page: usize = query.get("page").and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+    let limit: usize = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10).min(100);
+    let filter = query.get("filter").map(|s| s.as_str()).unwrap_or("all");
+
+    log::info!("📋 /wallet/activity called (page={}, limit={}, filter={})", page, limit, filter);
+
+    let db = state.database.lock().unwrap();
+
+    // 1. Query sent transactions
+    let mut sent_items: Vec<serde_json::Value> = Vec::new();
+    if filter == "all" || filter == "sent" {
+        let mut stmt = match db.connection().prepare(
+            "SELECT txid, satoshis, is_outgoing, status, created_at, description, price_usd_cents
+             FROM transactions ORDER BY created_at DESC"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("   Failed to query transactions: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("DB error: {}", e)
+                }));
+            }
+        };
+
+        let rows = stmt.query_map([], |row| {
+            let txid: String = row.get(0)?;
+            let satoshis: i64 = row.get(1)?;
+            let is_outgoing: bool = row.get(2)?;
+            let status: String = row.get(3)?;
+            let created_at: i64 = row.get(4)?;
+            let description: Option<String> = row.get(5)?;
+            let price_usd_cents: Option<i64> = row.get(6)?;
+            Ok((txid, satoshis, is_outgoing, status, created_at, description, price_usd_cents))
+        });
+
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (txid, satoshis, is_outgoing, status, created_at, description, price_usd_cents) = row;
+                let direction = if is_outgoing { "sent" } else { "received" };
+
+                // Apply direction filter for transactions (some are incoming via internalize)
+                if filter == "sent" && !is_outgoing { continue; }
+                if filter == "received" && is_outgoing { continue; }
+
+                // Convert unix timestamp to ISO string
+                let timestamp = chrono::DateTime::from_timestamp(created_at, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default();
+
+                sent_items.push(serde_json::json!({
+                    "txid": txid,
+                    "direction": direction,
+                    "satoshis": satoshis,
+                    "status": status,
+                    "timestamp": timestamp,
+                    "sort_key": created_at,
+                    "description": description.unwrap_or_else(|| if is_outgoing { "Sent BSV".to_string() } else { "Received BSV".to_string() }),
+                    "price_usd_cents": price_usd_cents,
+                    "source": "wallet"
+                }));
+            }
+        }
+    }
+
+    // 2. Query received payments (peerpay + address sync)
+    let mut received_items: Vec<serde_json::Value> = Vec::new();
+    if filter == "all" || filter == "received" {
+        let mut stmt = match db.connection().prepare(
+            "SELECT txid, amount_satoshis, accepted_at, source, price_usd_cents
+             FROM peerpay_received
+             ORDER BY id DESC"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("   Failed to query peerpay_received: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("DB error: {}", e)
+                }));
+            }
+        };
+
+        let rows = stmt.query_map([], |row| {
+            let txid: Option<String> = row.get(0)?;
+            let amount: i64 = row.get(1)?;
+            let accepted_at: String = row.get(2)?;
+            let source: String = row.get(3)?;
+            let price_usd_cents: Option<i64> = row.get(4)?;
+            Ok((txid, amount, accepted_at, source, price_usd_cents))
+        });
+
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (txid, amount, accepted_at, source, price_usd_cents) = row;
+
+                // Skip peerpay_received entries that also exist in transactions
+                // (to avoid double-counting internalized transactions)
+                if let Some(ref tid) = txid {
+                    let exists_in_tx: bool = db.connection().query_row(
+                        "SELECT COUNT(*) FROM transactions WHERE txid = ?1",
+                        rusqlite::params![tid],
+                        |row| row.get::<_, i64>(0),
+                    ).unwrap_or(0) > 0;
+                    if exists_in_tx { continue; }
+                }
+
+                // Parse accepted_at (SQLite datetime string) to unix timestamp for sorting
+                let sort_key = chrono::NaiveDateTime::parse_from_str(&accepted_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| dt.and_utc().timestamp())
+                    .unwrap_or(0);
+
+                let timestamp = chrono::NaiveDateTime::parse_from_str(&accepted_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_else(|_| accepted_at.clone());
+
+                let desc = match source.as_str() {
+                    "peerpay" => "Received via PeerPay",
+                    "address_sync" => "Received BSV",
+                    _ => "Received",
+                };
+
+                received_items.push(serde_json::json!({
+                    "txid": txid.unwrap_or_default(),
+                    "direction": "received",
+                    "satoshis": amount,
+                    "status": "completed",
+                    "timestamp": timestamp,
+                    "sort_key": sort_key,
+                    "description": desc,
+                    "price_usd_cents": price_usd_cents,
+                    "source": source
+                }));
+            }
+        }
+    }
+
+    // 3. Merge and sort by timestamp DESC
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+    all_items.extend(sent_items);
+    all_items.extend(received_items);
+    all_items.sort_by(|a, b| {
+        let a_key = a["sort_key"].as_i64().unwrap_or(0);
+        let b_key = b["sort_key"].as_i64().unwrap_or(0);
+        b_key.cmp(&a_key)
+    });
+
+    // 4. Paginate
+    let total = all_items.len();
+    let skip = (page - 1) * limit;
+    let page_items: Vec<serde_json::Value> = all_items.into_iter()
+        .skip(skip)
+        .take(limit)
+        .map(|mut item| {
+            // Remove internal sort_key from response
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("sort_key");
+            }
+            item
+        })
+        .collect();
+
+    // 5. Get labels for transaction-sourced items
+    let page_items: Vec<serde_json::Value> = page_items.into_iter().map(|mut item| {
+        if item["source"].as_str() == Some("wallet") {
+            if let Some(txid) = item["txid"].as_str() {
+                let labels: Vec<String> = db.connection().prepare(
+                    "SELECT tl.label FROM tx_labels tl
+                     INNER JOIN tx_labels_map tlm ON tl.txLabelId = tlm.txLabelId
+                     INNER JOIN transactions t ON tlm.transaction_id = t.id
+                     WHERE t.txid = ?1 AND tlm.is_deleted = 0 AND tl.is_deleted = 0"
+                ).ok().map(|mut stmt| {
+                    stmt.query_map(rusqlite::params![txid], |row| row.get::<_, String>(0))
+                        .ok()
+                        .map(|rows| rows.flatten().collect())
+                        .unwrap_or_default()
+                }).unwrap_or_default();
+
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("labels".to_string(), serde_json::json!(labels));
+                }
+            }
+        }
+        item
+    }).collect();
+
+    // 6. Current BSV price
+    let current_price_usd_cents = state.price_cache.get_cached()
+        .or_else(|| state.price_cache.get_stale())
+        .map(|p| (p * 100.0) as i64);
+
+    let page_size = limit;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "current_price_usd_cents": current_price_usd_cents
+    }))
 }
 
 // ============================================================================
@@ -10537,6 +10760,225 @@ pub async fn wallet_recover(
             result.addresses_found, result.utxos_found, result.total_balance
         ),
     })
+}
+
+// ============================================================================
+// Wallet Rescan — re-derive addresses and scan blockchain for missed UTXOs
+// ============================================================================
+
+/// POST /wallet/rescan
+///
+/// Re-runs the gap-limit scanner against an existing wallet.
+/// Useful when a user believes coins were sent to an old address.
+///
+/// Requires wallet to be unlocked (mnemonic cached).
+pub async fn wallet_rescan(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("🔍 POST /wallet/rescan called");
+
+    // 1. Check sync not already running
+    {
+        let status = state.sync_status.read().unwrap();
+        if status.active {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A sync or rescan is already in progress"
+            }));
+        }
+    }
+
+    // 2. Phase 1 (DB lock): read mnemonic + current max address index
+    let (mnemonic_str, wallet_id, user_id, current_max_index) = {
+        let db = match state.database.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database lock: {}", e)
+                }));
+            }
+        };
+
+        // Check wallet is unlocked
+        let mnemonic = match db.get_cached_mnemonic() {
+            Ok(m) => m.to_string(),
+            Err(_) => {
+                return HttpResponse::Locked().json(serde_json::json!({
+                    "error": "Wallet is locked. Unlock with PIN first."
+                }));
+            }
+        };
+
+        use crate::database::{WalletRepository, AddressRepository};
+        let wallet_repo = WalletRepository::new(db.connection());
+        let wallet = match wallet_repo.get_primary_wallet() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "No wallet found"
+                }));
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Database error: {}", e)
+                }));
+            }
+        };
+
+        let wid = wallet.id.unwrap();
+        let max_idx = wallet.current_index;
+
+        (mnemonic, wid, state.current_user_id, max_idx)
+    }; // DB lock released
+
+    // 3. Set sync status to active
+    {
+        let mut status = state.sync_status.write().unwrap();
+        *status = SyncStatus {
+            active: true,
+            phase: "rescanning".to_string(),
+            addresses_scanned: 0,
+            utxos_found: 0,
+            total_satoshis: 0,
+            error: None,
+            completed_at: None,
+            result_seen: false,
+        };
+    }
+
+    // 4. Phase 2 (no lock): run recovery scanner
+    let scan_max = std::cmp::max(current_max_index + 20, 100) as u32;
+    let options = crate::recovery::RecoveryOptions {
+        mnemonic: mnemonic_str,
+        gap_limit: 20,
+        start_index: 0,
+        max_index: Some(scan_max),
+    };
+
+    let scan_result = crate::recovery::recover_wallet_from_mnemonic(options).await;
+
+    let result = match scan_result {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("   ⚠️  Rescan blockchain scan failed: {}", e);
+            let mut status = state.sync_status.write().unwrap();
+            status.active = false;
+            status.phase = "idle".to_string();
+            status.error = Some(format!("Scan failed: {}", e));
+            status.completed_at = Some(std::time::Instant::now());
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": format!("Blockchain scan failed: {}", e)
+            }));
+        }
+    };
+
+    // 5. Phase 3 (DB lock): insert newly discovered addresses + UTXOs
+    let mut new_addresses_found = 0u32;
+    let mut new_utxos_found = 0u32;
+    let mut max_index = current_max_index;
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let address_repo = crate::database::AddressRepository::new(conn);
+        let output_repo = crate::database::OutputRepository::new(conn);
+        let wallet_repo = crate::database::WalletRepository::new(conn);
+
+        for addr in &result.addresses {
+            let addr_index = addr.index as i32;
+            if addr_index > max_index {
+                max_index = addr_index;
+            }
+
+            // Check if address already exists at this index
+            let exists = address_repo.get_by_wallet_and_index(wallet_id, addr_index)
+                .ok().flatten().is_some();
+
+            if !exists {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                let address_model = crate::database::Address {
+                    id: None,
+                    wallet_id,
+                    index: addr_index,
+                    address: addr.address.clone(),
+                    public_key: addr.public_key.clone(),
+                    used: addr.has_utxos,
+                    balance: addr.balance,
+                    pending_utxo_check: true,
+                    created_at: now,
+                };
+                if let Err(e) = address_repo.create(&address_model) {
+                    log::error!("   ❌ Failed to insert address idx={}: {}", addr_index, e);
+                } else {
+                    new_addresses_found += 1;
+                }
+            }
+
+            // Insert UTXOs (upsert — skips existing)
+            for utxo in &addr.utxos {
+                match output_repo.upsert_received_utxo_with_derivation(
+                    user_id,
+                    &utxo.txid,
+                    utxo.vout,
+                    utxo.satoshis,
+                    &utxo.script,
+                    addr_index,
+                    &addr.derivation_method,
+                ) {
+                    Ok(1) => new_utxos_found += 1,
+                    Ok(_) => {} // Already existed
+                    Err(e) => log::error!("   ❌ Failed to insert UTXO {}:{}: {}",
+                        &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e),
+                }
+            }
+        }
+
+        // Update wallet current_index if we found addresses beyond current max
+        if max_index > current_max_index {
+            if let Err(e) = wallet_repo.update_current_index(wallet_id, max_index) {
+                log::error!("   ❌ Failed to update wallet current_index: {}", e);
+            }
+        }
+
+        // Re-enable UTXO monitoring for ALL addresses (restart 90-day window)
+        let _ = address_repo.set_all_pending_utxo_check(wallet_id);
+    } // DB lock released
+
+    // 6. Invalidate and recalculate balance
+    state.balance_cache.invalidate();
+    let balance = {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let bal = output_repo.calculate_balance(user_id).unwrap_or(0);
+        state.balance_cache.set(bal);
+        bal
+    };
+
+    // 7. Update sync status
+    {
+        let mut status = state.sync_status.write().unwrap();
+        status.active = false;
+        status.phase = "idle".to_string();
+        status.addresses_scanned = result.addresses_found;
+        status.utxos_found = new_utxos_found;
+        status.total_satoshis = balance as u64;
+        status.error = None;
+        status.completed_at = Some(std::time::Instant::now());
+        status.result_seen = false;
+    }
+
+    log::info!("   ✅ Rescan complete! Scanned {} addresses, found {} new addresses, {} new UTXOs, balance: {} sats",
+              result.addresses_found, new_addresses_found, new_utxos_found, balance);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "addresses_scanned": result.addresses_found,
+        "new_addresses_found": new_addresses_found,
+        "new_utxos_found": new_utxos_found,
+        "balance": balance
+    }))
 }
 
 // ============================================================================
@@ -11902,7 +12344,7 @@ pub async fn peerpay_send(
             accept_delayed_broadcast: Some(false),
             return_txid_only: Some(false),
             no_send: Some(true),
-            randomize_outputs: Some(true),
+            randomize_outputs: Some(false),  // PeerPay assumes payment at output index 0
             send_max: None,
             send_with: None,
         }),
@@ -11992,12 +12434,17 @@ pub async fn peerpay_send(
     }
 
     // Build PaymentToken (the content sent via MessageBox)
+    // Per BRC-29 spec: transaction must be AtomicBEEF as number[] (JSON array of byte values).
+    // PeerPay does `new Uint8Array(payment.token.transaction)` so it must be an array, not base64.
+    let tx_array: Vec<serde_json::Value> = atomic_beef_bytes.iter()
+        .map(|b| serde_json::Value::Number((*b as u64).into()))
+        .collect();
     let payment_token = serde_json::json!({
         "customInstructions": {
             "derivationPrefix": derivation_prefix,
             "derivationSuffix": derivation_suffix
         },
-        "transaction": BASE64.encode(&atomic_beef_bytes),
+        "transaction": tx_array,
         "amount": req.amount_satoshis
     });
 
@@ -12109,4 +12556,561 @@ pub async fn peerpay_dismiss(
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+// ============================================================================
+// Paymail (bsvalias) Endpoints — Phase 3b Sprint 1
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PaymailSendRequest {
+    pub paymail: String,
+    pub amount_satoshis: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaymailResolveQuery {
+    pub address: String,
+}
+
+/// POST /wallet/paymail/send — Send BSV to a paymail address
+///
+/// Resolves the paymail via bsvalias protocol (P2P preferred, basic fallback),
+/// builds a transaction, broadcasts, and optionally notifies the receiver.
+pub async fn paymail_send(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("💸 /wallet/paymail/send called");
+
+    let req: PaymailSendRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse request: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid request: {}", e)
+            }));
+        }
+    };
+
+    if req.amount_satoshis <= 0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Amount must be greater than 0"
+        }));
+    }
+
+    // Parse paymail (handles $handle → alias@handcash.io conversion)
+    let (alias, domain) = match crate::paymail::PaymailClient::parse_paymail(&req.paymail) {
+        Ok(p) => p,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid paymail: {}", e)
+            }));
+        }
+    };
+
+    log::info!("   Paymail: {} sats to {}@{}", req.amount_satoshis, alias, domain);
+
+    // Read sender display name from settings
+    let sender_display_name = {
+        let db = state.database.lock().unwrap();
+        let settings_repo = crate::database::SettingsRepository::new(db.connection());
+        settings_repo.get_sender_display_name().unwrap_or_else(|_| "Anonymous".to_string())
+    };
+    let sender_label = format!("{}'s Hodos Wallet", sender_display_name);
+
+    let client = crate::paymail::PaymailClient::new();
+
+    // Try P2P path first, then fall back to basic
+    let (outputs, reference, is_p2p) = match client
+        .get_p2p_destination(&alias, &domain, req.amount_satoshis)
+        .await
+    {
+        Ok(dest) => {
+            log::info!("   P2P destination: {} outputs, ref={}...",
+                dest.outputs.len(),
+                &dest.reference[..dest.reference.len().min(20)]
+            );
+            let outs: Vec<CreateActionOutput> = dest
+                .outputs
+                .iter()
+                .map(|o| CreateActionOutput {
+                    satoshis: Some(o.satoshis),
+                    script: Some(o.script_hex.clone()),
+                    address: None,
+                    custom_instructions: None,
+                    output_description: Some(format!("Paymail P2P to {}@{}", alias, domain)),
+                    basket: None,
+                    tags: None,
+                })
+                .collect();
+            (outs, Some(dest.reference), true)
+        }
+        Err(p2p_err) => {
+            log::info!("   P2P unavailable ({}), trying basic path...", p2p_err);
+            match client
+                .resolve_address(&alias, &domain, req.amount_satoshis, &sender_display_name)
+                .await
+            {
+                Ok(script_hex) => {
+                    log::info!("   Basic resolution OK: {}...{}", &script_hex[..script_hex.len().min(10)], &script_hex[script_hex.len().saturating_sub(6)..]);
+                    let outs = vec![CreateActionOutput {
+                        satoshis: Some(req.amount_satoshis),
+                        script: Some(script_hex),
+                        address: None,
+                        custom_instructions: None,
+                        output_description: Some(format!("Paymail to {}@{}", alias, domain)),
+                        basket: None,
+                        tags: None,
+                    }];
+                    (outs, None, false)
+                }
+                Err(basic_err) => {
+                    log::error!("   Both P2P and basic resolution failed");
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Paymail resolution failed: P2P: {}; Basic: {}", p2p_err, basic_err)
+                    }));
+                }
+            }
+        }
+    };
+
+    // Build transaction via createAction (noSend=true to get Atomic BEEF)
+    let create_req = CreateActionRequest {
+        inputs: None,
+        outputs,
+        description: Some(format!("Paymail {} sats to {}@{}", req.amount_satoshis, alias, domain)),
+        labels: Some(vec!["paymail".to_string(), "send".to_string()]),
+        options: Some(CreateActionOptions {
+            sign_and_process: Some(true),
+            accept_delayed_broadcast: Some(false),
+            return_txid_only: Some(false),
+            no_send: Some(true),
+            // P2P: reference depends on output order, so don't randomize
+            // Basic: safe to randomize
+            randomize_outputs: Some(!is_p2p),
+            send_max: None,
+            send_with: None,
+        }),
+        input_beef: None,
+    };
+
+    let create_body = match serde_json::to_vec(&create_req) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Serialization failed: {}", e)
+            }));
+        }
+    };
+
+    let internal_req = actix_web::test::TestRequest::default().to_http_request();
+    let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
+
+    if !create_response.status().is_success() {
+        let body_bytes = actix_web::body::to_bytes(create_response.into_body()).await.ok();
+        let error_msg = body_bytes.and_then(|b| {
+            serde_json::from_slice::<serde_json::Value>(&b).ok()
+                .and_then(|j| j["error"].as_str().map(String::from))
+        }).unwrap_or_else(|| "Transaction creation failed".to_string());
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": error_msg
+        }));
+    }
+
+    let resp_bytes = match actix_web::body::to_bytes(create_response.into_body()).await {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response read failed: {}", e)
+            }));
+        }
+    };
+
+    let json_resp: serde_json::Value = match serde_json::from_slice(&resp_bytes) {
+        Ok(j) => j,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response parse failed: {}", e)
+            }));
+        }
+    };
+
+    let txid = json_resp["txid"].as_str().unwrap_or("").to_string();
+
+    // Extract Atomic BEEF bytes from createAction response
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    let atomic_beef_bytes: Vec<u8> = if let Some(s) = json_resp["tx"].as_str() {
+        hex::decode(s).unwrap_or_else(|_| {
+            BASE64.decode(s).unwrap_or_default()
+        })
+    } else if let Some(arr) = json_resp["tx"].as_array() {
+        arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+    } else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Missing tx data"
+        }));
+    };
+
+    let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
+
+    // Broadcast the transaction
+    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(msg) => {
+            log::info!("   Paymail broadcast OK: {} - {}", txid, msg);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+            drop(db);
+        }
+        Err(e) => {
+            log::error!("   Paymail broadcast failed: {}", e);
+
+            // Cleanup ghost outputs and restore inputs on broadcast failure
+            {
+                let db = state.database.lock().unwrap();
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                let _ = output_repo.delete_by_txid(&txid);
+                let _ = output_repo.restore_by_spending_description(&txid);
+                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                let _ = tx_repo.update_broadcast_status(&txid, "failed");
+            }
+            state.balance_cache.invalidate();
+
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Broadcast failed: {}", e)
+            }));
+        }
+    }
+
+    // If P2P: submit transaction to receiver's receive-tx endpoint (non-fatal)
+    if is_p2p {
+        if let Some(ref p2p_reference) = reference {
+            match extract_raw_tx_from_atomic_beef(&atomic_beef_hex) {
+                Ok(raw_tx_hex) => {
+                    match client
+                        .submit_transaction(
+                            &alias,
+                            &domain,
+                            &raw_tx_hex,
+                            p2p_reference,
+                            &sender_label,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            log::info!("   P2P receive-tx notification sent");
+                        }
+                        Err(e) => {
+                            log::warn!("   P2P receive-tx failed (tx still broadcast): {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("   Could not extract raw tx for P2P notify: {}", e);
+                }
+            }
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    log::info!("   Paymail send complete: txid={}", txid);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "message": format!("Sent to {}@{}", alias, domain),
+        "whatsOnChainUrl": format!("https://whatsonchain.com/tx/{}", txid)
+    }))
+}
+
+/// GET /wallet/paymail/resolve?address=alice@handcash.io — Resolve paymail for UI
+///
+/// Returns validation status, profile name/avatar, and P2P support.
+/// Always returns HTTP 200 (valid: false on error) to prevent frontend
+/// from treating bad paymail as network errors.
+pub async fn paymail_resolve(
+    state: web::Data<AppState>,
+    query: web::Query<PaymailResolveQuery>,
+) -> HttpResponse {
+    log::info!("🔍 /wallet/paymail/resolve?address={}", query.address);
+
+    let _ = state; // AppState not needed for resolve, but kept for consistency
+
+    let client = crate::paymail::PaymailClient::new();
+    let resolution = client.resolve(&query.address).await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "valid": resolution.valid,
+        "name": resolution.name,
+        "avatar_url": resolution.avatar_url,
+        "has_p2p": resolution.has_p2p,
+    }))
+}
+
+// ============================================================================
+// Unified Recipient Resolution
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct RecipientResolveQuery {
+    pub input: String,
+}
+
+/// GET /wallet/recipient/resolve?input=<value>
+///
+/// Unified recipient resolution. Auto-detects recipient type and resolves:
+/// - Identity key (02/03 + 64 hex) → BSV Overlay Services lookup
+/// - $handle → Handcash paymail resolve
+/// - user@domain.tld → Paymail resolve
+/// - BSV address (1xxx/3xxx) → immediate valid response
+///
+/// Response format:
+/// ```json
+/// { "type": "paymail"|"identity"|"address", "valid": true, "name": "...", "avatar_url": "...", "source": "...", "has_p2p": true }
+/// ```
+pub async fn recipient_resolve(
+    _state: web::Data<AppState>,
+    query: web::Query<RecipientResolveQuery>,
+) -> HttpResponse {
+    let input = query.input.trim().to_string();
+    log::info!("🔍 /wallet/recipient/resolve?input={}", input);
+
+    // Detect recipient type using same patterns as frontend
+    let identity_key_re = regex::Regex::new(r"^(02|03)[0-9a-fA-F]{64}$").unwrap();
+    let bsv_address_re = regex::Regex::new(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$").unwrap();
+    let paymail_re = regex::Regex::new(r"^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})$").unwrap();
+
+    if identity_key_re.is_match(&input) {
+        // Identity key → resolve via Overlay Services
+        let resolver = crate::identity_resolver::IdentityResolver::new();
+        match resolver.resolve(&input).await {
+            Some(resolved) => {
+                HttpResponse::Ok().json(serde_json::json!({
+                    "type": "identity",
+                    "valid": true,
+                    "name": resolved.name,
+                    "avatar_url": resolved.avatar_url,
+                    "source": resolved.source,
+                    "has_p2p": false,
+                }))
+            }
+            None => {
+                // Not found but still valid for PeerPay
+                HttpResponse::Ok().json(serde_json::json!({
+                    "type": "identity",
+                    "valid": true,
+                    "name": null,
+                    "avatar_url": null,
+                    "source": null,
+                    "has_p2p": false,
+                }))
+            }
+        }
+    } else if paymail_re.is_match(&input) {
+        // Paymail → resolve via bsvalias
+        let client = crate::paymail::PaymailClient::new();
+
+        // Convert $handle to handle@handcash.io for display source
+        let source = if input.starts_with('$') {
+            "handcash.io".to_string()
+        } else if let Some(at_pos) = input.find('@') {
+            input[at_pos + 1..].to_string()
+        } else {
+            String::new()
+        };
+
+        let resolution = client.resolve(&input).await;
+
+        HttpResponse::Ok().json(serde_json::json!({
+            "type": "paymail",
+            "valid": resolution.valid,
+            "name": resolution.name,
+            "avatar_url": resolution.avatar_url,
+            "source": source,
+            "has_p2p": resolution.has_p2p,
+        }))
+    } else if bsv_address_re.is_match(&input) {
+        // BSV address → immediately valid, no further resolution needed
+        HttpResponse::Ok().json(serde_json::json!({
+            "type": "address",
+            "valid": true,
+            "name": null,
+            "avatar_url": null,
+            "source": null,
+            "has_p2p": false,
+        }))
+    } else {
+        // Unknown format
+        HttpResponse::Ok().json(serde_json::json!({
+            "type": null,
+            "valid": false,
+            "name": null,
+            "avatar_url": null,
+            "source": null,
+            "has_p2p": false,
+        }))
+    }
+}
+
+// =============================================================================
+// Wallet Settings (Phase 4 - Advanced Wallet Dashboard)
+// =============================================================================
+
+/// GET /wallet/settings — Return wallet settings including display name and default limits
+pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
+    log::info!("⚙️ GET /wallet/settings called");
+
+    let db = state.database.lock().unwrap();
+
+    let settings_repo = crate::database::SettingsRepository::new(db.connection());
+    let display_name = settings_repo.get_sender_display_name().unwrap_or_else(|_| "Anonymous".to_string());
+    let (per_tx, per_session, rate) = settings_repo.get_default_limits().unwrap_or((1000, 5000, 10));
+    drop(db);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "sender_display_name": display_name,
+        "default_per_tx_limit_cents": per_tx,
+        "default_per_session_limit_cents": per_session,
+        "default_rate_limit_per_min": rate,
+    }))
+}
+
+/// POST /wallet/settings — Update wallet settings
+pub async fn wallet_settings_set(
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    log::info!("⚙️ POST /wallet/settings called");
+
+    let db = state.database.lock().unwrap();
+    let settings_repo = crate::database::SettingsRepository::new(db.connection());
+
+    // Update display name if provided
+    if let Some(name) = body.get("sender_display_name").and_then(|v| v.as_str()) {
+        if let Err(e) = settings_repo.set_sender_display_name(name) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    // Update default limits if any provided
+    let has_limits = body.get("default_per_tx_limit_cents").is_some()
+        || body.get("default_per_session_limit_cents").is_some()
+        || body.get("default_rate_limit_per_min").is_some();
+
+    if has_limits {
+        let (cur_tx, cur_session, cur_rate) = settings_repo.get_default_limits().unwrap_or((1000, 5000, 10));
+        let per_tx = body.get("default_per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(cur_tx);
+        let per_session = body.get("default_per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(cur_session);
+        let rate = body.get("default_rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(cur_rate);
+
+        if let Err(e) = settings_repo.set_default_limits(per_tx, per_session, rate) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    drop(db);
+    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+}
+
+/// POST /wallet/reveal-mnemonic — PIN-gated mnemonic retrieval
+pub async fn reveal_mnemonic(
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    log::info!("🔑 POST /wallet/reveal-mnemonic called");
+
+    let pin = match body.get("pin").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "PIN is required"}));
+        }
+    };
+
+    let mut db = state.database.lock().unwrap();
+
+    // If wallet is already unlocked, just return the cached mnemonic
+    if db.is_unlocked() {
+        match db.get_cached_mnemonic() {
+            Ok(mnemonic) => {
+                let m = mnemonic.to_string();
+                drop(db);
+                return HttpResponse::Ok().json(serde_json::json!({"mnemonic": m}));
+            }
+            Err(e) => {
+                drop(db);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+            }
+        }
+    }
+
+    // Wallet is locked — need to verify PIN
+    match db.unlock(&pin) {
+        Ok(()) => {
+            match db.get_cached_mnemonic() {
+                Ok(mnemonic) => {
+                    let m = mnemonic.to_string();
+                    drop(db);
+                    HttpResponse::Ok().json(serde_json::json!({"mnemonic": m}))
+                }
+                Err(e) => {
+                    drop(db);
+                    HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+                }
+            }
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            drop(db);
+            if err_msg.contains("Wrong PIN") || err_msg.contains("Invalid PIN") || err_msg.contains("decryption failed") {
+                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid PIN"}))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": err_msg}))
+            }
+        }
+    }
+}
+
+/// POST /domain/permissions/reset-all — Batch reset all domain permissions to provided defaults
+pub async fn domain_permissions_reset_all(
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    log::info!("🔄 POST /domain/permissions/reset-all called");
+
+    let per_tx = body.get("per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(1000);
+    let per_session = body.get("per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(5000);
+    let rate = body.get("rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(10);
+
+    let db = state.database.lock().unwrap();
+    let user_id = state.current_user_id;
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    match repo.reset_all_limits(user_id, per_tx, per_session, rate) {
+        Ok(count) => {
+            drop(db);
+            log::info!("   ✅ Reset {} domain permissions", count);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "updated_count": count,
+            }))
+        }
+        Err(e) => {
+            drop(db);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
 }

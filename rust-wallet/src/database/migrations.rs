@@ -160,6 +160,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             block_height INTEGER,
             confirmations INTEGER NOT NULL DEFAULT 0,
             failed_at INTEGER,
+            price_usd_cents INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -336,6 +337,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             chain TEXT NOT NULL DEFAULT 'main',
             dbtype TEXT NOT NULL DEFAULT 'sqlite',
             max_output_script INTEGER NOT NULL DEFAULT 500000,
+            sender_display_name TEXT NOT NULL DEFAULT 'Anonymous',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
@@ -489,6 +491,26 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_cert_field_perms_domain ON cert_field_permissions(domain_permission_id);
+
+        -- =====================================================================
+        -- PeerPay / Notification tracking (V7 + V8)
+        -- =====================================================================
+
+        CREATE TABLE IF NOT EXISTS peerpay_received (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL UNIQUE,
+            sender_identity_key TEXT NOT NULL,
+            amount_satoshis INTEGER NOT NULL,
+            derivation_prefix TEXT NOT NULL,
+            derivation_suffix TEXT NOT NULL,
+            txid TEXT,
+            accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            dismissed INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'peerpay',
+            price_usd_cents INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_peerpay_dismissed ON peerpay_received(dismissed);
+        CREATE INDEX IF NOT EXISTS idx_peerpay_source ON peerpay_received(source);
     ")?;
 
     info!("   ✅ Consolidated schema V1 created successfully");
@@ -606,5 +628,141 @@ pub fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     ")?;
 
     info!("   ✅ V7 migration applied (peerpay_received table)");
+    Ok(())
+}
+
+/// Migrate V7 → V8: Add source column to peerpay_received for unified notifications
+pub fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
+    info!("   Adding source column to peerpay_received...");
+
+    // Safe guard: column may already exist in consolidated V1 schema
+    let has_source: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(peerpay_received)")?;
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "source")
+    };
+
+    if has_source {
+        info!("   source column already exists — skipping ALTER");
+    } else {
+        conn.execute(
+            "ALTER TABLE peerpay_received ADD COLUMN source TEXT NOT NULL DEFAULT 'peerpay'",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_peerpay_source ON peerpay_received(source)",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V8 migration applied (unified notifications)");
+    Ok(())
+}
+
+/// Migrate V8 → V9: Add sender_display_name column to settings
+pub fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    info!("   Adding sender_display_name column to settings...");
+
+    let has_col: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "sender_display_name")
+    };
+
+    if has_col {
+        info!("   sender_display_name column already exists — skipping ALTER");
+    } else {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN sender_display_name TEXT NOT NULL DEFAULT 'Anonymous'",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V9 migration applied (sender display name)");
+    Ok(())
+}
+
+/// Migrate V9 → V10: Add default auto-approve limit columns to settings
+pub fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
+    info!("   Adding default auto-approve limit columns to settings...");
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !cols.iter().any(|c| c == "default_per_tx_limit_cents") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_per_tx_limit_cents INTEGER NOT NULL DEFAULT 1000",
+            [],
+        )?;
+    }
+
+    if !cols.iter().any(|c| c == "default_per_session_limit_cents") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_per_session_limit_cents INTEGER NOT NULL DEFAULT 5000",
+            [],
+        )?;
+    }
+
+    if !cols.iter().any(|c| c == "default_rate_limit_per_min") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_rate_limit_per_min INTEGER NOT NULL DEFAULT 10",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V10 migration applied (default auto-approve limits)");
+    Ok(())
+}
+
+/// Migrate V10 → V11: Add price_usd_cents column to transactions and peerpay_received
+///
+/// Records BSV/USD price in cents at the time of each transaction.
+/// Nullable — old transactions will show current price only.
+pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    info!("   Adding price_usd_cents column to transactions and peerpay_received...");
+
+    // transactions table
+    let tx_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(transactions)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !tx_cols.iter().any(|c| c == "price_usd_cents") {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN price_usd_cents INTEGER",
+            [],
+        )?;
+    }
+
+    // peerpay_received table
+    let pp_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(peerpay_received)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !pp_cols.iter().any(|c| c == "price_usd_cents") {
+        conn.execute(
+            "ALTER TABLE peerpay_received ADD COLUMN price_usd_cents INTEGER",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V11 migration applied (price at transaction time)");
     Ok(())
 }

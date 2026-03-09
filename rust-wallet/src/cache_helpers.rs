@@ -111,10 +111,10 @@ async fn fetch_tsc_proof_from_whatsonchain(
 
     let tsc_json: Value = serde_json::from_str(&proof_text)?;
 
-    // If null, retry once after delay (transaction might be confirming)
+    // If null, retry once after brief delay (transaction might be confirming)
     if tsc_json.is_null() {
-        log::warn!("   ⚠️  TSC proof is null - retrying after 2 seconds...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        log::warn!("   ⚠️  TSC proof is null - retrying after 500ms...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let retry_response = client.get(&proof_url).send().await
             .map_err(|e| CacheError::Api(format!("Retry failed: {}", e)))?;

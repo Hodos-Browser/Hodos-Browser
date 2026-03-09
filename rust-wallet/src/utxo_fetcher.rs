@@ -17,7 +17,7 @@ pub struct UTXO {
     pub custom_instructions: Option<String>, // BRC-29 derivation info for spending derived UTXOs
 }
 
-/// WhatsOnChain API response format
+/// WhatsOnChain API response format (single-address endpoint)
 #[derive(Debug, Deserialize)]
 struct WhatsOnChainUTXO {
     tx_hash: String,
@@ -26,6 +26,19 @@ struct WhatsOnChainUTXO {
     #[serde(default)]
     script: String,
 }
+
+/// WhatsOnChain bulk endpoint response item
+#[derive(Debug, Deserialize)]
+struct WhatsOnChainBulkItem {
+    address: String,
+    #[serde(default)]
+    unspent: Vec<WhatsOnChainUTXO>,
+    #[serde(default)]
+    error: String,
+}
+
+/// Max addresses per bulk API request (WhatsOnChain limit)
+const BULK_BATCH_SIZE: usize = 20;
 
 /// Fetch UTXOs for a Bitcoin address from WhatsOnChain
 ///
@@ -182,28 +195,142 @@ fn generate_p2pkh_script_from_address(address: &str) -> Result<String, String> {
     Ok(script_hex)
 }
 
-/// Fetch UTXOs for all addresses in the wallet
-pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
+/// Fetch UTXOs for multiple addresses using WhatsOnChain bulk endpoint.
+///
+/// POST https://api.whatsonchain.com/v1/bsv/main/addresses/unspent
+/// Body: { "addresses": ["addr1", "addr2", ...] }  (max 20)
+///
+/// Chunks addresses into groups of 20, retries on failure, falls back to
+/// single-address fetching if the bulk endpoint returns an error.
+async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_DELAY_MS: u64 = 1000;
+
+    let client = reqwest::Client::new();
     let mut all_utxos = Vec::new();
 
-    for (idx, addr) in addresses.iter().enumerate() {
-        // Always check all addresses - balance cache may be stale
-        match fetch_utxos_for_address(&addr.address, addr.index).await {
-            Ok(mut utxos) => {
-                all_utxos.append(&mut utxos);
-            }
+    // Build address→index lookup
+    let addr_to_index: std::collections::HashMap<&str, i32> = addresses.iter()
+        .map(|a| (a.address.as_str(), a.index))
+        .collect();
+
+    // Pre-generate P2PKH scripts for each address
+    let mut addr_to_script: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for addr in addresses {
+        match generate_p2pkh_script_from_address(&addr.address) {
+            Ok(script) => { addr_to_script.insert(&addr.address, script); }
             Err(e) => {
-                log::warn!("   Failed to fetch UTXOs for {}: {}", addr.address, e);
-                // Continue with other addresses
+                log::warn!("   Failed to generate script for {}: {}", addr.address, e);
+            }
+        }
+    }
+
+    let chunks: Vec<&[crate::json_storage::AddressInfo]> = addresses.chunks(BULK_BATCH_SIZE).collect();
+
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let addr_list: Vec<&str> = chunk.iter().map(|a| a.address.as_str()).collect();
+
+        log::info!("   Bulk UTXO fetch: chunk {}/{} ({} addresses)",
+                  chunk_idx + 1, chunks.len(), addr_list.len());
+
+        let body = serde_json::json!({ "addresses": addr_list });
+        let mut bulk_ok = false;
+
+        // Retry loop for bulk endpoint
+        for attempt in 0..=MAX_RETRIES {
+            let response = match client.post("https://api.whatsonchain.com/v1/bsv/main/addresses/unspent")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
+                        log::warn!("   Bulk request failed (attempt {}/{}): {}. Retrying in {}ms...",
+                                  attempt + 1, MAX_RETRIES + 1, e, delay_ms);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    log::warn!("   Bulk request failed after {} attempts: {}", MAX_RETRIES + 1, e);
+                    break;
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                match response.json::<Vec<WhatsOnChainBulkItem>>().await {
+                    Ok(items) => {
+                        for item in items {
+                            if !item.error.is_empty() {
+                                log::warn!("   Bulk API error for {}: {}", item.address, item.error);
+                                continue;
+                            }
+                            let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
+                            let script = match addr_to_script.get(item.address.as_str()) {
+                                Some(s) => s.clone(),
+                                None => continue,
+                            };
+                            for u in item.unspent {
+                                all_utxos.push(UTXO {
+                                    txid: u.tx_hash,
+                                    vout: u.tx_pos,
+                                    satoshis: u.value,
+                                    script: script.clone(),
+                                    address_index,
+                                    custom_instructions: None,
+                                });
+                            }
+                        }
+                        bulk_ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("   Failed to parse bulk response: {}", e);
+                        break; // Fall through to single-address fallback
+                    }
+                }
+            } else if status.is_server_error() && attempt < MAX_RETRIES {
+                let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
+                log::warn!("   Bulk server error {} (attempt {}/{}). Retrying in {}ms...",
+                          status, attempt + 1, MAX_RETRIES + 1, delay_ms);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                continue;
+            } else {
+                log::warn!("   Bulk endpoint returned status {}", status);
+                break; // Fall through to single-address fallback
             }
         }
 
-        // Add small delay between requests to avoid rate limiting
-        // (only if not the last address)
-        if idx < addresses.len() - 1 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Fallback: single-address fetch for this chunk if bulk failed
+        if !bulk_ok {
+            log::info!("   Falling back to single-address fetch for {} addresses", chunk.len());
+            for (i, addr) in chunk.iter().enumerate() {
+                match fetch_utxos_for_address(&addr.address, addr.index).await {
+                    Ok(mut utxos) => all_utxos.append(&mut utxos),
+                    Err(e) => log::warn!("   Failed to fetch UTXOs for {}: {}", addr.address, e),
+                }
+                if i < chunk.len() - 1 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+
+        // Small delay between chunks to avoid rate limiting
+        if chunk_idx < chunks.len() - 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
+
+    Ok(all_utxos)
+}
+
+/// Fetch UTXOs for all addresses in the wallet.
+///
+/// Uses bulk API (POST /addresses/unspent, 20 addresses/request) for speed.
+/// Falls back to single-address fetch if bulk endpoint fails.
+pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
+    let all_utxos = fetch_utxos_bulk(addresses).await?;
 
     log::info!("📊 Total UTXOs across all addresses: {} ({} satoshis)",
         all_utxos.len(),

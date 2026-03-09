@@ -223,6 +223,7 @@ pub struct Setting {
     pub chain: String,                 // Network: "main" or "test"
     pub db_type: String,               // Database type: "sqlite"
     pub max_output_script: i32,        // Max script size in bytes (default 500000)
+    pub sender_display_name: String,   // Display name for paymail sender (default "Anonymous")
     pub created_at: i64,               // Unix timestamp
     pub updated_at: i64,               // Unix timestamp
 }

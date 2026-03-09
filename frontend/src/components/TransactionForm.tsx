@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTransaction } from '../hooks/useTransaction';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
 
@@ -6,6 +6,8 @@ import type { TransactionData, TransactionResponse } from '../types/transaction'
 const IDENTITY_KEY_REGEX = /^(02|03)[0-9a-fA-F]{64}$/;
 // Legacy BSV address: starts with 1 or 3
 const BSV_ADDRESS_REGEX = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/;
+// Paymail: $handle or user@domain.tld
+const PAYMAIL_REGEX = /^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$/;
 
 interface TransactionFormProps {
   onTransactionCreated: (result: TransactionResponse) => void;
@@ -50,8 +52,40 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     return bsvAmount * price;
   }, []);
 
-  // Detect whether recipient is an identity key or BSV address
+  // Detect whether recipient is an identity key, BSV address, or paymail
   const isPeerPay = useMemo(() => IDENTITY_KEY_REGEX.test(formData.recipient.trim()), [formData.recipient]);
+  const isPaymail = useMemo(() => PAYMAIL_REGEX.test(formData.recipient.trim()), [formData.recipient]);
+
+  // Paymail resolution state
+  const [paymailInfo, setPaymailInfo] = useState<{ valid: boolean; name?: string; avatar_url?: string; has_p2p?: boolean } | null>(null);
+  const [isResolvingPaymail, setIsResolvingPaymail] = useState(false);
+
+  // Debounced paymail resolution
+  useEffect(() => {
+    if (!isPaymail) {
+      setPaymailInfo(null);
+      setIsResolvingPaymail(false);
+      return;
+    }
+
+    setIsResolvingPaymail(true);
+    setPaymailInfo(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const address = formData.recipient.trim();
+        const resp = await fetch(`http://127.0.0.1:31301/wallet/paymail/resolve?address=${encodeURIComponent(address)}`);
+        const data = await resp.json();
+        setPaymailInfo(data);
+      } catch {
+        setPaymailInfo({ valid: false });
+      } finally {
+        setIsResolvingPaymail(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [isPaymail, formData.recipient]);
 
   const validateForm = useCallback((): boolean => {
     const newErrors: Partial<TransactionData> = {};
@@ -60,8 +94,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     const trimmed = formData.recipient.trim();
     if (!trimmed) {
       newErrors.recipient = 'Recipient is required';
-    } else if (!BSV_ADDRESS_REGEX.test(trimmed) && !IDENTITY_KEY_REGEX.test(trimmed)) {
-      newErrors.recipient = 'Enter a BSV address or identity key (66-char hex)';
+    } else if (!BSV_ADDRESS_REGEX.test(trimmed) && !IDENTITY_KEY_REGEX.test(trimmed) && !PAYMAIL_REGEX.test(trimmed)) {
+      newErrors.recipient = 'Enter a BSV address, identity key, or paymail';
+    } else if (PAYMAIL_REGEX.test(trimmed) && paymailInfo && !paymailInfo.valid) {
+      newErrors.recipient = 'Could not resolve this paymail address';
     }
 
     // Validate amount (BSV field is source of truth)
@@ -88,7 +124,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
-  }, [formData, balance]);
+  }, [formData, balance, paymailInfo]);
 
   const handleInputChange = useCallback((field: keyof TransactionData, value: string) => {
     setFormData(prev => {
@@ -146,7 +182,19 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 
       let result: TransactionResponse;
 
-      if (isPeerPay) {
+      if (isPaymail) {
+        // Paymail: send via bsvalias protocol
+        console.log('📝 Sending via Paymail...');
+        const resp = await fetch('http://127.0.0.1:31301/wallet/paymail/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymail: formData.recipient.trim(),
+            amount_satoshis: satoshiAmount,
+          }),
+        });
+        result = await resp.json();
+      } else if (isPeerPay) {
         // PeerPay: send via identity key through BRC-29 MessageBox
         console.log('📝 Sending via PeerPay to identity key...');
         const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/send', {
@@ -210,7 +258,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       console.log('🏁 Form: Setting isSubmitting to false');
       setIsSubmitting(false);
     }
-  }, [formData, validateForm, sendTransaction, onTransactionCreated]);
+  }, [formData, validateForm, sendTransaction, onTransactionCreated, isPaymail, isPeerPay]);
 
   const formatBalance = useCallback((satoshis: number): string => {
     const bsv = satoshis / 100000000;
@@ -238,12 +286,27 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             type="text"
             value={formData.recipient}
             onChange={(e) => handleInputChange('recipient', e.target.value)}
-            placeholder="BSV address or identity key"
+            placeholder="BSV address, identity key, or paymail"
             className={errors.recipient ? 'error' : ''}
             disabled={isSubmitting || isLoading}
           />
           <span className="field-hint">
-            {isPeerPay ? 'Sending via PeerPay (identity key detected)' : 'Enter BSV address or identity key'}
+            {isPaymail
+              ? (isResolvingPaymail
+                  ? <><span className="loading-spinner-inline" /> Resolving paymail...</>
+                  : paymailInfo?.valid
+                    ? <span className="paymail-resolve-row">
+                        {paymailInfo.avatar_url && <img src={paymailInfo.avatar_url} className="paymail-avatar" alt="" />}
+                        <span>{paymailInfo.name || formData.recipient.trim()}{paymailInfo.has_p2p ? ' (P2P)' : ''}</span>
+                      </span>
+                    : paymailInfo === null
+                      ? 'Verifying paymail...'
+                      : 'Paymail not found'
+                )
+              : isPeerPay
+                ? 'Sending via PeerPay (identity key detected)'
+                : 'Enter BSV address, identity key, or paymail'
+            }
           </span>
           {errors.recipient && <span className="field-error">{errors.recipient}</span>}
         </div>
@@ -319,7 +382,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
           className="submit-button"
           disabled={isSubmitting || isLoading || Object.keys(errors).length > 0}
         >
-          {isSubmitting ? 'Creating Transaction...' : (isPeerPay ? 'Send via PeerPay' : 'Send Transaction')}
+          {isSubmitting ? 'Sending...' : (isPaymail ? 'Send to Paymail' : isPeerPay ? 'Send via PeerPay' : 'Send Transaction')}
         </button>
       </form>
     </div>

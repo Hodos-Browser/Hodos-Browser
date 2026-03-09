@@ -32,8 +32,8 @@ impl<'a> TransactionRepository<'a> {
         self.conn.execute(
             "INSERT INTO transactions (
                 txid, reference_number, raw_tx, description, status, is_outgoing,
-                satoshis, block_height, confirmations, version, lock_time, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                satoshis, block_height, confirmations, version, lock_time, price_usd_cents, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 action.txid,
                 action.reference_number,
@@ -46,6 +46,7 @@ impl<'a> TransactionRepository<'a> {
                 action.confirmations as i32,
                 action.version as i32,
                 action.lock_time as i32,
+                action.price_usd_cents,
                 now,
                 now,
             ],
@@ -123,7 +124,7 @@ impl<'a> TransactionRepository<'a> {
         // Get transaction
         let mut stmt = self.conn.prepare(
             "SELECT id, txid, reference_number, raw_tx, description, status, is_outgoing,
-                    satoshis, created_at, block_height, confirmations, version, lock_time
+                    satoshis, created_at, block_height, confirmations, version, lock_time, price_usd_cents
              FROM transactions
              WHERE txid = ?1"
         )?;
@@ -145,11 +146,12 @@ impl<'a> TransactionRepository<'a> {
                     row.get::<_, i32>(10)?,  // confirmations
                     row.get::<_, i32>(11)?,  // version
                     row.get::<_, i32>(12)?,  // lock_time
+                    row.get::<_, Option<i64>>(13)?,  // price_usd_cents
                 ))
             },
         );
 
-        let (transaction_id, txid_val, ref_num, raw_tx_opt, desc, status_str, is_out, sats, ts, bh, conf, ver, lt) = match tx_result {
+        let (transaction_id, txid_val, ref_num, raw_tx_opt, desc, status_str, is_out, sats, ts, bh, conf, ver, lt, price_usd_cents) = match tx_result {
             Ok(t) => t,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(e) => return Err(e),
@@ -220,6 +222,7 @@ impl<'a> TransactionRepository<'a> {
             lock_time: lt as u32,
             inputs,
             outputs,
+            price_usd_cents,
         }))
     }
 

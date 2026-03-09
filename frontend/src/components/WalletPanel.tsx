@@ -21,7 +21,7 @@ interface WalletPanelProps {
   onClose?: () => void;
 }
 
-export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
+export default function WalletPanel({ onClose }: WalletPanelProps) {
   const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
@@ -236,10 +236,10 @@ export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
 
   const handleAdvanced = () => {
     console.log('Advanced button clicked - opening wallet page in new tab');
-    // Open wallet page in new tab
     if (window.cefMessage) {
       window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet');
     }
+    onClose?.();
   };
 
   const handleManageSites = () => {
@@ -247,6 +247,7 @@ export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
     if (window.cefMessage) {
       window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet?tab=4');
     }
+    onClose?.();
   };
 
   return (
@@ -351,13 +352,28 @@ export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
         <div className="peerpay-banner-light">
           <div className="peerpay-banner-content">
             <span>
-              Received {peerpayNotification.count} payment{peerpayNotification.count > 1 ? 's' : ''} totaling{' '}
+              Received {peerpayNotification.count} payment{peerpayNotification.count > 1 ? 's' : ''}:{' '}
               {(peerpayNotification.amount / 100_000_000).toFixed(8)} BSV
+              {bsvPrice > 0 && ` (~$${((peerpayNotification.amount / 100_000_000) * bsvPrice).toFixed(2)})`}
             </span>
           </div>
-          <button className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
-            Dismiss
-          </button>
+          <div className="peerpay-banner-actions">
+            <button
+              className="peerpay-details-button"
+              onClick={() => {
+                handleDismissPeerpay();
+                if (window.cefMessage?.send) {
+                  window.cefMessage.send('tab_create', 'http://127.0.0.1:5137/wallet?tab=1');
+                }
+                onClose?.();
+              }}
+            >
+              Details
+            </button>
+            <button className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
@@ -420,7 +436,7 @@ export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
             {currentAddress && (
               <div className="qr-code-container-light">
                 <QRCodeSVG
-                  value={`bitcoin:${currentAddress}`}
+                  value={currentAddress}
                   size={160}
                   level="M"
                   marginSize={4}
@@ -481,6 +497,7 @@ export default function WalletPanel({ onClose: _onClose }: WalletPanelProps) {
                       target="_blank"
                       rel="noopener noreferrer"
                       className="whatsonchain-link-light"
+                      onClick={() => onClose?.()}
                     >
                       View on WhatsOnChain
                     </a>

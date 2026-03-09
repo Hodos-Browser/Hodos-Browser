@@ -27,6 +27,7 @@ use ripemd::Ripemd160;
 use bs58;
 use crate::crypto::brc42::derive_child_public_key;
 use crate::utxo_fetcher::fetch_utxos_for_address;
+use crate::json_storage::AddressInfo as FetchAddressInfo;
 use crate::transaction::{
     Transaction, TxInput, TxOutput, OutPoint, Script,
     calculate_sighash, SIGHASH_ALL_FORKID,
@@ -167,161 +168,182 @@ pub async fn recover_wallet_from_mnemonic(
     let master_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
     let master_pubkey_bytes = master_pubkey.serialize();
 
-    // Derive addresses and check blockchain
+    // Derive addresses and check blockchain in batches of 20
     let mut recovered_addresses = Vec::new();
     let mut current_index = options.start_index;
-    let mut unused_count = 0;
-    let mut total_utxos = 0;
+    let mut unused_count: u32 = 0;
+    let mut total_utxos: u32 = 0;
     let mut total_balance = 0i64;
 
+    const BATCH_SIZE: u32 = 20;
+
     loop {
-        // Check max_index limit
+        // Determine batch range
+        let batch_start = current_index;
+        let mut batch_end = batch_start + BATCH_SIZE;
         if let Some(max) = options.max_index {
-            if current_index > max {
+            if batch_start > max {
                 info!("   📊 Reached max_index limit: {}", max);
                 break;
             }
+            batch_end = batch_end.min(max + 1);
+        }
+        let batch_count = batch_end - batch_start;
+
+        info!("   🔍 Checking indices {}..{} ({} addresses)...", batch_start, batch_end - 1, batch_count);
+
+        // 1. Derive all addresses in this batch
+        let mut batch_bip32: Vec<(u32, Option<AddressInfo>)> = Vec::new();
+        let mut batch_brc42: Vec<(u32, Option<AddressInfo>)> = Vec::new();
+
+        for idx in batch_start..batch_end {
+            let bip32 = derive_bip32_address(&master_key, idx).ok();
+            let brc42 = derive_brc42_address(&master_privkey, &master_pubkey_bytes, idx).ok();
+            batch_bip32.push((idx, bip32));
+            batch_brc42.push((idx, brc42));
         }
 
-        info!("   🔍 Checking index {}...", current_index);
-
-        // Try BIP32 derivation first
-        let bip32_address = match derive_bip32_address(&master_key, current_index) {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                log::warn!("   ⚠️  BIP32 derivation failed for index {}: {}", current_index, e);
-                None
+        // 2. Build address list for bulk UTXO fetch
+        let mut fetch_addresses: Vec<FetchAddressInfo> = Vec::new();
+        // Track which entries are BIP32 vs BRC-42 (for result mapping)
+        // Use negative index convention: -(index+1) for BRC-42 to distinguish from BIP32
+        for &(idx, ref addr) in &batch_bip32 {
+            if let Some(ref a) = addr {
+                fetch_addresses.push(FetchAddressInfo {
+                    index: idx as i32,
+                    address: a.address.clone(),
+                    public_key: a.public_key.clone(),
+                    used: false,
+                    balance: 0,
+                });
             }
-        };
-
-        // Try BRC-42 derivation
-        let brc42_address = match derive_brc42_address(&master_privkey, &master_pubkey_bytes, current_index) {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                log::warn!("   ⚠️  BRC-42 derivation failed for index {}: {}", current_index, e);
-                None
+        }
+        for &(idx, ref addr) in &batch_brc42 {
+            if let Some(ref a) = addr {
+                // Use -(idx+1) so we can distinguish BRC-42 results from BIP32
+                fetch_addresses.push(FetchAddressInfo {
+                    index: -(idx as i32 + 1),
+                    address: a.address.clone(),
+                    public_key: a.public_key.clone(),
+                    used: false,
+                    balance: 0,
+                });
             }
-        };
+        }
 
-        // Check both addresses for UTXOs
-        let mut found_utxos = false;
-        let mut recovered_address: Option<RecoveredAddress> = None;
+        // 3. Bulk fetch UTXOs for all addresses in this batch
+        let api_utxos = crate::utxo_fetcher::fetch_all_utxos(&fetch_addresses).await
+            .unwrap_or_default();
 
-        // Check BIP32 address
-        if let Some(ref addr) = bip32_address {
-            match fetch_utxos_for_address(&addr.address, current_index as i32).await {
-                Ok(utxos) if !utxos.is_empty() => {
-                    let address_balance = utxos.iter().map(|u| u.satoshis).sum();
-                    let utxo_count = utxos.len() as u32;
+        // 4. Process results per-index
+        for idx in batch_start..batch_end {
+            let bip32_addr = batch_bip32.iter().find(|(i, _)| *i == idx).and_then(|(_, a)| a.as_ref());
+            let brc42_addr = batch_brc42.iter().find(|(i, _)| *i == idx).and_then(|(_, a)| a.as_ref());
+
+            // Check BIP32 UTXOs (positive index match)
+            let bip32_utxos: Vec<_> = api_utxos.iter()
+                .filter(|u| u.address_index == idx as i32)
+                .cloned()
+                .collect();
+
+            // Check BRC-42 UTXOs (negative index match)
+            let brc42_utxos: Vec<_> = api_utxos.iter()
+                .filter(|u| u.address_index == -(idx as i32 + 1))
+                .cloned()
+                .collect();
+
+            let mut found_utxos = false;
+
+            // BIP32 UTXOs found
+            if !bip32_utxos.is_empty() {
+                if let Some(addr) = bip32_addr {
+                    let address_balance: i64 = bip32_utxos.iter().map(|u| u.satoshis).sum();
+                    let utxo_count = bip32_utxos.len() as u32;
                     info!("   ✅ Found {} UTXO(s) on BIP32 address {} ({} satoshis)",
                           utxo_count, addr.address, address_balance);
-                    found_utxos = true;
-                    recovered_address = Some(RecoveredAddress {
-                        index: current_index,
+                    // Fix address_index back to positive for storage
+                    let mut fixed_utxos = bip32_utxos;
+                    for u in &mut fixed_utxos { u.address_index = idx as i32; }
+                    recovered_addresses.push(RecoveredAddress {
+                        index: idx,
                         address: addr.address.clone(),
                         public_key: addr.public_key.clone(),
                         derivation_method: "BIP32".to_string(),
                         has_utxos: true,
                         balance: address_balance,
-                        utxos,
+                        utxos: fixed_utxos,
                     });
                     total_utxos += utxo_count;
                     total_balance += address_balance;
-                }
-                Ok(_) => {
-                    // No UTXOs, continue
-                }
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to fetch UTXOs for BIP32 address {}: {}", addr.address, e);
+                    found_utxos = true;
                 }
             }
-        }
 
-        // Check BRC-42 address (only if BIP32 didn't find anything)
-        if !found_utxos {
-            if let Some(ref addr) = brc42_address {
-                match fetch_utxos_for_address(&addr.address, current_index as i32).await {
-                    Ok(utxos) if !utxos.is_empty() => {
-                        let address_balance = utxos.iter().map(|u| u.satoshis).sum();
-                        let utxo_count = utxos.len() as u32;
-                        info!("   ✅ Found {} UTXO(s) on BRC-42 address {} ({} satoshis)",
-                              utxo_count, addr.address, address_balance);
-                        found_utxos = true;
-                        recovered_address = Some(RecoveredAddress {
-                            index: current_index,
-                            address: addr.address.clone(),
-                            public_key: addr.public_key.clone(),
-                            derivation_method: "BRC-42".to_string(),
-                            has_utxos: true,
-                            balance: address_balance,
-                            utxos,
-                        });
-                        total_utxos += utxo_count;
-                        total_balance += address_balance;
-                    }
-                    Ok(_) => {
-                        // No UTXOs, continue
-                    }
-                    Err(e) => {
-                        log::warn!("   ⚠️  Failed to fetch UTXOs for BRC-42 address {}: {}", addr.address, e);
-                    }
+            // BRC-42 UTXOs found (only if BIP32 didn't find any)
+            if !found_utxos && !brc42_utxos.is_empty() {
+                if let Some(addr) = brc42_addr {
+                    let address_balance: i64 = brc42_utxos.iter().map(|u| u.satoshis).sum();
+                    let utxo_count = brc42_utxos.len() as u32;
+                    info!("   ✅ Found {} UTXO(s) on BRC-42 address {} ({} satoshis)",
+                          utxo_count, addr.address, address_balance);
+                    // Fix address_index back to positive for storage
+                    let mut fixed_utxos = brc42_utxos;
+                    for u in &mut fixed_utxos { u.address_index = idx as i32; }
+                    recovered_addresses.push(RecoveredAddress {
+                        index: idx,
+                        address: addr.address.clone(),
+                        public_key: addr.public_key.clone(),
+                        derivation_method: "BRC-42".to_string(),
+                        has_utxos: true,
+                        balance: address_balance,
+                        utxos: fixed_utxos,
+                    });
+                    total_utxos += utxo_count;
+                    total_balance += address_balance;
+                    found_utxos = true;
                 }
             }
-        }
 
-        // If we found UTXOs, save the address
-        if let Some(addr) = recovered_address {
-            recovered_addresses.push(addr);
-            unused_count = 0; // Reset gap limit
-        } else {
-            // No UTXOs found — check if either address has any transaction history.
-            // An address with history but 0 balance was used and spent (e.g. change
-            // that was later spent). This means there may be more addresses at higher
-            // indices, so we must NOT count it toward the gap limit.
-            let mut has_history = false;
-            if let Some(ref addr) = bip32_address {
-                match crate::utxo_fetcher::address_has_history(&addr.address).await {
-                    Ok(true) => {
+            if found_utxos {
+                unused_count = 0;
+            } else {
+                // No UTXOs — check tx history to determine if address was used and spent.
+                // An address with history but 0 balance resets the gap counter.
+                let mut has_history = false;
+                if let Some(addr) = bip32_addr {
+                    if let Ok(true) = crate::utxo_fetcher::address_has_history(&addr.address).await {
                         info!("   📜 BIP32 address {} has tx history (spent), resetting gap counter", addr.address);
                         has_history = true;
                     }
-                    Ok(false) => {}
-                    Err(e) => {
-                        log::warn!("   ⚠️  History check failed for {}: {}", addr.address, e);
-                    }
                 }
-            }
-            if !has_history {
-                if let Some(ref addr) = brc42_address {
-                    match crate::utxo_fetcher::address_has_history(&addr.address).await {
-                        Ok(true) => {
+                if !has_history {
+                    if let Some(addr) = brc42_addr {
+                        if let Ok(true) = crate::utxo_fetcher::address_has_history(&addr.address).await {
                             info!("   📜 BRC-42 address {} has tx history (spent), resetting gap counter", addr.address);
                             has_history = true;
                         }
-                        Ok(false) => {}
-                        Err(e) => {
-                            log::warn!("   ⚠️  History check failed for {}: {}", addr.address, e);
-                        }
                     }
                 }
+                if has_history {
+                    unused_count = 0;
+                } else {
+                    unused_count += 1;
+                }
             }
-            if has_history {
-                unused_count = 0; // Reset — this address was used, more may follow
-            } else {
-                unused_count += 1;
+
+            // Check gap limit after each index
+            if unused_count >= options.gap_limit {
+                info!("   📊 Gap limit reached ({} unused addresses), stopping recovery", options.gap_limit);
+                break;
             }
         }
 
-        // Check gap limit
+        // If gap limit was met during the batch, stop
         if unused_count >= options.gap_limit {
-            info!("   📊 Gap limit reached ({} unused addresses), stopping recovery", options.gap_limit);
             break;
         }
 
-        current_index += 1;
-
-        // Rate limiting: small delay to avoid API limits
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        current_index = batch_end;
     }
 
     info!("   ✅ Recovery complete!");

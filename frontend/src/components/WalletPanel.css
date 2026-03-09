@@ -1476,6 +1476,32 @@
   transform: scale(0.97);
 }
 
+.peerpay-banner-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.peerpay-details-button {
+  padding: 4px 12px;
+  background: transparent;
+  color: #2e7d32;
+  border: 1px solid #2e7d32;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.peerpay-details-button:hover {
+  background: rgba(46, 125, 50, 0.1);
+}
+
+.peerpay-details-button:active {
+  transform: scale(0.97);
+}
+
 .peerpay-link {
   color: #2e7d32;
   font-size: 11px;
@@ -1538,4 +1564,32 @@
 
 .manage-sites-link-light:active {
   transform: scale(0.97);
+}
+
+/* Paymail resolve indicator */
+.loading-spinner-inline {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(107, 114, 128, 0.3);
+  border-top: 2px solid var(--wallet-gold-accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.paymail-resolve-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--wallet-primary);
+  font-weight: 500;
+}
+
+.paymail-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
 }

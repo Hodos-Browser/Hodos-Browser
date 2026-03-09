@@ -29,7 +29,7 @@ impl BalanceCache {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(RwLock::new(None)),
-            ttl_seconds: 30,  // 30 second TTL as safety net
+            ttl_seconds: 60,  // 60 second TTL as safety net
         }
     }
 

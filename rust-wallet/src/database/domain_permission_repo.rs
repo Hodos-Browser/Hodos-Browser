@@ -148,6 +148,17 @@ impl<'a> DomainPermissionRepository<'a> {
         Ok(())
     }
 
+    /// Reset all domain permissions to the given limits
+    pub fn reset_all_limits(&self, user_id: i64, per_tx: i64, per_session: i64, rate: i64) -> Result<usize> {
+        let now = unix_now();
+        let count = self.conn.execute(
+            "UPDATE domain_permissions SET per_tx_limit_cents = ?1, per_session_limit_cents = ?2,
+             rate_limit_per_min = ?3, updated_at = ?4 WHERE user_id = ?5",
+            params![per_tx, per_session, rate, now, user_id],
+        )?;
+        Ok(count)
+    }
+
     // ========================================================================
     // Certificate field permissions
     // ========================================================================

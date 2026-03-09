@@ -17,14 +17,16 @@ The current architecture is robust but suffers from minor "integration friction"
 ## 2. Technical Categorization & Deep Dive
 
 ### 2.1 Communication Patterns (IPC & JS Bridge)
-**Current Implementation**: The React frontend communicates with the C++ shell via `window.cefMessage.send`. Responses are handled by assigning global callbacks to the `window` object (e.g., `window.onCookieBlocklistResponse = (data) => {...}`). 
+
+#### 2.1a — Global Callback Race Conditions
+**Current Implementation**: The React frontend communicates with the C++ shell via `window.cefMessage.send`. Responses are handled by assigning global callbacks to the `window` object (e.g., `window.onCookieBlocklistResponse = (data) => {...}`).
 *   **Why it was built this way**: This is the simplest way to implement asynchronous communication in CEF. It avoids complex JS-side message routing and allows C++ to simply execute `window.onSomething(data)` via V8.
 *   **The Problem**: Global callbacks are extremely fragile. If two React components request the cookie blocklist simultaneously, the second component will overwrite the first's callback, causing the first component to hang indefinitely.
 *   **Risk of Changing (High)**: Modifying this requires coordinated changes across the React hooks and the C++ Render Process (`CefV8Handler` or IPC message handlers). Missing a single C++ callback string will break that specific UI feature.
 *   **Implementation Recommendation**:
     1.  **Advantage**: Eliminates race conditions and allows standard `async/await` syntax in React.
     2.  **Disadvantage**: Requires touching dozens of files across C++ and JS.
-    3.  **How to Implement**: Create a unified dispatcher in `initWindowBridge.ts`. 
+    3.  **How to Implement**: Create a unified dispatcher in `initWindowBridge.ts`.
         ```typescript
         const pendingRequests = new Map();
         window.hodosBrowser.invoke = (action, data) => {
@@ -42,6 +44,49 @@ The current architecture is robust but suffers from minor "integration friction"
         };
         ```
         Update the C++ side to extract the `id` from the IPC message and include it in the `__hodos_ipc_resolve` execution.
+
+#### 2.1b — Synchronous WinHTTP Blocking the UI Thread (Discovered 2026-03-07)
+
+**Observed Bug**: User clicks Send in wallet panel → screen goes black for 3-6 seconds → wallet overlay closes → no success/failure feedback shown.
+
+**Root Cause Chain**:
+1.  `send_transaction` IPC handler in `simple_handler.cpp:4079` runs on CEF **UI thread** (via `OnProcessMessageReceived`)
+2.  Calls `walletService.sendTransaction()` → synchronous WinHTTP POST to `localhost:31301/transaction/send`
+3.  Rust handler takes 3-6 seconds (BEEF ancestry chain building for unconfirmed parent txs — see note below)
+4.  UI thread blocked entire time → **no rendering, no event processing** → black screen
+5.  When unblocking, queued `WM_ACTIVATE` events fire → wallet overlay closes before success modal renders
+6.  User gets zero feedback on transaction outcome
+
+**The Problem**: Any IPC handler in `OnProcessMessageReceived` that calls `walletService.*` (synchronous WinHTTP) blocks the entire CEF UI thread. This affects every handler that makes a WinHTTP call to the Rust wallet, not just `send_transaction`. Short calls (<200ms) are invisible to the user; long calls (>500ms) cause visible freezing.
+
+**IPC Handlers to Audit** (all in `simple_handler.cpp`, all call synchronous WinHTTP):
+
+| IPC Message | WalletService Method | Typical Duration | Risk |
+|-------------|---------------------|-----------------|------|
+| `send_transaction` | `sendTransaction()` | 1-6s (BEEF building) | **HIGH** — causes black screen |
+| `get_balance` | `getBalance()` | 2-50ms | Low |
+| `create_transaction` | `createTransaction()` | variable | Medium |
+| `sign_transaction` | `signTransaction()` | variable | Medium |
+| `broadcast_transaction` | `broadcastTransaction()` | 1-5s (network) | **HIGH** |
+| Other wallet calls | various | variable | Audit needed |
+
+**Risk of Changing (Medium-High)**: Threading bugs are subtle. If `SendProcessMessage` is called from the wrong thread, it silently fails or crashes. The `CefRefPtr<CefBrowser>` must remain valid across thread boundaries.
+
+**Implementation Recommendation**:
+1.  **Pattern**: Move WinHTTP call to background thread via `CefPostTask(TID_FILE_USER_VISIBLE, ...)`, capture `CefRefPtr<CefBrowser>` + request ID, return result via `SendProcessMessage` from callback.
+2.  **Existing precedent**: `HttpRequestInterceptor.cpp` already uses `CefPostTask` with `CefTask` subclasses for async WinHTTP work. Use same pattern.
+3.  **Phased approach**: Convert `send_transaction` first (highest impact), then audit and convert remaining handlers.
+4.  **V8 side**: The render process already handles async IPC responses — `SendProcessMessage(PID_RENDERER)` from a callback should resolve the JS Promise correctly.
+
+**Key Files**:
+| File | What to Change |
+|------|----------------|
+| `simple_handler.cpp:4079-4160` | `send_transaction` IPC → async pattern |
+| `simple_handler.cpp` (other handlers) | Audit all `walletService.*` calls for >200ms duration |
+| `WalletService.cpp:797` | `sendTransaction()` — the sync WinHTTP call itself |
+| `HttpRequestInterceptor.cpp` | Reference implementation for CefPostTask async pattern |
+
+**Note — Why `send_transaction` is slow**: The Rust `/transaction/send` handler builds BEEF (BRC-62) which requires a complete ancestry chain back to confirmed transactions. When the parent transaction is unconfirmed, the code fetches grandparent transactions + merkle proofs from WhatsOnChain API (multiple network round-trips). This is a separate optimization tracked outside this document — see "BEEF Ancestry Cache Optimization" in development-docs.
 
 ### 2.2 Performance & Latency (Response Filtering)
 **Current Implementation**: `AdblockResponseFilter` (a `CefResponseFilter`) buffers the *entire* HTTP response for YouTube before outputting it. It does this to safely regex and rename JSON keys (e.g., `adPlacements` -> `adPlacements_`).

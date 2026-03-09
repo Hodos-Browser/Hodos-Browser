@@ -7,7 +7,7 @@
 use rusqlite::{Connection, Result, params};
 use serde::Serialize;
 
-/// A received PeerPay payment record
+/// A received payment record (PeerPay or address sync)
 #[derive(Debug, Clone, Serialize)]
 pub struct ReceivedPayment {
     pub id: i64,
@@ -19,6 +19,8 @@ pub struct ReceivedPayment {
     pub txid: Option<String>,
     pub accepted_at: String,
     pub dismissed: bool,
+    pub source: String,
+    pub price_usd_cents: Option<i64>,
 }
 
 /// PeerPay database repository
@@ -34,13 +36,30 @@ impl PeerPayRepository {
         prefix: &str,
         suffix: &str,
         txid: Option<&str>,
+        source: &str,
+        price_usd_cents: Option<i64>,
     ) -> Result<()> {
         conn.execute(
-            "INSERT OR IGNORE INTO peerpay_received (message_id, sender_identity_key, amount_satoshis, derivation_prefix, derivation_suffix, txid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![message_id, sender, amount, prefix, suffix, txid],
+            "INSERT OR IGNORE INTO peerpay_received (message_id, sender_identity_key, amount_satoshis, derivation_prefix, derivation_suffix, txid, source, price_usd_cents)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![message_id, sender, amount, prefix, suffix, txid, source, price_usd_cents],
         )?;
         Ok(())
+    }
+
+    /// Insert a notification for a newly discovered address sync UTXO
+    ///
+    /// Uses `utxo:{txid}:{vout}` as message_id for natural deduplication.
+    /// INSERT OR IGNORE ensures idempotency across repeated syncs.
+    pub fn insert_address_sync_notification(
+        conn: &Connection,
+        txid: &str,
+        vout: i64,
+        amount: i64,
+        price_usd_cents: Option<i64>,
+    ) -> Result<()> {
+        let message_id = format!("utxo:{}:{}", txid, vout);
+        Self::insert_received(conn, &message_id, "unknown", amount, "", "", Some(txid), "address_sync", price_usd_cents)
     }
 
     /// Check if a message_id has already been processed (deduplication)
@@ -56,7 +75,7 @@ impl PeerPayRepository {
     /// Get all undismissed received payments
     pub fn get_undismissed(conn: &Connection) -> Result<Vec<ReceivedPayment>> {
         let mut stmt = conn.prepare(
-            "SELECT id, message_id, sender_identity_key, amount_satoshis, derivation_prefix, derivation_suffix, txid, accepted_at, dismissed
+            "SELECT id, message_id, sender_identity_key, amount_satoshis, derivation_prefix, derivation_suffix, txid, accepted_at, dismissed, source, price_usd_cents
              FROM peerpay_received
              WHERE dismissed = 0
              ORDER BY id DESC"
@@ -73,6 +92,8 @@ impl PeerPayRepository {
                 txid: row.get(6)?,
                 accepted_at: row.get(7)?,
                 dismissed: row.get::<_, i32>(8)? != 0,
+                source: row.get(9)?,
+                price_usd_cents: row.get(10)?,
             })
         })?.collect::<Result<Vec<_>>>()?;
 
@@ -118,9 +139,12 @@ mod tests {
                 derivation_suffix TEXT NOT NULL,
                 txid TEXT,
                 accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
-                dismissed INTEGER NOT NULL DEFAULT 0
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'peerpay',
+                price_usd_cents INTEGER
             );
             CREATE INDEX idx_peerpay_dismissed ON peerpay_received(dismissed);
+            CREATE INDEX idx_peerpay_source ON peerpay_received(source);
         ").unwrap();
         conn
     }
@@ -128,19 +152,20 @@ mod tests {
     #[test]
     fn test_insert_and_query() {
         let conn = setup_test_db();
-        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "prefix1", "suffix1", Some("txid1")).unwrap();
+        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "prefix1", "suffix1", Some("txid1"), "peerpay", None).unwrap();
 
         let payments = PeerPayRepository::get_undismissed(&conn).unwrap();
         assert_eq!(payments.len(), 1);
         assert_eq!(payments[0].message_id, "msg1");
         assert_eq!(payments[0].amount_satoshis, 1000);
+        assert_eq!(payments[0].source, "peerpay");
     }
 
     #[test]
     fn test_deduplication() {
         let conn = setup_test_db();
-        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None).unwrap();
-        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None).unwrap(); // duplicate
+        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None, "peerpay", None).unwrap();
+        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None, "peerpay", None).unwrap(); // duplicate
 
         assert!(PeerPayRepository::is_already_processed(&conn, "msg1").unwrap());
         assert!(!PeerPayRepository::is_already_processed(&conn, "msg2").unwrap());
@@ -152,8 +177,8 @@ mod tests {
     #[test]
     fn test_dismiss_all() {
         let conn = setup_test_db();
-        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None).unwrap();
-        PeerPayRepository::insert_received(&conn, "msg2", "02def", 2000, "p", "s", None).unwrap();
+        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None, "peerpay", None).unwrap();
+        PeerPayRepository::insert_received(&conn, "msg2", "02def", 2000, "p", "s", None, "peerpay", None).unwrap();
 
         let (count, total) = PeerPayRepository::get_undismissed_summary(&conn).unwrap();
         assert_eq!(count, 2);
@@ -164,5 +189,43 @@ mod tests {
         let (count, total) = PeerPayRepository::get_undismissed_summary(&conn).unwrap();
         assert_eq!(count, 0);
         assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_address_sync_notification() {
+        let conn = setup_test_db();
+
+        // Insert address sync notification
+        PeerPayRepository::insert_address_sync_notification(&conn, "abc123", 0, 5000, None).unwrap();
+
+        let payments = PeerPayRepository::get_undismissed(&conn).unwrap();
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].message_id, "utxo:abc123:0");
+        assert_eq!(payments[0].source, "address_sync");
+        assert_eq!(payments[0].amount_satoshis, 5000);
+        assert_eq!(payments[0].txid, Some("abc123".to_string()));
+
+        // Deduplication: inserting same UTXO again is a no-op
+        PeerPayRepository::insert_address_sync_notification(&conn, "abc123", 0, 5000, None).unwrap();
+        let payments = PeerPayRepository::get_undismissed(&conn).unwrap();
+        assert_eq!(payments.len(), 1);
+    }
+
+    #[test]
+    fn test_mixed_sources_summary() {
+        let conn = setup_test_db();
+
+        // Insert both PeerPay and address sync notifications
+        PeerPayRepository::insert_received(&conn, "msg1", "02abc", 1000, "p", "s", None, "peerpay", None).unwrap();
+        PeerPayRepository::insert_address_sync_notification(&conn, "txid1", 0, 3000, None).unwrap();
+
+        let (count, total) = PeerPayRepository::get_undismissed_summary(&conn).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(total, 4000);
+
+        // Dismiss clears both
+        PeerPayRepository::dismiss_all(&conn).unwrap();
+        let (count, _) = PeerPayRepository::get_undismissed_summary(&conn).unwrap();
+        assert_eq!(count, 0);
     }
 }

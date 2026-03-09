@@ -677,6 +677,34 @@ impl WalletDatabase {
             info!("   ✅ Schema V7 applied");
         }
 
+        if current_version < 8 {
+            info!("   Applying migration V8 (unified notifications)...");
+            migrations::migrate_v7_to_v8(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (8)", [])?;
+            info!("   ✅ Schema V8 applied");
+        }
+
+        if current_version < 9 {
+            info!("   Applying migration V9 (sender display name)...");
+            migrations::migrate_v8_to_v9(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (9)", [])?;
+            info!("   ✅ Schema V9 applied");
+        }
+
+        if current_version < 10 {
+            info!("   Applying migration V10 (default auto-approve limits)...");
+            migrations::migrate_v9_to_v10(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (10)", [])?;
+            info!("   ✅ Schema V10 applied");
+        }
+
+        if current_version < 11 {
+            info!("   Applying migration V11 (price at transaction time)...");
+            migrations::migrate_v10_to_v11(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (11)", [])?;
+            info!("   ✅ Schema V11 applied");
+        }
+
         Ok(())
     }
 
