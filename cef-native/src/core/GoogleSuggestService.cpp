@@ -15,7 +15,11 @@ GoogleSuggestService& GoogleSuggestService::GetInstance() {
 }
 
 GoogleSuggestService::GoogleSuggestService()
-    : hSession_(nullptr), initialized_(false) {
+    :
+#ifdef _WIN32
+      hSession_(nullptr),
+#endif
+      initialized_(false) {
     initialize();
 }
 

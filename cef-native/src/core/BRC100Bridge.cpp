@@ -2,6 +2,12 @@
 #include <iostream>
 #include <sstream>
 
+#ifdef _WIN32
+
+// ============================================================================
+// Windows implementation (WinHTTP)
+// ============================================================================
+
 BRC100Bridge::BRC100Bridge()
     : baseUrl_("http://localhost:31301"),
       hSession_(nullptr),
@@ -158,6 +164,99 @@ std::string BRC100Bridge::readResponse(HINTERNET hRequest) {
     return response;
 }
 
+bool BRC100Bridge::sendRequest(HINTERNET hRequest, const std::string& body) {
+    return WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             const_cast<char*>(body.c_str()), body.length(),
+                             body.length(), 0) != 0;
+}
+
+#elif defined(__APPLE__)
+
+// ============================================================================
+// macOS implementation (libcurl)
+// ============================================================================
+
+#include <curl/curl.h>
+
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output) {
+    size_t totalSize = size * nmemb;
+    output->append(static_cast<char*>(contents), totalSize);
+    return totalSize;
+}
+
+BRC100Bridge::BRC100Bridge()
+    : baseUrl_("http://localhost:31301"),
+      connected_(false),
+      webSocketConnected_(false) {
+    initializeConnection();
+}
+
+BRC100Bridge::~BRC100Bridge() {
+    cleanupConnection();
+    cleanupWebSocket();
+}
+
+bool BRC100Bridge::initializeConnection() {
+    connected_ = true;
+    return true;
+}
+
+void BRC100Bridge::cleanupConnection() {
+    connected_ = false;
+}
+
+bool BRC100Bridge::isConnected() {
+    return connected_;
+}
+
+void BRC100Bridge::setBaseUrl(const std::string& url) {
+    baseUrl_ = url;
+}
+
+nlohmann::json BRC100Bridge::makeHttpRequest(const std::string& method, const std::string& endpoint, const nlohmann::json& body) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return nlohmann::json{{"error", "Failed to initialize curl"}};
+    }
+
+    std::string url = baseUrl_ + endpoint;
+    std::string responseStr;
+    std::string bodyStr = body.dump();
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    if (method == "POST") {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return nlohmann::json{{"error", std::string("curl error: ") + curl_easy_strerror(res)}};
+    }
+
+    try {
+        return nlohmann::json::parse(responseStr);
+    } catch (const std::exception& e) {
+        return nlohmann::json{{"error", "Invalid JSON response: " + std::string(e.what())}};
+    }
+}
+
+#endif
+
+// ============================================================================
+// Cross-platform API methods (delegate to makeHttpRequest)
+// ============================================================================
+
 // Status & Detection
 nlohmann::json BRC100Bridge::getStatus() {
     return makeHttpRequest("GET", "/brc100/status");
@@ -231,7 +330,6 @@ nlohmann::json BRC100Bridge::createSPVProof(const nlohmann::json& proofData) {
 
 // WebSocket Support (placeholder implementation)
 bool BRC100Bridge::connectWebSocket() {
-    // TODO: Implement WebSocket connection
     webSocketConnected_ = true;
     return true;
 }
@@ -241,17 +339,14 @@ void BRC100Bridge::disconnectWebSocket() {
 }
 
 bool BRC100Bridge::sendWebSocketMessage(const std::string& message) {
-    // TODO: Implement WebSocket message sending
     return webSocketConnected_;
 }
 
 std::string BRC100Bridge::receiveWebSocketMessage() {
-    // TODO: Implement WebSocket message receiving
     return "";
 }
 
 bool BRC100Bridge::initializeWebSocket() {
-    // TODO: Implement WebSocket initialization
     return true;
 }
 

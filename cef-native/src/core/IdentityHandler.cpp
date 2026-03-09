@@ -1,6 +1,7 @@
 #include "../../include/core/IdentityHandler.h"
 #include <fstream>
 #include <cstdlib>
+#include <filesystem>
 
 CefRefPtr<CefV8Value> jsonToV8(const nlohmann::json& j) {
     if (j.is_object()) {
@@ -30,21 +31,30 @@ bool IdentityHandler::Execute(const CefString& name,
                                const CefV8ValueList& arguments,
                                CefRefPtr<CefV8Value>& retval,
                                CefString& exception) {
-    std::cout << "💡 IdentityHandler started - Function: " << name.ToString() << std::endl;
-    std::cout.flush(); // Force flush
+    std::cout << "IdentityHandler started - Function: " << name.ToString() << std::endl;
+    std::cout.flush();
 
-    // Also try OutputDebugString for Windows
-    std::string debugMsg = "💡 IdentityHandler started - Function: " + name.ToString();
+#ifdef _WIN32
+    std::string debugMsg = "IdentityHandler started - Function: " + name.ToString();
     OutputDebugStringA(debugMsg.c_str());
     OutputDebugStringA("\n");
+#endif
 
     // For identity.get(), first check if local identity file exists
     if (name == "get") {
+#ifdef _WIN32
         const char* homeDir = std::getenv("USERPROFILE");
-        std::string identityPath = std::string(homeDir) + "\\AppData\\Roaming\\HodosBrowser\\identity.json";
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "\\AppData\\Roaming\\HodosBrowser\\identity.json";
+#elif defined(__APPLE__)
+        const char* homeDir = std::getenv("HOME");
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "/Library/Application Support/HodosBrowser/identity.json";
+#else
+        const char* homeDir = std::getenv("HOME");
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "/.config/HodosBrowser/identity.json";
+#endif
         std::ifstream identityFile(identityPath);
         if (identityFile.good()) {
-            std::cout << "📁 Local identity file exists, reading from file" << std::endl;
+            std::cout << "Local identity file exists, reading from file" << std::endl;
             try {
                 nlohmann::json identity;
                 identityFile >> identity;
@@ -54,12 +64,12 @@ bool IdentityHandler::Execute(const CefString& name,
                 retval = identityObject;
                 return true;
             } catch (const std::exception& e) {
-                std::cerr << "💥 Error reading identity file: " << e.what() << std::endl;
+                std::cerr << "Error reading identity file: " << e.what() << std::endl;
                 identityFile.close();
                 // Fall through to daemon check
             }
         } else {
-            std::cout << "📁 No local identity file found, will check daemon" << std::endl;
+            std::cout << "No local identity file found, will check daemon" << std::endl;
             identityFile.close();
         }
     }
@@ -68,20 +78,20 @@ bool IdentityHandler::Execute(const CefString& name,
 
     // Check if Go daemon is running
     if (!walletService.isConnected()) {
-        std::cerr << "❌ Cannot connect to Go wallet daemon. Make sure it's running on port 31301." << std::endl;
+        std::cerr << "Cannot connect to Go wallet daemon. Make sure it's running on port 31301." << std::endl;
         exception = "Go wallet daemon is not running. Please start the wallet daemon first.";
         return false;
     }
 
     // Check daemon health
     if (!walletService.isHealthy()) {
-        std::cerr << "❌ Go wallet daemon is not healthy" << std::endl;
+        std::cerr << "Go wallet daemon is not healthy" << std::endl;
         exception = "Go wallet daemon is not responding properly.";
         return false;
     }
 
     if (name == "markBackedUp") {
-        std::cout << "✅ Marking wallet as backed up via Go daemon" << std::endl;
+        std::cout << "Marking wallet as backed up via Go daemon" << std::endl;
 
         if (walletService.markWalletBackedUp()) {
             retval = CefV8Value::CreateString("success");
@@ -97,19 +107,19 @@ bool IdentityHandler::Execute(const CefString& name,
         nlohmann::json walletInfo = walletService.getWalletInfo();
 
         if (walletInfo.empty()) {
-            std::cerr << "❌ Failed to get wallet info from Go daemon" << std::endl;
+            std::cerr << "Failed to get wallet info from Go daemon" << std::endl;
             exception = "Failed to retrieve wallet info from Go wallet daemon.";
             return false;
         }
 
-        std::cout << "📦 Wallet info from Go daemon: " << walletInfo.dump() << std::endl;
+        std::cout << "Wallet info from Go daemon: " << walletInfo.dump() << std::endl;
 
         CefRefPtr<CefV8Value> walletObject = jsonToV8(walletInfo);
         retval = walletObject;
 
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "💥 Error in IdentityHandler: " << e.what() << std::endl;
+        std::cerr << "Error in IdentityHandler: " << e.what() << std::endl;
         exception = "Exception in IdentityHandler: " + std::string(e.what());
         return false;
     }

@@ -93,6 +93,12 @@ NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
 
+// Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
+bool g_file_dialog_active = false;
+bool g_wallet_overlay_prevent_close = false;
+int g_peerpay_count = 0;
+int g_peerpay_amount = 0;
+
 // Stored icon right offsets for repositioning overlays on move/resize (physical pixels)
 static int g_mac_settings_icon_right_offset = 0;
 static int g_mac_wallet_icon_right_offset = 0;
@@ -108,14 +114,20 @@ void DebugLog(const std::string& message) {
     LOG_INFO(message);
 }
 
+// Handle fullscreen mode transitions (called from SimpleHandler::OnFullscreenModeChange)
+void HandleFullscreenChange(bool fullscreen) {
+    // TODO: Implement macOS fullscreen handling (NSWindow toggleFullScreen)
+    LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "enter" : "exit") + " (macOS stub)");
+}
+
 // ============================================================================
 // Forward Declarations
 // ============================================================================
 
 void ToggleWalletPanel();  // C++ callable function
 void CreateMainWindow();
-void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset = 0);
-void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
+void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset);
+void CreateWalletOverlayWithSeparateProcess(int iconRightOffset);
 void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateSettingsMenuOverlay();

@@ -56,7 +56,7 @@ TabManager::~TabManager() {
 
 // ========== Tab Lifecycle Methods ==========
 
-int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int y, int width, int height) {
+int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int y, int width, int height, int window_id) {
     CEF_REQUIRE_UI_THREAD();
 
     int tab_id = GetNextTabId();
@@ -442,4 +442,25 @@ int TabManager::FindTabToSwitchTo(int closing_tab_id) {
     }
 
     return best_tab_id;
+}
+
+int TabManager::GetActiveTabIdForWindow(int window_id) const {
+    auto it = active_tab_per_window_.find(window_id);
+    if (it != active_tab_per_window_.end()) {
+        return it->second;
+    }
+    // Fallback: check if global active tab is in this window
+    if (active_tab_id_ >= 0) {
+        auto tab_it = tabs_.find(active_tab_id_);
+        if (tab_it != tabs_.end() && tab_it->second.window_id == window_id) {
+            return active_tab_id_;
+        }
+    }
+    return -1;
+}
+
+Tab* TabManager::GetActiveTabForWindow(int window_id) {
+    int id = GetActiveTabIdForWindow(window_id);
+    if (id == -1) return nullptr;
+    return GetTab(id);
 }

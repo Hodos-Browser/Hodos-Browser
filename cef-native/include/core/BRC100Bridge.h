@@ -2,8 +2,10 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
+#ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
+#endif
 #include <thread>
 #include <atomic>
 
@@ -54,18 +56,24 @@ public:
 
 private:
     std::string baseUrl_;
+#ifdef _WIN32
     HINTERNET hSession_;
     HINTERNET hConnect_;
+#endif
     bool connected_;
 
+#ifdef _WIN32
     // WebSocket connection
     HINTERNET hWebSocket_;
+#endif
     bool webSocketConnected_;
 
     // HTTP helper methods
     nlohmann::json makeHttpRequest(const std::string& method, const std::string& endpoint, const nlohmann::json& body = nlohmann::json());
+#ifdef _WIN32
     std::string readResponse(HINTERNET hRequest);
     bool sendRequest(HINTERNET hRequest, const std::string& body);
+#endif
 
     // WebSocket helper methods
     bool initializeWebSocket();

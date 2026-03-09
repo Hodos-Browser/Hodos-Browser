@@ -15,6 +15,7 @@
 
 #ifdef __APPLE__
     #include "../../include/core/WalletService.h"
+    #include "../../include/core/AdblockCache.h"
 #endif
 
 // Cross-platform includes (available on both platforms)
@@ -2041,9 +2042,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 CefWindowInfo windowInfo;
 #ifdef _WIN32
                 windowInfo.SetAsPopup(nullptr, "Developer Tools");
-#elif defined(__APPLE__)
-                windowInfo.SetAsPopup(nullptr, "Developer Tools");
 #endif
+                // macOS: default CefWindowInfo — ShowDevTools creates a new top-level window
                 CefBrowserSettings devSettings;
                 active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
             }
@@ -2124,17 +2124,14 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("✅ Settings overlay destroyed via settings_close");
         }
 #elif defined(__APPLE__)
-        extern NSWindow* g_main_window;
-        extern NSWindow* g_settings_overlay_window;
         if (g_settings_overlay_window) {
             CefRefPtr<CefBrowser> settings_browser = GetSettingsBrowser();
             if (settings_browser) {
                 settings_browser->GetHost()->CloseBrowser(false);
             }
-            [g_main_window removeChildWindow:g_settings_overlay_window];
-            [g_settings_overlay_window close];
+            CloseOverlayWindow((void*)g_settings_overlay_window, (void*)g_main_window);
             g_settings_overlay_window = nullptr;
-            LOG_DEBUG_BROWSER("✅ Settings overlay destroyed via settings_close (macOS)");
+            LOG_DEBUG_BROWSER("Settings overlay destroyed via settings_close (macOS)");
         }
 #endif
         return true;
@@ -6042,7 +6039,7 @@ static void CreateNewTabWithUrl(const std::string& url) {
     int tabHeight = height - shellHeight;
     TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else
-    extern void* g_webview_view;
+    extern NSView* g_webview_view;
     ViewDimensions dims = GetViewDimensions(g_webview_view);
     TabManager::GetInstance().CreateTab(url, g_webview_view, 0, 0, dims.width, dims.height);
 #endif

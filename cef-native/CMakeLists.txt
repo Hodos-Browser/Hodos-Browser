@@ -71,6 +71,20 @@ endif()
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 # set(OPENSSL_MSVC_STATIC_RT TRUE)
 
+# macOS: Hint OpenSSL location for Homebrew (not in default search path)
+if(APPLE)
+    # Try Homebrew paths for Apple Silicon and Intel
+    if(EXISTS "/opt/homebrew/opt/openssl@3")
+        set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
+    elseif(EXISTS "/opt/homebrew/opt/openssl")
+        set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl")
+    elseif(EXISTS "/usr/local/opt/openssl@3")
+        set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl@3")
+    elseif(EXISTS "/usr/local/opt/openssl")
+        set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl")
+    endif()
+endif()
+
 # Find required packages (platform-specific)
 find_package(OpenSSL REQUIRED)
 
@@ -135,8 +149,18 @@ if(APPLE)
         cef_browser_shell_mac.mm
         src/core/TabManager_mac.mm
         src/core/WalletService_mac.cpp
+        # Cross-platform modules needed by simple_handler.cpp on macOS
+        src/core/BrowserWindow.cpp
+        src/core/WindowManager.cpp
+        src/core/SessionManager.cpp
+        src/core/SettingsManager.cpp
+        src/core/EphemeralCookieManager.cpp
+        src/core/ProfileImporter.cpp
+        src/core/IdentityHandler.cpp
+        src/core/BRC100Bridge.cpp
+        src/core/BRC100Handler.cpp
     )
-    message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp")
+    message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
 
     # Helper process source files (need render process handler + dependencies)
     set(HODOS_HELPER_SRCS
@@ -283,6 +307,9 @@ if(APPLE)
         -Wno-deprecated-declarations
         -Wno-objc-missing-property-synthesis
     )
+
+    # Ensure DCHECK_IS_ON() matches the CEF wrapper (built in Release with NDEBUG)
+    target_compile_definitions(HodosBrowserShell PRIVATE NDEBUG)
 
     # Set rpath for CEF framework lookup at runtime
     set_target_properties(HodosBrowserShell PROPERTIES
