@@ -131,7 +131,7 @@ HodosBrowser/
 |
 |-- development-docs/        Sprint plans, research, architecture docs
 |   |-- browser-core/        MVP gap analysis + implementation plan
-|   |-- macos-port/          macOS porting plan + build instructions
+|   |-- Final-MVP-Sprint/    Active sprint: testing, optimization, security, macOS port
 |   |-- UX_UI/               Wallet UX phase tracker
 |
 |-- build-instructions/      Platform-specific build guides
@@ -149,7 +149,7 @@ HodosBrowser/
 | `SECURITY_AND_PROCESS_ISOLATION_ANALYSIS.md` | Process isolation security model |
 | `IMPLEMENTATION_STATUS.md` | Detailed implementation log (all phases) |
 | `development-docs/browser-core/` | MVP sprint plan and gap analysis |
-| `development-docs/macos-port/` | macOS porting plan |
+| `development-docs/Final-MVP-Sprint/` | Active sprint (testing, optimization, security, macOS port) |
 
 ---
 

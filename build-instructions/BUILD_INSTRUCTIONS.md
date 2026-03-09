@@ -175,9 +175,14 @@ cargo run --release
 
 #### Wallet Storage
 
-The wallet data is stored in a SQLite database at: `%APPDATA%/HodosBrowser/wallet/wallet.db`
+The wallet data is stored in a SQLite database. The path is resolved automatically per platform:
 
-**Note**: The wallet has been migrated from JSON file storage (`wallet.json`, `actions.json`) to a SQLite database. The database is automatically created and initialized on first run. If you have existing JSON files, they will be automatically migrated to the database.
+| Platform | Path |
+|----------|------|
+| **Windows** | `%APPDATA%\HodosBrowser\wallet\wallet.db` |
+| **macOS** | `~/Library/Application Support/HodosBrowser/wallet/wallet.db` |
+
+The database is automatically created and initialized on first run.
 
 #### Test the Wallet API
 
@@ -447,10 +452,10 @@ The following directories/files are gitignored and must be set up locally:
 ## 🚀 Future Build Considerations
 
 ### Multi-Platform Support
-- 🟡 **Windows**: Current CEF implementation
-- 🟡 **macOS**: CEF with Cocoa integration
-- 🟡 **Linux**: CEF with GTK integration
-- 🟡 **Mobile**: React Native with native modules
+- ✅ **Windows**: Full feature parity (current primary platform)
+- 🟡 **macOS**: Foundation complete (window, overlays, tabs). Feature parity sprint in progress. See `development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`
+- 🟡 **Linux**: CEF with GTK integration (future)
+- 🟡 **Mobile**: React Native with native modules (future)
 
 ### Build Optimizations
 - 🟡 **Incremental Builds**: Optimize CMake for faster rebuilds

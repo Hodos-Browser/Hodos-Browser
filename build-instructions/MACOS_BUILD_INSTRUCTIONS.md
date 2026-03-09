@@ -208,7 +208,9 @@ ls HodosBrowserShell.app/Contents/Frameworks/
 
 ## ✅ Step 5: Run HodosBrowser
 
-You need **three terminals** running simultaneously:
+> **Note:** On Windows, the C++ shell auto-launches the Rust wallet and adblock engine. On macOS, auto-launch is not yet implemented (it's part of the macOS feature parity sprint — see `development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`). For now, you need to start them manually. If you don't need to see their logs, you can still run them in the background.
+
+You need **three terminals** running simultaneously (four if you also want adblock):
 
 ### Terminal 1: Rust Wallet Backend
 
@@ -222,7 +224,19 @@ cargo run --release
 
 **Leave running** - Provides wallet/crypto backend
 
-### Terminal 2: React Frontend Dev Server
+### Terminal 2: Adblock Engine (optional but recommended)
+
+```bash
+cd adblock-engine
+cargo run --release
+
+# Wait for:
+# "Listening on: http://127.0.0.1:3302"
+```
+
+**Leave running** - Provides ad/tracker blocking
+
+### Terminal 3: React Frontend Dev Server
 
 ```bash
 cd frontend
@@ -234,7 +248,7 @@ npm run dev
 
 **Leave running** - Serves React UI with hot reload
 
-### Terminal 3: macOS Browser
+### Terminal 4: macOS Browser
 
 ```bash
 cd cef-native/build/bin
@@ -243,6 +257,8 @@ open -a HodosBrowserShell.app
 # Or run directly for console output:
 ./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
 ```
+
+> **Tip:** Once the macOS auto-launch feature is implemented, you'll only need the frontend dev server + browser (same as Windows). Running wallet/adblock manually will still be useful for debugging with console logs.
 
 ### Expected Behavior
 
@@ -371,11 +387,13 @@ curl http://127.0.0.1:5137
 - ✅ Framework paths configured correctly
 - ✅ Process isolation working
 
-### Not Yet Implemented
-- ⏳ **Wallet Integration** - APIs stubbed (need to port WalletService)
-- ⏳ **Overlays** - Settings/Wallet panels (architecture ready, not connected)
-- ⏳ **History** - Browser history (need to port HistoryManager)
-- ⏳ **BRC-100** - Bitcoin authentication (Windows-only currently)
+### Not Yet at Windows Feature Parity
+
+The macOS C++ layer needs additional work for full feature parity. The Rust wallet and adblock engine are fully cross-platform and work identically on macOS.
+
+For the complete gap analysis and sprint plan, see: **`development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`**
+
+Key gaps: 6 missing overlay types, HTTP singleton porting (WinHTTP → libcurl), process auto-launch, multi-window support, keyboard shortcuts (Cmd vs Ctrl).
 
 ---
 
@@ -562,25 +580,12 @@ The current build has **development-only** settings:
 
 **For production:** Enable sandbox, remove web security bypass, use separate GPU process (requires code signing).
 
-### Features Not Implemented
+### macOS Feature Parity
 
-**Wallet/Backend Integration:**
-- Address generation (UI button exists, stubbed)
-- Transaction creation/signing
-- Balance display
-- Wallet panel functionality
+The macOS C++ layer has foundational support (window, tabs, 5 overlays, rendering) but is behind Windows on features added in Sprints 8-13. The Rust wallet and React frontend work identically on both platforms.
 
-**Overlays:**
-- Settings panel (creates window, not functional)
-- Wallet panel (creates window, not functional)
-- BRC-100 auth dialog
-
-**Browser Features:**
-- History persistence (in-memory only)
-- Bookmarks
-- Download management
-
-**These are Windows-only currently** and can be ported using the same patterns used for Tab Management.
+**For the complete feature gap analysis, sprint plan, and implementation guide, see:**
+**`development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`**
 
 ---
 
@@ -710,4 +715,4 @@ Before committing or distributing:
 
 **Questions or issues?** Check the main project documentation or open a GitHub issue.
 
-*Last updated: January 2, 2026 - macOS Port Complete*
+*Last updated: March 9, 2026 - Updated run instructions, feature parity references*

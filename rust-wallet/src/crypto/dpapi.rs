@@ -1,12 +1,21 @@
-//! Windows DPAPI integration for mnemonic auto-unlock
+//! Platform-native mnemonic auto-unlock
 //!
-//! Uses CryptProtectData/CryptUnprotectData to encrypt/decrypt the mnemonic
-//! tied to the current Windows user account. Decryption succeeds if and only if
-//! the same Windows user is logged in — no password or PIN needed.
+//! Each platform uses its OS credential storage to encrypt/decrypt the mnemonic
+//! tied to the current user account. Decryption succeeds if and only if the same
+//! OS user is logged in — no password or PIN needed.
 //!
-//! This is the same mechanism Chrome, Firefox, and Edge use for saved passwords.
+//! - **Windows**: DPAPI (CryptProtectData/CryptUnprotectData)
+//!   Same mechanism Chrome, Firefox, and Edge use for saved passwords.
+//!   Storage: `wallets.mnemonic_dpapi` = raw DPAPI blob (BLOB column)
 //!
-//! Storage: `wallets.mnemonic_dpapi` = raw DPAPI blob (BLOB column)
+//! - **macOS**: Keychain Services (SecKeychainAddGenericPassword/FindGenericPassword)
+//!   Same mechanism Chrome ("Chrome Safe Storage") and Brave use.
+//!   Storage: `wallets.mnemonic_dpapi` = sentinel value b"KEYCHAIN" (actual secret
+//!   lives in the OS Keychain under service "HodosBrowser", account "wallet-mnemonic")
+
+// =============================================================================
+// Windows DPAPI implementation
+// =============================================================================
 
 /// Encrypt data using Windows DPAPI (tied to current user account).
 /// Returns the DPAPI-encrypted blob on success.
@@ -111,17 +120,69 @@ pub fn dpapi_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Stub for non-Windows platforms. Always returns an error.
-#[cfg(not(windows))]
-pub fn dpapi_encrypt(_plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    Err("DPAPI is only available on Windows. Use macOS Keychain on macOS.".to_string())
+// =============================================================================
+// macOS Keychain implementation
+// =============================================================================
+
+/// Sentinel value stored in DB column `mnemonic_dpapi` when the actual secret
+/// lives in the macOS Keychain. Must be non-empty so `mnemonic_dpapi.is_some()`
+/// returns true (indicating auto-unlock is available).
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SENTINEL: &[u8] = b"KEYCHAIN";
+
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "HodosBrowser";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_ACCOUNT: &str = "wallet-mnemonic";
+
+/// Store mnemonic in macOS Keychain (tied to current user account).
+/// Returns a sentinel value for the DB column (the real secret is in Keychain).
+#[cfg(target_os = "macos")]
+pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    use security_framework::passwords::{set_generic_password, delete_generic_password};
+
+    // Delete any existing entry first (set_generic_password fails if entry exists)
+    let _ = delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+
+    set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, plaintext)
+        .map_err(|e| format!("Keychain store failed: {}", e))?;
+
+    log::info!("   Mnemonic stored in macOS Keychain (service={}, account={})",
+        KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+
+    // Return sentinel — the DB column stores this, not the actual secret
+    Ok(KEYCHAIN_SENTINEL.to_vec())
 }
 
-/// Stub for non-Windows platforms. Always returns an error.
-#[cfg(not(windows))]
+/// Retrieve mnemonic from macOS Keychain (requires same macOS user account).
+/// The `_encrypted` parameter is the sentinel value from the DB — ignored.
+#[cfg(target_os = "macos")]
 pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
-    Err("DPAPI is only available on Windows. Use macOS Keychain on macOS.".to_string())
+    use security_framework::passwords::get_generic_password;
+
+    let password = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+        .map_err(|e| format!("Keychain retrieve failed: {}", e))?;
+
+    Ok(password)
 }
+
+// =============================================================================
+// Linux / other platforms — stub (wallet still works, just no auto-unlock)
+// =============================================================================
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn dpapi_encrypt(_plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Platform auto-unlock not available. Use PIN to unlock wallet.".to_string())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Platform auto-unlock not available. Use PIN to unlock wallet.".to_string())
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -140,10 +201,21 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn test_dpapi_not_available() {
+    #[cfg(target_os = "macos")]
+    fn test_keychain_round_trip() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let sentinel = dpapi_encrypt(mnemonic.as_bytes()).expect("keychain store should succeed");
+        assert_eq!(sentinel, KEYCHAIN_SENTINEL);
+
+        let retrieved = dpapi_decrypt(&sentinel).expect("keychain retrieve should succeed");
+        assert_eq!(retrieved, mnemonic.as_bytes());
+    }
+
+    #[test]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    fn test_platform_unlock_not_available() {
         let result = dpapi_encrypt(b"test");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("only available on Windows"));
+        assert!(result.unwrap_err().contains("not available"));
     }
 }

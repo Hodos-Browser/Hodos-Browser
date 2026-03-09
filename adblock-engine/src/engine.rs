@@ -1194,11 +1194,23 @@ youtube.com##.ad-showing
     #[test]
     fn test_real_easylist_blocks_known_ad_domains() {
         // Try multiple possible locations for the downloaded lists
-        let possible_dirs = vec![
-            PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-                .join("HodosBrowser").join("adblock").join("lists"),
+        let mut possible_dirs = vec![
             PathBuf::from(".").join("adblock").join("lists"),
         ];
+
+        // Platform-specific app data directories
+        #[cfg(target_os = "windows")]
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            possible_dirs.insert(0,
+                PathBuf::from(appdata).join("HodosBrowser").join("adblock").join("lists"));
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(home) = std::env::var_os("HOME") {
+            possible_dirs.insert(0,
+                PathBuf::from(home).join("Library").join("Application Support")
+                    .join("HodosBrowser").join("adblock").join("lists"));
+        }
 
         let lists_dir = possible_dirs.iter().find(|d| d.join("easylist.txt").exists());
         let lists_dir = match lists_dir {
@@ -1250,8 +1262,23 @@ youtube.com##.ad-showing
     /// Test with the serialized engine.dat to verify it works after deserialization
     #[test]
     fn test_real_engine_dat_deserialization() {
-        let engine_path = PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-            .join("HodosBrowser").join("adblock").join("engine.dat");
+        let engine_path = {
+            #[cfg(target_os = "windows")]
+            {
+                PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+                    .join("HodosBrowser").join("adblock").join("engine.dat")
+            }
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                    .join("Library").join("Application Support")
+                    .join("HodosBrowser").join("adblock").join("engine.dat")
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                PathBuf::from(".").join("adblock").join("engine.dat")
+            }
+        };
 
         if !engine_path.exists() {
             eprintln!("SKIP: No engine.dat found — run the engine once first");

@@ -12,14 +12,17 @@ fn main() {
 
     println!("🔐 Extracting master private key from wallet database...\n");
 
-    // Get database path - use same logic as main.rs
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| {
-            eprintln!("⚠️  APPDATA not set, using current directory");
-            ".".to_string()
-        });
-
-    let wallet_dir = std::path::PathBuf::from(&appdata)
+    // Get database path - cross-platform (same logic as main.rs)
+    let wallet_dir = dirs::data_dir()
+        .unwrap_or_else(|| {
+            match std::env::var("APPDATA") {
+                Ok(appdata) => std::path::PathBuf::from(appdata),
+                Err(_) => {
+                    eprintln!("⚠️  Could not determine data directory, using current directory");
+                    std::path::PathBuf::from(".")
+                }
+            }
+        })
         .join("HodosBrowser")
         .join("wallet");
 

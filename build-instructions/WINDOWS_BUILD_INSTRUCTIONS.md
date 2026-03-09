@@ -452,12 +452,13 @@ cmake --build . --config Release
 
 ## 🚀 Next Steps
 
-- For macOS build instructions, see `MACOS_BUILD_INSTRUCTIONS.md` (when available)
-- For development workflow, see `ARCHITECTURE.md` and `PROJECT_OVERVIEW.md`
-- For contributing, see project documentation
+- For macOS build instructions, see `MACOS_BUILD_INSTRUCTIONS.md`
+- For macOS porting work, see `development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`
+- For development workflow, see `PROJECT_OVERVIEW.md`
+- For project architecture, see root `CLAUDE.md`
 
 ---
 
 **Build Issues?** Check troubleshooting section above or open an issue on GitHub.
 
-*Last Updated: 2025-12-31 (Phase 1: Portable Build Complete)*
+*Last Updated: 2026-03-09*

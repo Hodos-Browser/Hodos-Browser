@@ -427,4 +427,4 @@ After changes, always build before asking user to test:
 |--------|---------|
 | `development-docs/browser-core/` | Browser feature sprints (SSL, permissions, downloads, ad blocking, etc.) |
 | `development-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) |
-| `development-docs/macos-port/` | macOS porting plan and status |
+| `development-docs/Final-MVP-Sprint/` | Active sprint: testing, optimization, security, macOS port |

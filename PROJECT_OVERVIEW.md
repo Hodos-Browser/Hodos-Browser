@@ -127,7 +127,7 @@ Main Shell (g_hwnd)
 
 ### 2.7 macOS Port
 
-`cef_browser_shell_mac.mm` (1754 lines): NSWindow/NSView hierarchy, 5 overlay types, event forwarding. Build system supports macOS via CMake. See `development-docs/macos-port/MAC_PLATFORM_SUPPORT_PLAN.md`.
+`cef_browser_shell_mac.mm` (1754 lines): NSWindow/NSView hierarchy, 5 overlay types, event forwarding. Build system supports macOS via CMake. See `development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`.
 
 ---
 
@@ -452,7 +452,7 @@ Transactions broadcast in BEEF (Background Evaluation Extended Format):
 - Light wallet polish
 
 ### Future
-- macOS port (5-7 day sprint, see `development-docs/macos-port/`)
+- macOS port (5-7 day sprint, see `development-docs/Final-MVP-Sprint/macos-port/`)
 - Full wallet view (transaction history, output browser)
 - Activity status indicator
 - Settings persistence + profile import

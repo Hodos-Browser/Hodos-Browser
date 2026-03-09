@@ -65,14 +65,18 @@ async fn main() -> std::io::Result<()> {
     println!("=================================");
     println!();
 
-    // Get wallet path
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| {
-            println!("⚠️  APPDATA not set, using current directory");
-            ".".to_string()
-        });
-
-    let wallet_dir = PathBuf::from(appdata)
+    // Get wallet path (cross-platform)
+    let wallet_dir = dirs::data_dir()
+        .unwrap_or_else(|| {
+            // Fallback: try APPDATA (Windows) or current directory
+            match std::env::var("APPDATA") {
+                Ok(appdata) => PathBuf::from(appdata),
+                Err(_) => {
+                    println!("⚠️  Could not determine data directory, using current directory");
+                    PathBuf::from(".")
+                }
+            }
+        })
         .join("HodosBrowser")
         .join("wallet");
 
