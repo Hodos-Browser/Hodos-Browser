@@ -60,11 +60,12 @@
 | 2026-03-09 | Setup | 0 | Created 25 GitHub issues, 4 milestones, branch structure |
 | 2026-03-09 | Track A - S1 | 7 | #7, #8, #27, #9, #12, #13, #14 — ALL Track A issues complete! |
 | 2026-03-09 | Track A - S2 | 1 | #20 (Notification overlay) — fixed wallet hang, moved from Track B to A |
+| 2026-03-09 | Track A - S3 | 0 | Cross-platform hardening: overlay IPC, Identity/BRC-100 API, path separators, devtools fix |
 
-**Average velocity**: 8 issues/2 sessions
+**Average velocity**: 8 issues/3 sessions
 **Milestone 1 code**: COMPLETE (pending user test)
-**Milestone 2 Track A**: COMPLETE (all 3 Track A issues + notification overlay done)
-**Track A status**: ALL DONE + bonus #20. Only Track B issues remain for M2.
+**Milestone 2 Track A**: COMPLETE (all 3 Track A issues + notification overlay + hardening)
+**Track A status**: ALL DONE. 6 commits pushed. Only Track B overlay issues remain for M2.
 
 ---
 
@@ -81,6 +82,11 @@
 - Security framework linked for SecRandomCopyBytes
 - Notification overlay (domain approval, no-wallet, payment confirmation) — fixed wallet hang
 - handleAuthResponse calls now cross-platform
+- Overlay IPC handlers enabled on macOS (overlay_hide, overlay_hide_settings, overlay_input)
+- sendAuthRequestDataToOverlay enabled on macOS
+- Identity API + BRC-100 API enabled in render process (was Windows-only stub)
+- Path separator fix for CookieBlockManager and BookmarkManager DB paths
+- DevTools popup fix (SetAsPopup Windows-only)
 
 **Person B**: Starting on #10 (keyboard shortcuts) and #11 (click-outside detection)
 
