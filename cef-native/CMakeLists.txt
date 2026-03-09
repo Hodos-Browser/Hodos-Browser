@@ -173,6 +173,9 @@ if(APPLE)
         src/core/WalletService_mac.cpp
         src/core/Logger.cpp
         src/core/HistoryManager.cpp
+        src/core/IdentityHandler.cpp
+        src/core/BRC100Bridge.cpp
+        src/core/BRC100Handler.cpp
     )
 
     # Load CEF cmake utilities for helper generation
