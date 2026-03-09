@@ -96,6 +96,7 @@ NSWindow* g_settings_overlay_window = nullptr;
 NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
+NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
@@ -141,6 +142,7 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset);
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset);
 void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
+void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
 void ShutdownApplication();
 
@@ -706,6 +708,124 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
 @end
 
+// Notification Overlay View (domain approval, no-wallet, payment confirmation)
+@interface NotificationOverlayView : NSView
+@property (nonatomic, strong) CALayer* renderLayer;
+@end
+
+@implementation NotificationOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (!notif) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    notif->GetHost()->SendKeyEvent(key_event);
+
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        notif->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (!notif) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    notif->GetHost()->SendKeyEvent(key_event);
+}
+
+@end
+
 // Settings Menu Overlay View (simplified - dropdown menu)
 @interface SettingsMenuOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
@@ -909,6 +1029,13 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // ============================================================================
 // Helper function for closing overlay windows from C++ code
 // ============================================================================
+
+extern "C" void HideNotificationOverlayWindow() {
+    if (g_notification_overlay_window) {
+        [g_notification_overlay_window orderOut:nil];
+        LOG_INFO("🔔 Notification overlay hidden (keep-alive)");
+    }
+}
 
 extern "C" void CloseOverlayWindow(void* window, void* parent) {
     if (!window) {
@@ -1317,6 +1444,117 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
 
     [g_brc100_auth_overlay_window makeKeyAndOrderFront:nil];
     LOG_INFO("✅ BRC-100 auth overlay created successfully");
+}
+
+void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams) {
+    LOG_INFO("🔔 Creating notification overlay (type: " + type + ", domain: " + domain + ") (macOS)");
+
+    NSRect mainFrame = [g_main_window frame];
+
+    // Build URL with query parameters
+    std::string queryString = "type=" + type + "&domain=" + domain;
+    if (!extraParams.empty()) queryString += extraParams;
+    std::string url = "http://127.0.0.1:5137/brc100-auth?" + queryString;
+
+    // Keep-alive: if window and browser already exist, use JS injection (instant)
+    CefRefPtr<CefBrowser> existing = SimpleHandler::GetNotificationBrowser();
+    if (g_notification_overlay_window && existing) {
+        LOG_INFO("🔔 Reusing existing notification overlay (keep-alive, JS injection)");
+
+        // Resize to match current main window
+        [g_notification_overlay_window setFrame:mainFrame display:YES];
+
+        if (type != "preload") {
+            // Escape single quotes in the query string for JS
+            std::string safeQuery = queryString;
+            size_t pos = 0;
+            while ((pos = safeQuery.find('\'', pos)) != std::string::npos) {
+                safeQuery.replace(pos, 1, "\\'");
+                pos += 2;
+            }
+
+            std::string js = "if(window.showNotification){window.showNotification('" + safeQuery + "')}else{window.location.search='?" + safeQuery + "'}";
+            existing->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+        }
+
+        existing->GetHost()->WasResized();
+        [g_notification_overlay_window makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    // First time or stale: clean up and create fresh
+    if (g_notification_overlay_window) {
+        CefRefPtr<CefBrowser> old_browser = SimpleHandler::GetNotificationBrowser();
+        if (old_browser) {
+            old_browser->GetHost()->CloseBrowser(false);
+        }
+        [g_notification_overlay_window close];
+        g_notification_overlay_window = nullptr;
+    }
+
+    g_notification_overlay_window = [[NSWindow alloc]
+        initWithContentRect:mainFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_notification_overlay_window) {
+        LOG_ERROR("❌ Failed to create notification overlay window");
+        return;
+    }
+
+    [g_notification_overlay_window setOpaque:NO];
+    [g_notification_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_notification_overlay_window setLevel:NSNormalWindowLevel];
+    [g_notification_overlay_window setIgnoresMouseEvents:NO];
+    [g_notification_overlay_window setReleasedWhenClosed:NO];
+    [g_notification_overlay_window setHasShadow:NO];
+
+    [g_main_window addChildWindow:g_notification_overlay_window ordered:NSWindowAbove];
+
+    NotificationOverlayView* contentView = [[NotificationOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
+    [g_notification_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("notification"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)mainFrame.size.width,
+                                   (int)mainFrame.size.height);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        url,
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("❌ Failed to create notification overlay CEF browser");
+        return;
+    }
+
+    if (type == "preload") {
+        [g_notification_overlay_window orderOut:nil];
+        LOG_INFO("🔔 Notification overlay pre-created (hidden)");
+    } else {
+        [g_notification_overlay_window makeKeyAndOrderFront:nil];
+    }
+
+    LOG_INFO("✅ Notification overlay created successfully");
 }
 
 void CreateSettingsMenuOverlay() {

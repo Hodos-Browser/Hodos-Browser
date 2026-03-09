@@ -581,6 +581,8 @@ public:
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateNotificationOverlay(g_hInstance, type_, domain_, extraParams_);
+#elif defined(__APPLE__)
+        CreateNotificationOverlay(type_, domain_, extraParams_);
 #endif
     }
 private:

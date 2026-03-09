@@ -78,8 +78,9 @@ extern std::string g_pendingModalDomain;
 #else
     // macOS global views
     extern NSView* g_webview_view;
-    // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
+    // macOS overlay helpers (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
+    extern "C" void HideNotificationOverlayWindow();
 #endif
 
 // Global backup modal state management
@@ -3194,6 +3195,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern NSWindow* g_wallet_overlay_window;
         extern NSWindow* g_backup_overlay_window;
         extern NSWindow* g_brc100_auth_overlay_window;
+        extern NSWindow* g_notification_overlay_window;
 
         NSWindow* target_window = nullptr;
         CefRefPtr<CefBrowser> target_browser = nullptr;
@@ -3210,9 +3212,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "brc100auth") {
             target_window = g_brc100_auth_overlay_window;
             target_browser = GetBRC100AuthBrowser();
+        } else if (role_ == "notification") {
+            target_window = g_notification_overlay_window;
+            target_browser = GetNotificationBrowser();
         }
 
-        if (target_window) {
+        // Keep-alive: notification overlay hides instead of destroying
+        if (role_ == "notification" && target_window) {
+            HideNotificationOverlayWindow();
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript(
+                    "window.hideNotification && window.hideNotification()", "", 0);
+            }
+            extern std::string g_pendingModalDomain;
+            g_pendingModalDomain = "";
+            LOG_DEBUG_BROWSER("🔔 Notification overlay hidden (keep-alive), cleared modal domain");
+        } else if (target_window) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window");
 
             // Close the browser first
@@ -3224,6 +3240,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
                 else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
+                else if (role_ == "notification") notification_browser_ = nullptr;
             }
 
             // Remove from parent window and close
@@ -3239,6 +3256,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_backup_overlay_window = nullptr;
             } else if (role_ == "brc100auth") {
                 g_brc100_auth_overlay_window = nullptr;
+            } else if (role_ == "notification") {
+                g_notification_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -3505,12 +3524,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                                 CefURLRequest::Status status = request->GetRequestStatus();
                                 if (status == UR_SUCCESS && !responseData_.empty()) {
                                     LOG_DEBUG_BROWSER("🔐 Authentication response generated successfully");
-#ifdef _WIN32
                                     extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
                                     handleAuthResponse(requestId_, responseData_);
-#else
-                                    LOG_WARNING_BROWSER("Warning: handleAuthResponse not implemented on macOS");
-#endif
                                 } else {
                                     LOG_DEBUG_BROWSER("🔐 Failed to generate authentication response (status: " + std::to_string(status) + ")");
                                 }
@@ -3544,7 +3559,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 } else {
                     LOG_DEBUG_BROWSER("🔐 User rejected auth request");
 
-#ifdef _WIN32
                     if (!requestId.empty()) {
                         extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
                         handleAuthResponse(requestId, "{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
@@ -3552,7 +3566,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                         extern void handleAuthResponse(const std::string& responseData);
                         handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
                     }
-#endif
                     g_pendingModalDomain = "";
                 }
             } catch (const std::exception& e) {

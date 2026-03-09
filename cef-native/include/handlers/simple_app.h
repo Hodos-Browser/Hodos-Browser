@@ -54,6 +54,7 @@
     extern NSWindow* g_wallet_overlay_window;
     extern NSWindow* g_backup_overlay_window;
     extern NSWindow* g_brc100_auth_overlay_window;
+    extern NSWindow* g_notification_overlay_window;
     extern NSWindow* g_settings_menu_overlay_window;
 
     // macOS overlay creation functions
@@ -61,6 +62,7 @@
     void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
     void CreateBackupOverlayWithSeparateProcess();
     void CreateBRC100AuthOverlayWithSeparateProcess();
+    void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay();
 
     // Helper function to get NSView dimensions (implemented in cef_browser_shell_mac.mm)
