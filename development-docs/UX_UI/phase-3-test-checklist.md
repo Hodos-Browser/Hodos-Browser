@@ -290,6 +290,145 @@ curl -X POST http://127.0.0.1:3301/wallet/peerpay/dismiss
 
 ---
 
+---
+
+## Phase 3b: Paymail + Identity Resolution
+
+### 12. Paymail Send (Sprint 3b.1-2)
+
+#### 12.1 Paymail Detection
+- [ ] Type `alice@handcash.io` → recipient dropdown appears with spinner
+- [ ] Type `$alice` → converts to `alice@handcash.io`, dropdown appears
+- [ ] Resolution completes: name + avatar + P2P badge shown
+- [ ] Invalid paymail (e.g., `foo@nonexistent.xyz`) → dropdown shows error
+- [ ] Clear field → dropdown disappears
+
+#### 12.2 Paymail Send Flow
+- [ ] Enter valid paymail + amount → click Send
+- [ ] P2P path: transaction submitted back to receiver's server
+- [ ] Basic fallback: works for paymails without P2P support
+- [ ] Success: txid shown, form resets, balance updates
+- [ ] Error: friendly message shown (network, invalid paymail, insufficient funds)
+
+#### 12.3 HandCash Handle
+- [ ] `$handle` format detected and converted to `handle@handcash.io`
+- [ ] Resolution works (shows HandCash profile if available)
+- [ ] Send works via P2P path
+
+### 13. Identity Name Resolution (Sprint 3b.3-4)
+
+#### 13.1 Identity Key Resolution
+- [ ] Paste 66-char identity key (02.../03...) → dropdown appears with spinner
+- [ ] If identity found: avatar + name + source (e.g., "X/Twitter via SocialCert") + checkmark
+- [ ] If not found: "Identity key detected" (still sends via PeerPay)
+- [ ] Debounce: no flicker during typing, resolves after 300ms pause
+
+#### 13.2 Unified Detection
+- [ ] BSV address (1... or 3...): no dropdown, standard send
+- [ ] Identity key: PeerPay routing + identity resolution
+- [ ] Paymail: paymail routing + name resolution
+- [ ] $handle: paymail routing via handcash.io
+- [ ] Invalid input: no resolution, validation error on submit
+
+#### 13.3 Caching
+- [ ] Same identity key resolves instantly on second attempt (frontend cache)
+- [ ] Backend caches overlay results for 10 minutes
+
+---
+
+## Phase 4: Advanced Wallet Dashboard
+
+### 14. Dashboard Layout (Sprint 4.1)
+
+#### 14.1 Sidebar Navigation
+- [ ] Wallet overlay opens with sidebar visible (5 tabs)
+- [ ] Clicking each tab switches content area: Dashboard, Activity, Certificates, Approved Sites, Settings
+- [ ] Active tab highlighted with gold accent
+- [ ] Sidebar width consistent, no layout shift
+
+#### 14.2 Dashboard Tab
+- [ ] Balance displays correctly (BSV + USD)
+- [ ] QR code generates for receive address (BIP21 format)
+- [ ] Send form works (TransactionForm embedded)
+- [ ] Recent activity shows 5 most recent transactions (sent + received)
+- [ ] Recent activity shows USD values per row
+
+### 15. Activity Tab (Sprint 4.2 + 4.6)
+
+#### 15.1 Transaction List
+- [ ] Shows BOTH sent AND received transactions
+- [ ] Sorted newest-first
+- [ ] Direction arrow: up for sent, down for received
+- [ ] Description, BSV amount, human-readable date shown per row
+
+#### 15.2 USD Display
+- [ ] USD at transaction time shown (primary, right side)
+- [ ] Current USD shown as secondary if different: `(now: $X.XX)`
+- [ ] Old transactions (no historical price): show current price or `--`
+
+#### 15.3 Pagination
+- [ ] 10 items per page
+- [ ] `[<] Page X of Y [>]` controls at bottom
+- [ ] Prev button disabled on page 1
+- [ ] Next button disabled on last page
+- [ ] "Showing X-Y of Z" counter visible
+
+#### 15.4 Filters
+- [ ] All / Sent / Received filter buttons
+- [ ] Changing filter resets to page 1
+- [ ] Active filter highlighted
+- [ ] Counts update correctly per filter
+
+#### 15.5 TxID & External Links
+- [ ] Copy icon: click copies full txid to clipboard
+- [ ] Copy icon: tooltip shows truncated txid on hover
+- [ ] Copy icon: checkmark shows for 2s after copy
+- [ ] WhatsOnChain icon: opens `https://whatsonchain.com/tx/{txid}` in new browser tab
+
+### 16. Certificates Tab (Sprint 4.3)
+- [ ] BRC-52 certificates listed (if any exist)
+- [ ] Certificate details expandable
+- [ ] Empty state shown when no certificates
+
+### 17. Approved Sites Tab (Sprint 4.3)
+- [ ] Domain permissions list displayed
+- [ ] Default limit controls visible (per-tx, per-session, rate limit)
+- [ ] Changing defaults saves to backend
+- [ ] "Reset All" button clears all permissions
+- [ ] Embedded MUI DomainPermissionsTab renders correctly in dark theme
+
+### 18. Settings Tab (Sprint 4.4)
+
+#### 18.1 Display Name
+- [ ] Shows current display name (default: "Anonymous")
+- [ ] Editable text field, saves on blur or Enter
+- [ ] Persists after closing/reopening wallet
+
+#### 18.2 Mnemonic Reveal
+- [ ] "Reveal Recovery Phrase" button visible
+- [ ] Requires PIN entry before showing mnemonic
+- [ ] Correct PIN: mnemonic displayed
+- [ ] Wrong PIN: error message shown
+- [ ] Mnemonic hidden again after closing section
+
+#### 18.3 Export Backup
+- [ ] "Export Backup" button visible
+- [ ] Clicking downloads `.hodos` encrypted backup file
+
+#### 18.4 Delete Wallet
+- [ ] "Delete Wallet" button visible (red/destructive styling)
+- [ ] 2-step confirmation: first click shows warning, second click confirms
+- [ ] Refuses to delete if spendable balance > 0 satoshis
+- [ ] Successful deletion: wallet cleared, returns to setup flow
+
+### 19. Dark Theme & Layout
+- [ ] All tabs render with dark background, light text
+- [ ] No visual artifacts or unreadable text
+- [ ] Embedded MUI components styled correctly (tables, inputs, switches)
+- [ ] Layout responsive — no horizontal scroll, content fills available space
+
+---
+
 ## Sign-Off
 
 | Area | Tester | Pass/Fail | Notes |
@@ -306,3 +445,11 @@ curl -X POST http://127.0.0.1:3301/wallet/peerpay/dismiss
 | Visual/CSS | | | |
 | Integration | | | |
 | Standard Sites | | | |
+| Paymail Send | | | |
+| Identity Resolution | | | |
+| Dashboard Layout | | | |
+| Activity Tab | | | |
+| Certificates Tab | | | |
+| Approved Sites Tab | | | |
+| Settings Tab | | | |
+| Dark Theme | | | |

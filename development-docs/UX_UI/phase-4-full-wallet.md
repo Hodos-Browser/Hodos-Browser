@@ -1,114 +1,141 @@
-# Wallet Dashboard (Full Wallet) Implementation Plan
+# Phase 4: Advanced Wallet Dashboard — Implementation Summary
 
-**Date**: March 6, 2026
+**Date**: March 8, 2026
 **Project**: Hodos Browser
-**Phase**: 4 - Full Wallet Experience
-**Status**: 🏗️ Strategic Planning (Prioritizing Dashboard Layout)
+**Phase**: 4 - Full Wallet Dashboard
+**Status**: IMPLEMENTED — Needs Testing & Refinement
 
 ---
 
-## 1. Executive Summary
+## 1. Overview
 
-Phase 4 moves the wallet from a simple "Quick Access" overlay (Light Wallet) to a first-class browser experience. We are renaming "Advanced Wallet" to **"Wallet"** and centering the experience on a comprehensive **Dashboard** with a left-side navigation sidebar.
-
-The goal is to provide a beautiful, branded (Gold/Black), and identity-first interface that handles both BRC-100 (Identity) and Legacy (ECC/UTXO) operations.
+Phase 4 replaced the old MUI-tab wallet overlay (786 lines in `WalletOverlayRoot.tsx`) with a sidebar + content dashboard layout. The wallet now has five navigable sections with a dark theme, lazy-loaded tabs, and deep-linking support.
 
 ---
 
-## 2. Interface & Layout (Dashboard-First)
+## 2. What Was Built
 
-### 2.1 The "Gold & Black" Sidebar (Left)
-*   **Branding**: Fixed Sidebar on the left (`width: 260px`).
-*   **Theme**: Dark (`#000000`) with Gold (`#a67c00`) highlights for the active state.
-*   **Logo**: The "Hodos Gold Wallet" icon in the top-left.
-*   **Navigation Items**:
-    1.  **Dashboard** (Home) - [Icon: LayoutDashboard]
-    2.  **Transactions** - [Icon: History]
-    3.  **Addresses** - [Icon: MapPin]
-    4.  **Certificates** (BRC-100) - [Icon: ShieldCheck]
-    5.  **Vault** (Security & Keys) - [Icon: Lock]
+### Sprint 4.1: Layout Shell + Dashboard
+- `WalletSidebar.tsx` — Left sidebar navigation (5 tabs)
+- `DashboardTab.tsx` — Balance card, QR receive, send form (TransactionForm), recent activity (5 most recent)
+- Sidebar uses gold highlight on active tab, compact icon+label layout
 
-### 2.2 The Dashboard (Homepage) Layout
-The Dashboard is the "at-a-glance" command center.
+### Sprint 4.2: Activity Tab
+- `ActivityTab.tsx` — Full transaction history with unified sent/received
+- Direction filter (All / Sent / Received)
+- Pagination: 10 per page, `[<] Page X of Y [>]`
+- Copy txid icon + WhatsOnChain external link per row
+- USD at transaction time + current USD display
 
-#### **Section A: Balance & Quick Actions (Top)**
-*   **Card**: Large, high-contrast card showing `Total BSV Balance` and its `USD Equivalent`.
-*   **Buttons**: Large [Send] and [Receive] buttons with Gold accents.
+### Sprint 4.3: Certificates + Approved Sites
+- `CertificatesTab.tsx` — Extracted from old WalletOverlayRoot, same BRC-52 certificate list
+- `ApprovedSitesTab.tsx` — Wraps existing `DomainPermissionsTab` + default auto-approve limit controls (per-tx, per-session, rate limit)
 
-#### **Section B: Dual-Identity QR Widget (Center-Right)**
-*   **Identity QR (Static)**: Your BRC-100 **Identity Key (BIP32/BRC-42 pubkey)** QR. This is your "Public Web3 ID."
-*   **Legacy QR (Dynamic)**: A QR for a **freshly generated ECC address**.
-    *   **Action**: A prominent "Generate New" button to cycle to the next unused address in the derivation path (Privacy-first).
-    *   **Label**: Clearly marked as "Single-Use Payment Address."
+### Sprint 4.4: Settings Tab
+- `SettingsTab.tsx` — Display name editor, PIN-gated mnemonic reveal, export backup, delete wallet with 2-step confirmation
+- New endpoints: `GET/POST /wallet/settings`, `POST /wallet/reveal-mnemonic`, `POST /domain/permissions/reset-all`
 
-#### **Section C: Activity & Assets (Bottom-Left)**
-*   **Recent Activity**: A list of the last 5 transactions (Filtered by Type: Payment, BRC-100, etc.).
-*   **Asset Summary**: (Table) BSV Balance, Total Certificates Count, and Active Sessions.
+### Sprint 4.5: Dark Theme CSS
+- `WalletDashboard.css` — Full dark theme, MUI overrides for embedded DomainPermissionsTab
+- Responsive layout, lazy-loaded tabs via `React.lazy()` + `Suspense`
 
----
-
-## 3. "The Vault" (Security & Key Management)
-
-This is the high-security section for sensitive operations (Phase 4 final sprint).
-*   **Identity Management**: View/Copy the BRC-42 Identity Pubkey and Mnemonic (requires PIN).
-*   **Key Export**: Export individual Private Keys for specific ECC addresses (with "Nuclear" warnings).
-*   **Data Management**:
-    *   **Export Wallet**: Generate encrypted `.hodos-wallet` backup.
-    *   **Delete Wallet**: The final "Nuclear Option" with triple confirmation and PIN verification.
+### Unified Activity History (Sprint 4.6, added 2026-03-09)
+- V11 DB migration: `price_usd_cents INTEGER` column on `transactions` + `peerpay_received`
+- New `GET /wallet/activity` endpoint merging both tables with deduplication, ISO timestamps, pagination, direction filter
+- ActivityTab rewrite to use unified endpoint
+- DashboardTab recent activity uses `/wallet/activity?page=1&limit=5&filter=all`
+- Price snapshot at transaction time recorded in create_action, internalize_action, task_check_peerpay, task_sync_pending
 
 ---
 
-## 4. Technical Component Architecture
+## 3. Architecture
 
-### **Layout Wrapper**
-*   `src/layouts/WalletLayout.tsx`: Handles the Sidebar and the Responsive Content area.
+### Frontend Files
 
-### **Pages**
-*   `src/pages/wallet/DashboardPage.tsx`: The primary entry point.
-*   `src/pages/wallet/TransactionsPage.tsx`: Full searchable/filterable transaction list.
-*   `src/pages/wallet/AddressesPage.tsx`: Management of all derived ECC addresses and labels.
-*   `src/pages/wallet/CertificatesPage.tsx`: BRC-100 certificate browser.
-*   `src/pages/wallet/VaultPage.tsx`: Security and Key management.
+| File | Purpose |
+|------|---------|
+| `frontend/src/components/wallet/WalletSidebar.tsx` | Sidebar navigation (Dashboard, Activity, Certificates, Approved Sites, Settings) |
+| `frontend/src/components/wallet/DashboardTab.tsx` | Balance + QR + Send form + Recent activity |
+| `frontend/src/components/wallet/ActivityTab.tsx` | Full transaction history with pagination, filters, USD |
+| `frontend/src/components/wallet/CertificatesTab.tsx` | BRC-52 certificate list (extracted) |
+| `frontend/src/components/wallet/ApprovedSitesTab.tsx` | Domain permissions + default limit controls |
+| `frontend/src/components/wallet/SettingsTab.tsx` | Display name, mnemonic reveal, backup, delete |
+| `frontend/src/components/wallet/WalletDashboard.css` | All dashboard styles, dark theme |
 
----
+### Backend Endpoints Added
 
-## 4b. Settings — Wallet Preferences
+| Method | Path | Handler | Purpose |
+|--------|------|---------|---------|
+| GET | `/wallet/settings` | `wallet_get_settings` | Read display name + default limits |
+| POST | `/wallet/settings` | `wallet_set_settings` | Update display name + default limits |
+| POST | `/wallet/reveal-mnemonic` | `wallet_reveal_mnemonic` | PIN-gated mnemonic reveal |
+| POST | `/domain/permissions/reset-all` | `domain_permissions_reset_all` | Clear all domain permissions |
+| GET | `/wallet/activity` | `wallet_activity` | Unified sent+received activity with pagination |
 
-### Sender Display Name
+### Database Changes
 
-The wallet stores a `sender_display_name` in the `settings` table (default: `"Anonymous"`). This name is sent to paymail recipients as the "from" label (formatted as `"{name}'s Hodos Wallet"`).
+| Migration | Table | Change |
+|-----------|-------|--------|
+| V10 | `settings` | Added `default_per_tx_limit_cents`, `default_per_session_limit_cents`, `default_rate_limit_per_min` |
+| V11 | `transactions` | Added `price_usd_cents INTEGER` |
+| V11 | `peerpay_received` | Added `price_usd_cents INTEGER` |
 
-**Phase 4 UI task**: Add a "Display Name" text field to the Wallet settings tab in the full wallet dashboard. Include an info icon (tooltip/hover) explaining:
+### Key Patterns
 
-> *"This name is shown to paymail recipients when you send them BSV. It tells them who the payment came from. Currently formatted as '{Your Name}'s Hodos Wallet'."*
-
-**Future (Open Paymail)**: When the Open Paymail protocol is implemented, the sender label will transition to the user's registered paymail alias (e.g. `alice@paymail`) and the "Hodos Wallet" suffix will be removed. The same `sender_display_name` field will serve as the registration alias, so no schema change is needed — only the formatting logic changes.
-
----
-
-## 5. Implementation Roadmap (Sprint 4.1: Dashboard)
-
-1.  **[ ] Phase 4.1a: Layout Shell**
-    *   Create the `WalletLayout` with the Sidebar.
-    *   Implement "Gold on Black" branding for the navigation.
-    *   Setup the `/wallet/*` route structure in `App.tsx`.
-
-2.  **[ ] Phase 4.1b: The Dashboard Core**
-    *   Integrate `BalanceCache` to show total BSV + USD.
-    *   Implement the **Dual QR Widget** (Static Identity vs. Dynamic Legacy).
-    *   Implement "Quick Action" buttons for Send/Receive.
-
-3.  **[ ] Phase 4.1c: Transaction Feed**
-    *   Connect the Dashboard's "Recent Activity" to the Rust backend history.
+- **Lazy-loaded tabs**: `React.lazy()` + `Suspense` — each tab is a separate chunk
+- **Dark theme**: CSS-only (no MUI ThemeProvider), uses `WalletDashboard.css`
+- **Deep-linking**: `?tab=N` query param for direct tab navigation
+- **Price snapshot**: `state.price_cache.get_cached().or_else(|| state.price_cache.get_stale()).map(|p| (p * 100.0) as i64)`
 
 ---
 
-## 6. UX Best Practices & Considerations
+## 4. Sender Display Name
 
-*   **Pixels vs. Percentages**: The Sidebar will be a fixed `rem` or `px` width, while the main dashboard uses a flexible `CSS Grid` (max 3 columns) to look great on 1080p and 4K.
-*   **Progressive Disclosure**: Detailed UTXO data is hidden in "Advanced" sub-menus on the Addresses page, keeping the Dashboard clean.
-*   **Feedback**: All buttons must have a `100ms` visual press feedback to feel responsive.
+The wallet stores `sender_display_name` in the `settings` table (default: `"Anonymous"`). This name is sent to paymail recipients as the "from" label (formatted as `"{name}'s Hodos Wallet"`).
+
+**Settings tab UI**: Text field with info tooltip explaining the purpose. Saves on blur or Enter.
+
+**Future (Open Paymail)**: When implemented, `sender_display_name` becomes the paymail registration alias and the "Hodos Wallet" suffix is removed. No schema change needed.
 
 ---
 
-*This document replaces the old `phase-4-full-wallet.md`. All future Wallet Dashboard tasks should be tracked here.*
+## 5. Testing Status
+
+### Needs Testing
+
+- [ ] Dashboard tab: balance displays correctly, QR code generates, send form works
+- [ ] Activity tab: shows both sent AND received transactions
+- [ ] Activity tab: pagination works (next/prev, page counter)
+- [ ] Activity tab: direction filter (All/Sent/Received) resets to page 1
+- [ ] Activity tab: USD at tx time displays, current USD shown when different
+- [ ] Activity tab: copy txid icon works (shows checkmark 2s)
+- [ ] Activity tab: WoC link opens transaction in new browser tab
+- [ ] Certificates tab: lists existing certificates
+- [ ] Approved Sites tab: shows domain permissions, default limits editable
+- [ ] Settings tab: display name editable and persists
+- [ ] Settings tab: mnemonic reveal requires correct PIN
+- [ ] Settings tab: export backup downloads .hodos file
+- [ ] Settings tab: delete wallet has 2-step confirmation, refuses if balance > 0
+- [ ] Sidebar navigation: all 5 tabs switch correctly
+- [ ] Dark theme: no visual artifacts, all text readable
+- [ ] DashboardTab recent activity: shows 5 most recent with USD values
+
+### Known Issues to Investigate
+
+- Send transaction black screen / wallet close (C++ IPC blocking UI thread — see MEMORY.md)
+- Activity timestamps may need timezone handling verification
+- Historical USD prices only recorded for new transactions (old ones show current price only)
+
+---
+
+## 6. Future Work (Phase 5+)
+
+- Activity Status Indicator (Phase 5, low priority)
+- Addresses page (view/label derived addresses)
+- Vault section (advanced key management)
+- Per-site toggle for identity resolution
+- V&B branding alignment pass on earlier phases
+
+---
+
+*This document replaces the original Phase 4 strategic planning doc. All wallet dashboard tasks should be tracked here.*

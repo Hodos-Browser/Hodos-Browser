@@ -4,8 +4,8 @@
 
 This document serves as the master index and tracker for the Web3 BitcoinSV UI/UX interfaces in Hodos Browser. It tracks both original implementation status and the current **Verification & Branding Alignment Pass (V&B)** — a systematic re-test of the entire wallet flow from Phase 0 onwards, aligning all interfaces with Hodos branding.
 
-**Document Version:** 2.0
-**Last Updated:** 2026-03-03
+**Document Version:** 3.0
+**Last Updated:** 2026-03-09
 **Target Audience:** UI/UX Developers, Full-Stack Developers
 
 ---
@@ -40,10 +40,11 @@ The Web3 BitcoinSV UI/UX includes a startup flow (foundation) and five key inter
 | 1d. Raw Private Key Recovery | PLANNING | [phase-1d-raw-private-key-recovery.md](./phase-1d-raw-private-key-recovery.md) | 2026-03-03 |
 | 2. User Notifications (2.0–2.3.7) | COMPLETE | [phase-2-research-findings.md](./phase-2-research-findings.md) | 2026-02-25 |
 | 2. User Notifications (remaining) | TODO | [phase-2-research-findings.md](./phase-2-research-findings.md) | 2026-02-25 |
-| 3. Light Wallet (Polish) | PLANNING | [phase-3-light-wallet.md](./phase-3-light-wallet.md) | 2026-02-11 |
-| 3a. BRC-29 Peer Payments | PLANNING | [phase-3a-brc29-peer-payments.md](./phase-3a-brc29-peer-payments.md) | 2026-02-26 |
-| **Phase 3 Master Plan** | PLANNING | [PHASE_3_IMPLEMENTATION_PLAN.md](./PHASE_3_IMPLEMENTATION_PLAN.md) | 2026-02-26 |
-| 4. Full Wallet | PLANNING | [phase-4-full-wallet.md](./phase-4-full-wallet.md) | 2026-02-11 |
+| 3. Light Wallet (Polish) | COMPLETE | [phase-3-light-wallet.md](./phase-3-light-wallet.md) | 2026-03-04 |
+| 3a. BRC-29 Peer Payments | COMPLETE | [phase-3a-brc29-peer-payments.md](./phase-3a-brc29-peer-payments.md) | 2026-03-05 |
+| 3b. Paymail + Identity Resolution | COMPLETE (needs testing) | [phase-3b-paymail-identity-resolution.md](./phase-3b-paymail-identity-resolution.md) | 2026-03-07 |
+| **Phase 3 Master Plan** | COMPLETE | [PHASE_3_IMPLEMENTATION_PLAN.md](./PHASE_3_IMPLEMENTATION_PLAN.md) | 2026-03-07 |
+| 4. Full Wallet Dashboard | COMPLETE (needs testing) | [phase-4-full-wallet.md](./phase-4-full-wallet.md) | 2026-03-09 |
 | 5. Activity Status Indicator | PLANNING (Low Priority) | [phase-5-activity-status-indicator.md](./phase-5-activity-status-indicator.md) | - |
 
 ### Phase 2 — Detailed Sub-Phase Status

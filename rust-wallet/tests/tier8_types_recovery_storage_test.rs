@@ -102,6 +102,7 @@ fn make_test_action(
         lock_time: 0,
         inputs: vec![],
         outputs: vec![],
+        price_usd_cents: None,
     }
 }
 

@@ -19,13 +19,13 @@
 
 ---
 
-## Current Work: Phase 3 Complete — V&B Pass Pending
+## Current Status: Phase 4 Complete — Testing & Refinement Needed
 
-**Phase 3 (Light Wallet Polish + BRC-29 PeerPay)** is now COMPLETE. The V&B (Verification & Branding Alignment) pass for earlier phases is still pending.
+**Phases 3, 3a, 3b, and 4** are all IMPLEMENTED. All need real-world testing and refinement before MVP.
 
-**See [00-IMPLEMENTATION_INDEX.md](./00-IMPLEMENTATION_INDEX.md)** for the full V&B schedule and checklists.
+**See [00-IMPLEMENTATION_INDEX.md](./00-IMPLEMENTATION_INDEX.md)** for full status and V&B schedule.
 
-### Phase 3 Completed Sprints
+### Phase 3: Light Wallet Polish + BRC-29 PeerPay (COMPLETE)
 
 | Sprint | Description | Status |
 |--------|-------------|--------|
@@ -36,7 +36,29 @@
 | 3.4 | PeerPay receive (background poller + polling badge) | COMPLETE |
 | 3.5 | Error handling, labels, documentation | COMPLETE |
 
-### V&B Pass (Pending)
+### Phase 3a: BRC-29 PeerPay Rebuild (COMPLETE — 2026-03-05)
+Full rewrite with correct BRC-29 + MessageBox protocol. See `phase-3a-brc29-peer-payments.md`.
+
+### Phase 3b: Paymail + Identity Resolution (COMPLETE — 2026-03-07)
+
+| Sprint | Description | Status |
+|--------|-------------|--------|
+| 3b.1 | Paymail backend (`paymail.rs`, `paymail_send`, `paymail_resolve`) | COMPLETE |
+| 3b.2 | Paymail frontend (detection, debounced resolve, send routing) | COMPLETE |
+| 3b.3-4 | Unified recipient resolution (`identity_resolver.rs`, `/wallet/recipient/resolve`, dropdown UI) | COMPLETE |
+
+### Phase 4: Advanced Wallet Dashboard (COMPLETE — 2026-03-08)
+
+| Sprint | Description | Status |
+|--------|-------------|--------|
+| 4.1 | Layout shell — sidebar nav, DashboardTab (balance, QR, send, recent activity) | COMPLETE |
+| 4.2 | ActivityTab — unified sent/received, pagination, USD, copy txid, WoC link | COMPLETE |
+| 4.3 | CertificatesTab, ApprovedSitesTab (domain permissions + default limits) | COMPLETE |
+| 4.4 | SettingsTab (display name, PIN mnemonic reveal, backup export, wallet delete) | COMPLETE |
+| 4.5 | Dark theme CSS, responsive layout, lazy-loaded tabs | COMPLETE |
+| 4.6 | Unified activity history — V11 migration, `/wallet/activity` endpoint, price snapshots | COMPLETE |
+
+### V&B Pass (Pending — Lower Priority)
 
 | Step | Status |
 |------|--------|
@@ -81,7 +103,7 @@ Before writing or modifying ANY wallet UI code, read these docs:
 
 ---
 
-## Implementation Status (as of 2026-03-03)
+## Implementation Status (as of 2026-03-09)
 
 | Phase | Name | Status | Key Doc |
 |-------|------|--------|---------|
@@ -92,7 +114,9 @@ Before writing or modifying ANY wallet UI code, read these docs:
 | **2** | Remaining (2.3.8, 2.4.x) | TODO | `phase-2-research-findings.md` |
 | **CR-2** | Interceptor Architecture | COMPLETE | (done as part of Phase 2.2) |
 | **3** | Light Wallet (Polish + BRC-29) | COMPLETE | `phase-3-light-wallet.md`, `PHASE_3_IMPLEMENTATION_PLAN.md` |
-| **4** | Full Wallet | PLANNING | `phase-4-full-wallet.md` |
+| **3a** | BRC-29 PeerPay Rebuild | COMPLETE (needs testing) | `phase-3a-brc29-peer-payments.md` |
+| **3b** | Paymail + Identity Resolution | COMPLETE (needs testing) | `phase-3b-paymail-identity-resolution.md` |
+| **4** | Full Wallet Dashboard | COMPLETE (needs testing) | `phase-4-full-wallet.md` |
 | **5** | Activity Status Indicator | PLANNING (Low Priority) | `phase-5-activity-status-indicator.md` |
 
 ---
@@ -179,39 +203,35 @@ From `phase-2-research-findings.md`:
 |------|-------------|--------|
 | 2.3.8 | Certificate field disclosure notification | TODO |
 | 2.4.1 | BRC-104 nonce fix in Rust | TODO |
-| 2.4.1b | Rust defense-in-depth permission checks | TODO |
-| 2.4.2 | Domain permissions UI in wallet settings | TODO |
+| 2.4.2 | Domain permissions UI in wallet settings | DONE (ApprovedSitesTab in Phase 4) |
 | 2.4.4 | Documentation updates | TODO |
 
-**Key infrastructure already built:**
-- `DomainPermissionCache` (C++ singleton, reads from Rust DB)
-- `PendingRequestManager` (per-request map, replaces global)
-- `SessionManager` (per-browser-session spending/rate tracking)
-- `BSVPriceCache` (USD conversion for spending limits)
-- Notification overlay with keep-alive (HWND reused, hidden/shown)
+---
+
+## Phase 3: What Was Built
+
+Phase 3 was a polish pass + BRC-29 peer payments + paymail + identity resolution:
+
+- **3.1**: Button audit (native), QR code (BIP21), notification badge
+- **3a**: BRC-29 PeerPay rebuild (authfetch, MessageBox, auto-accept, encrypted payments)
+- **3b**: Paymail resolution (bsvalias protocol, P2P + basic paths, HandCash $handle support)
+- **3b**: Identity name resolution (BSV Overlay Services, PushDrop, BRC-2 anyone-key decryption)
+- **3b**: Unified recipient resolution (`/wallet/recipient/resolve` — auto-detects all 4 input types)
 
 ---
 
-## Phase 3: What to Know
+## Phase 4: What Was Built
 
-Phase 3 is a **polish pass** on the existing wallet overlay (`WalletPanelLayout.tsx`) + BRC-29 peer payments:
+Phase 4 replaced the old MUI-tab wallet overlay with a sidebar + content dashboard:
 
-- Apply Hodos gold branding (should be done from the start, not retrofitted)
-- Add button feedback states (hover, pressed, loading) per helper-2
-- Add BSV QR code to receive section
-- Add progress indicators for transactions
-- Micro UX fixes (copy feedback, inline validation, empty states)
-- BRC-29 peer-to-peer payments via identity key + MessageBox
+- **4.1**: Sidebar navigation, DashboardTab (balance, QR, send form, recent activity)
+- **4.2**: ActivityTab (unified sent+received, pagination, USD at tx time, copy txid, WoC link)
+- **4.3**: CertificatesTab, ApprovedSitesTab (domain permissions + default limits)
+- **4.4**: SettingsTab (display name, PIN mnemonic reveal, backup export, delete wallet)
+- **4.5**: Dark theme CSS, lazy-loaded tabs, responsive layout
+- **4.6**: Unified activity history (V11 migration, `/wallet/activity` endpoint, price snapshots)
 
----
-
-## Phase 4: Route Namespace Warning
-
-The `/wallet` route is currently used by the wallet overlay. Phase 4 (Full Wallet) proposes sub-routes like `/wallet/overview`, `/wallet/addresses`. **Resolve this conflict during Phase 4 planning:**
-
-- Option A: Move light wallet to overlay-only (no URL route)
-- Option B: Use `/wallet-full/*` for Phase 4
-- Option C: Phase 4 replaces overlay and owns `/wallet/*`
+Route namespace resolved: Phase 4 owns `/wallet` as the overlay route. No sub-routes needed — tabs are components within the single overlay.
 
 ---
 
@@ -295,4 +315,4 @@ html, body {
 
 ---
 
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-03-09

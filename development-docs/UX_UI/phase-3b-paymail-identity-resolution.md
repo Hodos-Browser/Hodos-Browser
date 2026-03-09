@@ -1,8 +1,8 @@
 # Phase 3b: Paymail Support + Identity Name Resolution
 
-**Status**: Planned (after PeerPay rebuild completion)
-**Dependencies**: Phase 3a (BRC-29 PeerPay) must be complete
-**Estimated Effort**: 4-6 days across 4 sprints
+**Status**: IMPLEMENTED — Needs Testing & Refinement
+**Completed**: 2026-03-07
+**Dependencies**: Phase 3a (BRC-29 PeerPay) — complete
 
 ---
 
@@ -580,7 +580,8 @@ Update field hint:
 | `rust-wallet/src/handlers.rs` | EDIT — Add `paymail_send`, `paymail_resolve`, `identity_resolve` endpoints |
 | `rust-wallet/src/main.rs` | EDIT — Add modules, register routes |
 | `rust-wallet/Cargo.toml` | EDIT — Add `hickory-resolver` for DNS SRV |
-| `frontend/src/components/TransactionForm.tsx` | EDIT — Add paymail/identity detection, debounced resolution, routing |
+| `frontend/src/components/TransactionForm.tsx` | EDIT — Unified recipient resolution with dropdown UI |
+| `frontend/src/components/wallet/TransactionComponents.css` | NEW — Recipient dropdown styles |
 
 ## Crypto Reuse (DO NOT rewrite)
 
@@ -590,3 +591,42 @@ Update field hint:
 | `derive_symmetric_key` | `crypto/brc2.rs` | ECDH symmetric key for BRC-2 decryption |
 | existing BEEF parser | `beef.rs` | Parse BEEF-encoded overlay responses |
 | existing tx builder | `handlers.rs` / `transaction/` | Build and sign transactions for paymail outputs |
+
+---
+
+## Implementation Summary (All 4 Sprints Complete)
+
+### What Was Actually Built
+
+**Sprint 1: Paymail Backend** — `rust-wallet/src/paymail.rs`
+- `PaymailClient`: parse_paymail ($handle + alias@domain), SRV overrides (handcash.io → cloud.handcash.io), capability cache (1h TTL)
+- P2P destination + basic fallback, submit_transaction (receive-tx notification), get_profile, resolve
+- `POST /wallet/paymail/send`: P2P preferred → basic fallback → createAction → broadcast → P2P notify (non-fatal)
+- `GET /wallet/paymail/resolve?address=`: returns `{valid, name, avatar_url, has_p2p}`, always HTTP 200
+- 16 unit tests. No new dependencies (reuses reqwest, serde_json, chrono, thiserror, log)
+- Key pattern: `randomize_outputs: false` for P2P (reference depends on output order), `true` for basic
+- Sender: `"anonymous@hodosbrowser.com"` (we don't host paymail)
+
+**Sprint 2: Paymail Frontend** — `TransactionForm.tsx`
+- Added `PAYMAIL_REGEX`, `isPaymail` memo, debounced resolve via `/wallet/paymail/resolve`
+- Paymail submit branch via `/wallet/paymail/send`
+- Three-way detection: BSV address → standard send, identity key → PeerPay, paymail → bsvalias
+
+**Sprints 3+4: Unified Recipient Resolution** — Consolidated into a single implementation
+- `rust-wallet/src/identity_resolver.rs`: BSV Overlay Services lookup (`ls_identity`), BEEF parse → PushDrop decode → BRC-2 anyone-key decryption. 10-min cache. US/EU overlay fallback. Trusted certifiers: Metanet Trust + SocialCert. Maps 5 cert types to name/avatar fields.
+- `GET /wallet/recipient/resolve?input=<value>`: Unified endpoint — auto-detects identity key, paymail, $handle, BSV address. Returns `{type, valid, name, avatar_url, source, has_p2p}`. Old `/wallet/paymail/resolve` still works (no breaking change).
+- `TransactionForm.tsx`: Replaced fragmented `paymailInfo`/`isResolvingPaymail` with unified `resolveResult`/`isResolving`/`detectedType`. Single `useEffect` with debounce (500ms paymail, 300ms identity). Frontend `resolveCacheRef` for instant re-display.
+- Recipient dropdown: Replaces old `field-hint` span. Absolute positioned below input. Shows: spinner → avatar+name+source+checkmark → "Identity key detected" (unresolved) → red X (failed). BSV addresses: no dropdown.
+- CSS: `TransactionComponents.css` (dropdown styles), `WalletPanel.css` (dark theme overrides)
+
+### Testing Status
+
+- [ ] Paymail send to known HandCash handle ($handle)
+- [ ] Paymail send to alias@domain format
+- [ ] Identity key resolution shows name/avatar from Overlay Services
+- [ ] Recipient dropdown appears with spinner during resolution
+- [ ] Resolved name + avatar + source badge display correctly
+- [ ] BSV address: no dropdown, standard send
+- [ ] Invalid paymail: dropdown shows error state
+- [ ] P2P vs basic fallback works correctly
+- [ ] Standard send (BSV address) unaffected by changes
