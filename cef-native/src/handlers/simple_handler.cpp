@@ -15,6 +15,7 @@
 
 #ifdef __APPLE__
     #include "../../include/core/WalletService.h"
+    #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
 #endif
 
@@ -5614,12 +5615,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
         url.find("messagebox.babbage.systems") != std::string::npos ||
         url.find("/.well-known/auth") != std::string::npos) {
         LOG_DEBUG_BROWSER("🌐 Intercepting wallet request from browser role: " + role_);
-#ifdef _WIN32
         return new HttpRequestInterceptor();
-#else
-        // TODO: macOS HTTP request interception
-        return nullptr;  // No interception on macOS yet
-#endif
     }
 
     // For non-wallet requests, return CookieFilterResourceHandler

@@ -13,7 +13,7 @@
 #include <iostream>
 #include <regex>
 
-#include "../include/core/PendingAuthRequest.h"
+#include "../../include/core/PendingAuthRequest.h"
 #include "../../include/core/SessionManager.h"
 
 // Forward declaration
@@ -39,6 +39,7 @@ std::string g_pendingModalDomain = "";
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
 #endif
+#include "../../include/core/SyncHttpClient.h"
 #include "../../include/core/Logger.h"
 
 // Logging macros for HTTP interceptor
@@ -178,9 +179,24 @@ private:
     }
 #else
     Permission fetchFromBackend(const std::string& domain) {
-        // TODO(macOS): Implement using NSURLSession or similar
         Permission result;
         result.trustLevel = "unknown";
+
+        std::string url = "http://localhost:31301/domain/permissions?domain=" + domain;
+        HttpResponse resp = SyncHttpClient::Get(url, 5000);
+        if (!resp.success) return result;
+
+        try {
+            auto json = nlohmann::json::parse(resp.body);
+            result.trustLevel = json.value("trustLevel", "unknown");
+            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)10);
+            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)300);
+            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)10);
+            result.adblockEnabled = json.value("adblockEnabled", true);
+        } catch (const std::exception& e) {
+            LOG_DEBUG_HTTP("Failed to parse domain permission response: " + std::string(e.what()));
+        }
+
         return result;
     }
 #endif
@@ -280,7 +296,15 @@ private:
     }
 #else
     bool fetchWalletStatus() {
-        return false;
+        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status", 5000);
+        if (!resp.success) return false;
+
+        try {
+            auto json = nlohmann::json::parse(resp.body);
+            return json.value("exists", false);
+        } catch (...) {
+            return false;
+        }
     }
 #endif
 };
@@ -393,7 +417,16 @@ private:
     }
 #else
     double fetchFromBackend() {
-        return -1.0;
+        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/bsv-price", 5000);
+        if (!resp.success) return -1.0;
+
+        try {
+            auto json = nlohmann::json::parse(resp.body);
+            double price = json.value("priceUsd", -1.0);
+            return price > 0.0 ? price : -1.0;
+        } catch (...) {
+            return -1.0;
+        }
     }
 #endif
 };
@@ -489,8 +522,27 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
 }
 #else
 static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domain, const std::string& certType) {
-    // TODO(macOS): Implement using NSURLSession
-    return std::set<std::string>();
+    std::set<std::string> result;
+
+    std::string url = "http://localhost:31301/domain/permissions/certificate?domain="
+                    + urlEncode(domain) + "&cert_type=" + urlEncode(certType);
+    HttpResponse resp = SyncHttpClient::Get(url, 5000);
+    if (!resp.success) return result;
+
+    try {
+        auto json = nlohmann::json::parse(resp.body);
+        if (json.contains("approvedFields") && json["approvedFields"].is_array()) {
+            for (const auto& field : json["approvedFields"]) {
+                if (field.is_string()) {
+                    result.insert(field.get<std::string>());
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_DEBUG_HTTP("Failed to parse cert field permissions response: " + std::string(e.what()));
+    }
+
+    return result;
 }
 #endif
 

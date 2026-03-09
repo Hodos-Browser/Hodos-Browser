@@ -77,6 +77,11 @@ void ShutdownApplication();
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
 #include "include/core/SettingsManager.h"
+#include "include/core/SyncHttpClient.h"
+#include "include/core/AdblockCache.h"
+#include "include/core/FingerprintProtection.h"
+#include "include/core/CookieBlockManager.h"
+#include "include/core/BookmarkManager.h"
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -102,6 +107,12 @@ int g_peerpay_amount = 0;
 // Stored icon right offsets for repositioning overlays on move/resize (physical pixels)
 static int g_mac_settings_icon_right_offset = 0;
 static int g_mac_wallet_icon_right_offset = 0;
+
+// Server process management
+static pid_t g_wallet_server_pid = -1;
+static pid_t g_adblock_server_pid = -1;
+bool g_walletServerRunning = false;
+bool g_adblockServerRunning = false;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -1485,6 +1496,180 @@ void ShutdownApplication() {
 }
 
 // ============================================================================
+// Health Check Functions (macOS) — uses SyncHttpClient (libcurl)
+// ============================================================================
+
+// Returns true if wallet server at localhost:31301 responds with "ok"
+static bool QuickHealthCheck() {
+    HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/health", 2000);
+    return resp.success && resp.body.find("\"ok\"") != std::string::npos;
+}
+
+// Returns true if adblock engine at localhost:31302 responds with "ready"
+static bool QuickAdblockHealthCheck() {
+    HttpResponse resp = SyncHttpClient::Get("http://localhost:31302/health", 2000);
+    return resp.success && resp.body.find("\"ready\"") != std::string::npos;
+}
+
+// Send POST /shutdown to a localhost service for graceful shutdown
+static bool SendShutdownRequest(int port) {
+    std::string url = "http://localhost:" + std::to_string(port) + "/shutdown";
+    HttpResponse resp = SyncHttpClient::Post(url, "", "application/json", 2000);
+    return resp.success;
+}
+
+// ============================================================================
+// Server Process Management (macOS)
+// ============================================================================
+
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+static void StartWalletServer() {
+    // Check if already running (dev mode: cargo run separately)
+    if (QuickHealthCheck()) {
+        LOG_INFO("Wallet server already running (dev mode) - skipping launch");
+        g_walletServerRunning = true;
+        return;
+    }
+
+    // Resolve exe path relative to browser executable
+    char exec_path[1024];
+    uint32_t exec_path_size = sizeof(exec_path);
+    if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) {
+        LOG_WARNING("Failed to get executable path for wallet server resolution");
+        return;
+    }
+
+    std::string exeDir(exec_path);
+    size_t lastSlash = exeDir.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        exeDir = exeDir.substr(0, lastSlash);
+    }
+
+    // Try relative path from build dir: ../../../../../../rust-wallet/target/release/hodos-wallet
+    std::string walletExe = exeDir + "/../../../../../../rust-wallet/target/release/hodos-wallet";
+
+    // Check if file exists
+    if (access(walletExe.c_str(), X_OK) != 0) {
+        // Try alternate path for development
+        walletExe = exeDir + "/../../../../../rust-wallet/target/release/hodos-wallet";
+        if (access(walletExe.c_str(), X_OK) != 0) {
+            LOG_WARNING("Wallet server executable not found - browser will run without auto-launched wallet");
+            LOG_WARNING("Start wallet manually: cd rust-wallet && cargo run --release");
+            return;
+        }
+    }
+
+    LOG_INFO("Launching wallet server: " + walletExe);
+
+    char* argv[] = { const_cast<char*>(walletExe.c_str()), nullptr };
+    int status = posix_spawn(&g_wallet_server_pid, walletExe.c_str(), nullptr, nullptr, argv, environ);
+    if (status != 0) {
+        LOG_ERROR("Failed to launch wallet server: posix_spawn error " + std::to_string(status));
+        return;
+    }
+
+    LOG_INFO("Wallet server launched with PID: " + std::to_string(g_wallet_server_pid));
+
+    // Wait for it to become healthy (up to 10 seconds)
+    for (int i = 0; i < 20; i++) {
+        usleep(500000); // 500ms
+        if (QuickHealthCheck()) {
+            g_walletServerRunning = true;
+            LOG_INFO("Wallet server is healthy");
+            return;
+        }
+    }
+    LOG_WARNING("Wallet server launched but health check timed out");
+}
+
+static void StartAdblockServer() {
+    if (QuickAdblockHealthCheck()) {
+        LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
+        g_adblockServerRunning = true;
+        return;
+    }
+
+    char exec_path[1024];
+    uint32_t exec_path_size = sizeof(exec_path);
+    if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) return;
+
+    std::string exeDir(exec_path);
+    size_t lastSlash = exeDir.find_last_of('/');
+    if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
+
+    std::string adblockExe = exeDir + "/../../../../../../adblock-engine/target/release/hodos-adblock";
+    if (access(adblockExe.c_str(), X_OK) != 0) {
+        adblockExe = exeDir + "/../../../../../adblock-engine/target/release/hodos-adblock";
+        if (access(adblockExe.c_str(), X_OK) != 0) {
+            LOG_WARNING("Adblock engine not found - browser will run without ad blocking");
+            return;
+        }
+    }
+
+    LOG_INFO("Launching adblock engine: " + adblockExe);
+    char* argv[] = { const_cast<char*>(adblockExe.c_str()), nullptr };
+    int status = posix_spawn(&g_adblock_server_pid, adblockExe.c_str(), nullptr, nullptr, argv, environ);
+    if (status != 0) {
+        LOG_ERROR("Failed to launch adblock engine: posix_spawn error " + std::to_string(status));
+        return;
+    }
+
+    LOG_INFO("Adblock engine launched with PID: " + std::to_string(g_adblock_server_pid));
+
+    for (int i = 0; i < 20; i++) {
+        usleep(500000);
+        if (QuickAdblockHealthCheck()) {
+            g_adblockServerRunning = true;
+            LOG_INFO("Adblock engine is healthy");
+            return;
+        }
+    }
+    LOG_WARNING("Adblock engine launched but health check timed out");
+}
+
+static void StopServers() {
+    // Graceful shutdown via HTTP
+    if (g_walletServerRunning) {
+        SendShutdownRequest(31301);
+    }
+    if (g_adblockServerRunning) {
+        SendShutdownRequest(31302);
+    }
+
+    // Wait briefly for graceful shutdown
+    usleep(1000000); // 1 second
+
+    // Force kill if still running
+    if (g_wallet_server_pid > 0) {
+        int status;
+        pid_t result = waitpid(g_wallet_server_pid, &status, WNOHANG);
+        if (result == 0) {
+            // Still running — send SIGTERM
+            kill(g_wallet_server_pid, SIGTERM);
+            usleep(500000);
+            waitpid(g_wallet_server_pid, &status, WNOHANG);
+        }
+        g_wallet_server_pid = -1;
+    }
+
+    if (g_adblock_server_pid > 0) {
+        int status;
+        pid_t result = waitpid(g_adblock_server_pid, &status, WNOHANG);
+        if (result == 0) {
+            kill(g_adblock_server_pid, SIGTERM);
+            usleep(500000);
+            waitpid(g_adblock_server_pid, &status, WNOHANG);
+        }
+        g_adblock_server_pid = -1;
+    }
+}
+
+// ============================================================================
 // Main Entry Point (macOS)
 // ============================================================================
 
@@ -1628,6 +1813,27 @@ int main(int argc, char* argv[]) {
         SettingsManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("Settings loaded for profile: " + profileId);
 
+        // Initialize AdblockCache with profile path (loads per-site settings)
+        AdblockCache::GetInstance().Initialize(profile_cache);
+        AdblockCache::GetInstance().SetGlobalEnabled(
+            SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
+        LOG_INFO("AdblockCache initialized");
+
+        // Initialize fingerprint protection session token
+        FingerprintProtection::GetInstance().Initialize();
+        LOG_INFO("Fingerprint protection initialized");
+
+        // Initialize CookieBlockManager
+        if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("CookieBlockManager initialized");
+        } else {
+            LOG_WARNING("CookieBlockManager initialization failed");
+        }
+
+        // Initialize BookmarkManager
+        BookmarkManager::GetInstance().Initialize(profile_cache);
+        LOG_INFO("BookmarkManager initialized");
+
         // Set cache_path to profile-specific directory (cookie/localStorage isolation!)
         std::string cache_path = profile_cache;
         CefString(&settings.cache_path).FromString(cache_path);
@@ -1654,6 +1860,10 @@ int main(int argc, char* argv[]) {
             LOG_ERROR("❌ CEF initialization failed - exiting");
             return 1;
         }
+
+        // Start backend services (wallet + adblock)
+        StartWalletServer();
+        StartAdblockServer();
 
         // Create windows after CEF is initialized
         // (Activation policy already set above for main process only)
@@ -1812,6 +2022,7 @@ int main(int argc, char* argv[]) {
 
         // Cleanup
         LOG_INFO("CEF message loop exited - shutting down...");
+        StopServers();
         ReleaseProfileLock();
         CefShutdown();
 
