@@ -1030,6 +1030,13 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // Helper function for closing overlay windows from C++ code
 // ============================================================================
 
+extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores) {
+    if (!window) return;
+    NSWindow* overlayWindow = (__bridge NSWindow*)window;
+    [overlayWindow setIgnoresMouseEvents:ignores];
+    LOG_DEBUG("🪟 Overlay mouse events " + std::string(ignores ? "disabled" : "enabled"));
+}
+
 extern "C" void HideNotificationOverlayWindow() {
     if (g_notification_overlay_window) {
         [g_notification_overlay_window orderOut:nil];

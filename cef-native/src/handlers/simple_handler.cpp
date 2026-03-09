@@ -81,6 +81,7 @@ extern std::string g_pendingModalDomain;
     // macOS overlay helpers (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
     extern "C" void HideNotificationOverlayWindow();
+    extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores);
 #endif
 
 // Global backup modal state management
@@ -823,14 +824,10 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             // Send pending auth request data to the overlay after React app loads
             // Add a small delay to ensure React is fully mounted
-#ifdef _WIN32
             CefPostDelayedTask(TID_UI, base::BindOnce([]() {
                 extern void sendAuthRequestDataToOverlay();
                 sendAuthRequestDataToOverlay();
             }), 500);
-#else
-            // TODO: Implement BRC-100 auth on macOS
-#endif
         } else if (role_ == "notification") {
             // Inject the hodosBrowser API into notification overlay browser
             LOG_DEBUG_BROWSER("🔔 NOTIFICATION BROWSER LOADED - Injecting hodosBrowser API");
@@ -3267,8 +3264,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OVERLAY MESSAGES (Cross-platform) ==========
 #ifdef _WIN32
-    // ========== OVERLAY MESSAGES (Windows-specific) ==========
     if (false && message_name == "overlay_hide_NEVER_CALLED_12345") {
         LOG_DEBUG_BROWSER("🪟 Hiding overlay HWND");
         LOG_DEBUG_BROWSER("🪟 Before hide - EXSTYLE: 0x" + std::to_string(GetWindowLong(nullptr, GWL_EXSTYLE)));
@@ -3276,6 +3273,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🪟 After hide - EXSTYLE: 0x" + std::to_string(GetWindowLong(nullptr, GWL_EXSTYLE)));
         return true;
     }
+#endif
 
     if (message_name == "overlay_show_wallet") {
         LOG_DEBUG_BROWSER("💰 overlay_show_wallet message received from role: " + role_);
@@ -3318,8 +3316,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (active_tab && active_tab->browser) {
             CefWindowInfo windowInfo;
 #ifdef _WIN32
-            windowInfo.SetAsPopup(nullptr, "Developer Tools");
-#elif defined(__APPLE__)
             windowInfo.SetAsPopup(nullptr, "Developer Tools");
 #endif
             CefBrowserSettings devSettings;
@@ -3438,9 +3434,17 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay window not found");
         }
-#else
-        // TODO(macOS): Implement BRC-100 auth overlay hiding for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_hide not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_brc100_auth_overlay_window;
+        extern NSWindow* g_main_window;
+        if (g_brc100_auth_overlay_window) {
+            CefRefPtr<CefBrowser> auth = GetBRC100AuthBrowser();
+            if (auth) auth->GetHost()->CloseBrowser(false);
+            brc100_auth_browser_ = nullptr;
+            CloseOverlayWindow((void*)g_brc100_auth_overlay_window, (void*)g_main_window);
+            g_brc100_auth_overlay_window = nullptr;
+            LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay closed on macOS");
+        }
 #endif
         return true;
     }
@@ -3740,9 +3744,17 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🪟 Closing settings overlay window");
             DestroyWindow(settings_hwnd);
         }
-#else
-        // TODO(macOS): Implement settings overlay hiding for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_hide_settings not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_settings_overlay_window;
+        extern NSWindow* g_main_window;
+        if (g_settings_overlay_window) {
+            CefRefPtr<CefBrowser> settings = GetSettingsBrowser();
+            if (settings) settings->GetHost()->CloseBrowser(false);
+            settings_browser_ = nullptr;
+            CloseOverlayWindow((void*)g_settings_overlay_window, (void*)g_main_window);
+            g_settings_overlay_window = nullptr;
+            LOG_DEBUG_BROWSER("🪟 Settings overlay closed on macOS");
+        }
 #endif
         return true;
     }
@@ -3783,13 +3795,25 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("❌ No target HWND found for overlay_input");
         }
-#else
-        // TODO(macOS): Implement overlay input handling for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_input not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_settings_overlay_window;
+        extern NSWindow* g_wallet_overlay_window;
+        extern NSWindow* g_backup_overlay_window;
+
+        NSWindow* target_window = nullptr;
+        if (role_ == "settings") target_window = g_settings_overlay_window;
+        else if (role_ == "wallet") target_window = g_wallet_overlay_window;
+        else if (role_ == "backup") target_window = g_backup_overlay_window;
+
+        if (target_window) {
+            SetOverlayIgnoresMouseEvents((void*)target_window, !enable);
+            LOG_DEBUG_BROWSER("🪟 Mouse input " + std::string(enable ? "ENABLED" : "DISABLED") + " for " + role_ + " overlay");
+        } else {
+            LOG_DEBUG_BROWSER("❌ No target window found for overlay_input");
+        }
 #endif
         return true;
     }
-#endif  // _WIN32 - end of overlay messages
 
     // ========== WALLET PANEL TOGGLE (Cross-platform: uses separate overlay window) ==========
     if (message_name == "toggle_wallet_panel") {
