@@ -95,7 +95,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchBalance = useCallback(async (showLoading = false) => {
     try {
       if (showLoading) setBalanceLoading(true);
-      const res = await fetch('http://localhost:31301/wallet/balance');
+      const res = await fetch('http://127.0.0.1:31301/wallet/balance');
       if (!res.ok) throw new Error('Failed to fetch balance');
       const data = await res.json();
       const newBalance = data.balance || 0;
@@ -122,7 +122,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchAddress = useCallback(async () => {
     try {
       setAddressLoading(true);
-      const res = await fetch('http://localhost:31301/wallet/address/current');
+      const res = await fetch('http://127.0.0.1:31301/wallet/address/current');
       if (!res.ok) throw new Error('Failed to fetch address');
       const data = await res.json();
       setCurrentAddress(data.address || '');
@@ -136,7 +136,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchRecentActivity = useCallback(async () => {
     try {
       setRecentLoading(true);
-      const res = await fetch('http://localhost:31301/wallet/activity?page=1&limit=5&filter=all');
+      const res = await fetch('http://127.0.0.1:31301/wallet/activity?page=1&limit=5&filter=all');
       if (!res.ok) throw new Error('Failed to fetch activity');
       const data = await res.json();
       setRecentActions(data.items || []);
@@ -163,7 +163,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   // Notification polling (incoming payments)
   useEffect(() => {
     const fetchNotification = () => {
-      fetch('http://localhost:31301/wallet/peerpay/status')
+      fetch('http://127.0.0.1:31301/wallet/peerpay/status')
         .then(r => r.json())
         .then((data: { unread_count?: number; total_satoshis?: number }) => {
           if (data.unread_count && data.unread_count > 0) {
@@ -192,7 +192,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const handleGenerateAddress = async () => {
     try {
       setGenerating(true);
-      const res = await fetch('http://localhost:31301/wallet/address/generate', { method: 'POST' });
+      const res = await fetch('http://127.0.0.1:31301/wallet/address/generate', { method: 'POST' });
       if (!res.ok) throw new Error('Failed to generate address');
       const data = await res.json();
       setCurrentAddress(data.address || '');
@@ -249,7 +249,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const handleDismissNotification = () => {
     setNotification(null);
     prevNotificationCount.current = 0;
-    fetch('http://localhost:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
+    fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     if ((window as any).cefMessage?.send) {
       (window as any).cefMessage.send('wallet_payment_dismissed', []);
     }

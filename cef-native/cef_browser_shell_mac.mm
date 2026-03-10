@@ -82,6 +82,7 @@ void ShutdownApplication();
 #include "include/core/FingerprintProtection.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/WindowManager.h"
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -303,6 +304,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // Wallet Overlay View
 @interface WalletOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* walletTrackingArea;
 @end
 
 @implementation WalletOverlayView
@@ -314,33 +316,117 @@ ViewDimensions GetViewDimensions(void* nsview) {
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        // NSTrackingArea is REQUIRED for mouseMoved/mouseEntered/mouseExited on macOS
+        _walletTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_walletTrackingArea];
     }
     return self;
 }
 
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_walletTrackingArea) {
+        [self removeTrackingArea:_walletTrackingArea];
+    }
+    _walletTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_walletTrackingArea];
+}
+
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+
+// CRITICAL: Override hitTest to ensure this view ALWAYS receives mouse events
+- (NSView *)hitTest:(NSPoint)point {
+    // Log to file for diagnostics
+    static std::string hitLogPath;
+    if (hitLogPath.empty()) {
+        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+        hitLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+    }
+    static int hitCount = 0;
+    if (hitCount < 10) {
+        std::ofstream dbg(hitLogPath, std::ios::app);
+        dbg << "hitTest called: point=(" << point.x << "," << point.y
+            << ") bounds=(" << self.bounds.origin.x << "," << self.bounds.origin.y
+            << "," << self.bounds.size.width << "," << self.bounds.size.height
+            << ") subviews=" << [[self subviews] count]
+            << " self=" << (void*)self
+            << std::endl;
+        // Log subviews if any exist
+        for (NSView* sub in [self subviews]) {
+            NSRect f = [sub frame];
+            dbg << "  subview: " << [[sub className] UTF8String]
+                << " frame=(" << f.origin.x << "," << f.origin.y
+                << "," << f.size.width << "," << f.size.height
+                << ") hidden=" << [sub isHidden]
+                << std::endl;
+        }
+        dbg.close();
+        hitCount++;
+    }
+    return self;  // Always return self — we handle ALL events
+}
 
 - (void)mouseDown:(NSEvent *)event {
-    NSLog(@"🔍 WalletOverlayView mouseDown called!");
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
+
+    // Use file logging (NSLog doesn't appear in log show for unsigned apps)
+    static std::string mdLogPath;
+    if (mdLogPath.empty()) {
+        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+        mdLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+    }
+    std::ofstream dbg(mdLogPath, std::ios::app);
+    dbg << "VIEW mouseDown: NSView(" << location.x << "," << location.y
+        << ") → CEF(" << mouse_event.x << "," << mouse_event.y
+        << ") bounds=" << self.bounds.size.width << "x" << self.bounds.size.height << std::endl;
 
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
-        // CRITICAL: Set focus when user clicks
         wallet->GetHost()->SetFocus(true);
-        NSLog(@"🔍 CEF focus enabled on click");
-
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        LOG_DEBUG("🖱️ Wallet overlay: Left-click forwarded to CEF");
+        dbg << "  → Click sent to wallet browser ID=" << wallet->GetIdentifier() << std::endl;
     } else {
-        NSLog(@"❌ Wallet browser not available!");
+        dbg << "  ❌ GetWalletBrowser() returned NULL!" << std::endl;
+    }
+    dbg.close();
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    // mouseUp is now handled in mouseDown (combined down+up pattern)
+    // Keep this for any future separation if needed
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
     }
 }
 
@@ -348,15 +434,31 @@ ViewDimensions GetViewDimensions(void* nsview) {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
 
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
-        LOG_DEBUG("🖱️ Wallet overlay: Right-click forwarded to CEF");
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        // macOS scroll deltas: positive deltaY = scroll up
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        wallet->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
     }
 }
 
@@ -364,13 +466,43 @@ ViewDimensions GetViewDimensions(void* nsview) {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
+
+    // Log first few mouse moves to confirm event routing works
+    static int moveCount = 0;
+    if (moveCount < 5) {
+        NSLog(@"🖱️ WalletOverlay mouseMoved: CEF(%d,%d)", mouse_event.x, mouse_event.y);
+        moveCount++;
+    }
 
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
         wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+        CefMouseEvent mouse_event;
+        mouse_event.x = (int)location.x;
+        mouse_event.y = (int)(self.bounds.size.height - location.y);
+        mouse_event.modifiers = 0;
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        CefMouseEvent mouse_event;
+        mouse_event.x = -1;
+        mouse_event.y = -1;
+        mouse_event.modifiers = 0;
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, true);  // true = mouse left
     }
 }
 
@@ -451,6 +583,53 @@ ViewDimensions GetViewDimensions(void* nsview) {
 @implementation WalletOverlayWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeMainWindow { return NO; }
+
+// CRITICAL FIX: NSWindow's internal dispatch does NOT forward mouse events to our
+// content view in borderless+transparent+OSR windows. We must dispatch manually.
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+
+    switch (type) {
+        case NSEventTypeLeftMouseDown:
+            [view mouseDown:event];
+            return;
+        case NSEventTypeLeftMouseUp:
+            [view mouseUp:event];
+            return;
+        case NSEventTypeLeftMouseDragged:
+            [view mouseDragged:event];
+            return;
+        case NSEventTypeRightMouseDown:
+            [view rightMouseDown:event];
+            return;
+        case NSEventTypeRightMouseUp:
+            [view rightMouseUp:event];
+            return;
+        case NSEventTypeMouseMoved:
+            [view mouseMoved:event];
+            return;
+        case NSEventTypeScrollWheel:
+            [view scrollWheel:event];
+            return;
+        case NSEventTypeMouseEntered:
+            [view mouseEntered:event];
+            return;
+        case NSEventTypeMouseExited:
+            [view mouseExited:event];
+            return;
+        case NSEventTypeKeyDown:
+            [view keyDown:event];
+            return;
+        case NSEventTypeKeyUp:
+            [view keyUp:event];
+            return;
+        default:
+            // All other events go through normal dispatch
+            [super sendEvent:event];
+            return;
+    }
+}
 @end
 
 
@@ -1256,6 +1435,7 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
     [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];  // Must be floating to stay above main window (not a child)
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
+    [g_wallet_overlay_window setAcceptsMouseMovedEvents:YES];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
     [g_wallet_overlay_window setHasShadow:NO];
 
@@ -1311,7 +1491,32 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     NSLog(@"🔍 Wallet overlay is key window: %d", [g_wallet_overlay_window isKeyWindow]);
     NSLog(@"🔍 First responder: %@", [g_wallet_overlay_window firstResponder]);
 
-    LOG_INFO("✅ Wallet overlay created successfully");
+    // Global event monitor - captures ALL mouse events in the app
+    static id walletGlobalMonitor = nil;
+    if (walletGlobalMonitor) {
+        [NSEvent removeMonitor:walletGlobalMonitor];
+    }
+    NSString* monLogPath = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject]
+                            stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"];
+    std::string monLogPathStr = [monLogPath UTF8String];
+
+    walletGlobalMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        (NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved |
+         NSEventMaskMouseEntered | NSEventMaskMouseExited)
+        handler:^NSEvent*(NSEvent* event) {
+            std::ofstream dbg(monLogPathStr, std::ios::app);
+            NSWindow* w = [event window];
+            dbg << "GLOBAL MONITOR: type=" << (int)[event type]
+                << " window=" << (void*)w
+                << " isWallet=" << (w == g_wallet_overlay_window ? 1 : 0)
+                << " isMain=" << (w == g_main_window ? 1 : 0)
+                << " at (" << [event locationInWindow].x << "," << [event locationInWindow].y << ")"
+                << std::endl;
+            dbg.close();
+            return event;
+        }];
+
+    LOG_INFO("✅ Wallet overlay created successfully (with global event monitor)");
 }
 
 void CreateBackupOverlayWithSeparateProcess() {
@@ -1639,6 +1844,11 @@ void CreateSettingsMenuOverlay() {
 // ============================================================================
 
 void ShutdownApplication() {
+    // Guard against re-entrant calls (terminate: → ShutdownApplication → terminate:)
+    static bool shutting_down = false;
+    if (shutting_down) return;
+    shutting_down = true;
+
     LOG_INFO("🛑 Starting graceful application shutdown (macOS)...");
 
     // TODO: Save session when macOS tab system is implemented
@@ -1972,8 +2182,14 @@ int main(int argc, char* argv[]) {
         // Only the main process should be a regular application
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        // Initialize centralized logger
-        Logger::Initialize(ProcessType::MAIN, "debug_output.log");
+        // Initialize centralized logger with absolute path
+        // (CWD is '/' when launched via 'open', so relative paths fail)
+        {
+            NSString* appSupDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* logDir = [appSupDir stringByAppendingPathComponent:@"HodosBrowser"];
+            std::string logPath = std::string([logDir UTF8String]) + "/debug_output.log";
+            Logger::Initialize(ProcessType::MAIN, logPath);
+        }
         LOG_INFO("=== NEW SESSION STARTED (macOS) ===");
         LOG_INFO("🍎 HodosBrowser Shell starting on macOS...");
 
@@ -2098,7 +2314,9 @@ int main(int argc, char* argv[]) {
 
         // Initialize CEF first (before creating windows)
         LOG_INFO("🔄 Initializing CEF...");
+        NSLog(@"🔄 About to call CefInitialize...");
         bool cef_success = CefInitialize(main_args, settings, app, nullptr);
+        NSLog(@"✅ CefInitialize returned: %s", cef_success ? "true" : "false");
         LOG_INFO("CefInitialize result: " + std::string(cef_success ? "✅ SUCCESS" : "❌ FAILED"));
 
         if (!cef_success) {
@@ -2107,8 +2325,15 @@ int main(int argc, char* argv[]) {
         }
 
         // Start backend services (wallet + adblock)
+        NSLog(@"🔄 Starting backend services...");
         StartWalletServer();
         StartAdblockServer();
+        NSLog(@"✅ Backend services started");
+
+        // Create the primary BrowserWindow record (window 0) in WindowManager.
+        // This MUST happen before any browser creation so SetBrowserForRole works.
+        WindowManager::GetInstance().CreateWindowRecord();
+        LOG_INFO("✅ WindowManager window 0 created");
 
         // Create windows after CEF is initialized
         // (Activation policy already set above for main process only)

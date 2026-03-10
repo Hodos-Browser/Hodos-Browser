@@ -23,7 +23,7 @@ const ApprovedSitesTab: React.FC = () => {
   const fetchDefaults = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch('http://localhost:31301/wallet/settings');
+      const res = await fetch('http://127.0.0.1:31301/wallet/settings');
       if (!res.ok) throw new Error('Failed to fetch settings');
       const data = await res.json();
       const loaded: DefaultLimits = {
@@ -50,7 +50,7 @@ const ApprovedSitesTab: React.FC = () => {
     try {
       setSaving(true);
       setSaveResult(null);
-      const res = await fetch('http://localhost:31301/wallet/settings', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -73,7 +73,7 @@ const ApprovedSitesTab: React.FC = () => {
   const handleResetAll = async () => {
     try {
       setResetting(true);
-      const res = await fetch('http://localhost:31301/domain/permissions/reset-all', {
+      const res = await fetch('http://127.0.0.1:31301/domain/permissions/reset-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

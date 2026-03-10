@@ -5598,6 +5598,15 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
+    // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
+    // bypass ALL resource handlers — let CEF's native network stack handle them.
+    // This avoids CefURLRequest forwarding issues on macOS.
+    if (url.find("127.0.0.1:31301") != std::string::npos &&
+        (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
+        LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
+        return nullptr;
+    }
+
     // Sprint 11b: Inject Do Not Track headers if enabled
     if (SettingsManager::GetInstance().GetPrivacySettings().doNotTrack) {
         request->SetHeaderByName("DNT", "1", true);

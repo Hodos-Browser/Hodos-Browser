@@ -20,7 +20,7 @@ const CertificatesTab: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('http://localhost:31301/listCertificates', {
+      const res = await fetch('http://127.0.0.1:31301/listCertificates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ limit: 100, offset: 0 }),
