@@ -1852,11 +1852,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
         extern void ShowCookiePanelOverlay(int iconRightOffset);
         extern void HideCookiePanelOverlay();
+        extern bool IsCookiePanelOverlayVisible();
+        extern bool WasCookiePanelJustHidden();
 
-        // Check if overlay window exists by trying to show it; if no window, create
-        // We use a simple approach: always try create (it destroys existing), or show if exists
-        // Since g_cookie_panel_overlay_window is in .mm, we can't reference it directly from .cpp
-        // Instead, check if the browser reference exists as a proxy
+        // Toggle behavior: if already visible, hide it
+        // Also suppress re-show if click-outside just hid it (debounce race condition)
+        if (IsCookiePanelOverlayVisible() || WasCookiePanelJustHidden()) {
+            if (IsCookiePanelOverlayVisible()) {
+                HideCookiePanelOverlay();
+            }
+            LOG_INFO_BROWSER("🛡️ Privacy shield toggled OFF (macOS)");
+            return true;
+        }
+
+        // Show or create the overlay
         CefRefPtr<CefBrowser> existing_cookie = GetCookiePanelBrowser();
         if (!existing_cookie) {
             CreateCookiePanelOverlayWithSeparateProcess(iconRightOffset);
@@ -2145,6 +2154,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (action == "settings_privacy") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page/privacy");
+#elif defined(__APPLE__)
+            extern void HideCookiePanelOverlay();
+            HideCookiePanelOverlay();
+            TabManager::GetInstance().CreateTab("http://127.0.0.1:5137/settings-page/privacy",
+                nullptr, 0, 0, 800, 600, 0);
 #endif
         } else if (action == "bookmarks") {
             // TODO: bookmarks page

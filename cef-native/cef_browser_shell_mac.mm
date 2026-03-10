@@ -150,6 +150,7 @@ void CreateSettingsMenuOverlay();
 void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
 void ShowCookiePanelOverlay(int iconRightOffset);
 void HideCookiePanelOverlay();
+bool IsCookiePanelOverlayVisible();
 void ShutdownApplication();
 
 // ============================================================================
@@ -1559,6 +1560,82 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
 // Cookie Panel (Privacy Shield) Overlay
 // ============================================================================
 
+// Click-outside monitor for cookie panel overlay
+static id g_cookie_panel_click_monitor = nil;
+// Timestamp of last hide — used to debounce toggle vs click-outside race
+static CFAbsoluteTime g_cookie_panel_last_hide_time = 0;
+
+// Forward declarations for monitor helpers
+static void RemoveCookiePanelClickOutsideMonitor();
+
+void HideCookiePanelOverlay() {
+    if (g_cookie_panel_overlay_window) {
+        [g_cookie_panel_overlay_window orderOut:nil];
+        RemoveCookiePanelClickOutsideMonitor();
+        g_cookie_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Cookie panel overlay hidden (macOS)");
+    }
+}
+
+static void InstallCookiePanelClickOutsideMonitor() {
+    if (g_cookie_panel_click_monitor) return;  // Already installed
+
+    g_cookie_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_cookie_panel_overlay_window || ![g_cookie_panel_overlay_window isVisible]) {
+                return event;
+            }
+
+            // Check if click is inside the cookie panel overlay
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_cookie_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                // Click outside — hide the overlay
+                HideCookiePanelOverlay();
+            }
+            return event;
+        }];
+    LOG_INFO("Cookie panel click-outside monitor installed");
+}
+
+static void RemoveCookiePanelClickOutsideMonitor() {
+    if (g_cookie_panel_click_monitor) {
+        [NSEvent removeMonitor:g_cookie_panel_click_monitor];
+        g_cookie_panel_click_monitor = nil;
+        LOG_INFO("Cookie panel click-outside monitor removed");
+    }
+}
+
+bool IsCookiePanelOverlayVisible() {
+    return g_cookie_panel_overlay_window && [g_cookie_panel_overlay_window isVisible];
+}
+
+// Returns true if the overlay was hidden very recently (within 300ms)
+// Used by the IPC toggle to avoid show-after-click-outside race
+bool WasCookiePanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_cookie_panel_last_hide_time) < 0.3;
+}
+
+void ShowCookiePanelOverlay(int iconRightOffset) {
+    if (g_cookie_panel_overlay_window) {
+        g_mac_cookie_panel_icon_right_offset = iconRightOffset;
+
+        // Reposition based on current main window frame and icon offset
+        NSRect mainFrame = [g_main_window frame];
+        CGFloat panelWidth = 400;
+        CGFloat panelHeight = 500;
+        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+        [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
+        [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+        InstallCookiePanelClickOutsideMonitor();
+        LOG_INFO("Cookie panel overlay shown (macOS)");
+    }
+}
+
 void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_cookie_panel_icon_right_offset = iconRightOffset;
@@ -1644,32 +1721,8 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     }
 
     [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+    InstallCookiePanelClickOutsideMonitor();
     LOG_INFO("Cookie panel overlay created successfully");
-}
-
-void ShowCookiePanelOverlay(int iconRightOffset) {
-    if (g_cookie_panel_overlay_window) {
-        g_mac_cookie_panel_icon_right_offset = iconRightOffset;
-
-        // Reposition based on current main window frame and icon offset
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 400;
-        CGFloat panelHeight = 500;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
-
-        [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
-        [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
-        LOG_INFO("Cookie panel overlay shown (macOS)");
-    }
-}
-
-void HideCookiePanelOverlay() {
-    if (g_cookie_panel_overlay_window) {
-        [g_cookie_panel_overlay_window orderOut:nil];
-        LOG_INFO("Cookie panel overlay hidden (macOS)");
-    }
 }
 
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
