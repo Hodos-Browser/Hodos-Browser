@@ -1343,7 +1343,7 @@ bool SimpleHandler::OnBeforePopup(
         GetClientRect(popupHwnd, &rect);
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
         int tabHeight = height - shellHeight;
 
         // Create new tab with the popup URL in the same window
@@ -1401,8 +1401,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
 
-        // Account for header height (12% for tab bar + toolbar)
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+        // Account for header height (10% for tab bar + toolbar)
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, window_id_);
@@ -1984,7 +1984,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             GetClientRect(menuHwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+            int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
             int tabHeight = height - shellHeight;
             TabManager::GetInstance().CreateTab(url, menuHwnd, 0, shellHeight, width, tabHeight, menuWid);
         };
@@ -6035,7 +6035,7 @@ static void CreateNewTabWithUrl(const std::string& url) {
     GetClientRect(parentHwnd, &rect);
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
     int tabHeight = height - shellHeight;
     TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else

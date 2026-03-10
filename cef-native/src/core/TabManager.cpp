@@ -394,7 +394,7 @@ bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_in
         RECT r;
         GetClientRect(target_bw->hwnd, &r);
         int totalH = r.bottom - r.top;
-        int shellH = (std::max)(100, static_cast<int>(totalH * 0.12));
+        int shellH = (std::max)(100, static_cast<int>(totalH * 0.10));
         int tabH = totalH - shellH;
         SetWindowPos(tab->hwnd, nullptr, 0, shellH, r.right - r.left, tabH,
                      SWP_NOZORDER | SWP_NOACTIVATE);

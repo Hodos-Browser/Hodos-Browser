@@ -130,7 +130,7 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     int winX = workArea.left + 50 + offset;
     int winY = workArea.top + 50 + offset;
 
-    int shellHeight = (std::max)(100, static_cast<int>(winH * 0.12));
+    int shellHeight = (std::max)(100, static_cast<int>(winH * 0.10));
     int tabHeight = winH - shellHeight;
 
     // --- Create main shell HWND ---

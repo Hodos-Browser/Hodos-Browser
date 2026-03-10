@@ -197,7 +197,7 @@ void SimpleApp::OnContextInitialized() {
     GetClientRect(g_hwnd, &mainRect);
     int width = mainRect.right - mainRect.left;
     int height = mainRect.bottom - mainRect.top;
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
     int tabHeight = height - shellHeight;
 
     LOG_INFO_APP("📑 Creating initial tab(s) with TabManager...");
@@ -290,7 +290,7 @@ void SimpleApp::OnContextInitialized() {
                                             GetClientRect(g_hwnd, &cr);
                                             width = cr.right - cr.left;
                                             int h = cr.bottom - cr.top;
-                                            shellHeight = (std::max)(100, static_cast<int>(h * 0.12));
+                                            shellHeight = (std::max)(100, static_cast<int>(h * 0.10));
                                             tabHeight = h - shellHeight;
                                             LOG_INFO_APP("📋 Restored primary window position: " +
                                                 std::to_string(wx) + "," + std::to_string(wy) +
@@ -323,7 +323,7 @@ void SimpleApp::OnContextInitialized() {
                                         GetClientRect(newWin->hwnd, &nwr);
                                         int nw = nwr.right - nwr.left;
                                         int nh = nwr.bottom - nwr.top;
-                                        int nsh = (std::max)(100, static_cast<int>(nh * 0.12));
+                                        int nsh = (std::max)(100, static_cast<int>(nh * 0.10));
                                         int nth = nh - nsh;
 
                                         totalRestored += restoreTabsForWindow(winEntry["tabs"], aIdx,
