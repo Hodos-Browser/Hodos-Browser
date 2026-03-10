@@ -2,14 +2,13 @@
 
 **Owner:** Person B
 **Branch:** `Ishaan` (pushed to `origin/Ishaan`)
-**Estimated effort:** 24-31 hours across ~3 weeks
 **Master tracking issue:** [#31](https://github.com/BSVArchie/Hodos-Browser/issues/31)
 
 ---
 
 ## Goal
 
-Port all keyboard shortcuts and overlay windows from Windows to macOS so that the browser has full single-window feature parity. This track has no dependency on Track A (HTTP/backend) for Week 1 work and only a soft dependency (AdblockCache) for the Cookie Panel in Week 2.
+Port all keyboard shortcuts and overlay windows from Windows to macOS so that the browser has full single-window feature parity. This track has no dependency on Track A (HTTP/backend) for the foundation work and only a soft dependency (AdblockCache) for the Cookie Panel overlay.
 
 **All work must be done on the `Ishaan` branch.** Before starting any task, verify you are on the correct branch with `git branch --show-current`. Do not commit directly to `main`.
 
@@ -44,7 +43,7 @@ The Windows implementations live in `simple_app.cpp` (lines 997-2393) and provid
 
 ## Task Breakdown
 
-### Phase 1 (Week 1) -- Foundation, No Dependencies
+### Phase 1 -- Foundation, No Dependencies
 
 #### Task 1: Keyboard Shortcuts -- Ctrl to Cmd (#10)
 
@@ -150,7 +149,7 @@ void RemoveClickOutsideMonitor(id* monitorRef) {
 
 ---
 
-### Phase 2 (Week 2) -- Overlay Ports
+### Phase 2 -- Overlay Ports
 
 All overlays follow the same general pattern established by the existing `CreateSettingsOverlayWithSeparateProcess`. For each overlay:
 
@@ -356,7 +355,7 @@ Task 2 ──┬──> Task 3: Menu Overlay (#15)
 ```
 
 **Recommended execution order:**
-1. Tasks 1 + 2 in parallel (Week 1)
+1. Tasks 1 + 2 in parallel
 2. Task 3 (Menu) first -- simplest overlay, validates the pattern
 3. Task 6 (Downloads) -- simple, no keyboard needed
 4. Task 5 (Cookie Panel) -- simple, but may need AdblockCache stub
