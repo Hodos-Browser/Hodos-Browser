@@ -1306,18 +1306,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    // Safety check: Only shut down if window is actually being closed by user
-    // Tab browser closes should NOT trigger window close
-    LOG_INFO("⚠️ windowShouldClose called");
-
-    // Check if this is a spurious close event (from tab removal)
-    // If we still have tabs, don't shut down
-    if (TabManager::GetInstance().GetTabCount() > 0) {
-        LOG_WARNING("⚠️ windowShouldClose called but tabs still exist - ignoring");
-        return NO;  // Don't close window
-    }
-
-    LOG_INFO("❌ Main window closing - shutting down application");
+    LOG_INFO("❌ Main window close requested - shutting down application");
     ShutdownApplication();
     return YES;
 }
@@ -1398,6 +1387,18 @@ extern "C" void CloseOverlayWindow(void* window, void* parent) {
 
 void CreateMainWindow() {
     LOG_INFO("🪟 Creating main browser window (macOS)");
+
+    // Create application menu bar with Quit item (enables Cmd+Q)
+    NSMenu* menuBar = [[NSMenu alloc] init];
+    NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:appMenuItem];
+    NSMenu* appMenu = [[NSMenu alloc] init];
+    NSMenuItem* quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit Hodos Browser"
+                                                      action:@selector(terminate:)
+                                               keyEquivalent:@"q"];
+    [appMenu addItem:quitItem];
+    [appMenuItem setSubmenu:appMenu];
+    [NSApp setMainMenu:menuBar];
 
     // Get screen dimensions (work area, excluding menu bar and dock)
     NSRect screenRect = [[NSScreen mainScreen] visibleFrame];
@@ -2273,11 +2274,28 @@ void ShutdownApplication() {
         g_main_window = nullptr;
     }
 
+    // Step 4: Kill background server processes
+    if (g_wallet_server_pid > 0) {
+        LOG_INFO("🔄 Killing wallet server (pid " + std::to_string(g_wallet_server_pid) + ")...");
+        kill(g_wallet_server_pid, SIGTERM);
+    }
+    if (g_adblock_server_pid > 0) {
+        LOG_INFO("🔄 Killing adblock server (pid " + std::to_string(g_adblock_server_pid) + ")...");
+        kill(g_adblock_server_pid, SIGTERM);
+    }
+
     LOG_INFO("✅ Application shutdown complete (macOS)");
     Logger::Shutdown();
 
-    // Quit application
-    [NSApp terminate:nil];
+    // Quit the CEF message loop, then exit the process.
+    // Do NOT call [NSApp terminate:nil] — that re-enters our terminate: override.
+    CefQuitMessageLoop();
+
+    // Post a delayed exit in case CefQuitMessageLoop doesn't fully tear down
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        _exit(0);
+    });
 }
 
 // ============================================================================
