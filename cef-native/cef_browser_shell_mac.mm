@@ -99,6 +99,7 @@ NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
+NSWindow* g_cookie_panel_overlay_window = nullptr;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
 bool g_file_dialog_active = false;
@@ -109,6 +110,7 @@ int g_peerpay_amount = 0;
 // Stored icon right offsets for repositioning overlays on move/resize (physical pixels)
 static int g_mac_settings_icon_right_offset = 0;
 static int g_mac_wallet_icon_right_offset = 0;
+static int g_mac_cookie_panel_icon_right_offset = 0;
 
 // Server process management
 static pid_t g_wallet_server_pid = -1;
@@ -145,6 +147,9 @@ void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
+void ShowCookiePanelOverlay(int iconRightOffset);
+void HideCookiePanelOverlay();
 void ShutdownApplication();
 
 // ============================================================================
@@ -296,6 +301,149 @@ ViewDimensions GetViewDimensions(void* nsview) {
     CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
     if (settings) {
         settings->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+@end
+
+// Cookie Panel (Privacy Shield) Overlay View
+@interface CookiePanelOverlayView : NSView
+@property (nonatomic, strong) CALayer* renderLayer;
+@end
+
+@implementation CookiePanelOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;  // Flip Y coordinate
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+        LOG_DEBUG("Cookie panel overlay: Left-click forwarded to CEF");
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+        LOG_DEBUG("Cookie panel overlay: Right-click forwarded to CEF");
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        cookie->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (!cookie) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    cookie->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        cookie->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("Cookie panel overlay: Key events forwarded to CEF");
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    int modifiers = 0;
+    NSEventModifierFlags flags = [event modifierFlags];
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendKeyEvent(key_event);
     }
 }
 
@@ -1407,6 +1555,123 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("✅ Settings overlay created successfully");
 }
 
+// ============================================================================
+// Cookie Panel (Privacy Shield) Overlay
+// ============================================================================
+
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
+    LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_cookie_panel_icon_right_offset = iconRightOffset;
+
+    // Get main window frame for overlay alignment
+    NSRect mainFrame = [g_main_window frame];
+
+    // Right-side popup panel, right edge aligned under icon
+    CGFloat panelWidth = 400;
+    CGFloat panelHeight = 500;
+    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
+    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+    LOG_INFO("Cookie panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+             + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
+
+    // Destroy existing overlay if present
+    if (g_cookie_panel_overlay_window) {
+        LOG_INFO("Destroying existing cookie panel overlay");
+        [g_cookie_panel_overlay_window close];
+        g_cookie_panel_overlay_window = nullptr;
+    }
+
+    // Create borderless, transparent, floating window
+    g_cookie_panel_overlay_window = [[NSWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_cookie_panel_overlay_window) {
+        LOG_ERROR("Failed to create cookie panel overlay window");
+        return;
+    }
+
+    [g_cookie_panel_overlay_window setOpaque:NO];
+    [g_cookie_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_cookie_panel_overlay_window setLevel:NSNormalWindowLevel];
+    [g_cookie_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_cookie_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_cookie_panel_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_cookie_panel_overlay_window ordered:NSWindowAbove];
+
+    // Create custom view for event handling and rendering
+    CookiePanelOverlayView* contentView = [[CookiePanelOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    [g_cookie_panel_overlay_window setContentView:contentView];
+
+    // Create CEF browser with windowless rendering
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("cookiepanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)panelWidth,
+                                   (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        "http://127.0.0.1:5137/privacy-shield",
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("Failed to create cookie panel overlay CEF browser");
+        return;
+    }
+
+    [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+    LOG_INFO("Cookie panel overlay created successfully");
+}
+
+void ShowCookiePanelOverlay(int iconRightOffset) {
+    if (g_cookie_panel_overlay_window) {
+        g_mac_cookie_panel_icon_right_offset = iconRightOffset;
+
+        // Reposition based on current main window frame and icon offset
+        NSRect mainFrame = [g_main_window frame];
+        CGFloat panelWidth = 400;
+        CGFloat panelHeight = 500;
+        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+        [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
+        [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+        LOG_INFO("Cookie panel overlay shown (macOS)");
+    }
+}
+
+void HideCookiePanelOverlay() {
+    if (g_cookie_panel_overlay_window) {
+        [g_cookie_panel_overlay_window orderOut:nil];
+        LOG_INFO("Cookie panel overlay hidden (macOS)");
+    }
+}
+
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_wallet_icon_right_offset = iconRightOffset;
@@ -1867,6 +2132,7 @@ void ShutdownApplication() {
     CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
     CefRefPtr<CefBrowser> brc100_auth_browser = SimpleHandler::GetBRC100AuthBrowser();
     CefRefPtr<CefBrowser> settings_menu_browser = SimpleHandler::GetSettingsMenuBrowser();
+    CefRefPtr<CefBrowser> cookie_panel_browser = SimpleHandler::GetCookiePanelBrowser();
 
     if (header_browser) {
         LOG_INFO("🔄 Closing header browser...");
@@ -1903,6 +2169,11 @@ void ShutdownApplication() {
         settings_menu_browser->GetHost()->CloseBrowser(false);
     }
 
+    if (cookie_panel_browser) {
+        LOG_INFO("🔄 Closing cookie panel browser...");
+        cookie_panel_browser->GetHost()->CloseBrowser(false);
+    }
+
     // Step 2: Close overlay windows
     LOG_INFO("🔄 Closing overlay windows...");
 
@@ -1934,6 +2205,12 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing settings menu overlay window...");
         [g_settings_menu_overlay_window close];
         g_settings_menu_overlay_window = nullptr;
+    }
+
+    if (g_cookie_panel_overlay_window) {
+        LOG_INFO("🔄 Closing cookie panel overlay window...");
+        [g_cookie_panel_overlay_window close];
+        g_cookie_panel_overlay_window = nullptr;
     }
 
     // Step 3: Close main window

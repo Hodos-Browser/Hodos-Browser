@@ -1848,8 +1848,57 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("Privacy shield not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
+        extern void ShowCookiePanelOverlay(int iconRightOffset);
+        extern void HideCookiePanelOverlay();
+
+        // Check if overlay window exists by trying to show it; if no window, create
+        // We use a simple approach: always try create (it destroys existing), or show if exists
+        // Since g_cookie_panel_overlay_window is in .mm, we can't reference it directly from .cpp
+        // Instead, check if the browser reference exists as a proxy
+        CefRefPtr<CefBrowser> existing_cookie = GetCookiePanelBrowser();
+        if (!existing_cookie) {
+            CreateCookiePanelOverlayWithSeparateProcess(iconRightOffset);
+        } else {
+            ShowCookiePanelOverlay(iconRightOffset);
+        }
+
+        // Inject domain into overlay via JS callback (same logic as Windows)
+        if (!shieldDomain.empty()) {
+            // Need delayed injection since browser may just have been created
+            std::string escapedDomain = shieldDomain;
+            for (size_t i = 0; i < escapedDomain.size(); ++i) {
+                if (escapedDomain[i] == '\\' || escapedDomain[i] == '\'') {
+                    escapedDomain.insert(i, "\\");
+                    ++i;
+                }
+            }
+
+            // Immediate injection attempt
+            CefRefPtr<CefBrowser> cookie_browser = GetCookiePanelBrowser();
+            if (cookie_browser && cookie_browser->GetMainFrame()) {
+                std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); }";
+                cookie_browser->GetMainFrame()->ExecuteJavaScript(js, cookie_browser->GetMainFrame()->GetURL(), 0);
+                LOG_INFO_BROWSER("🛡️ Shield domain injected immediately (macOS): " + shieldDomain);
+            }
+
+            // Delayed retry for newly created browsers where React may not have mounted yet
+            std::string retry_domain = escapedDomain;
+            CefPostDelayedTask(TID_UI, base::BindOnce([](std::string d) {
+                CefRefPtr<CefBrowser> b = SimpleHandler::GetCookiePanelBrowser();
+                if (b && b->GetMainFrame()) {
+                    std::string retryJs = "if (window.setShieldDomain) { window.setShieldDomain('" + d + "'); }";
+                    b->GetMainFrame()->ExecuteJavaScript(retryJs, b->GetMainFrame()->GetURL(), 0);
+                }
+            }, retry_domain), 500);
+
+            pending_shield_domain_ = shieldDomain;
+        } else {
+            LOG_WARNING_BROWSER("🛡️ Shield domain is EMPTY in cookie_panel_show IPC (macOS)");
+        }
+
+        LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -1859,8 +1908,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideCookiePanelOverlay();
         HideCookiePanelOverlay();
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideCookiePanelOverlay();
+        HideCookiePanelOverlay();
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -5435,7 +5486,6 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
 // the scriptlet injection timing problem where scriptlets injected via
 // OnLoadingStateChange arrive after YouTube's inline scripts have already
 // processed ad configuration from ytInitialPlayerResponse.
-#ifdef _WIN32
 class AdblockResponseFilter : public CefResponseFilter {
 public:
     AdblockResponseFilter() = default;
@@ -5521,7 +5571,6 @@ private:
 
     IMPLEMENT_REFCOUNTING(AdblockResponseFilter);
 };
-#endif
 
 // CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
 // so cookie blocking applies to all browsing. Also returns AdblockResponseFilter
@@ -5543,7 +5592,6 @@ public:
         CefRefPtr<CefFrame> frame,
         CefRefPtr<CefRequest> request,
         CefRefPtr<CefResponse> response) override {
-#ifdef _WIN32
         if (!g_adblockServerRunning || !AdblockCache::GetInstance().IsGlobalEnabled()) return nullptr;
 
         std::string url = request->GetURL().ToString();
@@ -5572,7 +5620,6 @@ public:
             LOG_DEBUG_BROWSER("🛡️ Response filter: YouTube HTML " + url);
             return new AdblockResponseFilter();
         }
-#endif
         return nullptr;
     }
 
@@ -5615,7 +5662,6 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
     // Ad & tracker blocking — check before wallet interception
     // Only for tab browsers making external requests (skip internal/overlay URLs)
-#ifdef _WIN32
     if (g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled() && !shouldSkipAdblockCheck(url)) {
         std::string sourceUrl;
         if (frame && frame->GetURL().length() > 0) {
@@ -5649,7 +5695,6 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
             }
         }
     }
-#endif
 
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
@@ -5668,11 +5713,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // to apply cookie blocking and ad response filtering (YouTube API/HTML stripping)
     {
         bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
-#ifdef _WIN32
         bool needsResponseFilter = g_adblockServerRunning;
-#else
-        bool needsResponseFilter = false;
-#endif
         if (needsCookieFilter || needsResponseFilter) {
             return new CookieFilterResourceHandler();
         }
