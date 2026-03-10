@@ -2000,8 +2000,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateSettingsMenuOverlay();
+        extern void ShowSettingsMenuOverlay();
+        extern void HideSettingsMenuOverlay();
+        extern bool IsSettingsMenuOverlayVisible();
+        extern bool WasSettingsMenuJustHidden();
+
+        if (IsSettingsMenuOverlayVisible() || WasSettingsMenuJustHidden()) {
+            if (IsSettingsMenuOverlayVisible()) {
+                HideSettingsMenuOverlay();
+            }
+            return true;
+        }
+
+        // Create each time (simple approach matching cookie panel)
+        CreateSettingsMenuOverlay();
+        LOG_DEBUG_BROWSER("Settings menu overlay shown (macOS)");
 #endif
         return true;
     }
@@ -2011,8 +2026,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideMenuOverlay();
         HideMenuOverlay();
         LOG_DEBUG_BROWSER("Menu overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideSettingsMenuOverlay();
+        HideSettingsMenuOverlay();
+        LOG_DEBUG_BROWSER("Settings menu overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -2030,6 +2047,9 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void HideMenuOverlay();
         HideMenuOverlay();
+#elif defined(__APPLE__)
+        extern void HideSettingsMenuOverlay();
+        HideSettingsMenuOverlay();
 #endif
 
         // Helper lambda to create a tab with current window dimensions
@@ -5946,6 +5966,32 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 return true;
             }
         }
+
+        // Ctrl+P / Cmd+P — Print current page
+        if (event.windows_key_code == 'P') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+P: Print current page");
+                auto* active_tab = TabManager::GetInstance().GetActiveTab();
+                if (active_tab && active_tab->browser) {
+                    active_tab->browser->GetHost()->Print();
+                }
+                return true;
+            }
+        }
+
+#ifdef __APPLE__
+        // Cmd+, — Open Preferences/Settings (macOS standard)
+        if (event.windows_key_code == 0xBC && (event.modifiers & EVENTFLAG_COMMAND_DOWN)) {
+            LOG_INFO_BROWSER("⌨️ Cmd+,: Opening settings");
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/general");
+            SimpleHandler::NotifyTabListChanged();
+            return true;
+        }
+#endif
 
         // Alt+Left — Navigate back (active tab)
         // 0x25 = VK_LEFT (cross-platform: CEF uses Windows key codes on all platforms)

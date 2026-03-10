@@ -147,6 +147,10 @@ void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
+void ShowSettingsMenuOverlay();
+void HideSettingsMenuOverlay();
+bool IsSettingsMenuOverlayVisible();
+bool WasSettingsMenuJustHidden();
 void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
 void ShowCookiePanelOverlay(int iconRightOffset);
 void HideCookiePanelOverlay();
@@ -1566,6 +1570,11 @@ static id g_cookie_panel_click_monitor = nil;
 // Timestamp of last hide — used to debounce toggle vs click-outside race
 static CFAbsoluteTime g_cookie_panel_last_hide_time = 0;
 
+// Click-outside monitor for settings menu overlay
+static id g_settings_menu_click_monitor = nil;
+// Timestamp of last hide — used to debounce toggle vs click-outside race
+static CFAbsoluteTime g_settings_menu_last_hide_time = 0;
+
 // Forward declarations for monitor helpers
 static void RemoveCookiePanelClickOutsideMonitor();
 
@@ -2088,6 +2097,74 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
     LOG_INFO("✅ Notification overlay created successfully");
 }
 
+// ============================================================================
+// Settings Menu Click-Outside Detection
+// ============================================================================
+
+// Forward declaration for monitor helper
+static void RemoveSettingsMenuClickOutsideMonitor();
+
+void HideSettingsMenuOverlay() {
+    if (g_settings_menu_overlay_window) {
+        [g_settings_menu_overlay_window orderOut:nil];
+        RemoveSettingsMenuClickOutsideMonitor();
+        g_settings_menu_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Settings menu overlay hidden (macOS)");
+    }
+}
+
+static void InstallSettingsMenuClickOutsideMonitor() {
+    if (g_settings_menu_click_monitor) return;  // Already installed
+
+    g_settings_menu_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_settings_menu_overlay_window || ![g_settings_menu_overlay_window isVisible]) {
+                return event;
+            }
+
+            // Check if click is inside the settings menu overlay
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_settings_menu_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                // Click outside — hide the overlay
+                HideSettingsMenuOverlay();
+            }
+            return event;
+        }];
+    LOG_INFO("Settings menu click-outside monitor installed");
+}
+
+static void RemoveSettingsMenuClickOutsideMonitor() {
+    if (g_settings_menu_click_monitor) {
+        [NSEvent removeMonitor:g_settings_menu_click_monitor];
+        g_settings_menu_click_monitor = nil;
+        LOG_INFO("Settings menu click-outside monitor removed");
+    }
+}
+
+bool IsSettingsMenuOverlayVisible() {
+    return g_settings_menu_overlay_window && [g_settings_menu_overlay_window isVisible];
+}
+
+// Returns true if the overlay was hidden very recently (within 300ms)
+// Used by the IPC toggle to avoid show-after-click-outside race
+bool WasSettingsMenuJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_settings_menu_last_hide_time) < 0.3;
+}
+
+void ShowSettingsMenuOverlay() {
+    if (g_settings_menu_overlay_window) {
+        [g_settings_menu_overlay_window makeKeyAndOrderFront:nil];
+        InstallSettingsMenuClickOutsideMonitor();
+        LOG_INFO("Settings menu overlay shown (macOS)");
+    }
+}
+
+// ============================================================================
+// Settings Menu Overlay Creation
+// ============================================================================
+
 void CreateSettingsMenuOverlay() {
     LOG_INFO("🎨 Creating settings menu overlay (macOS)");
 
@@ -2155,6 +2232,7 @@ void CreateSettingsMenuOverlay() {
     }
 
     [g_settings_menu_overlay_window makeKeyAndOrderFront:nil];
+    InstallSettingsMenuClickOutsideMonitor();
     LOG_INFO("✅ Settings menu overlay created successfully");
 }
 
