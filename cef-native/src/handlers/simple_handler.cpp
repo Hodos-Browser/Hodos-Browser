@@ -84,6 +84,9 @@ extern std::string g_pendingModalDomain;
     extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores);
 #endif
 
+// Forward declaration for cross-platform tab creation helper (defined later in file)
+static void CreateNewTabWithUrl(const std::string& url);
+
 // Global backup modal state management
 static bool g_backupModalShown = false;
 
@@ -2157,8 +2160,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 #elif defined(__APPLE__)
             extern void HideCookiePanelOverlay();
             HideCookiePanelOverlay();
-            TabManager::GetInstance().CreateTab("http://127.0.0.1:5137/settings-page/privacy",
-                nullptr, 0, 0, 800, 600, 0);
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/privacy");
 #endif
         } else if (action == "bookmarks") {
             // TODO: bookmarks page

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, IconButton, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import PublicIcon from '@mui/icons-material/Public';
@@ -29,6 +29,21 @@ export const TabComponent: React.FC<TabComponentProps> = ({
   dropIndicator,
   onPointerDown,
 }) => {
+  // Timeout loading spinner after 8 seconds — some sites (investing.com, yahoo.com)
+  // have persistent connections that keep CEF's isLoading=true indefinitely
+  const [loadingTimedOut, setLoadingTimedOut] = useState(false);
+  useEffect(() => {
+    if (tab.isLoading) {
+      setLoadingTimedOut(false);
+      const timer = setTimeout(() => setLoadingTimedOut(true), 8000);
+      return () => clearTimeout(timer);
+    } else {
+      setLoadingTimedOut(false);
+    }
+  }, [tab.isLoading, tab.id]);
+
+  const showSpinner = tab.isLoading && !loadingTimedOut;
+
   return (
     <Box
       ref={tabRef}
@@ -104,7 +119,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
     >
       {/* Favicon or default icon */}
       <Box sx={{ flexShrink: 0, width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {tab.isLoading ? (
+        {showSpinner ? (
           <CircularProgress
             size={12}
             sx={{ color: 'rgba(0, 0, 0, 0.4)' }}
