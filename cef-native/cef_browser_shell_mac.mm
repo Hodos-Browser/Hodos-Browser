@@ -1161,6 +1161,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // Settings Menu Overlay View (simplified - dropdown menu)
 @interface SettingsMenuOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* menuTrackingArea;
 @end
 
 @implementation SettingsMenuOverlayView
@@ -1172,25 +1173,100 @@ ViewDimensions GetViewDimensions(void* nsview) {
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _menuTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_menuTrackingArea];
     }
     return self;
 }
 
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_menuTrackingArea) {
+        [self removeTrackingArea:_menuTrackingArea];
+    }
+    _menuTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_menuTrackingArea];
+}
+
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+
+- (NSView *)hitTest:(NSPoint)point {
+    return self;  // Always return self — we handle ALL events
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
 
     CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
     if (menu) {
+        menu->GetHost()->SetFocus(true);
         menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
         menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        LOG_DEBUG("🖱️ Settings menu overlay: Left-click forwarded to CEF");
+    }
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    // mouseUp handled in mouseDown (combined down+up)
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        menu->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
     }
 }
 
@@ -1198,8 +1274,8 @@ ViewDimensions GetViewDimensions(void* nsview) {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
 
     CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
@@ -1208,6 +1284,131 @@ ViewDimensions GetViewDimensions(void* nsview) {
     }
 }
 
+- (void)mouseEntered:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+        CefMouseEvent mouse_event;
+        mouse_event.x = (int)location.x;
+        mouse_event.y = (int)(self.bounds.size.height - location.y);
+        mouse_event.modifiers = 0;
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        CefMouseEvent mouse_event;
+        mouse_event.x = -1;
+        mouse_event.y = -1;
+        mouse_event.modifiers = 0;
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, true);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (!menu) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) key_event.character = [chars characterAtIndex:0];
+    key_event.modifiers = modifiers;
+    menu->GetHost()->SendKeyEvent(key_event);
+
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        menu->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (!menu) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+    NSString* chars = [event characters];
+    if (chars.length > 0) key_event.character = [chars characterAtIndex:0];
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+    menu->GetHost()->SendKeyEvent(key_event);
+}
+
+@end
+
+// Custom NSWindow for Settings Menu overlay — borderless windows refuse to become key by default
+@interface SettingsMenuOverlayWindow : NSWindow
+@end
+
+@implementation SettingsMenuOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+
+// CRITICAL: NSWindow's internal dispatch does NOT forward mouse events to content view
+// in borderless+transparent+OSR windows. We must dispatch manually.
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+
+    switch (type) {
+        case NSEventTypeLeftMouseDown:
+            [view mouseDown:event];
+            return;
+        case NSEventTypeLeftMouseUp:
+            [view mouseUp:event];
+            return;
+        case NSEventTypeLeftMouseDragged:
+            [view mouseDragged:event];
+            return;
+        case NSEventTypeRightMouseDown:
+            [view rightMouseDown:event];
+            return;
+        case NSEventTypeRightMouseUp:
+            [view rightMouseUp:event];
+            return;
+        case NSEventTypeMouseMoved:
+            [view mouseMoved:event];
+            return;
+        case NSEventTypeScrollWheel:
+            [view scrollWheel:event];
+            return;
+        case NSEventTypeMouseEntered:
+            [view mouseEntered:event];
+            return;
+        case NSEventTypeMouseExited:
+            [view mouseExited:event];
+            return;
+        case NSEventTypeKeyDown:
+            [view keyDown:event];
+            return;
+        case NSEventTypeKeyUp:
+            [view keyUp:event];
+            return;
+        default:
+            [super sendEvent:event];
+            return;
+    }
+}
 @end
 
 // ============================================================================
@@ -2183,7 +2384,7 @@ void CreateSettingsMenuOverlay() {
         g_settings_menu_overlay_window = nullptr;
     }
 
-    g_settings_menu_overlay_window = [[NSWindow alloc]
+    g_settings_menu_overlay_window = [[SettingsMenuOverlayWindow alloc]
         initWithContentRect:menuFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
@@ -2199,7 +2400,8 @@ void CreateSettingsMenuOverlay() {
     [g_settings_menu_overlay_window setLevel:NSPopUpMenuWindowLevel];  // Higher than floating
     [g_settings_menu_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_menu_overlay_window setReleasedWhenClosed:NO];
-    [g_settings_menu_overlay_window setHasShadow:YES];  // Menu has shadow
+    [g_settings_menu_overlay_window setHasShadow:YES];
+    [g_settings_menu_overlay_window setAcceptsMouseMovedEvents:YES];
 
     SettingsMenuOverlayView* contentView = [[SettingsMenuOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, menuWidth, menuHeight)];
@@ -2220,7 +2422,7 @@ void CreateSettingsMenuOverlay() {
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         handler,
-        "http://127.0.0.1:5137/settings-menu",
+        "http://127.0.0.1:5137/menu",
         settings,
         nullptr,
         CefRequestContext::GetGlobalContext()
@@ -2232,6 +2434,7 @@ void CreateSettingsMenuOverlay() {
     }
 
     [g_settings_menu_overlay_window makeKeyAndOrderFront:nil];
+    [g_settings_menu_overlay_window makeFirstResponder:contentView];
     InstallSettingsMenuClickOutsideMonitor();
     LOG_INFO("✅ Settings menu overlay created successfully");
 }
