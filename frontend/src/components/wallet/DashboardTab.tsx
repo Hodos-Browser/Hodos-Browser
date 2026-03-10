@@ -5,26 +5,19 @@ import type { TransactionResponse } from '../../types/transaction';
 
 const InfoTooltip: React.FC<{ text: string }> = ({ text }) => {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [open]);
 
   return (
-    <div className="wd-info-tooltip-wrap" ref={ref}>
-      <button
+    <div
+      className="wd-info-tooltip-wrap"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <span
         className={`wd-info-icon${open ? ' active' : ''}`}
-        onClick={() => setOpen(!open)}
         title="More info"
       >
         i
-      </button>
+      </span>
       {open && (
         <div className="wd-info-popup">
           {text}
@@ -473,11 +466,20 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               {recentActions.map((action, idx) => {
                 const txPrice = action.price_usd_cents;
                 const hasHistorical = txPrice != null && txPrice > 0;
-                const usdDisplay = hasHistorical
+                const usdAtTx = hasHistorical
                   ? formatUsdCents(action.satoshis, txPrice!)
-                  : recentCurrentPrice
-                    ? formatUsdCents(action.satoshis, recentCurrentPrice)
-                    : null;
+                  : null;
+                const usdNow = recentCurrentPrice
+                  ? formatUsdCents(action.satoshis, recentCurrentPrice)
+                  : null;
+
+                const handleCopyTxid = (txid: string) => {
+                  navigator.clipboard.writeText(txid).catch(() => {});
+                };
+                const handleOpenWoC = (txid: string) => {
+                  const cef = (window as any).cefMessage;
+                  if (cef?.send) cef.send('tab_create', `https://whatsonchain.com/tx/${txid}`);
+                };
 
                 return (
                   <div key={action.txid || idx} className="wd-recent-item">
@@ -488,21 +490,39 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
                       <div className="wd-recent-desc">
                         {action.description || (action.direction === 'sent' ? 'Sent' : 'Received')}
                       </div>
-                      <div className="wd-recent-time">{formatTime(action.timestamp)}</div>
+                      <div className="wd-recent-meta">
+                        <span className="wd-recent-time">{formatTime(action.timestamp)}</span>
+                        <span className={`wd-recent-status ${action.status}`}>{action.status}</span>
+                      </div>
                     </div>
-                    <div className="wd-recent-right-col">
-                      {usdDisplay && (
-                        <span className={`wd-recent-usd ${action.direction}`}>
-                          {action.direction === 'sent' ? '-' : '+'}{usdDisplay}
-                        </span>
+                    <div className="wd-recent-center">
+                      {action.txid && (
+                        <>
+                          <button
+                            className="wd-txid-pill wd-txid-pill-sm"
+                            onClick={(e) => { e.stopPropagation(); handleCopyTxid(action.txid); }}
+                            title={action.txid}
+                          >
+                            txid
+                          </button>
+                          <button
+                            className="wd-woc-btn wd-woc-btn-sm"
+                            onClick={(e) => { e.stopPropagation(); handleOpenWoC(action.txid); }}
+                            title="View on WhatsOnChain"
+                          >
+                            <img src="/whatsonchain.png" alt="WoC" width="14" height="14" />
+                          </button>
+                        </>
                       )}
-                      <span className={`wd-recent-amount ${action.direction}`}>
-                        {action.direction === 'sent' ? '-' : '+'}{formatBsv(action.satoshis)}
-                      </span>
+                      <div className="wd-recent-values">
+                        <span className={`wd-recent-usd-primary ${action.direction}`}>
+                          {action.direction === 'sent' ? '-' : '+'}{usdAtTx || usdNow || '--'}
+                        </span>
+                        <span className="wd-recent-bsv">
+                          {action.direction === 'sent' ? '-' : '+'}{formatBsv(action.satoshis)} BSV
+                        </span>
+                      </div>
                     </div>
-                    <span className={`wd-recent-status ${action.status}`}>
-                      {action.status}
-                    </span>
                   </div>
                 );
               })}

@@ -942,6 +942,9 @@ const MainBrowserView: React.FC = () => {
                 )}
             </Toolbar>
 
+            {/* Spacer fills any remaining header HWND space below toolbar */}
+            <Box sx={{ flex: 1, bgcolor: '#ffffff' }} />
+
             {/* Toast for quick-block */}
             <Snackbar
                 open={toastOpen}

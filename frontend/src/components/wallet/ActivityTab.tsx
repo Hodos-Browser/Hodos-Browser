@@ -1,4 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+
+const InfoTooltip: React.FC<{ text: string; align?: 'left' | 'right' }> = ({ text, align }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className={`wd-info-tooltip-wrap${align === 'right' ? ' wd-info-tooltip-right' : ''}`}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <span className={`wd-info-icon${open ? ' active' : ''}`} title="More info">i</span>
+      {open && <div className="wd-info-popup">{text}</div>}
+    </div>
+  );
+};
 
 interface ActivityItem {
   txid: string;
@@ -113,6 +127,26 @@ const ActivityTab: React.FC = () => {
 
   const startIdx = (page - 1) * PAGE_SIZE + 1;
   const endIdx = Math.min(page * PAGE_SIZE, total);
+  const jumpInputRef = useRef<HTMLInputElement>(null);
+
+  // Build page number buttons with ellipsis for large page counts
+  const getPageNumbers = (): (number | '...')[] => {
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    const pages: (number | '...')[] = [1];
+    if (page > 3) pages.push('...');
+    const start = Math.max(2, page - 1);
+    const end = Math.min(totalPages - 1, page + 1);
+    for (let i = start; i <= end; i++) pages.push(i);
+    if (page < totalPages - 2) pages.push('...');
+    pages.push(totalPages);
+    return pages;
+  };
+
+  const handleJump = () => {
+    const val = parseInt(jumpInputRef.current?.value || '', 10);
+    if (val >= 1 && val <= totalPages) setPage(val);
+    if (jumpInputRef.current) jumpInputRef.current.value = '';
+  };
 
   if (loading && items.length === 0) {
     return (
@@ -175,41 +209,48 @@ const ActivityTab: React.FC = () => {
                     {item.description || (item.direction === 'sent' ? 'Sent' : 'Received')}
                   </div>
                   <div className="wd-activity-meta">
-                    <span className="wd-activity-bsv">
-                      {item.direction === 'sent' ? '-' : '+'}{formatBsv(item.satoshis)} BSV
-                    </span>
                     <span className="wd-activity-date">{formatDate(item.timestamp)}</span>
                     <span className={`wd-activity-status ${item.status}`}>{item.status}</span>
                   </div>
                 </div>
-                <div className="wd-activity-right">
-                  <span className={`wd-activity-usd ${item.direction}`}>
-                    {item.direction === 'sent' ? '-' : '+'}{usdAtTx || usdNow || '--'}
-                  </span>
-                  {showCurrentDiff && usdNow && (
-                    <span className="wd-activity-usd-secondary">
-                      (now: {item.direction === 'sent' ? '-' : '+'}{usdNow})
-                    </span>
+                <div className="wd-activity-center">
+                  {item.txid && (
+                    <>
+                      <button
+                        className="wd-txid-pill"
+                        onClick={(e) => { e.stopPropagation(); handleCopyTxid(item.txid); }}
+                        title={copiedTxid === item.txid ? 'Copied!' : truncateTxid(item.txid)}
+                      >
+                        {copiedTxid === item.txid ? 'Copied' : 'txid'}
+                      </button>
+                      <button
+                        className="wd-woc-btn"
+                        onClick={(e) => { e.stopPropagation(); handleOpenWoC(item.txid); }}
+                        title="View on WhatsOnChain"
+                      >
+                        <img src="/whatsonchain.png" alt="WoC" width="20" height="20" />
+                      </button>
+                    </>
                   )}
-                  <div className="wd-activity-icons">
-                    {item.txid && (
-                      <>
-                        <button
-                          className="wd-txid-icon"
-                          onClick={(e) => { e.stopPropagation(); handleCopyTxid(item.txid); }}
-                          title={copiedTxid === item.txid ? 'Copied!' : truncateTxid(item.txid)}
-                        >
-                          {copiedTxid === item.txid ? '\u2713' : '\u2398'}
-                        </button>
-                        <button
-                          className="wd-woc-icon"
-                          onClick={(e) => { e.stopPropagation(); handleOpenWoC(item.txid); }}
-                          title="View on WhatsOnChain"
-                        >
-                          {'\u2197'}
-                        </button>
-                      </>
+                  <span className="wd-activity-info-col">
+                    {idx === 0 && (
+                      <InfoTooltip align="right" text="Transactions are denominated in BSV — that amount never changes. The bold value shows what it was worth in USD at the time. &quot;now&quot; shows what that same BSV is worth today, since the exchange rate fluctuates." />
                     )}
+                  </span>
+                  <div className="wd-activity-values">
+                    <div className="wd-activity-values-top">
+                      <span className="wd-activity-usd-secondary">
+                        {showCurrentDiff && usdNow
+                          ? `now: ${item.direction === 'sent' ? '-' : '+'}${usdNow}`
+                          : ''}
+                      </span>
+                      <span className={`wd-activity-usd ${item.direction}`}>
+                        {item.direction === 'sent' ? '-' : '+'}{usdAtTx || usdNow || '--'}
+                      </span>
+                    </div>
+                    <span className="wd-activity-bsv">
+                      {item.direction === 'sent' ? '-' : '+'}{formatBsv(item.satoshis)} BSV
+                    </span>
                   </div>
                 </div>
               </div>
@@ -223,19 +264,62 @@ const ActivityTab: React.FC = () => {
         <div className="wd-pagination">
           <button
             className="wd-page-btn"
+            onClick={() => setPage(1)}
+            disabled={page <= 1 || loading}
+            title="First page"
+          >
+            &laquo;
+          </button>
+          <button
+            className="wd-page-btn"
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1 || loading}
+            title="Previous page"
           >
             &lt;
           </button>
-          <span className="wd-page-info">Page {page} of {totalPages}</span>
+          {getPageNumbers().map((p, idx) =>
+            p === '...' ? (
+              <span key={`e${idx}`} className="wd-page-ellipsis">...</span>
+            ) : (
+              <button
+                key={p}
+                className={`wd-page-btn${page === p ? ' active' : ''}`}
+                onClick={() => setPage(p)}
+                disabled={loading}
+              >
+                {p}
+              </button>
+            )
+          )}
           <button
             className="wd-page-btn"
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages || loading}
+            title="Next page"
           >
             &gt;
           </button>
+          <button
+            className="wd-page-btn"
+            onClick={() => setPage(totalPages)}
+            disabled={page >= totalPages || loading}
+            title="Last page"
+          >
+            &raquo;
+          </button>
+          {totalPages > 7 && (
+            <div className="wd-page-jump">
+              <span>Go to</span>
+              <input
+                ref={jumpInputRef}
+                type="number"
+                min={1}
+                max={totalPages}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleJump(); }}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

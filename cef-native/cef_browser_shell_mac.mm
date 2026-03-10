@@ -785,7 +785,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
     LOG_DEBUG("🔄 Main window resized - updating layout");
 
     NSRect contentRect = [[g_main_window contentView] bounds];
-    int headerHeight = 99;
+    int headerHeight = 96;
     int walletPanelWidth = 250;    // Vertical panel width
     int walletPanelHeight = 200;   // Vertical panel height
     int webviewHeight = contentRect.size.height - headerHeight;  // Full height
@@ -948,7 +948,7 @@ void CreateMainWindow() {
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 
     // Calculate heights
-    int headerHeight = 99;         // Header with tabs/address bar
+    int headerHeight = 96;         // Header with tabs (42px) + toolbar (54px)
     int webviewHeight = screenRect.size.height - headerHeight;  // Full height below header
 
     LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px");

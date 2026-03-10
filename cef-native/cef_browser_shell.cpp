@@ -173,7 +173,7 @@ void HandleFullscreenChange(bool fullscreen) {
             ShowWindow(g_header_hwnd, SW_SHOW);
         }
         // Restore normal layout (same as WM_SIZE)
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
         int webviewHeight = height - shellHeight;
 
         if (g_header_hwnd && IsWindow(g_header_hwnd)) {
@@ -716,8 +716,8 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
 
-            // Header: 12% of parent height, minimum 100px (for tab bar 40px + toolbar 52px)
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+            // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
+            int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
             int webviewHeight = height - shellHeight;
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
@@ -2664,8 +2664,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    // Header: 12% of parent height, minimum 100px (for tab bar 40px + toolbar 52px)
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.12));
+    // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
+    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;

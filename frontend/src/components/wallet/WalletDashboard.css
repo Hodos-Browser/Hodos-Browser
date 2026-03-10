@@ -44,11 +44,13 @@
 }
 
 .wd-sidebar-logo {
-  padding: 16px 16px 14px;
+  height: 56px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--wd-divider);
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  box-sizing: border-box;
 }
 
 .wd-sidebar-svg-logo {
@@ -105,13 +107,14 @@
 }
 
 .wd-content-header {
+  height: 56px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 24px;
+  padding: 0 24px;
   border-bottom: 1px solid var(--wd-divider);
   background: var(--wd-sidebar-bg);
-  min-height: 56px;
+  box-sizing: border-box;
 }
 
 .wd-content-title {
@@ -155,7 +158,7 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 24px;
+  padding: 16px 24px;
   box-sizing: border-box;
 }
 
@@ -188,19 +191,12 @@
   border: 1px solid var(--wd-gold);
   border-radius: 16px;
   padding: 24px;
-  position: relative;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
-.wd-balance-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, var(--wd-gold), transparent, var(--wd-gold));
-}
+/* Gold gradient top accent is handled by the border on .wd-balance-card */
 
 .wd-balance-top-row {
   display: flex;
@@ -384,6 +380,17 @@
   transform: rotate(45deg);
 }
 
+/* Right-aligned tooltip variant (for right-side info icons) */
+.wd-info-tooltip-right .wd-info-popup {
+  left: auto;
+  right: -8px;
+}
+
+.wd-info-tooltip-right .wd-info-popup::before {
+  left: auto;
+  right: 12px;
+}
+
 .wd-receive-generate {
   background: none;
   border: 1px solid var(--wd-gold);
@@ -560,28 +567,85 @@
   text-overflow: ellipsis;
 }
 
-.wd-recent-time {
-  font-size: 11px;
-  color: var(--wd-text-muted);
+.wd-recent-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
   margin-top: 2px;
 }
 
-.wd-recent-amount {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
+.wd-recent-time {
+  font-size: 11px;
+  color: var(--wd-text-muted);
 }
 
-.wd-recent-amount.received {
+.wd-recent-center {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  gap: 0;
+}
+
+.wd-recent-values {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.wd-recent-values-top {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.wd-recent-usd-primary {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.wd-recent-usd-primary.received {
   color: #4caf50;
 }
 
-.wd-recent-amount.sent {
+.wd-recent-usd-primary.sent {
   color: #ef5350;
 }
 
-.wd-recent-status {
+.wd-recent-usd-secondary {
+  font-size: 11px;
+  color: var(--wd-text-muted);
+  white-space: nowrap;
+}
+
+.wd-recent-bsv {
+  font-family: 'Courier New', monospace;
   font-size: 10px;
+  color: var(--wd-text-muted);
+  text-align: right;
+}
+
+/* Smaller pill/button variants for recent activity */
+.wd-txid-pill-sm {
+  font-size: 9px;
+  padding: 2px 6px;
+  width: 38px;
+  margin-right: 6px;
+}
+
+.wd-woc-btn-sm {
+  padding: 1px 5px;
+  margin-left: 6px;
+  margin-right: 12px;
+}
+
+.wd-recent-status {
+  font-size: 9px;
   padding: 2px 6px;
   border-radius: 4px;
   font-weight: 600;
@@ -709,7 +773,9 @@
 .wd-activity {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
 }
 
 .wd-activity-filters {
@@ -745,15 +811,18 @@
 .wd-activity-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .wd-activity-item {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-  border-radius: 10px;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 6px;
   background: var(--wd-card-bg);
   border: 1px solid var(--wd-card-border);
   cursor: pointer;
@@ -766,9 +835,9 @@
 }
 
 .wd-activity-direction {
-  font-size: 20px;
-  width: 36px;
-  height: 36px;
+  font-size: 16px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -792,10 +861,10 @@
 }
 
 .wd-activity-desc {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--wd-text-primary);
-  margin-bottom: 3px;
+  margin-bottom: 2px;
 }
 
 .wd-activity-meta {
@@ -811,16 +880,16 @@
 }
 
 .wd-activity-date {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--wd-text-muted);
 }
 
-.wd-activity-right {
+.wd-activity-center {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
+  align-items: center;
   flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 12px;
 }
 
 .wd-activity-amount {
@@ -837,7 +906,7 @@
 }
 
 .wd-activity-status {
-  font-size: 10px;
+  font-size: 12px;
   padding: 2px 8px;
   border-radius: 4px;
   font-weight: 600;
@@ -918,11 +987,44 @@
   font-weight: 600;
 }
 
+/* Info icon column — fixed width, only first row shows icon */
+.wd-activity-info-col {
+  width: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: 12px;
+}
+
+/* Activity values group — stacked right-aligned */
+.wd-activity-values {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.wd-activity-values-top {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.wd-activity-values-divider {
+  color: var(--wd-text-muted);
+  font-size: 12px;
+  font-weight: 300;
+}
+
 /* Activity USD amounts */
 .wd-activity-usd {
   font-size: 15px;
   font-weight: 700;
   white-space: nowrap;
+  width: 80px;
+  text-align: right;
 }
 
 .wd-activity-usd.received {
@@ -934,47 +1036,68 @@
 }
 
 .wd-activity-usd-secondary {
-  font-size: 11px;
+  font-size: 14px;
   color: var(--wd-text-muted);
   white-space: nowrap;
+  width: 80px;
+  text-align: right;
+  margin-right: -4px;
 }
 
 .wd-activity-bsv {
   font-family: 'Courier New', monospace;
-  font-size: 12px;
-  color: var(--wd-text-secondary);
-}
-
-/* Activity row icon buttons */
-.wd-activity-icons {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  margin-top: 2px;
-}
-
-.wd-txid-icon,
-.wd-woc-icon {
-  background: none;
-  border: 1px solid transparent;
+  font-size: 13px;
   color: var(--wd-text-muted);
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
+  text-align: right;
+}
+
+/* Activity row action buttons */
+.wd-txid-pill {
+  background: #e0e0e0;
+  border: none;
+  color: #1a1d23;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  width: 46px;
+  text-align: center;
+  box-sizing: border-box;
+  margin-right: 6px;
+  transition: all 0.15s ease;
+}
+
+.wd-txid-pill:hover {
+  background: var(--wd-gold);
+  color: #000;
+}
+
+.wd-woc-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
-  padding: 0;
+  padding: 3px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  margin-left: 6px;
+  margin-right: 12px;
   transition: all 0.15s ease;
 }
 
-.wd-txid-icon:hover,
-.wd-woc-icon:hover {
-  color: var(--wd-gold);
-  border-color: var(--wd-card-border);
-  background: rgba(166, 124, 0, 0.1);
+.wd-woc-btn:hover {
+  background: rgba(166, 124, 0, 0.15);
+}
+
+.wd-woc-btn img {
+  display: block;
+  border-radius: 2px;
 }
 
 /* Pagination */
@@ -982,22 +1105,23 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 16px 0 8px;
+  gap: 6px;
+  padding: 6px 0 2px;
+  flex-shrink: 0;
 }
 
 .wd-page-btn {
   background: none;
   border: 1px solid var(--wd-card-border);
   color: var(--wd-text-secondary);
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   transition: all 0.15s ease;
 }
@@ -1012,6 +1136,44 @@
   cursor: not-allowed;
 }
 
+.wd-page-btn.active {
+  background: var(--wd-gold);
+  border-color: var(--wd-gold);
+  color: #000;
+}
+
+.wd-page-ellipsis {
+  font-size: 13px;
+  color: var(--wd-text-muted);
+  width: 20px;
+  text-align: center;
+}
+
+.wd-page-jump {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--wd-text-muted);
+}
+
+.wd-page-jump input {
+  width: 40px;
+  height: 26px;
+  background: var(--wd-card-bg);
+  border: 1px solid var(--wd-card-border);
+  border-radius: 4px;
+  color: var(--wd-text-primary);
+  font-size: 12px;
+  text-align: center;
+  outline: none;
+}
+
+.wd-page-jump input:focus {
+  border-color: var(--wd-gold);
+}
+
 .wd-page-info {
   font-size: 13px;
   color: var(--wd-text-muted);
@@ -1021,27 +1183,7 @@
 }
 
 /* Recent activity right column (dashboard) */
-.wd-recent-right-col {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
-  flex-shrink: 0;
-}
-
-.wd-recent-usd {
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.wd-recent-usd.received {
-  color: #4caf50;
-}
-
-.wd-recent-usd.sent {
-  color: #ef5350;
-}
+/* (old wd-recent-right-col / wd-recent-usd removed — replaced by wd-recent-center layout) */
 
 /* Load More (legacy — kept for backward compat) */
 .wd-load-more {

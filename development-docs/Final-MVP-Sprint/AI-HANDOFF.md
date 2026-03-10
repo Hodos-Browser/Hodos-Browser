@@ -28,6 +28,29 @@
 
 ## Log
 
+### 2026-03-09 — Matt / Claude — GitHub Setup & Team Coordination
+
+**What was done:**
+- GitHub CLI (`gh`) installed and authenticated (BSVArchie) — works from WSL via credential helper
+- Reviewed all GitHub issues (#7-#31) and milestones that John (Calgoon) created
+- John's Track A (HTTP/backend): **all 7 issues closed** — SyncHttpClient, WinHTTP port, AdblockCache, singleton init, process auto-launch all done
+- Ishaan's Track B (UI/overlays): #20 (Notification overlay) closed, 8 remain open
+- Switched to Matt branch, merged origin/main (includes Ishaan's mac fix commit)
+- Cleaned up `.claude/settings.local.json` — removed ~30 one-off bash permissions, added comprehensive git/file operation patterns, added deny list for destructive commands
+- Reviewed Ishaan's mac fix commit (7d7f287) — confirmed Windows-safe, proper `#ifdef` patterns
+
+**What's blocked:**
+- Same as previous entry (send_transaction UX, persist_session_cookies)
+
+**What's next:**
+- UX/UI Phase 4 refinement — testing and polishing the wallet dashboard, general UI fixes
+- All local changes (~110 files) still unstaged on Matt branch — need to be committed and pushed
+
+**Files changed:**
+- `.claude/settings.local.json` (rewritten — clean permission set)
+
+---
+
 ### 2026-03-09 — Project Lead / Claude — Sprint Setup
 
 **What was done:**
