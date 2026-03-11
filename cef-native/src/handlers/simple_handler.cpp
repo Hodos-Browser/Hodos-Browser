@@ -2134,22 +2134,32 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (action == "new_tab") {
 #ifdef _WIN32
             createTabHelper("");  // Always NTP
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("");
 #endif
         } else if (action == "history") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/browser-data");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/browser-data");
 #endif
         } else if (action == "settings") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page");
 #endif
         } else if (action == "wallet") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/wallet");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/wallet");
 #endif
         } else if (action == "about") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page/about");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/about");
 #endif
         } else if (action == "downloads") {
 #ifdef _WIN32
@@ -2163,6 +2173,16 @@ bool SimpleHandler::OnProcessMessageReceived(
                 ShowDownloadPanelOverlay(100, GetOwnerWindow());
             }
             NotifyDownloadStateChanged();
+#elif defined(__APPLE__)
+            extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+            extern bool IsDownloadPanelOverlayVisible();
+            extern void HideDownloadPanelOverlayMacOS();
+            if (IsDownloadPanelOverlayVisible()) {
+                HideDownloadPanelOverlayMacOS();
+            } else {
+                CreateDownloadPanelOverlayMacOS(100);
+                NotifyDownloadStateChanged();
+            }
 #endif
         } else if (action == "find") {
             // Send find_show IPC to header browser
@@ -2205,7 +2225,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 active_tab->browser->GetHost()->SetZoomLevel(0.0);
             }
         } else if (action == "fullscreen") {
-            // Toggle fullscreen via Windows API
+            // Toggle fullscreen
 #ifdef _WIN32
             extern HWND g_hwnd;
             extern bool g_is_fullscreen;
@@ -2226,11 +2246,17 @@ bool SimpleHandler::OnProcessMessageReceived(
                 SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
+#elif defined(__APPLE__)
+            extern void ToggleFullScreenMacOS();
+            ToggleFullScreenMacOS();
 #endif
         } else if (action == "exit") {
 #ifdef _WIN32
             extern HWND g_hwnd;
             PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+#elif defined(__APPLE__)
+            extern void ShutdownApplication();
+            ShutdownApplication();
 #endif
         } else if (action == "settings_privacy") {
 #ifdef _WIN32
@@ -6037,6 +6063,16 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                     ShowDownloadPanelOverlay(0, GetOwnerWindow());
                 }
                 NotifyDownloadStateChanged();
+#elif defined(__APPLE__)
+                extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+                extern bool IsDownloadPanelOverlayVisible();
+                extern void HideDownloadPanelOverlayMacOS();
+                if (IsDownloadPanelOverlayVisible()) {
+                    HideDownloadPanelOverlayMacOS();
+                } else {
+                    CreateDownloadPanelOverlayMacOS(0);
+                    NotifyDownloadStateChanged();
+                }
 #endif
                 return true;
             }

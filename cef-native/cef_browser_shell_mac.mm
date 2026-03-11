@@ -161,6 +161,13 @@ void HandleFullscreenChange(bool fullscreen) {
     LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "enter" : "exit") + " (macOS stub)");
 }
 
+// Toggle fullscreen for the main window (called from menu_action "fullscreen")
+void ToggleFullScreenMacOS() {
+    if (g_main_window) {
+        [g_main_window toggleFullScreen:nil];
+    }
+}
+
 // ============================================================================
 // Forward Declarations
 // ============================================================================
@@ -192,6 +199,7 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset);
 void ShowProfilePanelOverlayMacOS(int iconRightOffset);
 void HideProfilePanelOverlayMacOS();
 void ShutdownApplication();
+void ToggleFullScreenMacOS();
 
 // ============================================================================
 // Helper Functions (C++ callable from simple_app.cpp)
@@ -2684,7 +2692,7 @@ void CreateSettingsMenuOverlay() {
     // Position in top-right corner
     NSRect mainFrame = [g_main_window frame];
     int menuWidth = 300;
-    int menuHeight = 400;
+    int menuHeight = 480;
     NSRect menuFrame = NSMakeRect(mainFrame.origin.x + mainFrame.size.width - menuWidth - 20,
                                   mainFrame.origin.y + mainFrame.size.height - menuHeight - 60,
                                   menuWidth, menuHeight);
