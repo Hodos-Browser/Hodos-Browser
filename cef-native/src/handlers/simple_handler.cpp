@@ -4768,7 +4768,6 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== ADBLOCK MESSAGES (Sprint 8c) ==========
 
-#ifdef _WIN32
     if (message_name == "adblock_get_blocked_count") {
         // Use per-window active tab's browser ID
         int browser_id = 0;
@@ -4897,11 +4896,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         return true;
     }
-#endif
 
     // ========== COSMETIC FILTERING PHASE 2 (Sprint 8e) ==========
 
-#ifdef _WIN32
     if (message_name == "cosmetic_class_id_query") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string dataJson = args->GetString(0).ToString();
@@ -4948,7 +4945,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         return true;
     }
-#endif
 
     // ========== BOOKMARK MESSAGES ==========
 
