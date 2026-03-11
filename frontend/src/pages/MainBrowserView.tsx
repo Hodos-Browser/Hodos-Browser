@@ -247,6 +247,11 @@ const MainBrowserView: React.FC = () => {
             if (event.data?.type === 'find_show') {
                 setFindBarVisible(true);
                 setFindResult(null);
+            } else if (event.data?.type === 'focus_address_bar') {
+                if (addressInputRef.current) {
+                    addressInputRef.current.focus();
+                    addressInputRef.current.select();
+                }
             } else if (event.data?.type === 'find_result') {
                 try {
                     const data = typeof event.data.data === 'string'
@@ -427,7 +432,12 @@ const MainBrowserView: React.FC = () => {
         onNextTab: nextTab,
         onPrevTab: prevTab,
         onSwitchToTab: switchToTabByIndex,
-        onFocusAddressBar: () => {}, // TODO: Implement address bar focus functionality
+        onFocusAddressBar: () => {
+            if (addressInputRef.current) {
+                addressInputRef.current.focus();
+                addressInputRef.current.select();
+            }
+        },
         onReload: reload,
         onFindInPage: () => {
             setFindBarVisible(true);

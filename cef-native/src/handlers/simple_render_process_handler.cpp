@@ -869,6 +869,17 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        if (message_name == "focus_address_bar") {
+            LOG_DEBUG_RENDER("⌨️ focus_address_bar received, dispatching to React");
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: { type: 'focus_address_bar' }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "find_result") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string resultJson = args->GetString(0);

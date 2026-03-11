@@ -5956,6 +5956,24 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             }
         }
 
+        // Ctrl+L / Cmd+L — Focus address bar
+        if (event.windows_key_code == 'L') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+L: Focus address bar");
+                CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+                if (header) {
+                    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("focus_address_bar");
+                    header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                    header->GetHost()->SetFocus(true);
+                }
+                return true;
+            }
+        }
+
         // Check for 'I' key shortcuts
         if (event.windows_key_code == 'I') {
 #ifdef __APPLE__

@@ -35,6 +35,8 @@
 // Forward Declarations
 // ============================================================================
 void ShutdownApplication();
+void HandleCmdD();  // Cmd+D — Bookmark current page
+void HandleCmdL();  // Cmd+L — Focus address bar
 
 // ============================================================================
 // Custom NSApplication for CEF (REQUIRED on macOS)
@@ -57,6 +59,29 @@ void ShutdownApplication();
 }
 
 - (void)sendEvent:(NSEvent*)event {
+  // Intercept Cmd+D and Cmd+L before NSMenu swallows them.
+  // These keys aren't standard Edit menu actions so macOS discards them
+  // before CEF's OnPreKeyEvent ever fires.
+  if (event.type == NSEventTypeKeyDown) {
+    NSUInteger flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (flags & NSEventModifierFlagCommand) {
+      NSString* chars = [event charactersIgnoringModifiers];
+      if ([chars length] == 1) {
+        unichar ch = [chars characterAtIndex:0];
+        if (ch == 'd' || ch == 'D') {
+          HandleCmdD();
+          [CATransaction flush];
+          return;
+        }
+        if (ch == 'l' || ch == 'L') {
+          HandleCmdL();
+          [CATransaction flush];
+          return;
+        }
+      }
+    }
+  }
+
   CefScopedSendingEvent sendingEventScoper;
   [super sendEvent:event];
 
@@ -165,6 +190,28 @@ void HandleFullscreenChange(bool fullscreen) {
 void ToggleFullScreenMacOS() {
     if (g_main_window) {
         [g_main_window toggleFullScreen:nil];
+    }
+}
+
+// Cmd+D — Bookmark current page (called from sendEvent: before NSMenu swallows it)
+void HandleCmdD() {
+    auto* activeTab = TabManager::GetInstance().GetActiveTab();
+    if (activeTab && !activeTab->url.empty()) {
+        LOG_INFO("⌨️ Cmd+D: Bookmarking " + activeTab->url);
+        std::vector<std::string> emptyTags;
+        BookmarkManager::GetInstance().AddBookmark(
+            activeTab->url, activeTab->title, -1, emptyTags);
+    }
+}
+
+// Cmd+L — Focus address bar (called from sendEvent: before NSMenu swallows it)
+void HandleCmdL() {
+    LOG_INFO("⌨️ Cmd+L: Focus address bar");
+    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+    if (header) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("focus_address_bar");
+        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+        header->GetHost()->SetFocus(true);
     }
 }
 
