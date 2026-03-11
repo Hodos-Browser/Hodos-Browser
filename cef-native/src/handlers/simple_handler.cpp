@@ -222,8 +222,15 @@ static void ShowGhostTab(const std::string& title, int width, int height) {
     }
 }
 #else
-static void HideGhostTab() {}
-static void ShowGhostTab(const std::string&, int, int) {}
+// macOS ghost tab — implemented in WindowManager_mac.mm
+extern "C" void ShowGhostTabMacOS(const char* title, int width, int height);
+extern "C" void HideGhostTabMacOS();
+extern "C" void* GetWindowAtScreenPointMacOS(int screenX, int screenY);
+extern "C" void PositionWindowAtScreenPoint(void* ns_window_ptr, int screenX, int screenY);
+static void HideGhostTab() { HideGhostTabMacOS(); }
+static void ShowGhostTab(const std::string& title, int width, int height) {
+    ShowGhostTabMacOS(title.c_str(), width, height);
+}
 #endif
 // ===== End Ghost Tab Window =====
 
@@ -1409,17 +1416,13 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         int tab_id = TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, window_id_);
 #else
-        // macOS: Get webview dimensions through helper function
-        // g_webview_view is already void*, no bridge cast needed
-        ViewDimensions dims = GetViewDimensions(g_webview_view);
+        // macOS: Use the requesting window's webview, fallback to global
+        BrowserWindow* ownerWin = GetOwnerWindow();
+        void* parentView = (ownerWin && ownerWin->webview_view) ? ownerWin->webview_view : g_webview_view;
 
+        ViewDimensions dims = GetViewDimensions(parentView);
         int tab_id = TabManager::GetInstance().CreateTab(
-            url,
-            g_webview_view,  // Already void*, no cast needed
-            0, 0,
-            dims.width,
-            dims.height
-        );
+            url, parentView, 0, 0, dims.width, dims.height, window_id_);
 #endif
 
         LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id) + " in window " + std::to_string(window_id_));
@@ -1552,6 +1555,28 @@ bool SimpleHandler::OnProcessMessageReceived(
                     // Position the new window at the drop point (offset so title bar is near cursor)
                     SetWindowPos(new_bw->hwnd, nullptr, screen_x - 100, screen_y - 50,
                                  0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                    TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
+                }
+            }
+#elif defined(__APPLE__)
+            // macOS merge detection — check if drop point is over another window
+            BrowserWindow* target_bw = (BrowserWindow*)GetWindowAtScreenPointMacOS(screen_x, screen_y);
+
+            // Don't merge into the same window we're tearing from
+            if (target_bw && target_bw->window_id == source_window_id) {
+                target_bw = nullptr;
+            }
+
+            if (target_bw) {
+                LOG_INFO_BROWSER("tab_tearoff: merging tab " + std::to_string(tab_id) +
+                                 " into window " + std::to_string(target_bw->window_id));
+                TabManager::GetInstance().MoveTabToWindow(tab_id, target_bw->window_id);
+            } else {
+                LOG_INFO_BROWSER("tab_tearoff: tearing off tab " + std::to_string(tab_id) +
+                                 " to new window at (" + std::to_string(screen_x) + "," + std::to_string(screen_y) + ")");
+                BrowserWindow* new_bw = WindowManager::GetInstance().CreateFullWindow(false);
+                if (new_bw) {
+                    PositionWindowAtScreenPoint(new_bw->ns_window, screen_x, screen_y);
                     TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
                 }
             }
@@ -5861,9 +5886,7 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
                 LOG_INFO_BROWSER("⌨️ Ctrl+N: Creating new window");
-#ifdef _WIN32
                 WindowManager::GetInstance().CreateFullWindow();
-#endif
                 return true;
             }
         }
@@ -6184,9 +6207,17 @@ static void CreateNewTabWithUrl(const std::string& url) {
     int tabHeight = height - shellHeight;
     TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else
-    extern NSView* g_webview_view;
-    ViewDimensions dims = GetViewDimensions(g_webview_view);
-    TabManager::GetInstance().CreateTab(url, g_webview_view, 0, 0, dims.width, dims.height);
+    BrowserWindow* activeWin = WindowManager::GetInstance().GetActiveWindow();
+    void* parentView = (activeWin && activeWin->webview_view) ? activeWin->webview_view : nullptr;
+    int winId = activeWin ? activeWin->window_id : 0;
+
+    if (!parentView) {
+        extern NSView* g_webview_view;
+        parentView = g_webview_view;
+    }
+
+    ViewDimensions dims = GetViewDimensions(parentView);
+    TabManager::GetInstance().CreateTab(url, parentView, 0, 0, dims.width, dims.height, winId);
 #endif
 }
 

@@ -1511,8 +1511,27 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    LOG_INFO("❌ Main window close requested - shutting down application");
-    ShutdownApplication();
+    int windowCount = WindowManager::GetInstance().GetWindowCount();
+
+    if (windowCount <= 1) {
+        LOG_INFO("❌ Last window close requested - shutting down application");
+        ShutdownApplication();
+        return YES;
+    }
+
+    // Not the last window — close tabs in window 0 and clean up
+    LOG_INFO("❌ Window 0 close requested (" + std::to_string(windowCount - 1) + " other windows remain)");
+    auto allTabs = TabManager::GetInstance().GetAllTabs();
+    std::vector<int> tabsToClose;
+    for (auto* tab : allTabs) {
+        if (tab->window_id == 0) {
+            tabsToClose.push_back(tab->id);
+        }
+    }
+    for (int tabId : tabsToClose) {
+        TabManager::GetInstance().CloseTab(tabId);
+    }
+    WindowManager::GetInstance().RemoveWindow(0);
     return YES;
 }
 
@@ -2978,6 +2997,15 @@ int main(int argc, char* argv[]) {
         app->SetMacOSWindow((__bridge void*)g_main_window,
                            (__bridge void*)g_header_view,
                            (__bridge void*)g_webview_view);
+
+        // Populate window 0's BrowserWindow struct for multi-window support
+        BrowserWindow* bw0 = WindowManager::GetInstance().GetWindow(0);
+        if (bw0) {
+            bw0->ns_window = (__bridge void*)g_main_window;
+            bw0->header_view = (__bridge void*)g_header_view;
+            bw0->webview_view = (__bridge void*)g_webview_view;
+            LOG_INFO("✅ BrowserWindow[0] populated with main window views");
+        }
 
         LOG_INFO("✅ Windows created, now manually creating header browser");
 
