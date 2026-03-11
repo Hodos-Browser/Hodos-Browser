@@ -176,6 +176,11 @@ bool TabManager::CloseTab(int tab_id) {
         EphemeralCookieManager::GetInstance().OnTabClosed(tab.browser->GetIdentifier());
     }
 
+    // Mute audio before closing to prevent background playback during async teardown
+    if (tab.browser) {
+        tab.browser->GetHost()->SetAudioMuted(true);
+    }
+
     // Request browser to close
     // OnBeforeClose will be called when CEF is ready, then we'll destroy the HWND
     if (tab.browser) {

@@ -77,6 +77,12 @@ void ShutdownApplication();
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
 #include "include/core/SettingsManager.h"
+#include "include/core/SyncHttpClient.h"
+#include "include/core/AdblockCache.h"
+#include "include/core/FingerprintProtection.h"
+#include "include/core/CookieBlockManager.h"
+#include "include/core/BookmarkManager.h"
+#include "include/core/WindowManager.h"
 
 // ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
@@ -91,7 +97,9 @@ NSWindow* g_settings_overlay_window = nullptr;
 NSWindow* g_wallet_overlay_window = nullptr;
 NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
+NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
+NSWindow* g_cookie_panel_overlay_window = nullptr;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
 bool g_file_dialog_active = false;
@@ -102,6 +110,13 @@ int g_peerpay_amount = 0;
 // Stored icon right offsets for repositioning overlays on move/resize (physical pixels)
 static int g_mac_settings_icon_right_offset = 0;
 static int g_mac_wallet_icon_right_offset = 0;
+static int g_mac_cookie_panel_icon_right_offset = 0;
+
+// Server process management
+static pid_t g_wallet_server_pid = -1;
+static pid_t g_adblock_server_pid = -1;
+bool g_walletServerRunning = false;
+bool g_adblockServerRunning = false;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -130,7 +145,16 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset);
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset);
 void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
+void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
+void ShowSettingsMenuOverlay();
+void HideSettingsMenuOverlay();
+bool IsSettingsMenuOverlayVisible();
+bool WasSettingsMenuJustHidden();
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
+void ShowCookiePanelOverlay(int iconRightOffset);
+void HideCookiePanelOverlay();
+bool IsCookiePanelOverlayVisible();
 void ShutdownApplication();
 
 // ============================================================================
@@ -287,12 +311,12 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
 @end
 
-// Wallet Overlay View
-@interface WalletOverlayView : NSView
+// Cookie Panel (Privacy Shield) Overlay View
+@interface CookiePanelOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
 @end
 
-@implementation WalletOverlayView
+@implementation CookiePanelOverlayView
 
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
@@ -309,25 +333,18 @@ ViewDimensions GetViewDimensions(void* nsview) {
 - (BOOL)canBecomeKeyView { return YES; }
 
 - (void)mouseDown:(NSEvent *)event {
-    NSLog(@"🔍 WalletOverlayView mouseDown called!");
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
     mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.y = self.bounds.size.height - location.y;  // Flip Y coordinate
     mouse_event.modifiers = 0;
 
-    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-    if (wallet) {
-        // CRITICAL: Set focus when user clicks
-        wallet->GetHost()->SetFocus(true);
-        NSLog(@"🔍 CEF focus enabled on click");
-
-        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
-        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        LOG_DEBUG("🖱️ Wallet overlay: Left-click forwarded to CEF");
-    } else {
-        NSLog(@"❌ Wallet browser not available!");
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+        LOG_DEBUG("Cookie panel overlay: Left-click forwarded to CEF");
     }
 }
 
@@ -339,11 +356,11 @@ ViewDimensions GetViewDimensions(void* nsview) {
     mouse_event.y = self.bounds.size.height - location.y;
     mouse_event.modifiers = 0;
 
-    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-    if (wallet) {
-        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
-        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
-        LOG_DEBUG("🖱️ Wallet overlay: Right-click forwarded to CEF");
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        cookie->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+        LOG_DEBUG("Cookie panel overlay: Right-click forwarded to CEF");
     }
 }
 
@@ -355,9 +372,290 @@ ViewDimensions GetViewDimensions(void* nsview) {
     mouse_event.y = self.bounds.size.height - location.y;
     mouse_event.modifiers = 0;
 
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        cookie->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (!cookie) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    // Send RAWKEYDOWN event
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    cookie->GetHost()->SendKeyEvent(key_event);
+
+    // Send CHAR event for character input (critical for typing)
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        cookie->GetHost()->SendKeyEvent(key_event);
+    }
+
+    LOG_DEBUG("Cookie panel overlay: Key events forwarded to CEF");
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    int modifiers = 0;
+    NSEventModifierFlags flags = [event modifierFlags];
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    CefRefPtr<CefBrowser> cookie = SimpleHandler::GetCookiePanelBrowser();
+    if (cookie) {
+        cookie->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+@end
+
+// Wallet Overlay View
+@interface WalletOverlayView : NSView
+@property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* walletTrackingArea;
+@end
+
+@implementation WalletOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+
+        // NSTrackingArea is REQUIRED for mouseMoved/mouseEntered/mouseExited on macOS
+        _walletTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_walletTrackingArea];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_walletTrackingArea) {
+        [self removeTrackingArea:_walletTrackingArea];
+    }
+    _walletTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_walletTrackingArea];
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+
+// CRITICAL: Override hitTest to ensure this view ALWAYS receives mouse events
+- (NSView *)hitTest:(NSPoint)point {
+    // Log to file for diagnostics
+    static std::string hitLogPath;
+    if (hitLogPath.empty()) {
+        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+        hitLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+    }
+    static int hitCount = 0;
+    if (hitCount < 10) {
+        std::ofstream dbg(hitLogPath, std::ios::app);
+        dbg << "hitTest called: point=(" << point.x << "," << point.y
+            << ") bounds=(" << self.bounds.origin.x << "," << self.bounds.origin.y
+            << "," << self.bounds.size.width << "," << self.bounds.size.height
+            << ") subviews=" << [[self subviews] count]
+            << " self=" << (void*)self
+            << std::endl;
+        // Log subviews if any exist
+        for (NSView* sub in [self subviews]) {
+            NSRect f = [sub frame];
+            dbg << "  subview: " << [[sub className] UTF8String]
+                << " frame=(" << f.origin.x << "," << f.origin.y
+                << "," << f.size.width << "," << f.size.height
+                << ") hidden=" << [sub isHidden]
+                << std::endl;
+        }
+        dbg.close();
+        hitCount++;
+    }
+    return self;  // Always return self — we handle ALL events
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    // Use file logging (NSLog doesn't appear in log show for unsigned apps)
+    static std::string mdLogPath;
+    if (mdLogPath.empty()) {
+        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+        mdLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+    }
+    std::ofstream dbg(mdLogPath, std::ios::app);
+    dbg << "VIEW mouseDown: NSView(" << location.x << "," << location.y
+        << ") → CEF(" << mouse_event.x << "," << mouse_event.y
+        << ") bounds=" << self.bounds.size.width << "x" << self.bounds.size.height << std::endl;
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        wallet->GetHost()->SetFocus(true);
+        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+        dbg << "  → Click sent to wallet browser ID=" << wallet->GetIdentifier() << std::endl;
+    } else {
+        dbg << "  ❌ GetWalletBrowser() returned NULL!" << std::endl;
+    }
+    dbg.close();
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    // mouseUp is now handled in mouseDown (combined down+up pattern)
+    // Keep this for any future separation if needed
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
         wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        // macOS scroll deltas: positive deltaY = scroll up
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        wallet->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    // Log first few mouse moves to confirm event routing works
+    static int moveCount = 0;
+    if (moveCount < 5) {
+        NSLog(@"🖱️ WalletOverlay mouseMoved: CEF(%d,%d)", mouse_event.x, mouse_event.y);
+        moveCount++;
+    }
+
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+        CefMouseEvent mouse_event;
+        mouse_event.x = (int)location.x;
+        mouse_event.y = (int)(self.bounds.size.height - location.y);
+        mouse_event.modifiers = 0;
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
+    if (wallet) {
+        CefMouseEvent mouse_event;
+        mouse_event.x = -1;
+        mouse_event.y = -1;
+        mouse_event.modifiers = 0;
+        wallet->GetHost()->SendMouseMoveEvent(mouse_event, true);  // true = mouse left
     }
 }
 
@@ -438,6 +736,53 @@ ViewDimensions GetViewDimensions(void* nsview) {
 @implementation WalletOverlayWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeMainWindow { return NO; }
+
+// CRITICAL FIX: NSWindow's internal dispatch does NOT forward mouse events to our
+// content view in borderless+transparent+OSR windows. We must dispatch manually.
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+
+    switch (type) {
+        case NSEventTypeLeftMouseDown:
+            [view mouseDown:event];
+            return;
+        case NSEventTypeLeftMouseUp:
+            [view mouseUp:event];
+            return;
+        case NSEventTypeLeftMouseDragged:
+            [view mouseDragged:event];
+            return;
+        case NSEventTypeRightMouseDown:
+            [view rightMouseDown:event];
+            return;
+        case NSEventTypeRightMouseUp:
+            [view rightMouseUp:event];
+            return;
+        case NSEventTypeMouseMoved:
+            [view mouseMoved:event];
+            return;
+        case NSEventTypeScrollWheel:
+            [view scrollWheel:event];
+            return;
+        case NSEventTypeMouseEntered:
+            [view mouseEntered:event];
+            return;
+        case NSEventTypeMouseExited:
+            [view mouseExited:event];
+            return;
+        case NSEventTypeKeyDown:
+            [view keyDown:event];
+            return;
+        case NSEventTypeKeyUp:
+            [view keyUp:event];
+            return;
+        default:
+            // All other events go through normal dispatch
+            [super sendEvent:event];
+            return;
+    }
+}
 @end
 
 
@@ -695,12 +1040,12 @@ ViewDimensions GetViewDimensions(void* nsview) {
 
 @end
 
-// Settings Menu Overlay View (simplified - dropdown menu)
-@interface SettingsMenuOverlayView : NSView
+// Notification Overlay View (domain approval, no-wallet, payment confirmation)
+@interface NotificationOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
 @end
 
-@implementation SettingsMenuOverlayView
+@implementation NotificationOverlayView
 
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
@@ -714,20 +1059,214 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
-
     CefMouseEvent mouse_event;
     mouse_event.x = location.x;
     mouse_event.y = self.bounds.size.height - location.y;
     mouse_event.modifiers = 0;
 
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        notif->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = location.x;
+    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        notif->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (!notif) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+    key_event.modifiers = modifiers;
+    notif->GetHost()->SendKeyEvent(key_event);
+
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        notif->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (!notif) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+
+    NSString* chars = [event characters];
+    if (chars.length > 0) {
+        key_event.character = [chars characterAtIndex:0];
+    }
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+
+    notif->GetHost()->SendKeyEvent(key_event);
+}
+
+@end
+
+// Settings Menu Overlay View (simplified - dropdown menu)
+@interface SettingsMenuOverlayView : NSView
+@property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* menuTrackingArea;
+@end
+
+@implementation SettingsMenuOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+
+        _menuTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_menuTrackingArea];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_menuTrackingArea) {
+        [self removeTrackingArea:_menuTrackingArea];
+    }
+    _menuTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_menuTrackingArea];
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+
+- (NSView *)hitTest:(NSPoint)point {
+    return self;  // Always return self — we handle ALL events
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
     CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
     if (menu) {
+        menu->GetHost()->SetFocus(true);
         menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
         menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        LOG_DEBUG("🖱️ Settings menu overlay: Left-click forwarded to CEF");
+    }
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    // mouseUp handled in mouseDown (combined down+up)
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+        menu->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        menu->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
     }
 }
 
@@ -735,8 +1274,8 @@ ViewDimensions GetViewDimensions(void* nsview) {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
 
     CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
 
     CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
@@ -745,6 +1284,131 @@ ViewDimensions GetViewDimensions(void* nsview) {
     }
 }
 
+- (void)mouseEntered:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+        CefMouseEvent mouse_event;
+        mouse_event.x = (int)location.x;
+        mouse_event.y = (int)(self.bounds.size.height - location.y);
+        mouse_event.modifiers = 0;
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (menu) {
+        CefMouseEvent mouse_event;
+        mouse_event.x = -1;
+        mouse_event.y = -1;
+        mouse_event.modifiers = 0;
+        menu->GetHost()->SendMouseMoveEvent(mouse_event, true);
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (!menu) return;
+
+    NSString* chars = [event characters];
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    key_event.native_key_code = [event keyCode];
+    if (chars.length > 0) key_event.character = [chars characterAtIndex:0];
+    key_event.modifiers = modifiers;
+    menu->GetHost()->SendKeyEvent(key_event);
+
+    if (chars.length > 0) {
+        key_event.type = KEYEVENT_CHAR;
+        key_event.character = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+        menu->GetHost()->SendKeyEvent(key_event);
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> menu = SimpleHandler::GetSettingsMenuBrowser();
+    if (!menu) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+    NSString* chars = [event characters];
+    if (chars.length > 0) key_event.character = [chars characterAtIndex:0];
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    int modifiers = 0;
+    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
+    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
+    key_event.modifiers = modifiers;
+    menu->GetHost()->SendKeyEvent(key_event);
+}
+
+@end
+
+// Custom NSWindow for Settings Menu overlay — borderless windows refuse to become key by default
+@interface SettingsMenuOverlayWindow : NSWindow
+@end
+
+@implementation SettingsMenuOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+
+// CRITICAL: NSWindow's internal dispatch does NOT forward mouse events to content view
+// in borderless+transparent+OSR windows. We must dispatch manually.
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+
+    switch (type) {
+        case NSEventTypeLeftMouseDown:
+            [view mouseDown:event];
+            return;
+        case NSEventTypeLeftMouseUp:
+            [view mouseUp:event];
+            return;
+        case NSEventTypeLeftMouseDragged:
+            [view mouseDragged:event];
+            return;
+        case NSEventTypeRightMouseDown:
+            [view rightMouseDown:event];
+            return;
+        case NSEventTypeRightMouseUp:
+            [view rightMouseUp:event];
+            return;
+        case NSEventTypeMouseMoved:
+            [view mouseMoved:event];
+            return;
+        case NSEventTypeScrollWheel:
+            [view scrollWheel:event];
+            return;
+        case NSEventTypeMouseEntered:
+            [view mouseEntered:event];
+            return;
+        case NSEventTypeMouseExited:
+            [view mouseExited:event];
+            return;
+        case NSEventTypeKeyDown:
+            [view keyDown:event];
+            return;
+        case NSEventTypeKeyUp:
+            [view keyUp:event];
+            return;
+        default:
+            [super sendEvent:event];
+            return;
+    }
+}
 @end
 
 // ============================================================================
@@ -847,18 +1511,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    // Safety check: Only shut down if window is actually being closed by user
-    // Tab browser closes should NOT trigger window close
-    LOG_INFO("⚠️ windowShouldClose called");
-
-    // Check if this is a spurious close event (from tab removal)
-    // If we still have tabs, don't shut down
-    if (TabManager::GetInstance().GetTabCount() > 0) {
-        LOG_WARNING("⚠️ windowShouldClose called but tabs still exist - ignoring");
-        return NO;  // Don't close window
-    }
-
-    LOG_INFO("❌ Main window closing - shutting down application");
+    LOG_INFO("❌ Main window close requested - shutting down application");
     ShutdownApplication();
     return YES;
 }
@@ -899,6 +1552,20 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // Helper function for closing overlay windows from C++ code
 // ============================================================================
 
+extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores) {
+    if (!window) return;
+    NSWindow* overlayWindow = (__bridge NSWindow*)window;
+    [overlayWindow setIgnoresMouseEvents:ignores];
+    LOG_DEBUG("🪟 Overlay mouse events " + std::string(ignores ? "disabled" : "enabled"));
+}
+
+extern "C" void HideNotificationOverlayWindow() {
+    if (g_notification_overlay_window) {
+        [g_notification_overlay_window orderOut:nil];
+        LOG_INFO("🔔 Notification overlay hidden (keep-alive)");
+    }
+}
+
 extern "C" void CloseOverlayWindow(void* window, void* parent) {
     if (!window) {
         LOG_WARNING("CloseOverlayWindow: window is null");
@@ -925,6 +1592,18 @@ extern "C" void CloseOverlayWindow(void* window, void* parent) {
 
 void CreateMainWindow() {
     LOG_INFO("🪟 Creating main browser window (macOS)");
+
+    // Create application menu bar with Quit item (enables Cmd+Q)
+    NSMenu* menuBar = [[NSMenu alloc] init];
+    NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:appMenuItem];
+    NSMenu* appMenu = [[NSMenu alloc] init];
+    NSMenuItem* quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit Hodos Browser"
+                                                      action:@selector(terminate:)
+                                               keyEquivalent:@"q"];
+    [appMenu addItem:quitItem];
+    [appMenuItem setSubmenu:appMenu];
+    [NSApp setMainMenu:menuBar];
 
     // Get screen dimensions (work area, excluding menu bar and dock)
     NSRect screenRect = [[NSScreen mainScreen] visibleFrame];
@@ -1083,6 +1762,180 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("✅ Settings overlay created successfully");
 }
 
+// ============================================================================
+// Cookie Panel (Privacy Shield) Overlay
+// ============================================================================
+
+// Click-outside monitor for cookie panel overlay
+static id g_cookie_panel_click_monitor = nil;
+// Timestamp of last hide — used to debounce toggle vs click-outside race
+static CFAbsoluteTime g_cookie_panel_last_hide_time = 0;
+
+// Click-outside monitor for settings menu overlay
+static id g_settings_menu_click_monitor = nil;
+// Timestamp of last hide — used to debounce toggle vs click-outside race
+static CFAbsoluteTime g_settings_menu_last_hide_time = 0;
+
+// Forward declarations for monitor helpers
+static void RemoveCookiePanelClickOutsideMonitor();
+
+void HideCookiePanelOverlay() {
+    if (g_cookie_panel_overlay_window) {
+        [g_cookie_panel_overlay_window orderOut:nil];
+        RemoveCookiePanelClickOutsideMonitor();
+        g_cookie_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Cookie panel overlay hidden (macOS)");
+    }
+}
+
+static void InstallCookiePanelClickOutsideMonitor() {
+    if (g_cookie_panel_click_monitor) return;  // Already installed
+
+    g_cookie_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_cookie_panel_overlay_window || ![g_cookie_panel_overlay_window isVisible]) {
+                return event;
+            }
+
+            // Check if click is inside the cookie panel overlay
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_cookie_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                // Click outside — hide the overlay
+                HideCookiePanelOverlay();
+            }
+            return event;
+        }];
+    LOG_INFO("Cookie panel click-outside monitor installed");
+}
+
+static void RemoveCookiePanelClickOutsideMonitor() {
+    if (g_cookie_panel_click_monitor) {
+        [NSEvent removeMonitor:g_cookie_panel_click_monitor];
+        g_cookie_panel_click_monitor = nil;
+        LOG_INFO("Cookie panel click-outside monitor removed");
+    }
+}
+
+bool IsCookiePanelOverlayVisible() {
+    return g_cookie_panel_overlay_window && [g_cookie_panel_overlay_window isVisible];
+}
+
+// Returns true if the overlay was hidden very recently (within 300ms)
+// Used by the IPC toggle to avoid show-after-click-outside race
+bool WasCookiePanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_cookie_panel_last_hide_time) < 0.3;
+}
+
+void ShowCookiePanelOverlay(int iconRightOffset) {
+    if (g_cookie_panel_overlay_window) {
+        g_mac_cookie_panel_icon_right_offset = iconRightOffset;
+
+        // Reposition based on current main window frame and icon offset
+        NSRect mainFrame = [g_main_window frame];
+        CGFloat panelWidth = 400;
+        CGFloat panelHeight = 500;
+        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+        [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
+        [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+        InstallCookiePanelClickOutsideMonitor();
+        LOG_INFO("Cookie panel overlay shown (macOS)");
+    }
+}
+
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
+    LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_cookie_panel_icon_right_offset = iconRightOffset;
+
+    // Get main window frame for overlay alignment
+    NSRect mainFrame = [g_main_window frame];
+
+    // Right-side popup panel, right edge aligned under icon
+    CGFloat panelWidth = 400;
+    CGFloat panelHeight = 500;
+    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
+    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+    LOG_INFO("Cookie panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+             + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
+
+    // Destroy existing overlay if present
+    if (g_cookie_panel_overlay_window) {
+        LOG_INFO("Destroying existing cookie panel overlay");
+        [g_cookie_panel_overlay_window close];
+        g_cookie_panel_overlay_window = nullptr;
+    }
+
+    // Create borderless, transparent, floating window
+    g_cookie_panel_overlay_window = [[NSWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_cookie_panel_overlay_window) {
+        LOG_ERROR("Failed to create cookie panel overlay window");
+        return;
+    }
+
+    [g_cookie_panel_overlay_window setOpaque:NO];
+    [g_cookie_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_cookie_panel_overlay_window setLevel:NSNormalWindowLevel];
+    [g_cookie_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_cookie_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_cookie_panel_overlay_window setHasShadow:NO];
+
+    // Make this a child window of the main window
+    [g_main_window addChildWindow:g_cookie_panel_overlay_window ordered:NSWindowAbove];
+
+    // Create custom view for event handling and rendering
+    CookiePanelOverlayView* contentView = [[CookiePanelOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    [g_cookie_panel_overlay_window setContentView:contentView];
+
+    // Create CEF browser with windowless rendering
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("cookiepanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)panelWidth,
+                                   (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        "http://127.0.0.1:5137/privacy-shield",
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("Failed to create cookie panel overlay CEF browser");
+        return;
+    }
+
+    [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
+    InstallCookiePanelClickOutsideMonitor();
+    LOG_INFO("Cookie panel overlay created successfully");
+}
+
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_wallet_icon_right_offset = iconRightOffset;
@@ -1111,6 +1964,7 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
     [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];  // Must be floating to stay above main window (not a child)
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
+    [g_wallet_overlay_window setAcceptsMouseMovedEvents:YES];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
     [g_wallet_overlay_window setHasShadow:NO];
 
@@ -1166,7 +2020,32 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     NSLog(@"🔍 Wallet overlay is key window: %d", [g_wallet_overlay_window isKeyWindow]);
     NSLog(@"🔍 First responder: %@", [g_wallet_overlay_window firstResponder]);
 
-    LOG_INFO("✅ Wallet overlay created successfully");
+    // Global event monitor - captures ALL mouse events in the app
+    static id walletGlobalMonitor = nil;
+    if (walletGlobalMonitor) {
+        [NSEvent removeMonitor:walletGlobalMonitor];
+    }
+    NSString* monLogPath = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject]
+                            stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"];
+    std::string monLogPathStr = [monLogPath UTF8String];
+
+    walletGlobalMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        (NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved |
+         NSEventMaskMouseEntered | NSEventMaskMouseExited)
+        handler:^NSEvent*(NSEvent* event) {
+            std::ofstream dbg(monLogPathStr, std::ios::app);
+            NSWindow* w = [event window];
+            dbg << "GLOBAL MONITOR: type=" << (int)[event type]
+                << " window=" << (void*)w
+                << " isWallet=" << (w == g_wallet_overlay_window ? 1 : 0)
+                << " isMain=" << (w == g_main_window ? 1 : 0)
+                << " at (" << [event locationInWindow].x << "," << [event locationInWindow].y << ")"
+                << std::endl;
+            dbg.close();
+            return event;
+        }];
+
+    LOG_INFO("✅ Wallet overlay created successfully (with global event monitor)");
 }
 
 void CreateBackupOverlayWithSeparateProcess() {
@@ -1308,6 +2187,185 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
     LOG_INFO("✅ BRC-100 auth overlay created successfully");
 }
 
+void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams) {
+    LOG_INFO("🔔 Creating notification overlay (type: " + type + ", domain: " + domain + ") (macOS)");
+
+    NSRect mainFrame = [g_main_window frame];
+
+    // Build URL with query parameters
+    std::string queryString = "type=" + type + "&domain=" + domain;
+    if (!extraParams.empty()) queryString += extraParams;
+    std::string url = "http://127.0.0.1:5137/brc100-auth?" + queryString;
+
+    // Keep-alive: if window and browser already exist, use JS injection (instant)
+    CefRefPtr<CefBrowser> existing = SimpleHandler::GetNotificationBrowser();
+    if (g_notification_overlay_window && existing) {
+        LOG_INFO("🔔 Reusing existing notification overlay (keep-alive, JS injection)");
+
+        // Resize to match current main window
+        [g_notification_overlay_window setFrame:mainFrame display:YES];
+
+        if (type != "preload") {
+            // Escape single quotes in the query string for JS
+            std::string safeQuery = queryString;
+            size_t pos = 0;
+            while ((pos = safeQuery.find('\'', pos)) != std::string::npos) {
+                safeQuery.replace(pos, 1, "\\'");
+                pos += 2;
+            }
+
+            std::string js = "if(window.showNotification){window.showNotification('" + safeQuery + "')}else{window.location.search='?" + safeQuery + "'}";
+            existing->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+        }
+
+        existing->GetHost()->WasResized();
+        [g_notification_overlay_window makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    // First time or stale: clean up and create fresh
+    if (g_notification_overlay_window) {
+        CefRefPtr<CefBrowser> old_browser = SimpleHandler::GetNotificationBrowser();
+        if (old_browser) {
+            old_browser->GetHost()->CloseBrowser(false);
+        }
+        [g_notification_overlay_window close];
+        g_notification_overlay_window = nullptr;
+    }
+
+    g_notification_overlay_window = [[NSWindow alloc]
+        initWithContentRect:mainFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_notification_overlay_window) {
+        LOG_ERROR("❌ Failed to create notification overlay window");
+        return;
+    }
+
+    [g_notification_overlay_window setOpaque:NO];
+    [g_notification_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_notification_overlay_window setLevel:NSNormalWindowLevel];
+    [g_notification_overlay_window setIgnoresMouseEvents:NO];
+    [g_notification_overlay_window setReleasedWhenClosed:NO];
+    [g_notification_overlay_window setHasShadow:NO];
+
+    [g_main_window addChildWindow:g_notification_overlay_window ordered:NSWindowAbove];
+
+    NotificationOverlayView* contentView = [[NotificationOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
+    [g_notification_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("notification"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)mainFrame.size.width,
+                                   (int)mainFrame.size.height);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        url,
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("❌ Failed to create notification overlay CEF browser");
+        return;
+    }
+
+    if (type == "preload") {
+        [g_notification_overlay_window orderOut:nil];
+        LOG_INFO("🔔 Notification overlay pre-created (hidden)");
+    } else {
+        [g_notification_overlay_window makeKeyAndOrderFront:nil];
+    }
+
+    LOG_INFO("✅ Notification overlay created successfully");
+}
+
+// ============================================================================
+// Settings Menu Click-Outside Detection
+// ============================================================================
+
+// Forward declaration for monitor helper
+static void RemoveSettingsMenuClickOutsideMonitor();
+
+void HideSettingsMenuOverlay() {
+    if (g_settings_menu_overlay_window) {
+        [g_settings_menu_overlay_window orderOut:nil];
+        RemoveSettingsMenuClickOutsideMonitor();
+        g_settings_menu_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Settings menu overlay hidden (macOS)");
+    }
+}
+
+static void InstallSettingsMenuClickOutsideMonitor() {
+    if (g_settings_menu_click_monitor) return;  // Already installed
+
+    g_settings_menu_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_settings_menu_overlay_window || ![g_settings_menu_overlay_window isVisible]) {
+                return event;
+            }
+
+            // Check if click is inside the settings menu overlay
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_settings_menu_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                // Click outside — hide the overlay
+                HideSettingsMenuOverlay();
+            }
+            return event;
+        }];
+    LOG_INFO("Settings menu click-outside monitor installed");
+}
+
+static void RemoveSettingsMenuClickOutsideMonitor() {
+    if (g_settings_menu_click_monitor) {
+        [NSEvent removeMonitor:g_settings_menu_click_monitor];
+        g_settings_menu_click_monitor = nil;
+        LOG_INFO("Settings menu click-outside monitor removed");
+    }
+}
+
+bool IsSettingsMenuOverlayVisible() {
+    return g_settings_menu_overlay_window && [g_settings_menu_overlay_window isVisible];
+}
+
+// Returns true if the overlay was hidden very recently (within 300ms)
+// Used by the IPC toggle to avoid show-after-click-outside race
+bool WasSettingsMenuJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_settings_menu_last_hide_time) < 0.3;
+}
+
+void ShowSettingsMenuOverlay() {
+    if (g_settings_menu_overlay_window) {
+        [g_settings_menu_overlay_window makeKeyAndOrderFront:nil];
+        InstallSettingsMenuClickOutsideMonitor();
+        LOG_INFO("Settings menu overlay shown (macOS)");
+    }
+}
+
+// ============================================================================
+// Settings Menu Overlay Creation
+// ============================================================================
+
 void CreateSettingsMenuOverlay() {
     LOG_INFO("🎨 Creating settings menu overlay (macOS)");
 
@@ -1326,7 +2384,7 @@ void CreateSettingsMenuOverlay() {
         g_settings_menu_overlay_window = nullptr;
     }
 
-    g_settings_menu_overlay_window = [[NSWindow alloc]
+    g_settings_menu_overlay_window = [[SettingsMenuOverlayWindow alloc]
         initWithContentRect:menuFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
@@ -1342,7 +2400,8 @@ void CreateSettingsMenuOverlay() {
     [g_settings_menu_overlay_window setLevel:NSPopUpMenuWindowLevel];  // Higher than floating
     [g_settings_menu_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_menu_overlay_window setReleasedWhenClosed:NO];
-    [g_settings_menu_overlay_window setHasShadow:YES];  // Menu has shadow
+    [g_settings_menu_overlay_window setHasShadow:YES];
+    [g_settings_menu_overlay_window setAcceptsMouseMovedEvents:YES];
 
     SettingsMenuOverlayView* contentView = [[SettingsMenuOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, menuWidth, menuHeight)];
@@ -1363,7 +2422,7 @@ void CreateSettingsMenuOverlay() {
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         handler,
-        "http://127.0.0.1:5137/settings-menu",
+        "http://127.0.0.1:5137/menu",
         settings,
         nullptr,
         CefRequestContext::GetGlobalContext()
@@ -1375,6 +2434,8 @@ void CreateSettingsMenuOverlay() {
     }
 
     [g_settings_menu_overlay_window makeKeyAndOrderFront:nil];
+    [g_settings_menu_overlay_window makeFirstResponder:contentView];
+    InstallSettingsMenuClickOutsideMonitor();
     LOG_INFO("✅ Settings menu overlay created successfully");
 }
 
@@ -1383,6 +2444,11 @@ void CreateSettingsMenuOverlay() {
 // ============================================================================
 
 void ShutdownApplication() {
+    // Guard against re-entrant calls (terminate: → ShutdownApplication → terminate:)
+    static bool shutting_down = false;
+    if (shutting_down) return;
+    shutting_down = true;
+
     LOG_INFO("🛑 Starting graceful application shutdown (macOS)...");
 
     // TODO: Save session when macOS tab system is implemented
@@ -1401,6 +2467,7 @@ void ShutdownApplication() {
     CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
     CefRefPtr<CefBrowser> brc100_auth_browser = SimpleHandler::GetBRC100AuthBrowser();
     CefRefPtr<CefBrowser> settings_menu_browser = SimpleHandler::GetSettingsMenuBrowser();
+    CefRefPtr<CefBrowser> cookie_panel_browser = SimpleHandler::GetCookiePanelBrowser();
 
     if (header_browser) {
         LOG_INFO("🔄 Closing header browser...");
@@ -1437,6 +2504,11 @@ void ShutdownApplication() {
         settings_menu_browser->GetHost()->CloseBrowser(false);
     }
 
+    if (cookie_panel_browser) {
+        LOG_INFO("🔄 Closing cookie panel browser...");
+        cookie_panel_browser->GetHost()->CloseBrowser(false);
+    }
+
     // Step 2: Close overlay windows
     LOG_INFO("🔄 Closing overlay windows...");
 
@@ -1470,6 +2542,12 @@ void ShutdownApplication() {
         g_settings_menu_overlay_window = nullptr;
     }
 
+    if (g_cookie_panel_overlay_window) {
+        LOG_INFO("🔄 Closing cookie panel overlay window...");
+        [g_cookie_panel_overlay_window close];
+        g_cookie_panel_overlay_window = nullptr;
+    }
+
     // Step 3: Close main window
     if (g_main_window) {
         LOG_INFO("🔄 Closing main window...");
@@ -1477,11 +2555,202 @@ void ShutdownApplication() {
         g_main_window = nullptr;
     }
 
+    // Step 4: Kill background server processes
+    if (g_wallet_server_pid > 0) {
+        LOG_INFO("🔄 Killing wallet server (pid " + std::to_string(g_wallet_server_pid) + ")...");
+        kill(g_wallet_server_pid, SIGTERM);
+    }
+    if (g_adblock_server_pid > 0) {
+        LOG_INFO("🔄 Killing adblock server (pid " + std::to_string(g_adblock_server_pid) + ")...");
+        kill(g_adblock_server_pid, SIGTERM);
+    }
+
     LOG_INFO("✅ Application shutdown complete (macOS)");
     Logger::Shutdown();
 
-    // Quit application
-    [NSApp terminate:nil];
+    // Quit the CEF message loop, then exit the process.
+    // Do NOT call [NSApp terminate:nil] — that re-enters our terminate: override.
+    CefQuitMessageLoop();
+
+    // Post a delayed exit in case CefQuitMessageLoop doesn't fully tear down
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        _exit(0);
+    });
+}
+
+// ============================================================================
+// Health Check Functions (macOS) — uses SyncHttpClient (libcurl)
+// ============================================================================
+
+// Returns true if wallet server at localhost:31301 responds with "ok"
+static bool QuickHealthCheck() {
+    HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/health", 2000);
+    return resp.success && resp.body.find("\"ok\"") != std::string::npos;
+}
+
+// Returns true if adblock engine at localhost:31302 responds with "ready"
+static bool QuickAdblockHealthCheck() {
+    HttpResponse resp = SyncHttpClient::Get("http://localhost:31302/health", 2000);
+    return resp.success && resp.body.find("\"ready\"") != std::string::npos;
+}
+
+// Send POST /shutdown to a localhost service for graceful shutdown
+static bool SendShutdownRequest(int port) {
+    std::string url = "http://localhost:" + std::to_string(port) + "/shutdown";
+    HttpResponse resp = SyncHttpClient::Post(url, "", "application/json", 2000);
+    return resp.success;
+}
+
+// ============================================================================
+// Server Process Management (macOS)
+// ============================================================================
+
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+static void StartWalletServer() {
+    // Check if already running (dev mode: cargo run separately)
+    if (QuickHealthCheck()) {
+        LOG_INFO("Wallet server already running (dev mode) - skipping launch");
+        g_walletServerRunning = true;
+        return;
+    }
+
+    // Resolve exe path relative to browser executable
+    char exec_path[1024];
+    uint32_t exec_path_size = sizeof(exec_path);
+    if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) {
+        LOG_WARNING("Failed to get executable path for wallet server resolution");
+        return;
+    }
+
+    std::string exeDir(exec_path);
+    size_t lastSlash = exeDir.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        exeDir = exeDir.substr(0, lastSlash);
+    }
+
+    // Try relative path from build dir: ../../../../../../rust-wallet/target/release/hodos-wallet
+    std::string walletExe = exeDir + "/../../../../../../rust-wallet/target/release/hodos-wallet";
+
+    // Check if file exists
+    if (access(walletExe.c_str(), X_OK) != 0) {
+        // Try alternate path for development
+        walletExe = exeDir + "/../../../../../rust-wallet/target/release/hodos-wallet";
+        if (access(walletExe.c_str(), X_OK) != 0) {
+            LOG_WARNING("Wallet server executable not found - browser will run without auto-launched wallet");
+            LOG_WARNING("Start wallet manually: cd rust-wallet && cargo run --release");
+            return;
+        }
+    }
+
+    LOG_INFO("Launching wallet server: " + walletExe);
+
+    char* argv[] = { const_cast<char*>(walletExe.c_str()), nullptr };
+    int status = posix_spawn(&g_wallet_server_pid, walletExe.c_str(), nullptr, nullptr, argv, environ);
+    if (status != 0) {
+        LOG_ERROR("Failed to launch wallet server: posix_spawn error " + std::to_string(status));
+        return;
+    }
+
+    LOG_INFO("Wallet server launched with PID: " + std::to_string(g_wallet_server_pid));
+
+    // Wait for it to become healthy (up to 10 seconds)
+    for (int i = 0; i < 20; i++) {
+        usleep(500000); // 500ms
+        if (QuickHealthCheck()) {
+            g_walletServerRunning = true;
+            LOG_INFO("Wallet server is healthy");
+            return;
+        }
+    }
+    LOG_WARNING("Wallet server launched but health check timed out");
+}
+
+static void StartAdblockServer() {
+    if (QuickAdblockHealthCheck()) {
+        LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
+        g_adblockServerRunning = true;
+        return;
+    }
+
+    char exec_path[1024];
+    uint32_t exec_path_size = sizeof(exec_path);
+    if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) return;
+
+    std::string exeDir(exec_path);
+    size_t lastSlash = exeDir.find_last_of('/');
+    if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
+
+    std::string adblockExe = exeDir + "/../../../../../../adblock-engine/target/release/hodos-adblock";
+    if (access(adblockExe.c_str(), X_OK) != 0) {
+        adblockExe = exeDir + "/../../../../../adblock-engine/target/release/hodos-adblock";
+        if (access(adblockExe.c_str(), X_OK) != 0) {
+            LOG_WARNING("Adblock engine not found - browser will run without ad blocking");
+            return;
+        }
+    }
+
+    LOG_INFO("Launching adblock engine: " + adblockExe);
+    char* argv[] = { const_cast<char*>(adblockExe.c_str()), nullptr };
+    int status = posix_spawn(&g_adblock_server_pid, adblockExe.c_str(), nullptr, nullptr, argv, environ);
+    if (status != 0) {
+        LOG_ERROR("Failed to launch adblock engine: posix_spawn error " + std::to_string(status));
+        return;
+    }
+
+    LOG_INFO("Adblock engine launched with PID: " + std::to_string(g_adblock_server_pid));
+
+    for (int i = 0; i < 20; i++) {
+        usleep(500000);
+        if (QuickAdblockHealthCheck()) {
+            g_adblockServerRunning = true;
+            LOG_INFO("Adblock engine is healthy");
+            return;
+        }
+    }
+    LOG_WARNING("Adblock engine launched but health check timed out");
+}
+
+static void StopServers() {
+    // Graceful shutdown via HTTP
+    if (g_walletServerRunning) {
+        SendShutdownRequest(31301);
+    }
+    if (g_adblockServerRunning) {
+        SendShutdownRequest(31302);
+    }
+
+    // Wait briefly for graceful shutdown
+    usleep(1000000); // 1 second
+
+    // Force kill if still running
+    if (g_wallet_server_pid > 0) {
+        int status;
+        pid_t result = waitpid(g_wallet_server_pid, &status, WNOHANG);
+        if (result == 0) {
+            // Still running — send SIGTERM
+            kill(g_wallet_server_pid, SIGTERM);
+            usleep(500000);
+            waitpid(g_wallet_server_pid, &status, WNOHANG);
+        }
+        g_wallet_server_pid = -1;
+    }
+
+    if (g_adblock_server_pid > 0) {
+        int status;
+        pid_t result = waitpid(g_adblock_server_pid, &status, WNOHANG);
+        if (result == 0) {
+            kill(g_adblock_server_pid, SIGTERM);
+            usleep(500000);
+            waitpid(g_adblock_server_pid, &status, WNOHANG);
+        }
+        g_adblock_server_pid = -1;
+    }
 }
 
 // ============================================================================
@@ -1542,8 +2811,14 @@ int main(int argc, char* argv[]) {
         // Only the main process should be a regular application
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        // Initialize centralized logger
-        Logger::Initialize(ProcessType::MAIN, "debug_output.log");
+        // Initialize centralized logger with absolute path
+        // (CWD is '/' when launched via 'open', so relative paths fail)
+        {
+            NSString* appSupDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* logDir = [appSupDir stringByAppendingPathComponent:@"HodosBrowser"];
+            std::string logPath = std::string([logDir UTF8String]) + "/debug_output.log";
+            Logger::Initialize(ProcessType::MAIN, logPath);
+        }
         LOG_INFO("=== NEW SESSION STARTED (macOS) ===");
         LOG_INFO("🍎 HodosBrowser Shell starting on macOS...");
 
@@ -1628,6 +2903,27 @@ int main(int argc, char* argv[]) {
         SettingsManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("Settings loaded for profile: " + profileId);
 
+        // Initialize AdblockCache with profile path (loads per-site settings)
+        AdblockCache::GetInstance().Initialize(profile_cache);
+        AdblockCache::GetInstance().SetGlobalEnabled(
+            SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
+        LOG_INFO("AdblockCache initialized");
+
+        // Initialize fingerprint protection session token
+        FingerprintProtection::GetInstance().Initialize();
+        LOG_INFO("Fingerprint protection initialized");
+
+        // Initialize CookieBlockManager
+        if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("CookieBlockManager initialized");
+        } else {
+            LOG_WARNING("CookieBlockManager initialization failed");
+        }
+
+        // Initialize BookmarkManager
+        BookmarkManager::GetInstance().Initialize(profile_cache);
+        LOG_INFO("BookmarkManager initialized");
+
         // Set cache_path to profile-specific directory (cookie/localStorage isolation!)
         std::string cache_path = profile_cache;
         CefString(&settings.cache_path).FromString(cache_path);
@@ -1647,13 +2943,26 @@ int main(int argc, char* argv[]) {
 
         // Initialize CEF first (before creating windows)
         LOG_INFO("🔄 Initializing CEF...");
+        NSLog(@"🔄 About to call CefInitialize...");
         bool cef_success = CefInitialize(main_args, settings, app, nullptr);
+        NSLog(@"✅ CefInitialize returned: %s", cef_success ? "true" : "false");
         LOG_INFO("CefInitialize result: " + std::string(cef_success ? "✅ SUCCESS" : "❌ FAILED"));
 
         if (!cef_success) {
             LOG_ERROR("❌ CEF initialization failed - exiting");
             return 1;
         }
+
+        // Start backend services (wallet + adblock)
+        NSLog(@"🔄 Starting backend services...");
+        StartWalletServer();
+        StartAdblockServer();
+        NSLog(@"✅ Backend services started");
+
+        // Create the primary BrowserWindow record (window 0) in WindowManager.
+        // This MUST happen before any browser creation so SetBrowserForRole works.
+        WindowManager::GetInstance().CreateWindowRecord();
+        LOG_INFO("✅ WindowManager window 0 created");
 
         // Create windows after CEF is initialized
         // (Activation policy already set above for main process only)
@@ -1812,6 +3121,7 @@ int main(int argc, char* argv[]) {
 
         // Cleanup
         LOG_INFO("CEF message loop exited - shutting down...");
+        StopServers();
         ReleaseProfileLock();
         CefShutdown();
 

@@ -56,7 +56,7 @@ const ActivityTab: React.FC = () => {
       setError(null);
 
       const res = await fetch(
-        `http://localhost:31301/wallet/activity?page=${p}&limit=${PAGE_SIZE}&filter=${f}`
+        `http://127.0.0.1:31301/wallet/activity?page=${p}&limit=${PAGE_SIZE}&filter=${f}`
       );
 
       if (!res.ok) throw new Error(`Failed to fetch: ${res.statusText}`);

@@ -50,7 +50,7 @@ const SettingsTab: React.FC = () => {
   const fetchSettings = useCallback(async () => {
     try {
       setNameLoading(true);
-      const res = await fetch('http://localhost:31301/wallet/settings');
+      const res = await fetch('http://127.0.0.1:31301/wallet/settings');
       if (!res.ok) throw new Error('Failed to fetch settings');
       const data = await res.json();
       setDisplayName(data.sender_display_name || 'Anonymous');
@@ -66,7 +66,7 @@ const SettingsTab: React.FC = () => {
 
   const fetchIdentityKey = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:31301/getPublicKey', {
+      const res = await fetch('http://127.0.0.1:31301/getPublicKey', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityKey: true }),
@@ -81,7 +81,7 @@ const SettingsTab: React.FC = () => {
 
   const fetchBalance = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:31301/wallet/balance');
+      const res = await fetch('http://127.0.0.1:31301/wallet/balance');
       if (!res.ok) return;
       const data = await res.json();
       setBalance(data.satoshis || 0);
@@ -100,7 +100,7 @@ const SettingsTab: React.FC = () => {
     try {
       setNameSaving(true);
       setNameResult(null);
-      const res = await fetch('http://localhost:31301/wallet/settings', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sender_display_name: displayName }),
@@ -131,7 +131,7 @@ const SettingsTab: React.FC = () => {
     try {
       setRevealingMnemonic(true);
       setMnemonicError(null);
-      const res = await fetch('http://localhost:31301/wallet/reveal-mnemonic', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/reveal-mnemonic', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: mnemonicPin }),
@@ -155,7 +155,7 @@ const SettingsTab: React.FC = () => {
       setRescanning(true);
       setRescanError(null);
       setRescanResult(null);
-      const res = await fetch('http://localhost:31301/wallet/rescan', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/rescan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -185,7 +185,7 @@ const SettingsTab: React.FC = () => {
     try {
       setExporting(true);
       setExportError(null);
-      const res = await fetch('http://localhost:31301/wallet/export', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: exportPassword }),
@@ -225,7 +225,7 @@ const SettingsTab: React.FC = () => {
       setDeleteError(null);
 
       // Verify PIN first
-      const unlockRes = await fetch('http://localhost:31301/wallet/unlock', {
+      const unlockRes = await fetch('http://127.0.0.1:31301/wallet/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: deletePin }),
@@ -237,7 +237,7 @@ const SettingsTab: React.FC = () => {
       }
 
       // Delete wallet
-      const res = await fetch('http://localhost:31301/wallet/delete', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),

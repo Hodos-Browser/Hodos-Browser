@@ -189,9 +189,11 @@ export default function WalletPanelPage() {
     // If localStorage says wallet exists, trust it and skip the fetch
     if (cachedExists) return;
 
-    fetch('http://localhost:31301/wallet/status')
+    console.log('[WalletPanel] Fetching wallet status from backend...');
+    fetch('http://127.0.0.1:31301/wallet/status')
       .then(r => r.json())
       .then(data => {
+        console.log('[WalletPanel] Wallet status response:', JSON.stringify(data));
         if (data.exists && data.locked) {
           localStorage.setItem('hodos_wallet_exists', 'true');
           cacheIdentityKey();
@@ -204,9 +206,13 @@ export default function WalletPanelPage() {
           localStorage.removeItem('hodos_wallet_exists');
           localStorage.removeItem('hodos_identity_key');
           setWalletStatus('no-wallet');
+          console.log('[WalletPanel] No wallet found — showing create/recover UI');
         }
       })
-      .catch(() => setWalletStatus('no-wallet'));
+      .catch((err) => {
+        console.error('[WalletPanel] Failed to fetch wallet status:', err);
+        setWalletStatus('no-wallet');
+      });
   }, []);
 
   const handleClose = () => {
@@ -218,6 +224,7 @@ export default function WalletPanelPage() {
   };
 
   const handleBackgroundClick = (e: React.MouseEvent) => {
+    console.log('[WalletPanel] Background click detected, target===currentTarget:', e.target === e.currentTarget, 'preventClose:', preventClose);
     if (e.target === e.currentTarget && !preventClose) {
       handleClose();
     }
@@ -226,6 +233,7 @@ export default function WalletPanelPage() {
   // --- PIN Flow (used during create, recover, import) ---
 
   const handleStartCreate = () => {
+    console.log('[WalletPanel] handleStartCreate called — transitioning to PIN create screen');
     setPendingAction('create');
     setPinStep('create');
     setPinDigits(['', '', '', '']);
@@ -268,7 +276,7 @@ export default function WalletPanelPage() {
     setPinStep(null);
     setCreating(true);
     try {
-      const res = await fetch('http://localhost:31301/wallet/create', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin }),
@@ -375,7 +383,7 @@ export default function WalletPanelPage() {
     setRecoveryError(null);
 
     try {
-      const res = await fetch('http://localhost:31301/wallet/recover', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/recover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -476,7 +484,7 @@ export default function WalletPanelPage() {
     setImportError(null);
 
     try {
-      const res = await fetch('http://localhost:31301/wallet/import', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -594,7 +602,7 @@ export default function WalletPanelPage() {
     setCentbeeProgress('Scanning Centbee addresses for funds...');
 
     try {
-      const res = await fetch('http://localhost:31301/wallet/recover-external', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/recover-external', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -748,7 +756,7 @@ export default function WalletPanelPage() {
       border: '2px solid #a67c00',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    }} onClick={e => e.stopPropagation()}>
+    }} onClick={e => { console.log('[WalletPanel] renderNoWallet container clicked'); e.stopPropagation(); }}>
       {/* Header */}
       <div style={{
         background: '#000000',
@@ -1344,6 +1352,8 @@ export default function WalletPanelPage() {
 
             <button
               onClick={handleStartCreate}
+              onMouseDown={() => console.log('[WalletPanel] Create button onMouseDown fired')}
+              onMouseEnter={() => console.log('[WalletPanel] Create button onMouseEnter fired')}
               disabled={creating}
               style={{
                 background: '#a67c00',
@@ -1567,7 +1577,7 @@ export default function WalletPanelPage() {
     setUnlocking(true);
     setUnlockError(null);
     try {
-      const res = await fetch('http://localhost:31301/wallet/unlock', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin }),

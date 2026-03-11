@@ -27,6 +27,7 @@ dist-ssr
 /cef-binaries/
 /cef-native/build/
 /cef-native/bin/
+*.tar.bz2
 
 # Bitcoin Wallet Identity Files (sensitive data)
 python-wallet/identity.json

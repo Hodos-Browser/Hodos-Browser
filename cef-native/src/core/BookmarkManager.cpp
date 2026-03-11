@@ -41,7 +41,11 @@ BookmarkManager::~BookmarkManager() {
 // Initialize
 // ============================================================================
 bool BookmarkManager::Initialize(const std::string& user_data_path) {
+#ifdef _WIN32
     db_path_ = user_data_path + "\\bookmarks.db";
+#else
+    db_path_ = user_data_path + "/bookmarks.db";
+#endif
     LOG_INFO_BM("Initializing BookmarkManager at: " + db_path_);
 
     if (!OpenDatabase()) {

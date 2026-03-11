@@ -15,6 +15,7 @@
 
 #ifdef __APPLE__
     #include "../../include/core/WalletService.h"
+    #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
 #endif
 
@@ -77,9 +78,14 @@ extern std::string g_pendingModalDomain;
 #else
     // macOS global views
     extern NSView* g_webview_view;
-    // macOS overlay close helper (defined in cef_browser_shell_mac.mm)
+    // macOS overlay helpers (defined in cef_browser_shell_mac.mm)
     extern "C" void CloseOverlayWindow(void* window, void* parent);
+    extern "C" void HideNotificationOverlayWindow();
+    extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores);
 #endif
+
+// Forward declaration for cross-platform tab creation helper (defined later in file)
+static void CreateNewTabWithUrl(const std::string& url);
 
 // Global backup modal state management
 static bool g_backupModalShown = false;
@@ -821,14 +827,10 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
             // Send pending auth request data to the overlay after React app loads
             // Add a small delay to ensure React is fully mounted
-#ifdef _WIN32
             CefPostDelayedTask(TID_UI, base::BindOnce([]() {
                 extern void sendAuthRequestDataToOverlay();
                 sendAuthRequestDataToOverlay();
             }), 500);
-#else
-            // TODO: Implement BRC-100 auth on macOS
-#endif
         } else if (role_ == "notification") {
             // Inject the hodosBrowser API into notification overlay browser
             LOG_DEBUG_BROWSER("🔔 NOTIFICATION BROWSER LOADED - Injecting hodosBrowser API");
@@ -1849,8 +1851,66 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("Privacy shield not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
+        extern void ShowCookiePanelOverlay(int iconRightOffset);
+        extern void HideCookiePanelOverlay();
+        extern bool IsCookiePanelOverlayVisible();
+        extern bool WasCookiePanelJustHidden();
+
+        // Toggle behavior: if already visible, hide it
+        // Also suppress re-show if click-outside just hid it (debounce race condition)
+        if (IsCookiePanelOverlayVisible() || WasCookiePanelJustHidden()) {
+            if (IsCookiePanelOverlayVisible()) {
+                HideCookiePanelOverlay();
+            }
+            LOG_INFO_BROWSER("🛡️ Privacy shield toggled OFF (macOS)");
+            return true;
+        }
+
+        // Show or create the overlay
+        CefRefPtr<CefBrowser> existing_cookie = GetCookiePanelBrowser();
+        if (!existing_cookie) {
+            CreateCookiePanelOverlayWithSeparateProcess(iconRightOffset);
+        } else {
+            ShowCookiePanelOverlay(iconRightOffset);
+        }
+
+        // Inject domain into overlay via JS callback (same logic as Windows)
+        if (!shieldDomain.empty()) {
+            // Need delayed injection since browser may just have been created
+            std::string escapedDomain = shieldDomain;
+            for (size_t i = 0; i < escapedDomain.size(); ++i) {
+                if (escapedDomain[i] == '\\' || escapedDomain[i] == '\'') {
+                    escapedDomain.insert(i, "\\");
+                    ++i;
+                }
+            }
+
+            // Immediate injection attempt
+            CefRefPtr<CefBrowser> cookie_browser = GetCookiePanelBrowser();
+            if (cookie_browser && cookie_browser->GetMainFrame()) {
+                std::string js = "if (window.setShieldDomain) { window.setShieldDomain('" + escapedDomain + "'); }";
+                cookie_browser->GetMainFrame()->ExecuteJavaScript(js, cookie_browser->GetMainFrame()->GetURL(), 0);
+                LOG_INFO_BROWSER("🛡️ Shield domain injected immediately (macOS): " + shieldDomain);
+            }
+
+            // Delayed retry for newly created browsers where React may not have mounted yet
+            std::string retry_domain = escapedDomain;
+            CefPostDelayedTask(TID_UI, base::BindOnce([](std::string d) {
+                CefRefPtr<CefBrowser> b = SimpleHandler::GetCookiePanelBrowser();
+                if (b && b->GetMainFrame()) {
+                    std::string retryJs = "if (window.setShieldDomain) { window.setShieldDomain('" + d + "'); }";
+                    b->GetMainFrame()->ExecuteJavaScript(retryJs, b->GetMainFrame()->GetURL(), 0);
+                }
+            }, retry_domain), 500);
+
+            pending_shield_domain_ = shieldDomain;
+        } else {
+            LOG_WARNING_BROWSER("🛡️ Shield domain is EMPTY in cookie_panel_show IPC (macOS)");
+        }
+
+        LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -1860,8 +1920,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideCookiePanelOverlay();
         HideCookiePanelOverlay();
         LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("🍪 Cookie panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideCookiePanelOverlay();
+        HideCookiePanelOverlay();
+        LOG_DEBUG_BROWSER("🍪 Cookie panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -1938,8 +2000,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateSettingsMenuOverlay();
+        extern void ShowSettingsMenuOverlay();
+        extern void HideSettingsMenuOverlay();
+        extern bool IsSettingsMenuOverlayVisible();
+        extern bool WasSettingsMenuJustHidden();
+
+        if (IsSettingsMenuOverlayVisible() || WasSettingsMenuJustHidden()) {
+            if (IsSettingsMenuOverlayVisible()) {
+                HideSettingsMenuOverlay();
+            }
+            return true;
+        }
+
+        // Create each time (simple approach matching cookie panel)
+        CreateSettingsMenuOverlay();
+        LOG_DEBUG_BROWSER("Settings menu overlay shown (macOS)");
 #endif
         return true;
     }
@@ -1949,8 +2026,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideMenuOverlay();
         HideMenuOverlay();
         LOG_DEBUG_BROWSER("Menu overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("Menu overlay not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideSettingsMenuOverlay();
+        HideSettingsMenuOverlay();
+        LOG_DEBUG_BROWSER("Settings menu overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -1968,6 +2047,9 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void HideMenuOverlay();
         HideMenuOverlay();
+#elif defined(__APPLE__)
+        extern void HideSettingsMenuOverlay();
+        HideSettingsMenuOverlay();
 #endif
 
         // Helper lambda to create a tab with current window dimensions
@@ -2095,6 +2177,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (action == "settings_privacy") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page/privacy");
+#elif defined(__APPLE__)
+            extern void HideCookiePanelOverlay();
+            HideCookiePanelOverlay();
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/privacy");
 #endif
         } else if (action == "bookmarks") {
             // TODO: bookmarks page
@@ -3193,6 +3279,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern NSWindow* g_wallet_overlay_window;
         extern NSWindow* g_backup_overlay_window;
         extern NSWindow* g_brc100_auth_overlay_window;
+        extern NSWindow* g_notification_overlay_window;
 
         NSWindow* target_window = nullptr;
         CefRefPtr<CefBrowser> target_browser = nullptr;
@@ -3209,9 +3296,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "brc100auth") {
             target_window = g_brc100_auth_overlay_window;
             target_browser = GetBRC100AuthBrowser();
+        } else if (role_ == "notification") {
+            target_window = g_notification_overlay_window;
+            target_browser = GetNotificationBrowser();
         }
 
-        if (target_window) {
+        // Keep-alive: notification overlay hides instead of destroying
+        if (role_ == "notification" && target_window) {
+            HideNotificationOverlayWindow();
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript(
+                    "window.hideNotification && window.hideNotification()", "", 0);
+            }
+            extern std::string g_pendingModalDomain;
+            g_pendingModalDomain = "";
+            LOG_DEBUG_BROWSER("🔔 Notification overlay hidden (keep-alive), cleared modal domain");
+        } else if (target_window) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window");
 
             // Close the browser first
@@ -3223,6 +3324,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
                 else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
+                else if (role_ == "notification") notification_browser_ = nullptr;
             }
 
             // Remove from parent window and close
@@ -3238,6 +3340,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_backup_overlay_window = nullptr;
             } else if (role_ == "brc100auth") {
                 g_brc100_auth_overlay_window = nullptr;
+            } else if (role_ == "notification") {
+                g_notification_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -3247,8 +3351,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OVERLAY MESSAGES (Cross-platform) ==========
 #ifdef _WIN32
-    // ========== OVERLAY MESSAGES (Windows-specific) ==========
     if (false && message_name == "overlay_hide_NEVER_CALLED_12345") {
         LOG_DEBUG_BROWSER("🪟 Hiding overlay HWND");
         LOG_DEBUG_BROWSER("🪟 Before hide - EXSTYLE: 0x" + std::to_string(GetWindowLong(nullptr, GWL_EXSTYLE)));
@@ -3256,6 +3360,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🪟 After hide - EXSTYLE: 0x" + std::to_string(GetWindowLong(nullptr, GWL_EXSTYLE)));
         return true;
     }
+#endif
 
     if (message_name == "overlay_show_wallet") {
         LOG_DEBUG_BROWSER("💰 overlay_show_wallet message received from role: " + role_);
@@ -3298,8 +3403,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (active_tab && active_tab->browser) {
             CefWindowInfo windowInfo;
 #ifdef _WIN32
-            windowInfo.SetAsPopup(nullptr, "Developer Tools");
-#elif defined(__APPLE__)
             windowInfo.SetAsPopup(nullptr, "Developer Tools");
 #endif
             CefBrowserSettings devSettings;
@@ -3418,9 +3521,17 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay window not found");
         }
-#else
-        // TODO(macOS): Implement BRC-100 auth overlay hiding for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_hide not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_brc100_auth_overlay_window;
+        extern NSWindow* g_main_window;
+        if (g_brc100_auth_overlay_window) {
+            CefRefPtr<CefBrowser> auth = GetBRC100AuthBrowser();
+            if (auth) auth->GetHost()->CloseBrowser(false);
+            brc100_auth_browser_ = nullptr;
+            CloseOverlayWindow((void*)g_brc100_auth_overlay_window, (void*)g_main_window);
+            g_brc100_auth_overlay_window = nullptr;
+            LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay closed on macOS");
+        }
 #endif
         return true;
     }
@@ -3504,12 +3615,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                                 CefURLRequest::Status status = request->GetRequestStatus();
                                 if (status == UR_SUCCESS && !responseData_.empty()) {
                                     LOG_DEBUG_BROWSER("🔐 Authentication response generated successfully");
-#ifdef _WIN32
                                     extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
                                     handleAuthResponse(requestId_, responseData_);
-#else
-                                    LOG_WARNING_BROWSER("Warning: handleAuthResponse not implemented on macOS");
-#endif
                                 } else {
                                     LOG_DEBUG_BROWSER("🔐 Failed to generate authentication response (status: " + std::to_string(status) + ")");
                                 }
@@ -3543,7 +3650,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 } else {
                     LOG_DEBUG_BROWSER("🔐 User rejected auth request");
 
-#ifdef _WIN32
                     if (!requestId.empty()) {
                         extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
                         handleAuthResponse(requestId, "{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
@@ -3551,7 +3657,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                         extern void handleAuthResponse(const std::string& responseData);
                         handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
                     }
-#endif
                     g_pendingModalDomain = "";
                 }
             } catch (const std::exception& e) {
@@ -3726,9 +3831,17 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🪟 Closing settings overlay window");
             DestroyWindow(settings_hwnd);
         }
-#else
-        // TODO(macOS): Implement settings overlay hiding for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_hide_settings not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_settings_overlay_window;
+        extern NSWindow* g_main_window;
+        if (g_settings_overlay_window) {
+            CefRefPtr<CefBrowser> settings = GetSettingsBrowser();
+            if (settings) settings->GetHost()->CloseBrowser(false);
+            settings_browser_ = nullptr;
+            CloseOverlayWindow((void*)g_settings_overlay_window, (void*)g_main_window);
+            g_settings_overlay_window = nullptr;
+            LOG_DEBUG_BROWSER("🪟 Settings overlay closed on macOS");
+        }
 #endif
         return true;
     }
@@ -3769,13 +3882,25 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_DEBUG_BROWSER("❌ No target HWND found for overlay_input");
         }
-#else
-        // TODO(macOS): Implement overlay input handling for macOS
-        LOG_DEBUG_BROWSER("⚠️ overlay_input not implemented on macOS");
+#elif defined(__APPLE__)
+        extern NSWindow* g_settings_overlay_window;
+        extern NSWindow* g_wallet_overlay_window;
+        extern NSWindow* g_backup_overlay_window;
+
+        NSWindow* target_window = nullptr;
+        if (role_ == "settings") target_window = g_settings_overlay_window;
+        else if (role_ == "wallet") target_window = g_wallet_overlay_window;
+        else if (role_ == "backup") target_window = g_backup_overlay_window;
+
+        if (target_window) {
+            SetOverlayIgnoresMouseEvents((void*)target_window, !enable);
+            LOG_DEBUG_BROWSER("🪟 Mouse input " + std::string(enable ? "ENABLED" : "DISABLED") + " for " + role_ + " overlay");
+        } else {
+            LOG_DEBUG_BROWSER("❌ No target window found for overlay_input");
+        }
 #endif
         return true;
     }
-#endif  // _WIN32 - end of overlay messages
 
     // ========== WALLET PANEL TOGGLE (Cross-platform: uses separate overlay window) ==========
     if (message_name == "toggle_wallet_panel") {
@@ -5397,7 +5522,6 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
 // the scriptlet injection timing problem where scriptlets injected via
 // OnLoadingStateChange arrive after YouTube's inline scripts have already
 // processed ad configuration from ytInitialPlayerResponse.
-#ifdef _WIN32
 class AdblockResponseFilter : public CefResponseFilter {
 public:
     AdblockResponseFilter() = default;
@@ -5483,7 +5607,6 @@ private:
 
     IMPLEMENT_REFCOUNTING(AdblockResponseFilter);
 };
-#endif
 
 // CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
 // so cookie blocking applies to all browsing. Also returns AdblockResponseFilter
@@ -5505,7 +5628,6 @@ public:
         CefRefPtr<CefFrame> frame,
         CefRefPtr<CefRequest> request,
         CefRefPtr<CefResponse> response) override {
-#ifdef _WIN32
         if (!g_adblockServerRunning || !AdblockCache::GetInstance().IsGlobalEnabled()) return nullptr;
 
         std::string url = request->GetURL().ToString();
@@ -5534,7 +5656,6 @@ public:
             LOG_DEBUG_BROWSER("🛡️ Response filter: YouTube HTML " + url);
             return new AdblockResponseFilter();
         }
-#endif
         return nullptr;
     }
 
@@ -5560,6 +5681,15 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
+    // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
+    // bypass ALL resource handlers — let CEF's native network stack handle them.
+    // This avoids CefURLRequest forwarding issues on macOS.
+    if (url.find("127.0.0.1:31301") != std::string::npos &&
+        (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
+        LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
+        return nullptr;
+    }
+
     // Sprint 11b: Inject Do Not Track headers if enabled
     if (SettingsManager::GetInstance().GetPrivacySettings().doNotTrack) {
         request->SetHeaderByName("DNT", "1", true);
@@ -5568,7 +5698,6 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
     // Ad & tracker blocking — check before wallet interception
     // Only for tab browsers making external requests (skip internal/overlay URLs)
-#ifdef _WIN32
     if (g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled() && !shouldSkipAdblockCheck(url)) {
         std::string sourceUrl;
         if (frame && frame->GetURL().length() > 0) {
@@ -5602,7 +5731,6 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
             }
         }
     }
-#endif
 
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
@@ -5614,23 +5742,14 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
         url.find("messagebox.babbage.systems") != std::string::npos ||
         url.find("/.well-known/auth") != std::string::npos) {
         LOG_DEBUG_BROWSER("🌐 Intercepting wallet request from browser role: " + role_);
-#ifdef _WIN32
         return new HttpRequestInterceptor();
-#else
-        // TODO: macOS HTTP request interception
-        return nullptr;  // No interception on macOS yet
-#endif
     }
 
     // For non-wallet requests, return CookieFilterResourceHandler
     // to apply cookie blocking and ad response filtering (YouTube API/HTML stripping)
     {
         bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
-#ifdef _WIN32
         bool needsResponseFilter = g_adblockServerRunning;
-#else
-        bool needsResponseFilter = false;
-#endif
         if (needsCookieFilter || needsResponseFilter) {
             return new CookieFilterResourceHandler();
         }
@@ -5847,6 +5966,32 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 return true;
             }
         }
+
+        // Ctrl+P / Cmd+P — Print current page
+        if (event.windows_key_code == 'P') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+P: Print current page");
+                auto* active_tab = TabManager::GetInstance().GetActiveTab();
+                if (active_tab && active_tab->browser) {
+                    active_tab->browser->GetHost()->Print();
+                }
+                return true;
+            }
+        }
+
+#ifdef __APPLE__
+        // Cmd+, — Open Preferences/Settings (macOS standard)
+        if (event.windows_key_code == 0xBC && (event.modifiers & EVENTFLAG_COMMAND_DOWN)) {
+            LOG_INFO_BROWSER("⌨️ Cmd+,: Opening settings");
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/general");
+            SimpleHandler::NotifyTabListChanged();
+            return true;
+        }
+#endif
 
         // Alt+Left — Navigate back (active tab)
         // 0x25 = VK_LEFT (cross-platform: CEF uses Windows key codes on all platforms)

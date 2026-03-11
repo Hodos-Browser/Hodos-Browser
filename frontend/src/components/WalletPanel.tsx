@@ -57,7 +57,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
 
   const handleDismissPeerpay = () => {
     setPeerpayNotification(null);
-    fetch('http://localhost:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
+    fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     // Notify header to clear the green dot
     if (window.cefMessage?.send) {
       window.cefMessage.send('wallet_payment_dismissed', []);
@@ -88,7 +88,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   // Fetch sync status on mount (deferred to let overlay become interactive first)
   useEffect(() => {
     const fetchStatus = () => {
-      fetch('http://localhost:31301/wallet/sync-status')
+      fetch('http://127.0.0.1:31301/wallet/sync-status')
         .then(r => r.json())
         .then((data: SyncStatusData) => {
           setSyncStatus(data);
@@ -114,7 +114,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     if (syncStatus?.active) {
       if (!pollRef.current) {
         pollRef.current = setInterval(() => {
-          fetch('http://localhost:31301/wallet/sync-status')
+          fetch('http://127.0.0.1:31301/wallet/sync-status')
             .then(r => r.json())
             .then((data: SyncStatusData) => {
               setSyncStatus(data);
@@ -124,7 +124,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                 refreshBalance();
                 if (!data.error) {
                   // Auto-dismiss successful sync (no "Continue to wallet" needed)
-                  fetch('http://localhost:31301/wallet/sync-status/seen', { method: 'POST' }).catch(() => {});
+                  fetch('http://127.0.0.1:31301/wallet/sync-status/seen', { method: 'POST' }).catch(() => {});
                 }
                 if (pollRef.current) {
                   clearInterval(pollRef.current);
@@ -144,7 +144,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   }, [syncStatus?.active]);
 
   const handleDismissSyncSummary = () => {
-    fetch('http://localhost:31301/wallet/sync-status/seen', { method: 'POST' })
+    fetch('http://127.0.0.1:31301/wallet/sync-status/seen', { method: 'POST' })
       .then(() => setSyncStatus(prev => prev ? { ...prev, result_seen: true } : null))
       .catch(() => {});
   };

@@ -72,7 +72,7 @@ const MainBrowserView: React.FC = () => {
     // Runs once on mount — if wallet.db was deleted, clears the stale cache before
     // the user ever opens the wallet panel.
     useEffect(() => {
-        fetch('http://localhost:31301/wallet/status')
+        fetch('http://127.0.0.1:31301/wallet/status')
             .then(r => r.json())
             .then(data => {
                 if (data.exists) {

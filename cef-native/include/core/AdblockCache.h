@@ -416,7 +416,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return false;
@@ -500,7 +500,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return result;
@@ -637,7 +637,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return "";
