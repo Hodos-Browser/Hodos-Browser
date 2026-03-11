@@ -85,6 +85,10 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     LOG_INFO_APP("Using in-process GPU on macOS; web security disabled for localhost dev");
 #endif
 
+    // Disable Chromium's built-in autofill, autocorrect, and spell checking
+    command_line->AppendSwitchWithValue("disable-features", "Autofill,AutofillServerCommunication");
+    command_line->AppendSwitch("disable-spell-checking");
+
     // Additional GPU flags (keep commented for now):
     // command_line->AppendSwitch("disable-gpu");
     // command_line->AppendSwitch("disable-gpu-shader-disk-cache");

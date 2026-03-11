@@ -74,20 +74,18 @@ const OmniboxOverlayRoot: React.FC = () => {
     };
   }, []);
 
-  // Send selected suggestion back to address bar via IPC when selectedIndex changes
+  // Send selected suggestion back to address bar via IPC when arrow keys change selection
   useEffect(() => {
     if (!window.cefMessage) return;
 
     if (selectedIndex >= 0 && selectedIndex < suggestions.length) {
       const selected = suggestions[selectedIndex];
-      // For history: send URL. For search suggestions: send the title (query text).
       const text = selected.type === 'history' ? selected.url : selected.title;
       window.cefMessage.send('omnibox_autocomplete', text);
     } else if (selectedIndex === -1) {
-      // Back to user-typed text — send empty to clear autocomplete
       window.cefMessage.send('omnibox_autocomplete', '');
     }
-  }, [selectedIndex, suggestions]);
+  }, [selectedIndex]);
 
   // Reset focus when query changes (clears any persistent MUI focus states)
   useEffect(() => {

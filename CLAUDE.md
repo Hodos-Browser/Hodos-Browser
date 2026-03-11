@@ -6,7 +6,7 @@ Build with a production-focused mindset. Do not take shortcuts. If you get stuck
 
 ## Testing Standards
 
-**Every feature must be tested against real-world sites.** See `development-docs/browser-core/test-site-basket.md` for the standard verification sites.
+**Every feature must be tested against real-world sites.** Standard verification sites are listed below.
 
 | Level | When | Duration | Sites |
 |-------|------|----------|-------|
@@ -32,7 +32,7 @@ React Frontend (Port 5137)
 C++ CEF Shell
     │ HTTP interception & forwarding → localhost:31301 for wallet functions
     ▼
-Rust Wallet Backend (Port 3301)
+Rust Wallet Backend (Port 31301)
     │
     ▼
 Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
@@ -62,7 +62,8 @@ All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
 | Downloads | ✅ Overlay | `DownloadsOverlayRoot.tsx` |
 | Privacy Shield | ✅ Overlay | `PrivacyShieldOverlayRoot.tsx` |
 | Omnibox | ✅ Overlay | `OmniboxOverlayRoot.tsx` |
-| **Profile Picker** | ✅ Overlay | `ProfilePickerOverlayRoot.tsx` (TODO) |
+| Menu | ✅ Overlay | `MenuOverlayRoot.tsx` |
+| Profile Picker | ✅ Overlay | `ProfilePickerOverlayRoot.tsx` |
 
 **Why overlays?**
 - Each overlay is isolated V8 context (security)
@@ -85,7 +86,9 @@ All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
 
 ---
 
-## ⚠️ Overlay Lifecycle & Close Prevention (IMPORTANT)
+## ⚠️ Overlay Lifecycle & Close Prevention (IMPORTANT — Windows)
+
+> **macOS note:** On macOS, overlays use `NSPanel` (not `WS_POPUP`). Close behavior is handled via `NSWindowDelegate` and `resignKey`/`resignMain` notifications in `cef_browser_shell_mac.mm`. The patterns below are Windows-specific.
 
 Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a different close/destroy pattern. Understanding these is critical for UX work.
 
@@ -235,70 +238,44 @@ browser->GetHost()->SetFocus(true);
 
 ---
 
-## Dev Runbook (Windows)
-
-**Prerequisites**: PowerShell, VS 2022 (MSVC), vcpkg, Rust, Node.js 18+
+## Dev Runbook
 
 **Run order** (all three must be running):
 
-1. **Rust wallet**:
-   ```powershell
-   cd rust-wallet
-   cargo run --release
-   # Runs on localhost:31301
-   ```
-
-2. **Frontend dev server**:
-   ```powershell
-   cd frontend
-   npm run dev
-   # Runs on localhost:5137
-   ```
-
+1. **Rust wallet**: `cd rust-wallet && cargo run --release` → localhost:31301
+2. **Frontend dev server**: `cd frontend && npm run dev` → localhost:5137
 3. **CEF browser**:
-   ```powershell
-   cd cef-native/build/bin/Release
-   ./HodosBrowserShell.exe
-   ```
+   - Windows: `cd cef-native/build/bin/Release && ./HodosBrowserShell.exe`
+   - macOS: `cd cef-native/build/bin && ./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell`
 
 **Storage**: Windows: `%APPDATA%/HodosBrowser/`, macOS: `~/Library/Application Support/HodosBrowser/`. Wallet DB: `<storage>/wallet/wallet.db` (SQLite)
 
 ---
 
-## Build (Windows)
+## Build
 
-First-time setup (requires CEF binaries already downloaded):
+**Prerequisites**: Rust, Node.js 18+, CEF binaries (download from https://cef-builds.spotifycdn.com/index.html → `./cef-binaries/`)
 
-1. **CEF binaries**: Download from https://cef-builds.spotifycdn.com/index.html
-   - Extract to `./cef-binaries/`
+**Platform-specific build guides**: See `build-instructions/WINDOWS_BUILD_INSTRUCTIONS.md` or `build-instructions/MACOS_BUILD_INSTRUCTIONS.md` for first-time setup.
 
-2. **CEF wrapper**:
-   ```powershell
-   cd cef-binaries/libcef_dll/wrapper
-   mkdir build; cd build
-   cmake .. -DCMAKE_TOOLCHAIN_FILE=[vcpkg_root]/scripts/buildsystems/vcpkg.cmake
-   cmake --build . --config Release
-   ```
+**Quick build (all platforms):**
+```bash
+# 1. CEF wrapper (first time only)
+cd cef-binaries/libcef_dll/wrapper && mkdir build && cd build
+cmake .. && cmake --build . --config Release
 
-3. **Rust wallet**:
-   ```powershell
-   cd rust-wallet
-   cargo build --release
-   ```
+# 2. Rust wallet
+cd rust-wallet && cargo build --release
 
-4. **Frontend**:
-   ```powershell
-   cd frontend
-   npm install
-   npm run build
-   ```
+# 3. Frontend
+cd frontend && npm install && npm run build
 
-5. **CEF shell**:
-   ```powershell
-   cd cef-native
-   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=[vcpkg_root]/scripts/buildsystems/vcpkg.cmake
-   cmake --build build --config Release
-   ```
+# 4. CEF shell
+cd cef-native
+# Windows: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=[vcpkg_root]/scripts/buildsystems/vcpkg.cmake
+# macOS:   cmake -S . -B build -G "Unix Makefiles"
+cmake --build build --config Release
+```
 
 ---
 
@@ -326,7 +303,7 @@ First-time setup (requires CEF binaries already downloaded):
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | 72+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), and more |
+| `rust-wallet/src/handlers.rs` | 76+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), and more |
 | `rust-wallet/src/crypto/` | 11 modules: `brc42`, `brc43`, `signing`, `aesgcm_custom`, `dpapi` (Windows DPAPI / macOS Keychain stub), `pin` (PBKDF2+AES-GCM), `keys`, `brc2`, `ghash`, plus tests |
 | `rust-wallet/src/authfetch.rs` | BRC-103 AuthFetch HTTP client: 401 challenge-response with ECDSA signing, server/client nonce exchange, authenticated requests to external BRC-103 servers (MessageBox) |
 | `rust-wallet/src/messagebox.rs` | MessageBox API client: BRC-2 encrypted message send/receive/acknowledge via `messagebox.babbage.systems`, deterministic HMAC message IDs, uses AuthFetch for authentication |
@@ -335,7 +312,7 @@ First-time setup (requires CEF binaries already downloaded):
 | `rust-wallet/src/price_cache.rs` | BSV/USD price cache (CryptoCompare primary + CoinGecko fallback, 5-min TTL) |
 | `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending`, `TaskCheckPeerPay` (BRC-103 AuthFetch + BRC-2 encrypted MessageBox polling + auto-accept via `internalize_action`) |
 | `cef-native/cef_browser_shell.cpp` | Windows entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs (incl. `g_download_panel_overlay_hwnd`); class: `Logger`; overlay functions: `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` |
-| `cef-native/cef_browser_shell_mac.mm` | macOS entry point (1754 lines); NSWindow/NSView hierarchy, 5 overlay types, event forwarding |
+| `cef-native/cef_browser_shell_mac.mm` | macOS entry point (~3900 lines); NSWindow/NSView hierarchy, 10 overlay types (settings, wallet, backup, BRC100 auth, notification, settings menu, cookie panel, omnibox, downloads, profile picker), event forwarding, multi-window support |
 | `adblock-engine/src/engine.rs` | AdblockEngine wrapper: filter list downloading, engine compilation, serialization, `RwLock<Engine>` thread-safe checking. 4 filter lists (EasyList, EasyPrivacy, uBlock Filters, uBlock Privacy) + 6 bundled extra scriptlets. Auto-update every 6 hours. |
 | `adblock-engine/src/handlers.rs` | HTTP endpoints on port 31302: `/health`, `/check`, `/status`, `/toggle`, `/cosmetic-resources`, `/cosmetic-hidden-ids` |
 | `cef-native/include/core/AdblockCache.h` | `AdblockCache` singleton: sync WinHTTP to port 31302, URL result cache, per-browser blocked counts, cosmetic resource fetching. `AdblockBlockHandler` cancels blocked requests. `AdblockResponseFilter` (CefResponseFilter) buffers YouTube responses and renames ad-configuration JSON keys. `CookieFilterResourceHandler` returns cookie filter + response filter for YouTube. |
@@ -346,6 +323,12 @@ First-time setup (requires CEF binaries already downloaded):
 | `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`; singleton: `PendingRequestManager` (in PendingAuthRequest.h) |
 | `cef-native/include/core/PendingAuthRequest.h` | `PendingRequestManager` singleton — thread-safe request tracking for auth/domain/payment/cert approvals |
 | `cef-native/include/core/SessionManager.h` | `SessionManager` singleton + `BrowserSession` — per-browser session spending/rate tracking for auto-approve |
+| `cef-native/include/core/ProfileManager.h` | `ProfileManager` singleton: multi-profile support, profile creation/switching, profile directory management |
+| `cef-native/include/core/TabManager.h` | `TabManager` singleton: per-window tab tracking, tab creation/close/switch, multi-window tab coordination |
+| `cef-native/include/core/WindowManager.h` | `WindowManager` singleton: multi-window lifecycle, window creation/destruction, window-to-tab mapping |
+| `cef-native/include/core/SettingsManager.h` | `SettingsManager` singleton: persistent settings storage, cross-platform settings resolution |
+| `cef-native/include/core/ProfileImporter.h` | Chrome/Edge profile importer: bookmarks, history, cookies import from other browsers |
+| `cef-native/include/core/SyncHttpClient.h` | Cross-platform sync HTTP client (WinHTTP on Windows, libcurl on macOS). Use this for new singletons instead of raw WinHTTP |
 | `frontend/src/hooks/useHodosBrowser.ts` | React hook: `useHodosBrowser()` with `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
 | `frontend/src/hooks/useDownloads.ts` | React hook for download state; listens for `download_state_update` IPC; exposes control functions (cancel, pause, resume, open, showInFolder, clearCompleted) |
 | `frontend/src/pages/DownloadsOverlayRoot.tsx` | Download panel overlay page; lists active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder |
@@ -387,37 +370,12 @@ First-time setup (requires CEF binaries already downloaded):
 
 ---
 
-## Testing
-
-### Test Site Basket
-
-Standard verification sites are documented in `development-docs/browser-core/test-site-basket.md`.
-
-| Level | When | Sites |
-|-------|------|-------|
-| **Minimal (5 min)** | After any browser-core change | youtube.com, x.com, github.com |
-| **Standard (15 min)** | After sprint completion | Auth category + 2-3 video/media + 1-2 news |
-| **Thorough (30-45 min)** | Before release/demo | Full basket, all categories |
-
-### Build Verification
-
-After changes, always build before asking user to test:
-- **C++:** `cmake --build build --config Release` in `cef-native/`
-- **Rust wallet:** `cargo build --release` in `rust-wallet/`
-- **Rust adblock:** `cargo build --release` in `adblock-engine/`
-- **Frontend:** `npm run build` in `frontend/`
-
----
-
 ## Context File Maintenance
-
-### Continuous Improvement Directive
 
 **After each sprint, phase, or sub-phase:**
 1. Review this CLAUDE.md — Is it still accurate? Update Key Files table if architecture changed.
-2. Check sprint-specific CLAUDE.md in `development-docs/browser-core/` or `development-docs/UX_UI/`.
-3. Update test-site-basket.md if new test cases identified.
-4. Add new patterns/gotchas to the relevant context file.
+2. Check sprint-specific CLAUDE.md in `development-docs/Final-MVP-Sprint/` or `development-docs/UX_UI/`.
+3. Add new patterns/gotchas to the relevant context file.
 
 **Goal:** Context files should always reflect current reality. They're the institutional memory that lets any AI (or human) pick up where the last session left off.
 
@@ -425,6 +383,8 @@ After changes, always build before asking user to test:
 
 | Folder | Purpose |
 |--------|---------|
-| `development-docs/browser-core/` | Browser feature sprints (SSL, permissions, downloads, ad blocking, etc.) |
-| `development-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) |
 | `development-docs/Final-MVP-Sprint/` | Active sprint: testing, optimization, security, macOS port |
+| `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
+| `development-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) |
+| `development-docs/Possible-MVP-Features/` | Roadmap items and feature research |
+| `build-instructions/` | Platform-specific build guides (Windows, macOS) |

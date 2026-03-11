@@ -71,7 +71,7 @@ Key methods:
 - `check_request(url, source_url, resource_type)` → `(blocked, redirect, filter)` — with entity-aware override
 - `cosmetic_resources(url)` → `(selectors, injected_script, generichide)` — Phase 1 cosmetic filtering
 - `hidden_class_id_selectors(url, classes, ids)` → selectors — Phase 2 cosmetic filtering
-- `rebuild_engine()` — hot-swap engine with freshly downloaded lists (background update)
+- `rebuild_engine()` — hot-swap engine with freshly downloaded lists + reload entity map from disk (background update)
 - `needs_update()` — checks if any list has expired based on `! Expires:` header
 
 ### `EntityMap` (`engine.rs`)

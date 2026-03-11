@@ -1646,7 +1646,10 @@ bool SimpleHandler::OnProcessMessageReceived(
             active_tab->browser->GetMainFrame()->LoadURL(path);
             LOG_DEBUG_BROWSER("🔁 Navigate to " + path + " on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(nav_wid) + ")");
         } else {
-            LOG_DEBUG_BROWSER("⚠️ No active tab available for navigation in window " + std::to_string(nav_wid));
+            // No active tab (e.g. first launch before tabs are ready) — create one
+            LOG_INFO_BROWSER("📑 No active tab for navigation, creating new tab with: " + path);
+            CreateNewTabWithUrl(path);
+            SimpleHandler::NotifyTabListChanged();
         }
 
         return true;
@@ -1795,8 +1798,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay shown with query: " + query);
         // TODO Phase 2: Send query to overlay browser for suggestion rendering
-#else
-        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateOmniboxOverlayMacOS();
+        extern void ShowOmniboxOverlayMacOS();
+        extern bool IsOmniboxOverlayVisible();
+        extern bool OmniboxOverlayExists();
+
+        // Keep-alive: create once, then just show/hide
+        if (IsOmniboxOverlayVisible()) {
+            // Already showing
+        } else if (OmniboxOverlayExists()) {
+            ShowOmniboxOverlayMacOS();
+        } else {
+            CreateOmniboxOverlayMacOS();
+        }
+        LOG_DEBUG_BROWSER("Omnibox overlay shown (macOS)");
 #endif
         return true;
     }
@@ -1806,8 +1822,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideOmniboxOverlay();
         HideOmniboxOverlay();
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideOmniboxOverlayMacOS();
+        HideOmniboxOverlayMacOS();
+        LOG_DEBUG_BROWSER("Omnibox overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -1974,8 +1992,21 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
+        extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);
+        extern void HideProfilePanelOverlayMacOS();
+        extern bool IsProfilePanelOverlayVisible();
+        extern bool WasProfilePanelJustHidden();
+
+        if (IsProfilePanelOverlayVisible() || WasProfilePanelJustHidden()) {
+            if (IsProfilePanelOverlayVisible()) {
+                HideProfilePanelOverlayMacOS();
+            }
+            return true;
+        }
+        CreateProfilePanelOverlayMacOS(iconRightOffset);
+        LOG_DEBUG_BROWSER("Profile panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -1985,8 +2016,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideProfilePanelOverlay();
         HideProfilePanelOverlay();
         LOG_DEBUG_BROWSER("👤 Profile panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideProfilePanelOverlayMacOS();
+        HideProfilePanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Profile panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -3324,6 +3357,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "notification") {
             target_window = g_notification_overlay_window;
             target_browser = GetNotificationBrowser();
+        } else if (role_ == "omnibox") {
+            extern NSWindow* g_omnibox_overlay_window;
+            target_window = g_omnibox_overlay_window;
+            target_browser = GetOmniboxBrowser();
+        } else if (role_ == "downloadpanel") {
+            extern NSWindow* g_download_panel_overlay_window;
+            target_window = g_download_panel_overlay_window;
+            target_browser = GetDownloadPanelBrowser();
+        } else if (role_ == "profilepanel") {
+            extern NSWindow* g_profile_panel_overlay_window;
+            target_window = g_profile_panel_overlay_window;
+            target_browser = GetProfilePanelBrowser();
         }
 
         // Keep-alive: notification overlay hides instead of destroying
@@ -3367,6 +3412,15 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_brc100_auth_overlay_window = nullptr;
             } else if (role_ == "notification") {
                 g_notification_overlay_window = nullptr;
+            } else if (role_ == "omnibox") {
+                extern NSWindow* g_omnibox_overlay_window;
+                g_omnibox_overlay_window = nullptr;
+            } else if (role_ == "downloadpanel") {
+                extern NSWindow* g_download_panel_overlay_window;
+                g_download_panel_overlay_window = nullptr;
+            } else if (role_ == "profilepanel") {
+                extern NSWindow* g_profile_panel_overlay_window;
+                g_profile_panel_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -5306,8 +5360,22 @@ bool SimpleHandler::OnProcessMessageReceived(
         NotifyDownloadStateChanged();
 
         LOG_DEBUG_BROWSER("📥 Download panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+        extern void ShowDownloadPanelOverlayMacOS(int iconRightOffset);
+        extern void HideDownloadPanelOverlayMacOS();
+        extern bool IsDownloadPanelOverlayVisible();
+        extern bool WasDownloadPanelJustHidden();
+
+        if (IsDownloadPanelOverlayVisible() || WasDownloadPanelJustHidden()) {
+            if (IsDownloadPanelOverlayVisible()) {
+                HideDownloadPanelOverlayMacOS();
+            }
+            return true;
+        }
+        CreateDownloadPanelOverlayMacOS(iconRightOffset);
+        NotifyDownloadStateChanged();
+        LOG_DEBUG_BROWSER("Download panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -5467,8 +5535,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideDownloadPanelOverlay();
         HideDownloadPanelOverlay();
         LOG_DEBUG_BROWSER("📥 Download panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideDownloadPanelOverlayMacOS();
+        HideDownloadPanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Download panel overlay hidden (macOS)");
 #endif
         return true;
     }

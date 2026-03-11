@@ -58,6 +58,8 @@ const MainBrowserView: React.FC = () => {
     const preNavTabUrlRef = React.useRef<string>('');
     // Suppress autocomplete after Backspace/Delete so it doesn't re-fill
     const suppressAutocompleteRef = React.useRef(false);
+    // Debounce omnibox IPC so typing stays snappy
+    const omniboxDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Search engine setting — fetched from C++ settings on mount
     const [searchEngine, setSearchEngine] = useState('duckduckgo');
@@ -395,27 +397,17 @@ const MainBrowserView: React.FC = () => {
     }, [activeTabId, tabs, resetBlockedCount, resetAdblockCount]);
 
     // Listen for autocomplete suggestions from omnibox overlay
+    // Only used for arrow-key selection in the dropdown — no inline autofill
     React.useEffect(() => {
         const handleAutocomplete = (event: MessageEvent) => {
             if (event.data?.type === 'omnibox_autocomplete') {
-                // After Backspace/Delete, skip auto-fill but keep suggestions visible
-                if (suppressAutocompleteRef.current) {
-                    return;
-                }
                 const suggestion = event.data.suggestion;
-                if (suggestion && userTypedText && isEditingAddress) {
-                    // Show inline autocomplete if suggestion starts with typed text
-                    if (suggestion.toLowerCase().startsWith(userTypedText.toLowerCase())) {
-                        const autocompletePart = suggestion.slice(userTypedText.length);
-                        setAutocompleteText(autocompletePart);
-                        setAddress(suggestion);
-                    } else {
-                        // Arrow-key selected item that doesn't prefix-match — show it directly
-                        setAutocompleteText('');
-                        setAddress(suggestion);
-                    }
+                if (suggestion && isEditingAddress) {
+                    // Arrow-key selected item — show it in the address bar
+                    setAutocompleteText('');
+                    setAddress(suggestion);
                 } else if (!suggestion && isEditingAddress) {
-                    // Empty suggestion (arrow back to -1) — revert to typed text
+                    // Arrow back to -1 — revert to typed text
                     setAutocompleteText('');
                     setAddress(userTypedText);
                 } else {
@@ -427,23 +419,6 @@ const MainBrowserView: React.FC = () => {
         window.addEventListener('message', handleAutocomplete);
         return () => window.removeEventListener('message', handleAutocomplete);
     }, [userTypedText, isEditingAddress]);
-
-    // Apply text selection to highlight autocomplete portion
-    React.useEffect(() => {
-        if (autocompleteText && isEditingAddress && addressInputRef.current) {
-            const input = addressInputRef.current;
-            const userLength = userTypedText.length;
-            const fullLength = address.length;
-
-            // Set selection to highlight the autocomplete part
-            // Use setTimeout to ensure this happens after React updates the DOM
-            setTimeout(() => {
-                if (document.activeElement === input) {
-                    input.setSelectionRange(userLength, fullLength);
-                }
-            }, 0);
-        }
-    }, [autocompleteText, address, userTypedText, isEditingAddress]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -615,10 +590,13 @@ const MainBrowserView: React.FC = () => {
                             setIsEditingAddress(true);
                             setAutocompleteText(''); // Clear autocomplete on input change
 
-                            // Send query to omnibox overlay for suggestions
+                            // Debounce omnibox IPC so typing stays responsive
+                            if (omniboxDebounceRef.current) clearTimeout(omniboxDebounceRef.current);
                             if (newValue.length > 0) {
-                                window.cefMessage?.send('omnibox_update_query', [newValue]);
-                                window.cefMessage?.send('omnibox_show', [newValue]);
+                                omniboxDebounceRef.current = setTimeout(() => {
+                                    window.cefMessage?.send('omnibox_update_query', [newValue]);
+                                    window.cefMessage?.send('omnibox_show', [newValue]);
+                                }, 150);
                             } else {
                                 window.cefMessage?.send('omnibox_hide', []);
                             }
@@ -691,6 +669,10 @@ const MainBrowserView: React.FC = () => {
                             }
                         }}
                         placeholder="Search or enter address"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         style={{
                             width: '100%',
                             boxSizing: 'border-box',

@@ -1,6 +1,6 @@
 # Rust Wallet Integration Test Suite
 
-> 650+ integration tests validating cryptography, transaction handling, BEEF format, certificates, and storage against known-answer vectors (NIST, RFC, BIP, BRC specs).
+> 780+ integration tests validating cryptography, transaction handling, BEEF format, certificates, and storage against known-answer vectors (NIST, RFC, BIP, BRC specs). 55 `#[test]` functions accumulate ~686 `check!` assertions across 12 files.
 
 ## Overview
 
@@ -22,11 +22,11 @@ cargo test --test tier9_beef_struct_serde_test  # Run a specific file
 | `diagnostic_test.rs` | ~77 | Foundation: BRC-42 key derivation, HMAC-SHA256, SHA-256, AES-256-GCM (NIST KATs), BIP-39 (24 TREZOR vectors), BIP-32 (11 paths), ECDSA sign/verify, BRC-3 signatures, BRC-2 HMAC |
 | `beef_crypto_cert_test.rs` | ~50 | BEEF format parsing/serialization/roundtrip, BUMP↔TSC proof conversion, AES-GCM (12-byte & 32-byte IVs), BRC-2 symmetric encryption, certificate preimage serialization, BRC-52 sign+verify |
 | `sighash_transaction_test.rs` | ~535 | Varint encode/decode, TX serialization roundtrip (20+ txns from sighash_vectors.json), TXID calculation (genesis tx), BIP-143 preimage (7 SIGHASH types), 500+ bitcoin-sv ForkID sighash vectors |
-| `tier3_edge_recovery_test.rs` | ~40 | Key derivation boundary conditions, ECDSA determinism & cross-verification, RFC 4231 HMAC vectors, PushDrop encode/decode at PUSHDATA boundaries, script parser corruption handling, BIP-0032 official vectors, GHASH known-answer |
-| `tier4_protocol_integration_test.rs` | ~35 | BRC-42 ECDH (spec vectors + cross-key), BRC-43 invoice formatting, BRC-2 end-to-end encrypt/decrypt, PIN-based mnemonic encryption (PBKDF2+AES-GCM), TX build→sign→verify workflow, cross-module BRC-42→BRC-2→certificate roundtrip |
-| `tier5_coverage_hardening_test.rs` | ~50 | BEEF advanced ops (find_txid, sort_topologically, extract_raw_tx_hex), script conversions, certificate JSON parsing edge cases, AES-GCM with AAD, BalanceCache lifecycle & thread safety, crypto error paths, BEEF error paths, address/PriceCache misc |
+| `tier3_edge_recovery_test.rs` | ~71 | Key derivation boundary conditions, ECDSA determinism & cross-verification, RFC 4231 HMAC vectors, PushDrop encode/decode at PUSHDATA boundaries, script parser corruption handling, BIP-0032 official vectors, GHASH known-answer |
+| `tier4_protocol_integration_test.rs` | ~57 | BRC-42 ECDH (spec vectors + cross-key), BRC-43 invoice formatting, BRC-2 end-to-end encrypt/decrypt, PIN-based mnemonic encryption (PBKDF2+AES-GCM), TX build→sign→verify workflow, cross-module BRC-42→BRC-2→certificate roundtrip |
+| `tier5_coverage_hardening_test.rs` | ~102 | BEEF advanced ops (find_txid, sort_topologically, extract_raw_tx_hex), script conversions, certificate JSON parsing edge cases, AES-GCM with AAD, BalanceCache lifecycle & thread safety, crypto error paths, BEEF error paths, address/PriceCache misc |
 | `tier6_protocol_vectors_test.rs` | ~60 | NIST SP 800-38D AES-256-GCM gold-standard vectors, BRC-42 symmetric key derivation symmetry, SIGHASH edge cases (SINGLE overflow, NONE, ANYONECANPAY), BEEF validation, certificate preimage serialization, Base58Check address validation, RFC 4231 HMAC, GHASH KATs |
-| `tier7_boundary_coverage_test.rs` | ~50 | PIN encrypt/decrypt edge cases (corrupted ciphertext, empty input), BRC-2 error paths & symmetry, DPAPI platform stubs, extract_input_outpoints, BUMP parse error paths, script parser OP_PUSHDATA boundaries, ActionStatus/TransactionStatus/ProvenTxReqStatus roundtrips, uncompressed pubkey conversion, PriceCache/BalanceCache TTL & invalidation |
+| `tier7_boundary_coverage_test.rs` | ~74 | PIN encrypt/decrypt edge cases (corrupted ciphertext, empty input), BRC-2 error paths & symmetry, DPAPI platform stubs, extract_input_outpoints, BUMP parse error paths, script parser OP_PUSHDATA boundaries, ActionStatus/TransactionStatus/ProvenTxReqStatus roundtrips, uncompressed pubkey conversion, PriceCache/BalanceCache TTL & invalidation |
 | `tier8_types_recovery_storage_test.rs` | ~65 | OutPoint/Script/TxOutput/TxInput/Transaction construction & serialization, BIP32 path derivation (hardened vs normal, deep paths), address↔P2PKH script conversion, sweep transaction building (batching, dust, fees), ActionStorage CRUD (file-based persistence), JsonStorage wallet loading & key derivation |
 | `tier9_beef_struct_serde_test.rs` | ~58 | Beef builder API, V1↔V2 serialization roundtrip, Atomic BEEF (BRC-95) encoding, ParsedTransaction parsing (inputs/outputs/scripts), ActionStatus/TransactionStatus/ProvenTxReqStatus JSON serde, UTXO serde, CacheError & PushDropError Display impls |
 | `tier10_cert_verify_beef_validate_test.rs` | ~56 | Certificate type construction & is_active, preimage serialization with field ordering, signature verification with BRC-42 keys, BEEF parse_bump_hex_to_tsc, validate_beef_v1_hex spec compliance, DB helper conversions (address_to_address_info, output_to_fetcher_utxo) |
@@ -61,7 +61,7 @@ fn test_section() {
 }
 ```
 
-Newer tiers (5+) split into multiple `#[test]` functions per section. Older tiers (1-4) use a single large `#[test]` function with internal sections.
+Tiers 6-11 split into multiple `#[test]` functions per section (e.g., `t6_01_nist_aesgcm`, `t6_02_brc42_symmetric_key`) with a dedicated summary test (e.g., `t6_zz_summary`) that sleeps 200ms then asserts zero failures. Tiers 1-5 use a single large `#[test]` function with internal sections; tier 5 delegates to helper functions but still has a single `#[test]` entry point.
 
 ## Modules Under Test
 

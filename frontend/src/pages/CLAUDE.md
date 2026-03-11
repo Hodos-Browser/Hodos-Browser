@@ -13,16 +13,16 @@ See root [CLAUDE.md](/CLAUDE.md) for overlay architecture rules, close preventio
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `MainBrowserView.tsx` | 987 | Main browser chrome: tab bar, address bar, nav buttons, toolbar icons. Orchestrates overlay creation via IPC triggers. |
-| `WalletPanelPage.tsx` | 1677 | Wallet setup overlay: create, recover (12-word mnemonic), backup import, Centbee legacy recovery, PIN creation/unlock. |
+| `MainBrowserView.tsx` | 990 | Main browser chrome: tab bar, address bar, nav buttons, toolbar icons. Orchestrates overlay creation via IPC triggers. PeerPay polling + download toasts. |
+| `WalletPanelPage.tsx` | 1677 | Wallet setup overlay: create, recover (12-word mnemonic), backup import, Centbee legacy recovery, PIN creation/unlock, wallet deletion. |
 | `BRC100AuthOverlayRoot.tsx` | 970 | BRC-100 auth notification modals: domain approval, payment confirmation, rate limit, certificate disclosure, no-wallet prompt. |
 | `SettingsOverlayRoot.tsx` | 551 | Settings overlay with tabs: browser, privacy, wallet auto-approval limits, profile import. |
 | `NewTabPage.tsx` | 382 | New tab page: search bar, quick-access tile grid with cached favicons. |
 | `BackupOverlayRoot.tsx` | 371 | Backup modal: displays mnemonic, requires checkbox confirmation before close. |
 | `ProfilePickerOverlayRoot.tsx` | 354 | Profile picker dropdown: list profiles, switch, create new (with avatar file upload). |
-| `OmniboxOverlayRoot.tsx` | 308 | Address bar autocomplete dropdown: history matches + search suggestions. |
-| `DownloadsOverlayRoot.tsx` | 219 | Downloads panel: active/completed downloads with progress bars, pause/resume/cancel. |
-| `MenuOverlayRoot.tsx` | 218 | Three-dot menu dropdown: new tab, find, print, zoom controls, bookmarks, history, devtools, settings, exit. |
+| `OmniboxOverlayRoot.tsx` | 308 | Address bar autocomplete dropdown: history matches + search suggestions with favicon icons. |
+| `DownloadsOverlayRoot.tsx` | 219 | Downloads panel: active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder. |
+| `MenuOverlayRoot.tsx` | 218 | Three-dot menu dropdown: new tab, history, bookmarks, downloads, zoom, print, find, devtools, settings, about, exit. |
 | `CertErrorPage.tsx` | 214 | SSL certificate error interstitial: warning display, "go back" / "proceed (unsafe)" actions. |
 | `SendPage.tsx` | 145 | Legacy transaction send page (balance, send form, transaction history). |
 | `SettingsPage.tsx` | 131 | Full-page settings with sidebar navigation (general, privacy, downloads, wallet, about). |
@@ -55,7 +55,7 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `BRC100AuthOverlayRoot` | Centered modal | C++ manages lifecycle; `overlay_close` IPC |
 | `BackupOverlayRoot` | Centered modal | Checkbox confirmation + `overlay_close` IPC |
 | `SettingsOverlayRoot` | Full page | `settings_close` IPC |
-| `MenuOverlayRoot` | Dropdown | C++ mouse hook (click-outside), Escape key sends `menu_hide` |
+| `MenuOverlayRoot` | Dropdown | C++ mouse hook (click-outside), Escape key sends `menu_hide`, auto-close after action |
 | `OmniboxOverlayRoot` | Dropdown below address bar | C++ mouse hook, auto-hide after navigation |
 | `DownloadsOverlayRoot` | Dropdown panel | `download_panel_hide` IPC |
 | `CookiePanelOverlayRoot` | Right-side panel | `cookie_panel_hide` IPC |
@@ -76,7 +76,7 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `omnibox_select` | `[direction]` | Arrow key nav (up/down) |
 | `cookie_panel_show` | `[rightOffset, domain]` | Show privacy shield overlay |
 | `download_panel_show` | `[rightOffset]` | Show downloads overlay |
-| `toggle_wallet_panel` | `[rightOffset, unreadCount]` | Toggle wallet panel |
+| `toggle_wallet_panel` | `[rightOffset, unreadCount, unreadAmount]` | Toggle wallet panel |
 | `profile_panel_show` | `[rightOffset]` | Show profile picker |
 | `menu_show` | `[rightOffset]` | Show three-dot menu |
 | `settings_get_all` | — | Fetch browser settings |
@@ -89,7 +89,8 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `wallet_prevent_close` / `wallet_allow_close` | WalletPanelPage | Toggle close prevention flag |
 | `settings_close` | SettingsOverlayRoot | Close settings overlay |
 | `menu_hide` | MenuOverlayRoot | Hide menu on Escape |
-| `menu_action` | MenuOverlayRoot, SettingsPage | Trigger action (new_tab, print, find, zoom, devtools, settings, exit, etc.) |
+| `menu_action` | MenuOverlayRoot, SettingsPage | Trigger action (new_tab, history, bookmarks, downloads, print, find, zoom_in/out/reset, devtools, settings, about, exit) |
+| `wallet_delete_cancel` | WalletPanelPage | Cancel wallet deletion flow |
 | `download_panel_hide` | DownloadsOverlayRoot | Hide downloads panel |
 | `cookie_panel_hide` | CookiePanelOverlay, PrivacyShield | Hide cookie/privacy panel |
 | `profile_panel_hide` | ProfilePickerOverlayRoot | Hide profile picker |
@@ -116,6 +117,8 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 |----------------|-------------|---------|
 | `find_show` | MainBrowserView | Show find bar (Ctrl+F from C++) |
 | `find_result` | MainBrowserView | Find match count + ordinal |
+| `wallet_payment_dismissed` | MainBrowserView | Clear unread payment indicators |
+| `omnibox_autocomplete` (MessageEvent) | MainBrowserView | Selected suggestion text from omnibox |
 | `omniboxQueryUpdate` (CustomEvent) | OmniboxOverlayRoot | New query from address bar |
 | `omniboxSelect` (CustomEvent) | OmniboxOverlayRoot | Arrow key selection |
 | `most_visited_response` | NewTabPage | Most-visited sites data |
@@ -142,6 +145,26 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `useBalance()` | SendPage | Balance + USD value |
 | `useTransaction()` | SendPage | Transaction list + send |
 | `usePrivacyShield()` | (via PrivacyShieldPanel) | Composed adblock + cookie state |
+
+---
+
+## Direct REST Calls (localhost:31301)
+
+Some pages call the Rust wallet backend directly instead of going through `window.hodosBrowser`:
+
+| Page | Endpoint | Purpose |
+|------|----------|---------|
+| `WalletPanelPage` | `/wallet/status` | Check wallet existence/lock status |
+| `WalletPanelPage` | `/wallet/create` (POST) | Create new wallet |
+| `WalletPanelPage` | `/wallet/recover` (POST) | Recover from mnemonic |
+| `WalletPanelPage` | `/wallet/import` (POST) | Import from backup file |
+| `WalletPanelPage` | `/wallet/recover-external` (POST) | Centbee legacy recovery |
+| `WalletPanelPage` | `/wallet/unlock` (POST) | Unlock wallet (fallback) |
+| `WalletPanelPage` | `/getPublicKey` (POST) | Fetch and cache identity key |
+| `MainBrowserView` | `/wallet/status` | Cache wallet existence on mount |
+| `MainBrowserView` | `/wallet/peerpay/status` | Poll every 60s for unread payments |
+
+**localStorage keys** used across pages: `hodos_wallet_exists`, `hodos_identity_key` (WalletPanelPage, MainBrowserView), `ntp_tiles_cache` (NewTabPage favicon cache).
 
 ---
 
