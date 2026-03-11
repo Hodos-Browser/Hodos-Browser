@@ -123,10 +123,12 @@ MyOverlayRenderHandler::~MyOverlayRenderHandler() {
 
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
     rect = CefRect(0, 0, width_, height_);
-    std::cout << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🔍 GetViewRect called: " << width_ << "x" << height_ << std::endl;
-    debugLog.close();
+    // Note: This is called ~60fps. Only log once for diagnostics.
+    static bool logged = false;
+    if (!logged) {
+        std::cout << "🔍 GetViewRect: " << width_ << "x" << height_ << std::endl;
+        logged = true;
+    }
 }
 
 // ============================================================================
@@ -205,10 +207,12 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
 #elif defined(__APPLE__)
     // ====== macOS Implementation ======
 
-    std::cout << "🧪 OnPaint called (macOS) - type: " << type << " size: " << width << "x" << height << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🧪 OnPaint called (macOS) - type: " << type << " size: " << width << "x" << height << std::endl;
-    debugLog.close();
+    // Note: OnPaint is called ~60fps. Only log first call.
+    static bool paintLogged = false;
+    if (!paintLogged) {
+        std::cout << "🧪 OnPaint (macOS) first call - type: " << type << " size: " << width << "x" << height << std::endl;
+        paintLogged = true;
+    }
 
     if (!buffer || !nsview_) {
         std::cout << "❌ Invalid buffer or NSView pointer" << std::endl;
@@ -296,10 +300,12 @@ bool MyOverlayRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int v
     if (!window) return false;
 
     NSRect windowFrame = [window frame];
-    NSPoint screenPoint = windowFrame.origin;
 
-    screenX = screenPoint.x + viewX;
-    screenY = screenPoint.y + viewY;
+    // macOS screen origin is bottom-left, CEF view origin is top-left.
+    // viewY=0 is top of view → maps to top of window in screen coords
+    // Top of window in screen coords = windowFrame.origin.y + windowFrame.size.height
+    screenX = (int)(windowFrame.origin.x + viewX);
+    screenY = (int)(windowFrame.origin.y + windowFrame.size.height - viewY);
     return true;
 
 #endif

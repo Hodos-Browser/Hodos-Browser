@@ -1,11 +1,9 @@
 // cef_native/src/simple_render_process_handler.cpp
 #include "../../include/handlers/simple_render_process_handler.h"
 
-// Platform-specific V8 handlers (Windows-only currently)
-#ifdef _WIN32
-    #include "../../include/core/IdentityHandler.h"
-    #include "BRC100Handler.h"
-#endif
+// V8 handlers (cross-platform)
+#include "../../include/core/IdentityHandler.h"
+#include "BRC100Handler.h"
 
 // Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
@@ -629,8 +627,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
     global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
 
-#ifdef _WIN32
-    // Create the identity object inside hodosBrowser (Windows-only)
+    // Create the identity object inside hodosBrowser
     CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
     hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -644,12 +641,6 @@ void SimpleRenderProcessHandler::OnContextCreated(
     identityObject->SetValue("markBackedUp",
         CefV8Value::CreateFunction("markBackedUp", identityHandler),
         V8_PROPERTY_ATTRIBUTE_NONE);
-#else
-    // macOS: Provide stub identity API to prevent JavaScript errors
-    CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
-    hodosBrowser->SetValue("identity", identityObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🔧 Identity API stubbed on macOS (empty object)");
-#endif
 
 #ifdef _WIN32
     // Create the navigation object inside hodosBrowser (Windows-only)
@@ -801,13 +792,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
         LOG_DEBUG_RENDER("🔍 Google Suggest API injected for omnibox overlay");
     }
 
-#ifdef _WIN32
-    // Register BRC-100 API (Windows-only)
+    // Register BRC-100 API (cross-platform)
     BRC100Handler::RegisterBRC100API(context);
-#else
-    // TODO: macOS implementation - BRC-100 API stubbed for now
-    LOG_DEBUG_RENDER("🔧 BRC-100 API not available on macOS - stubbed");
-#endif
 
     // For overlay browsers, signal that all systems are ready
     if (isOverlayBrowser) {

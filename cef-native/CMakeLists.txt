@@ -133,6 +133,7 @@ set(SOURCES
     src/core/CookieBlockManager.cpp
     src/core/BookmarkManager.cpp
     src/core/ProfileLock.cpp
+    src/core/SyncHttpClient.cpp
 )
 
 # Platform-specific handler files
@@ -159,6 +160,7 @@ if(APPLE)
         src/core/IdentityHandler.cpp
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
+        src/core/HttpRequestInterceptor.cpp
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
 
@@ -171,6 +173,9 @@ if(APPLE)
         src/core/WalletService_mac.cpp
         src/core/Logger.cpp
         src/core/HistoryManager.cpp
+        src/core/IdentityHandler.cpp
+        src/core/BRC100Bridge.cpp
+        src/core/BRC100Handler.cpp
     )
 
     # Load CEF cmake utilities for helper generation
@@ -273,6 +278,7 @@ if(APPLE)
     find_library(COREGRAPHICS_LIBRARY CoreGraphics)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
     find_library(CURL_LIBRARY curl)
+    find_library(SECURITY_LIBRARY Security)
 
     # Link CEF Framework (special handling for .framework bundle)
     # Note: Framework name has spaces, use find_library to handle properly
@@ -297,6 +303,7 @@ if(APPLE)
         ${COREGRAPHICS_LIBRARY}
         ${QUARTZCORE_LIBRARY}
         ${CURL_LIBRARY}
+        ${SECURITY_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto
         ${SQLITE3_LIBRARY}

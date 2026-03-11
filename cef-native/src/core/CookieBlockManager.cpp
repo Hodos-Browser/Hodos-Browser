@@ -75,7 +75,11 @@ CookieBlockManager::~CookieBlockManager() {
 // Initialize
 // ============================================================================
 bool CookieBlockManager::Initialize(const std::string& user_data_path) {
+#ifdef _WIN32
     db_path_ = user_data_path + "\\cookie_blocks.db";
+#else
+    db_path_ = user_data_path + "/cookie_blocks.db";
+#endif
     LOG_INFO_BLOCK("Initializing CookieBlockManager at: " + db_path_);
 
     if (!OpenDatabase()) {

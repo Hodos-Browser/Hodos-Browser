@@ -28,6 +28,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #endif
+#include "SyncHttpClient.h"
 
 // ============================================================================
 // Global flag — set by cef_browser_shell.cpp StartAdblockServer()
@@ -401,6 +402,23 @@ private:
     mutable std::mutex versionMutex_;
     int64_t lastKnownVersion_ = -1;  // -1 = not yet seen
 
+    // Escape JSON string (minimal: backslash and double-quote)
+    static std::string escapeJson(const std::string& s) {
+        std::string result;
+        result.reserve(s.size() + 16);
+        for (char c : s) {
+            switch (c) {
+                case '"':  result += "\\\""; break;
+                case '\\': result += "\\\\"; break;
+                case '\n': result += "\\n";  break;
+                case '\r': result += "\\r";  break;
+                case '\t': result += "\\t";  break;
+                default:   result += c;      break;
+            }
+        }
+        return result;
+    }
+
 #ifdef _WIN32
 
     // Sync WinHTTP POST to localhost:31302/check
@@ -725,32 +743,160 @@ private:
         return selectors;
     }
 
-    // Escape JSON string (minimal: backslash and double-quote)
-    static std::string escapeJson(const std::string& s) {
-        std::string result;
-        result.reserve(s.size() + 16);
-        for (char c : s) {
-            switch (c) {
-                case '"':  result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\n': result += "\\n";  break;
-                case '\r': result += "\\r";  break;
-                case '\t': result += "\\t";  break;
-                default:   result += c;      break;
-            }
-        }
-        return result;
-    }
 #elif defined(__APPLE__)
-    // macOS stub — TODO: implement with libcurl or NSURLSession
+    // macOS: uses SyncHttpClient (libcurl) to call adblock engine at localhost:31302
+
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
-        return false;
+        std::string body = "{\"url\":\"" + escapeJson(url)
+                         + "\",\"sourceUrl\":\"" + escapeJson(sourceUrl)
+                         + "\",\"resourceType\":\"" + resourceType + "\"}";
+
+        HttpResponse resp = SyncHttpClient::Post("http://localhost:31302/check", body, "application/json", 2000);
+        if (!resp.success) return false;
+
+        bool blocked = (resp.body.find("\"blocked\":true") != std::string::npos);
+
+        // Check engine version for cache invalidation
+        auto vpos = resp.body.find("\"version\":");
+        if (vpos != std::string::npos) {
+            int64_t ver = 0;
+            size_t numStart = vpos + 10;
+            while (numStart < resp.body.size() && resp.body[numStart] == ' ') numStart++;
+            if (numStart < resp.body.size()) {
+                try { ver = std::stoll(resp.body.substr(numStart)); } catch (...) {}
+            }
+            std::lock_guard<std::mutex> vlock(versionMutex_);
+            if (lastKnownVersion_ >= 0 && ver != lastKnownVersion_) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cache_.clear();
+            }
+            lastKnownVersion_ = ver;
+        }
+
+        return blocked;
     }
-    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
+
+    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
+        CosmeticResult result;
+
+        std::string body = "{\"url\":\"" + escapeJson(url) + "\"";
+        if (skipScriptlets) body += ",\"skip_scriptlets\":true";
+        body += "}";
+
+        HttpResponse resp = SyncHttpClient::Post("http://localhost:31302/cosmetic-resources", body, "application/json", 3000);
+        if (!resp.success || resp.body.size() >= 512 * 1024) return result;
+
+        const std::string& response = resp.body;
+
+        // Parse hideSelectors array -> join into CSS selector string
+        auto selStart = response.find("\"hideSelectors\":");
+        if (selStart != std::string::npos) {
+            auto arrStart = response.find('[', selStart);
+            auto arrEnd = response.find(']', arrStart);
+            if (arrStart != std::string::npos && arrEnd != std::string::npos) {
+                std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
+                std::string selectors;
+                size_t pos = 0;
+                while (pos < arrStr.size()) {
+                    auto qStart = arrStr.find('"', pos);
+                    if (qStart == std::string::npos) break;
+                    auto qEnd = arrStr.find('"', qStart + 1);
+                    while (qEnd != std::string::npos && arrStr[qEnd - 1] == '\\') {
+                        qEnd = arrStr.find('"', qEnd + 1);
+                    }
+                    if (qEnd == std::string::npos) break;
+                    std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
+                    if (!sel.empty()) {
+                        if (!selectors.empty()) selectors += ", ";
+                        selectors += sel;
+                    }
+                    pos = qEnd + 1;
+                }
+                result.cssSelectors = selectors;
+            }
+        }
+
+        // Parse injectedScript string
+        auto scriptStart = response.find("\"injectedScript\":\"");
+        if (scriptStart != std::string::npos) {
+            size_t valStart = scriptStart + 18;
+            size_t valEnd = valStart;
+            while (valEnd < response.size()) {
+                if (response[valEnd] == '"' && response[valEnd - 1] != '\\') break;
+                valEnd++;
+            }
+            if (valEnd < response.size()) {
+                result.injectedScript = response.substr(valStart, valEnd - valStart);
+                // Unescape JSON string escapes
+                std::string& s = result.injectedScript;
+                std::string unescaped;
+                unescaped.reserve(s.size());
+                for (size_t i = 0; i < s.size(); i++) {
+                    if (s[i] == '\\' && i + 1 < s.size()) {
+                        switch (s[i + 1]) {
+                            case 'n': unescaped += '\n'; i++; break;
+                            case 'r': unescaped += '\r'; i++; break;
+                            case 't': unescaped += '\t'; i++; break;
+                            case '"': unescaped += '"'; i++; break;
+                            case '\\': unescaped += '\\'; i++; break;
+                            default: unescaped += s[i]; break;
+                        }
+                    } else {
+                        unescaped += s[i];
+                    }
+                }
+                result.injectedScript = unescaped;
+            }
+        }
+
+        result.generichide = (response.find("\"generichide\":true") != std::string::npos);
+        return result;
+    }
+
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
-                                          const std::vector<std::string>& ids) { return ""; }
+                                          const std::vector<std::string>& ids) {
+        std::string body = "{\"url\":\"" + escapeJson(url) + "\",\"classes\":[";
+        for (size_t i = 0; i < classes.size(); i++) {
+            if (i > 0) body += ",";
+            body += "\"" + escapeJson(classes[i]) + "\"";
+        }
+        body += "],\"ids\":[";
+        for (size_t i = 0; i < ids.size(); i++) {
+            if (i > 0) body += ",";
+            body += "\"" + escapeJson(ids[i]) + "\"";
+        }
+        body += "]}";
+
+        HttpResponse resp = SyncHttpClient::Post("http://localhost:31302/cosmetic-hidden-ids", body, "application/json", 3000);
+        if (!resp.success || resp.body.size() >= 512 * 1024) return "";
+
+        const std::string& response = resp.body;
+        std::string selectors;
+        auto arrStart = response.find('[');
+        auto arrEnd = response.rfind(']');
+        if (arrStart != std::string::npos && arrEnd != std::string::npos && arrEnd > arrStart) {
+            std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
+            size_t pos = 0;
+            while (pos < arrStr.size()) {
+                auto qStart = arrStr.find('"', pos);
+                if (qStart == std::string::npos) break;
+                auto qEnd = arrStr.find('"', qStart + 1);
+                while (qEnd != std::string::npos && arrStr[qEnd - 1] == '\\') {
+                    qEnd = arrStr.find('"', qEnd + 1);
+                }
+                if (qEnd == std::string::npos) break;
+                std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
+                if (!sel.empty()) {
+                    if (!selectors.empty()) selectors += ", ";
+                    selectors += sel;
+                }
+                pos = qEnd + 1;
+            }
+        }
+        return selectors;
+    }
 #else
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {

@@ -80,6 +80,8 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     command_line->AppendSwitch("allow-loopback-in-sandbox");
     command_line->AppendSwitch("disable-web-security");  // Disable for development
     command_line->AppendSwitch("allow-running-insecure-content");
+    // Prevent Keychain access that blocks CefInitialize on unsigned apps
+    command_line->AppendSwitch("use-mock-keychain");
     LOG_INFO_APP("Using in-process GPU on macOS; web security disabled for localhost dev");
 #endif
 
