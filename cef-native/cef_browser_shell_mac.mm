@@ -3641,7 +3641,6 @@ int main(int argc, char* argv[]) {
         settings.command_line_args_disabled = false;
         CefString(&settings.log_file).FromASCII("debug.log");
         settings.log_severity = LOGSEVERITY_INFO;
-        settings.remote_debugging_port = 9222;
         settings.windowless_rendering_enabled = true;  // Required for overlays
 
         // CRITICAL: Disable sandbox on macOS for development (requires code signing otherwise)
@@ -3670,7 +3669,7 @@ int main(int argc, char* argv[]) {
         NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
 
         std::string user_data_path = [hodosBrowserDir UTF8String];
-        CefString(&settings.root_cache_path).FromString(user_data_path);
+        // NOTE: root_cache_path is set AFTER profile resolution below (must be unique per instance)
 
         // Initialize ProfileManager BEFORE CefInitialize so cache_path is correct
         LOG_INFO("Initializing ProfileManager...");
@@ -3738,11 +3737,20 @@ int main(int argc, char* argv[]) {
         BookmarkManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("BookmarkManager initialized");
 
-        // Set cache_path to profile-specific directory (cookie/localStorage isolation!)
+        // Set root_cache_path AND cache_path to profile-specific directory.
+        // CRITICAL: root_cache_path must be unique per CEF instance — two instances
+        // sharing the same root_cache_path will cause CefInitialize to fail.
         std::string cache_path = profile_cache;
+        CefString(&settings.root_cache_path).FromString(cache_path);
         CefString(&settings.cache_path).FromString(cache_path);
 
+        // Remote debugging port: 9222 for Default profile, disabled for others
+        // (avoids port conflict when multiple instances run simultaneously)
+        settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+
         LOG_INFO("Cache path: " + cache_path);
+        LOG_INFO("Root cache path: " + cache_path);
+        LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));
 
         // Enable JavaScript features
         CefString(&settings.javascript_flags).FromASCII("--expose-gc");
