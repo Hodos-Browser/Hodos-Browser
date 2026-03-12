@@ -1842,6 +1842,25 @@ bool SimpleHandler::OnProcessMessageReceived(
             shieldDomain = cp_args->GetString(1).ToString();
         }
 
+        // Fallback: if React didn't provide a domain (e.g. internal page), extract from active tab URL
+        if (shieldDomain.empty()) {
+            int window_id = window_id_;
+            auto* activeTab = TabManager::GetInstance().GetActiveTabForWindow(window_id);
+            if (activeTab && !activeTab->url.empty()) {
+                std::string tabUrl = activeTab->url;
+                size_t scheme_end = tabUrl.find("://");
+                if (scheme_end != std::string::npos) {
+                    size_t host_start = scheme_end + 3;
+                    size_t host_end = tabUrl.find('/', host_start);
+                    if (host_end == std::string::npos) host_end = tabUrl.length();
+                    std::string host_port = tabUrl.substr(host_start, host_end - host_start);
+                    size_t colon = host_port.find(':');
+                    shieldDomain = (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+                    LOG_INFO_BROWSER("🛡️ Shield domain fallback from active tab: " + shieldDomain);
+                }
+            }
+        }
+
 #ifdef _WIN32
         extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
