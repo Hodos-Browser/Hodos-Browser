@@ -3,7 +3,7 @@
 
 ## Overview
 
-This directory contains the core source modules for the Actix-web wallet server. `main.rs` bootstraps the app state and HTTP server on port 31301. `handlers.rs` (13k+ lines) contains all 70+ endpoint handlers organized by BRC-100 protocol area. The remaining modules provide caching, external API integration (WhatsOnChain, ARC, MessageBox, Paymail), BEEF transaction parsing, and wallet recovery.
+This directory contains the core source modules for the Actix-web wallet server. `main.rs` bootstraps the app state and HTTP server on port 31301. `handlers.rs` (13k+ lines) contains 76 endpoint handlers organized by BRC-100 protocol area (70 in handlers.rs + 6 certificate handlers). The remaining modules provide caching, external API integration (WhatsOnChain, ARC, MessageBox, Paymail), BEEF transaction parsing, and wallet recovery.
 
 Subdirectories `crypto/`, `database/`, `transaction/`, `certificate/`, `script/`, and `monitor/` each have their own CLAUDE.md with detailed documentation.
 
@@ -11,9 +11,9 @@ Subdirectories `crypto/`, `database/`, `transaction/`, `certificate/`, `script/`
 
 | File | Purpose |
 |------|---------|
-| `main.rs` | Entry point: `AppState` struct, Actix-web server init, route registration, DPAPI auto-unlock, Monitor startup |
-| `lib.rs` | Library exports for `cargo test` — re-exports all submodules |
-| `handlers.rs` | All 70+ HTTP endpoint handlers grouped by protocol area (see Handler Groups below) |
+| `main.rs` | Entry point: `AppState` struct, Actix-web server init, 73 route registrations, DPAPI/Keychain auto-unlock, Monitor startup |
+| `lib.rs` | Library exports for `cargo test` — re-exports submodules + `pub use crypto::brc2` and `crypto::aesgcm_custom` |
+| `handlers.rs` | 70 HTTP endpoint handlers grouped by protocol area (see Handler Groups below) |
 | `action_storage.rs` | `ActionStatus`, `TransactionStatus`, `ProvenTxReqStatus` enums; legacy `ActionStorage` (HashMap-backed, superseded by database) |
 | `auth_session.rs` | `AuthSessionManager` — BRC-103/104 session tracking with 24-hour expiry |
 | `authfetch.rs` | `AuthFetchClient` — BRC-103/104 authenticated HTTP client for MessageBox and overlay services |
@@ -26,7 +26,7 @@ Subdirectories `crypto/`, `database/`, `transaction/`, `certificate/`, `script/`
 | `fee_rate_cache.rs` | `FeeRateCache` — 1-hour TTL, fetches from ARC `/v1/policy`, defaults to 1000 sat/KB |
 | `identity_resolver.rs` | `IdentityResolver` — resolves identity keys to names/avatars via BSV Overlay Services (BRC-52 certificates), 10-min cache |
 | `json_storage.rs` | Legacy JSON file storage (`Wallet`, `AddressInfo`). Superseded by database; kept for backward compatibility |
-| `message_relay.rs` | `MessageStore` — in-memory BRC-33 PeerServ message relay (recipient → box → messages) |
+| `message_relay.rs` | `MessageStore` — in-memory BRC-33 PeerServ message relay (recipient → box → messages). Used by messagebox/monitor |
 | `messagebox.rs` | `MessageBoxClient` — BRC-2 encrypted messaging via `messagebox.babbage.systems`, uses AuthFetch for transport |
 | `paymail.rs` | `PaymailClient` — bsvalias capability discovery, P2P payment destination, public profile resolution. Handles HandCash `$alias` shorthand |
 | `price_cache.rs` | `PriceCache` — BSV/USD from CryptoCompare (primary) + CoinGecko (fallback), 5-min TTL, $0.01–$10k sanity range |
@@ -35,40 +35,42 @@ Subdirectories `crypto/`, `database/`, `transaction/`, `certificate/`, `script/`
 
 ## Handler Groups (handlers.rs)
 
-The 70+ handlers are organized by protocol area:
+76 handlers total (70 in handlers.rs + 6 certificate handlers):
 
 | Group | Key Handlers | Lines |
 |-------|-------------|-------|
-| **BRC-100 Identity** | `health`, `get_version`, `get_public_key`, `is_authenticated`, `wait_for_authentication`, `well_known_auth` | 150–746 |
-| **BRC-100 Crypto** | `create_hmac`, `verify_hmac`, `encrypt`, `decrypt`, `create_signature`, `verify_signature` | 748–2700 |
-| **Transactions** | `create_action`, `sign_action`, `process_action`, `internalize_action`, `abort_action`, `list_actions`, `update_confirmations` | 3234–9000 |
-| **Wallet Mgmt** | `wallet_status`, `wallet_create`, `wallet_delete`, `wallet_balance`, `wallet_sync`, `wallet_backup`, `wallet_restore`, `wallet_unlock`, `wallet_recover`, `wallet_rescan`, `wallet_cleanup`, `wallet_export`, `wallet_import`, `wallet_activity` | 1802–12000 |
+| **Server Control** | `health`, `shutdown`, `brc100_status` | 150–180 |
+| **BRC-100 Identity** | `get_version`, `get_public_key`, `is_authenticated`, `wait_for_authentication`, `well_known_auth` | 186–746 |
+| **BRC-100 Crypto** | `create_hmac`, `verify_hmac`, `encrypt`, `decrypt`, `create_signature`, `verify_signature` | 767–2700 |
+| **Transactions** | `create_action`, `sign_action`, `process_action`, `internalize_action`, `abort_action`, `list_actions`, `update_confirmations`, `send_transaction` | 3234–9000 |
+| **Wallet Mgmt** | `wallet_status`, `wallet_create`, `wallet_delete`, `wallet_balance`, `wallet_sync`, `wallet_backup`, `wallet_restore`, `wallet_unlock`, `wallet_recover`, `wallet_recover_external`, `wallet_rescan`, `wallet_cleanup`, `wallet_export`, `wallet_import`, `wallet_activity` | 1802–12100 |
 | **Addresses** | `generate_address`, `get_all_addresses`, `get_current_address` | 7756–8000 |
 | **Outputs** | `list_outputs` (with BEEF building), `relinquish_output` | 11347+ |
-| **Blockchain** | `get_height`, `get_header_for_height`, `get_network` | — |
+| **Blockchain** | `get_height`, `get_header_for_height`, `get_network` | 11666+ |
 | **Certificates** | delegates to `certificate/handlers.rs`: `list_certificates`, `acquire_certificate`, `prove_certificate`, `relinquish_certificate`, `discover_by_identity_key`, `discover_by_attributes` | — |
 | **Domain Perms** | `get_domain_permission`, `set_domain_permission`, `delete_domain_permission`, `list_domain_permissions`, `check_cert_permissions`, `approve_cert_fields`, `domain_permissions_reset_all` | 8382–8700 |
 | **Messages (BRC-33)** | `send_message`, `list_messages`, `acknowledge_message` | 8727–9000 |
 | **PeerPay (BRC-29)** | `peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss` | 12234+ |
-| **Paymail** | `paymail_send`, `paymail_resolve`, `recipient_resolve` (unified: identity/paymail/BSV address) | end |
+| **Paymail** | `paymail_send`, `paymail_resolve`, `recipient_resolve` (unified: identity/paymail/BSV address) | 12580+ |
 | **Settings/Price** | `get_bsv_price`, `wallet_settings_get`, `wallet_settings_set`, `reveal_mnemonic`, `get_sync_status`, `mark_sync_seen` | 8353+ |
 
 ## Key Types
 
 ### AppState (main.rs)
-Global application state shared across all handlers via `web::Data<Arc<AppState>>`:
+Global application state shared across all handlers via `web::Data<AppState>`:
 ```rust
 pub struct AppState {
-    pub db: Arc<Mutex<Database>>,
-    pub balance_cache: Arc<BalanceCache>,
+    pub database: Arc<Mutex<WalletDatabase>>,
     pub auth_sessions: Arc<AuthSessionManager>,
+    pub balance_cache: Arc<BalanceCache>,
     pub fee_rate_cache: Arc<FeeRateCache>,
     pub price_cache: Arc<PriceCache>,
-    pub user_id: Mutex<Option<i64>>,
-    pub shutdown_token: CancellationToken,
-    pub create_action_lock: Mutex<()>,
-    pub derived_key_cache: DashMap<String, DerivedKeyInfo>,
-    // ...
+    pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,
+    pub create_action_lock: Arc<tokio::sync::Mutex<()>>,
+    pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,
+    pub current_user_id: i64,
+    pub shutdown: CancellationToken,
+    pub sync_status: Arc<RwLock<SyncStatus>>,
 }
 ```
 
@@ -103,6 +105,7 @@ const ATOMIC_BEEF_MARKER: [u8; 4] = [0x01, 0x01, 0x01, 0x01];  // BRC-95
 | Fee rate cache TTL | 1 hour | `fee_rate_cache.rs` |
 | Price cache TTL | 5 minutes | `price_cache.rs` |
 | Identity cache TTL | 10 minutes | `identity_resolver.rs` |
+| Paymail capability cache TTL | 1 hour | `paymail.rs` |
 | AuthSession expiry | 24 hours | `auth_session.rs` |
 | JSON payload limit | 10 MB | `main.rs` |
 | BEEF payload limit | 100 MB | `main.rs` |
@@ -139,7 +142,13 @@ external_api_call().await; // safe
 `well_known_auth` derives an app-scoped identity key via BRC-42 (`invoice: "2-identity"`, counterparty: app's key) to prevent cross-domain tracking.
 
 ### Atomic Action Creation
-`create_action` holds `create_action_lock` while selecting UTXOs, building the transaction, and inserting into the database. If the process crashes between UTXO selection and DB insert, `monitor/task_fail_abandoned` cleans up on restart.
+`create_action` holds `create_action_lock` while selecting UTXOs, building the transaction, and inserting into the database. A separate `utxo_selection_lock` (tokio async mutex) prevents concurrent UTXO selection race conditions. If the process crashes between UTXO selection and DB insert, `monitor/task_fail_abandoned` cleans up on restart.
+
+### Recovery Sync Progress
+`sync_status: Arc<RwLock<SyncStatus>>` tracks wallet recovery progress (addresses scanned, UTXOs found) and is polled by the frontend via `/wallet/sync-status`. Cleared by `/wallet/sync-status/seen`.
+
+### External Wallet Recovery
+`wallet_recover_external` (`/wallet/recover-external`) supports sweeping funds from external wallets (currently Centbee). Scans external derivation paths, finds UTXOs, and sweeps them into the Hodos wallet via on-chain transactions.
 
 ### BEEF Ancestry Limits
 `build_beef_for_txid()` enforces `MAX_BEEF_ANCESTORS = 50` to prevent runaway ancestry walks. Confirmed transactions with BUMPs don't include parents (they already have merkle proof).
@@ -157,7 +166,7 @@ external_api_call().await; // safe
 | CoinGecko | `price_cache.rs` | `/simple/price?ids=bitcoin-sv&vs_currencies=usd` | BSV/USD price (fallback) |
 | MessageBox | `messagebox.rs` | `messagebox.babbage.systems` | BRC-2 encrypted message relay |
 | BSV Overlay | `identity_resolver.rs` | US/EU overlay endpoints | BRC-52 identity certificate lookup |
-| Paymail hosts | `paymail.rs` | `/.well-known/bsvalias` | bsvalias capability discovery |
+| Paymail hosts | `paymail.rs` | `/.well-known/bsvalias` | bsvalias capability discovery, P2P destinations |
 
 ## Adding a New Endpoint
 

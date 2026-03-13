@@ -8,18 +8,18 @@ This module provides the complete data access layer for the HodosBrowser wallet.
 
 **Architecture**: Repository pattern — each table group has a dedicated `*Repository` struct that borrows a `&Connection`. The central `WalletDatabase` owns the connection and manages migrations, PIN/mnemonic caching, and wallet creation orchestration.
 
-**Security invariant**: Mnemonics are stored encrypted (PIN + PBKDF2/AES-GCM or DPAPI). The plaintext mnemonic is only held in `WalletDatabase.cached_mnemonic` while the wallet is unlocked.
+**Security invariant**: Mnemonics are stored encrypted (PIN + PBKDF2/AES-GCM or DPAPI/Keychain). The plaintext mnemonic is only held in `WalletDatabase.cached_mnemonic` while the wallet is unlocked.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Module exports — re-exports all repositories and models |
-| `connection.rs` | `WalletDatabase` — connection wrapper, migration runner, PIN/mnemonic cache, wallet creation orchestration |
-| `models.rs` | All data structs (17 models matching database tables) |
-| `migrations.rs` | Schema V1 (consolidated) + incremental V2–V11 migrations |
+| `mod.rs` | Module exports — re-exports all 16 repositories and 18 models |
+| `connection.rs` | `WalletDatabase` — connection wrapper, migration runner, PIN/mnemonic cache, wallet creation/recovery orchestration, startup checks |
+| `models.rs` | All data structs (18 models matching database tables) |
+| `migrations.rs` | Consolidated V1 schema + incremental V2–V11 migrations |
 | `migration.rs` | One-time JSON→SQLite migration (legacy `wallet.json`/`actions.json`) |
-| `helpers.rs` | Key derivation helpers: `get_master_private_key_from_db`, `derive_key_for_output`, format converters |
+| `helpers.rs` | Key derivation helpers: `get_master_private_key_from_db`, `get_master_public_key_from_db`, `derive_key_for_output`, format converters |
 
 ## Models
 
@@ -41,8 +41,27 @@ This module provides the complete data access layer for the HodosBrowser wallet.
 | `SyncState` | `sync_states` | `user_id`, `status`, `ref_num`, `sync_map` (JSON) | Multi-device sync tracking |
 | `DomainPermission` | `domain_permissions` | `user_id`, `domain`, `trust_level`, spending limits | Per-site wallet permissions |
 | `CertFieldPermission` | `cert_field_permissions` | `domain_permission_id`, `cert_type`, `field_name` | Which cert fields a domain can see |
-| `RelayMessage` | `relay_messages` | `recipient`, `message_box`, `sender`, `body` | BRC-33 PeerServ message relay |
-| `ReceivedPayment` | `peerpay_received` | `message_id` (unique), `amount_satoshis`, `source`, `dismissed` | PeerPay + address sync notifications |
+| `RelayMessage` | `relay_messages` | `recipient`, `message_box`, `sender`, `body` | BRC-33 PeerServ message relay (defined in `message_relay_repo.rs`) |
+| `ReceivedPayment` | `peerpay_received` | `message_id` (unique), `amount_satoshis`, `source`, `dismissed` | PeerPay + address sync notifications (defined in `peerpay_repo.rs`) |
+
+## WalletDatabase (`connection.rs`)
+
+Central orchestrator. Owns the `Connection`, runs migrations on init, caches the plaintext mnemonic.
+
+**PIN/mnemonic lifecycle:**
+- `is_pin_protected()`, `is_unlocked()`, `unlock(pin)`, `get_cached_mnemonic()`
+- `cache_mnemonic(mnemonic)` — after create/recover when mnemonic is known
+- `clear_cached_mnemonic()` — after wallet deletion
+- `try_dpapi_unlock()` — auto-unlock via DPAPI (Windows) / Keychain (macOS)
+- `store_dpapi_blob(wallet_id, mnemonic)` — backfill DPAPI for pre-DPAPI wallets
+
+**Wallet creation:**
+- `create_wallet_with_first_address(pin)` — new wallet: generates mnemonic → user → default basket → BRC-42 address (index 0) → master address (index -1)
+- `create_wallet_from_existing_mnemonic(mnemonic, pin)` — recovery flow: same orchestration but uses provided mnemonic, sets `backed_up=true`
+
+**Startup checks:**
+- `ensure_master_address_exists()` — backfills master pubkey address (index -1) for pre-existing wallets
+- `ensure_default_basket_exists()` — backfills "default" basket for pre-existing wallets
 
 ## Repositories
 
@@ -73,9 +92,11 @@ Key design: `spendable=1` means available (inverse of old `is_spent`). `spent_by
 - `get_by_id(id)`, `get_by_txid_vout(txid, vout)`
 - `get_spendable_by_user(user_id)` — excludes `unsigned`/`failed` transaction outputs
 - `get_spendable_confirmed_by_user(user_id)` — only `completed` status (for confirmed-preference UTXO selection)
+- `get_all_by_user(user_id)` — all outputs (spendable and spent), used for backup/export
 - `get_spendable_by_basket(basket_id)`, `get_spendable_by_basket_with_tags(basket_id, tag_ids, require_all)`
 - `get_spendable_by_derivation(prefix, suffix)` — for UTXO sync reconciliation
 - `calculate_balance(user_id)`, `calculate_total_balance()`, `count_spendable(user_id)`
+- `get_locking_script_hex(output_id)` — converts BLOB to hex string
 
 **Write methods:**
 - `insert_output(...)` — new output with explicit fields
@@ -83,11 +104,13 @@ Key design: `spendable=1` means available (inverse of old `is_spent`). `spent_by
 - `upsert_received_utxo_with_derivation(...)` — recovery variant with explicit BIP32/BRC-42 method
 - `mark_spent(txid, vout, spending_txid)`, `mark_multiple_spent(outputs, spending_txid)`
 - `update_txid(old, vout, new)`, `update_txid_batch(old, new)` — post-signing txid rename
+- `update_spending_description_batch(placeholder, real_txid)` — replace placeholder with actual txid + set spent_by FK
 - `link_outputs_to_transaction(txid, transaction_id)` — set `transaction_id` FK after tx saved
 - `delete_by_txid(txid)` — cleanup failed broadcasts
 - `restore_by_spending_description(placeholder)`, `restore_spent_by_txid(txid)`, `restore_pending_placeholders()` — UTXO restoration on failure
 - `reconcile_for_derivation(user_id, prefix, suffix, api_utxos, grace_secs)` — mark stale outputs as `external-spend`
 - `assign_basket(output_id, basket_id)`, `remove_from_basket(output_id)`
+- `cleanup_old_spent(days)` — delete spent outputs older than N days
 
 ### TransactionRepository (`transaction_repo.rs`)
 Transaction records with status lifecycle and label management.
@@ -95,9 +118,15 @@ Transaction records with status lifecycle and label management.
 - `add_transaction(action, user_id)` — inserts transaction + labels (via `tx_labels`/`tx_labels_map`) + inputs + outputs
 - `get_by_txid(txid)`, `get_by_reference(reference_number)` — full `StoredAction` with labels/inputs/outputs
 - `set_transaction_status(txid, status)` — sets `failed_at` timestamp for Failed, clears it otherwise
-- `update_txid(reference, new_txid, new_raw_tx, user_id)` — replace entire tx record (two-phase signing)
+- `update_status(txid, ActionStatus)` — legacy interface, converts to `TransactionStatus`
+- `get_transaction_status(txid)` — returns `TransactionStatus` enum
+- `get_broadcast_status(txid)` — returns raw status string
+- `update_broadcast_status(txid, status_str)` — legacy broadcast status mapping
+- `update_txid(reference, new_txid, new_raw_tx, user_id)` — replace entire tx record (two-phase signing); detaches and re-links output FKs
 - `rename_txid(old, new)` — post-signing txid update
 - `update_raw_tx(txid, raw_tx)` — critical for BEEF: signed tx replaces unsigned
+- `update_confirmations(txid, confirmations, block_height)` — update confirmation count
+- `get_raw_tx(txid)` — efficient raw tx fetch (no labels/inputs/outputs)
 - `get_local_parent_tx(txid)` — unconfirmed parent for BEEF chain building
 - `get_stale_pending_transactions(max_age_secs)` — for TaskFailAbandoned cleanup
 - `list_transactions(label_filter, label_mode)` — with optional "any"/"all" label matching
@@ -144,6 +173,14 @@ Notification tracking for received payments (PeerPay and address sync). Static m
 - `get_undismissed(conn)`, `get_undismissed_summary(conn)` — for notification badge (count + total sats)
 - `dismiss_all(conn)` — mark all as seen
 
+### UserRepository (`user_repo.rs`)
+Identity mapping (master pubkey → userId). Single-user wallets have one default user.
+
+- `create(identity_key)` — creates user with `active_storage="local"`
+- `get_by_id(user_id)`, `get_by_identity_key(identity_key)`
+- `get_default()` — returns first user (ORDER BY userId ASC LIMIT 1)
+- `update_active_storage(user_id, storage)` — update storage mode
+
 ### Other Repositories
 
 **BasketRepository** (`basket_repo.rs`): Output categorization. Names normalized (trim+lowercase). `"default"` reserved for change. `"p "` prefix reserved (BRC-99).
@@ -167,7 +204,9 @@ Notification tracking for received payments (PeerPay and address sync). Static m
 **SettingsRepository** (`settings_repo.rs`): Singleton config row.
 - `get()`, `upsert(setting)`, `ensure_defaults()`
 - `get_chain()`, `set_chain(chain)`, `get_sender_display_name()`, `set_sender_display_name(name)`
+- `get_max_output_script()`, `set_max_output_script(max_size)`
 - `get_default_limits()`, `set_default_limits(per_tx, per_session, rate)`
+- `set_storage(identity_key, name)` — update storage configuration
 
 **SyncStateRepository** (`sync_state_repo.rs`): Multi-device sync tracking. Status: `unknown`→`syncing`→`synced`/`error`.
 - `create(state)`, `get_by_id(id)`, `get_by_ref_num(ref_num)`, `get_by_user(user_id)`
@@ -185,13 +224,13 @@ Notification tracking for received payments (PeerPay and address sync). Static m
 
 ## Schema & Migrations
 
-**Current version**: V11 (tracked in `schema_version` table). New databases get consolidated V1 schema + V2–V11 incremental migrations.
+**Current version**: V11 (tracked in `schema_version` table). New databases get a fully consolidated V1 schema; V2–V11 are incremental migrations for pre-existing databases. All migrations are idempotent (check column/table existence before ALTER).
 
-Migration runner in `WalletDatabase::migrate()` (`connection.rs:607`). Each migration checks for column/table existence before ALTER to be idempotent.
+Migration runner in `WalletDatabase::migrate()` (`connection.rs:607`).
 
 | Version | Purpose |
 |---------|---------|
-| V1 | Consolidated schema: all tables, indexes, constraints |
+| V1 | Consolidated schema: all tables, indexes, constraints (replaces old V1–V24 incremental chain) |
 | V2 | `pin_salt` column on wallets (PIN encryption) |
 | V3 | `domain_permissions` + `cert_field_permissions` tables |
 | V4 | `mnemonic_dpapi` BLOB column (Windows/macOS auto-unlock) |

@@ -66,9 +66,10 @@ Patches `XMLHttpRequest.prototype.open` and `.send`:
 
 ### DOM Observer (`remove_node_text.js`, `trusted_replace_node_text.js`)
 Uses `MutationObserver` on `document` with `{ childList: true, subtree: true }`:
-- Watches for added nodes matching the target tag name
-- `remove_node_text` clears `textContent` to empty string
-- `trusted_replace_node_text` performs string/regex replacement on `textContent`; also processes existing elements on load and supports `sedCount` limit
+- **`remove_node_text`** — checks only direct added nodes matching the target tag name; clears `textContent` to empty string
+- **`trusted_replace_node_text`** — checks direct added nodes AND their descendants via `querySelectorAll(tagLC)`; performs string/regex replacement on `textContent`; also runs an initial scan of existing elements on load (`document.querySelectorAll`); supports `sedCount` limit (tracks total replacements across all nodes)
+
+Non-regex string replacement in both network and DOM scriptlets uses `text.split(pattern).join(replacement)` for global replace without needing the `g` flag.
 
 ## Shared Utilities
 

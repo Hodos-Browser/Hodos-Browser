@@ -10,6 +10,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#include <limits.h>
 #endif
 
 using json = nlohmann::json;
@@ -371,8 +375,41 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
         std::cerr << "❌ Failed to launch new instance: " << GetLastError() << std::endl;
         return false;
     }
+#elif defined(__APPLE__)
+    // Get the executable path and walk up to the .app bundle
+    // Executable: .../HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+    char exePath[PATH_MAX];
+    uint32_t size = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &size) != 0) {
+        std::cerr << "❌ Failed to get executable path" << std::endl;
+        return false;
+    }
+
+    // Strip /Contents/MacOS/HodosBrowserShell (3 path components) to get .app bundle
+    std::string appPath(exePath);
+    for (int i = 0; i < 3; i++) {
+        size_t pos = appPath.rfind('/');
+        if (pos != std::string::npos) appPath = appPath.substr(0, pos);
+    }
+
+    // Verify this looks like an .app bundle
+    if (appPath.find(".app") == std::string::npos) {
+        std::cerr << "❌ Could not find .app bundle in path: " << appPath << std::endl;
+        return false;
+    }
+
+    // Use `open -n -a` to launch a new instance of the app bundle
+    std::string cmd = "/usr/bin/open -n -a \"" + appPath + "\" --args \"--profile=" + profileId + "\"";
+    std::cout << "🚀 Profile launch command: " << cmd << std::endl;
+    int ret = system(cmd.c_str());
+    if (ret == 0) {
+        std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
+        return true;
+    } else {
+        std::cerr << "❌ Failed to launch new instance (exit code " << ret << ")" << std::endl;
+        return false;
+    }
 #else
-    // macOS implementation would go here
     std::cerr << "❌ LaunchWithProfile not implemented for this platform" << std::endl;
     return false;
 #endif

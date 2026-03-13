@@ -46,6 +46,14 @@ BrowserWindow* WindowManager::GetWindowByHwnd(HWND hwnd) {
     }
     return nullptr;
 }
+#elif defined(__APPLE__)
+BrowserWindow* WindowManager::GetWindowByNSWindow(void* nsWindow) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, win] : windows_) {
+        if (win->ns_window == nsWindow) return win.get();
+    }
+    return nullptr;
+}
 #endif
 
 BrowserWindow* WindowManager::GetWindowForBrowser(int browser_id) {

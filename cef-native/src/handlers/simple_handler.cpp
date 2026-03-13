@@ -222,8 +222,15 @@ static void ShowGhostTab(const std::string& title, int width, int height) {
     }
 }
 #else
-static void HideGhostTab() {}
-static void ShowGhostTab(const std::string&, int, int) {}
+// macOS ghost tab — implemented in WindowManager_mac.mm
+extern "C" void ShowGhostTabMacOS(const char* title, int width, int height);
+extern "C" void HideGhostTabMacOS();
+extern "C" void* GetWindowAtScreenPointMacOS(int screenX, int screenY);
+extern "C" void PositionWindowAtScreenPoint(void* ns_window_ptr, int screenX, int screenY);
+static void HideGhostTab() { HideGhostTabMacOS(); }
+static void ShowGhostTab(const std::string& title, int width, int height) {
+    ShowGhostTabMacOS(title.c_str(), width, height);
+}
 #endif
 // ===== End Ghost Tab Window =====
 
@@ -1409,17 +1416,13 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         int tab_id = TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, window_id_);
 #else
-        // macOS: Get webview dimensions through helper function
-        // g_webview_view is already void*, no bridge cast needed
-        ViewDimensions dims = GetViewDimensions(g_webview_view);
+        // macOS: Use the requesting window's webview, fallback to global
+        BrowserWindow* ownerWin = GetOwnerWindow();
+        void* parentView = (ownerWin && ownerWin->webview_view) ? ownerWin->webview_view : g_webview_view;
 
+        ViewDimensions dims = GetViewDimensions(parentView);
         int tab_id = TabManager::GetInstance().CreateTab(
-            url,
-            g_webview_view,  // Already void*, no cast needed
-            0, 0,
-            dims.width,
-            dims.height
-        );
+            url, parentView, 0, 0, dims.width, dims.height, window_id_);
 #endif
 
         LOG_DEBUG_BROWSER("📑 Tab created: ID " + std::to_string(tab_id) + " in window " + std::to_string(window_id_));
@@ -1555,6 +1558,28 @@ bool SimpleHandler::OnProcessMessageReceived(
                     TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
                 }
             }
+#elif defined(__APPLE__)
+            // macOS merge detection — check if drop point is over another window
+            BrowserWindow* target_bw = (BrowserWindow*)GetWindowAtScreenPointMacOS(screen_x, screen_y);
+
+            // Don't merge into the same window we're tearing from
+            if (target_bw && target_bw->window_id == source_window_id) {
+                target_bw = nullptr;
+            }
+
+            if (target_bw) {
+                LOG_INFO_BROWSER("tab_tearoff: merging tab " + std::to_string(tab_id) +
+                                 " into window " + std::to_string(target_bw->window_id));
+                TabManager::GetInstance().MoveTabToWindow(tab_id, target_bw->window_id);
+            } else {
+                LOG_INFO_BROWSER("tab_tearoff: tearing off tab " + std::to_string(tab_id) +
+                                 " to new window at (" + std::to_string(screen_x) + "," + std::to_string(screen_y) + ")");
+                BrowserWindow* new_bw = WindowManager::GetInstance().CreateFullWindow(false);
+                if (new_bw) {
+                    PositionWindowAtScreenPoint(new_bw->ns_window, screen_x, screen_y);
+                    TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
+                }
+            }
 #endif
         }
         return true;
@@ -1621,7 +1646,10 @@ bool SimpleHandler::OnProcessMessageReceived(
             active_tab->browser->GetMainFrame()->LoadURL(path);
             LOG_DEBUG_BROWSER("🔁 Navigate to " + path + " on tab " + std::to_string(active_tab->id) + " (window " + std::to_string(nav_wid) + ")");
         } else {
-            LOG_DEBUG_BROWSER("⚠️ No active tab available for navigation in window " + std::to_string(nav_wid));
+            // No active tab (e.g. first launch before tabs are ready) — create one
+            LOG_INFO_BROWSER("📑 No active tab for navigation, creating new tab with: " + path);
+            CreateNewTabWithUrl(path);
+            SimpleHandler::NotifyTabListChanged();
         }
 
         return true;
@@ -1770,8 +1798,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay shown with query: " + query);
         // TODO Phase 2: Send query to overlay browser for suggestion rendering
-#else
-        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateOmniboxOverlayMacOS();
+        extern void ShowOmniboxOverlayMacOS();
+        extern bool IsOmniboxOverlayVisible();
+        extern bool OmniboxOverlayExists();
+
+        // Keep-alive: create once, then just show/hide
+        if (IsOmniboxOverlayVisible()) {
+            // Already showing
+        } else if (OmniboxOverlayExists()) {
+            ShowOmniboxOverlayMacOS();
+        } else {
+            CreateOmniboxOverlayMacOS();
+        }
+        LOG_DEBUG_BROWSER("Omnibox overlay shown (macOS)");
 #endif
         return true;
     }
@@ -1781,8 +1822,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideOmniboxOverlay();
         HideOmniboxOverlay();
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideOmniboxOverlayMacOS();
+        HideOmniboxOverlayMacOS();
+        LOG_DEBUG_BROWSER("Omnibox overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -1797,6 +1840,25 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         if (cp_args->GetSize() > 1) {
             shieldDomain = cp_args->GetString(1).ToString();
+        }
+
+        // Fallback: if React didn't provide a domain (e.g. internal page), extract from active tab URL
+        if (shieldDomain.empty()) {
+            int window_id = window_id_;
+            auto* activeTab = TabManager::GetInstance().GetActiveTabForWindow(window_id);
+            if (activeTab && !activeTab->url.empty()) {
+                std::string tabUrl = activeTab->url;
+                size_t scheme_end = tabUrl.find("://");
+                if (scheme_end != std::string::npos) {
+                    size_t host_start = scheme_end + 3;
+                    size_t host_end = tabUrl.find('/', host_start);
+                    if (host_end == std::string::npos) host_end = tabUrl.length();
+                    std::string host_port = tabUrl.substr(host_start, host_end - host_start);
+                    size_t colon = host_port.find(':');
+                    shieldDomain = (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+                    LOG_INFO_BROWSER("🛡️ Shield domain fallback from active tab: " + shieldDomain);
+                }
+            }
         }
 
 #ifdef _WIN32
@@ -1949,8 +2011,21 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 
         LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
+        extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);
+        extern void HideProfilePanelOverlayMacOS();
+        extern bool IsProfilePanelOverlayVisible();
+        extern bool WasProfilePanelJustHidden();
+
+        if (IsProfilePanelOverlayVisible() || WasProfilePanelJustHidden()) {
+            if (IsProfilePanelOverlayVisible()) {
+                HideProfilePanelOverlayMacOS();
+            }
+            return true;
+        }
+        CreateProfilePanelOverlayMacOS(iconRightOffset);
+        LOG_DEBUG_BROWSER("Profile panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -1960,8 +2035,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideProfilePanelOverlay();
         HideProfilePanelOverlay();
         LOG_DEBUG_BROWSER("👤 Profile panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("👤 Profile panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideProfilePanelOverlayMacOS();
+        HideProfilePanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Profile panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -2076,22 +2153,32 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (action == "new_tab") {
 #ifdef _WIN32
             createTabHelper("");  // Always NTP
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("");
 #endif
         } else if (action == "history") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/browser-data");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/browser-data");
 #endif
         } else if (action == "settings") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page");
 #endif
         } else if (action == "wallet") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/wallet");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/wallet");
 #endif
         } else if (action == "about") {
 #ifdef _WIN32
             createTabHelper("http://127.0.0.1:5137/settings-page/about");
+#elif defined(__APPLE__)
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/about");
 #endif
         } else if (action == "downloads") {
 #ifdef _WIN32
@@ -2105,6 +2192,16 @@ bool SimpleHandler::OnProcessMessageReceived(
                 ShowDownloadPanelOverlay(100, GetOwnerWindow());
             }
             NotifyDownloadStateChanged();
+#elif defined(__APPLE__)
+            extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+            extern bool IsDownloadPanelOverlayVisible();
+            extern void HideDownloadPanelOverlayMacOS();
+            if (IsDownloadPanelOverlayVisible()) {
+                HideDownloadPanelOverlayMacOS();
+            } else {
+                CreateDownloadPanelOverlayMacOS(100);
+                NotifyDownloadStateChanged();
+            }
 #endif
         } else if (action == "find") {
             // Send find_show IPC to header browser
@@ -2147,7 +2244,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 active_tab->browser->GetHost()->SetZoomLevel(0.0);
             }
         } else if (action == "fullscreen") {
-            // Toggle fullscreen via Windows API
+            // Toggle fullscreen
 #ifdef _WIN32
             extern HWND g_hwnd;
             extern bool g_is_fullscreen;
@@ -2168,11 +2265,17 @@ bool SimpleHandler::OnProcessMessageReceived(
                 SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
+#elif defined(__APPLE__)
+            extern void ToggleFullScreenMacOS();
+            ToggleFullScreenMacOS();
 #endif
         } else if (action == "exit") {
 #ifdef _WIN32
             extern HWND g_hwnd;
             PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+#elif defined(__APPLE__)
+            extern void ShutdownApplication();
+            ShutdownApplication();
 #endif
         } else if (action == "settings_privacy") {
 #ifdef _WIN32
@@ -3299,6 +3402,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "notification") {
             target_window = g_notification_overlay_window;
             target_browser = GetNotificationBrowser();
+        } else if (role_ == "omnibox") {
+            extern NSWindow* g_omnibox_overlay_window;
+            target_window = g_omnibox_overlay_window;
+            target_browser = GetOmniboxBrowser();
+        } else if (role_ == "downloadpanel") {
+            extern NSWindow* g_download_panel_overlay_window;
+            target_window = g_download_panel_overlay_window;
+            target_browser = GetDownloadPanelBrowser();
+        } else if (role_ == "profilepanel") {
+            extern NSWindow* g_profile_panel_overlay_window;
+            target_window = g_profile_panel_overlay_window;
+            target_browser = GetProfilePanelBrowser();
         }
 
         // Keep-alive: notification overlay hides instead of destroying
@@ -3342,6 +3457,15 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_brc100_auth_overlay_window = nullptr;
             } else if (role_ == "notification") {
                 g_notification_overlay_window = nullptr;
+            } else if (role_ == "omnibox") {
+                extern NSWindow* g_omnibox_overlay_window;
+                g_omnibox_overlay_window = nullptr;
+            } else if (role_ == "downloadpanel") {
+                extern NSWindow* g_download_panel_overlay_window;
+                g_download_panel_overlay_window = nullptr;
+            } else if (role_ == "profilepanel") {
+                extern NSWindow* g_profile_panel_overlay_window;
+                g_profile_panel_overlay_window = nullptr;
             }
         } else {
             LOG_DEBUG_BROWSER("❌ " + role_ + " overlay window not found");
@@ -4663,7 +4787,6 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== ADBLOCK MESSAGES (Sprint 8c) ==========
 
-#ifdef _WIN32
     if (message_name == "adblock_get_blocked_count") {
         // Use per-window active tab's browser ID
         int browser_id = 0;
@@ -4792,11 +4915,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         return true;
     }
-#endif
 
     // ========== COSMETIC FILTERING PHASE 2 (Sprint 8e) ==========
 
-#ifdef _WIN32
     if (message_name == "cosmetic_class_id_query") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string dataJson = args->GetString(0).ToString();
@@ -4843,7 +4964,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         return true;
     }
-#endif
 
     // ========== BOOKMARK MESSAGES ==========
 
@@ -5281,8 +5401,22 @@ bool SimpleHandler::OnProcessMessageReceived(
         NotifyDownloadStateChanged();
 
         LOG_DEBUG_BROWSER("📥 Download panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
-#else
-        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+        extern void ShowDownloadPanelOverlayMacOS(int iconRightOffset);
+        extern void HideDownloadPanelOverlayMacOS();
+        extern bool IsDownloadPanelOverlayVisible();
+        extern bool WasDownloadPanelJustHidden();
+
+        if (IsDownloadPanelOverlayVisible() || WasDownloadPanelJustHidden()) {
+            if (IsDownloadPanelOverlayVisible()) {
+                HideDownloadPanelOverlayMacOS();
+            }
+            return true;
+        }
+        CreateDownloadPanelOverlayMacOS(iconRightOffset);
+        NotifyDownloadStateChanged();
+        LOG_DEBUG_BROWSER("Download panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -5442,8 +5576,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideDownloadPanelOverlay();
         HideDownloadPanelOverlay();
         LOG_DEBUG_BROWSER("📥 Download panel overlay hidden");
-#else
-        LOG_DEBUG_BROWSER("📥 Download panel not implemented on macOS");
+#elif defined(__APPLE__)
+        extern void HideDownloadPanelOverlayMacOS();
+        HideDownloadPanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Download panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -5835,6 +5971,24 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             }
         }
 
+        // Ctrl+L / Cmd+L — Focus address bar
+        if (event.windows_key_code == 'L') {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+L: Focus address bar");
+                CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+                if (header) {
+                    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("focus_address_bar");
+                    header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                    header->GetHost()->SetFocus(true);
+                }
+                return true;
+            }
+        }
+
         // Check for 'I' key shortcuts
         if (event.windows_key_code == 'I') {
 #ifdef __APPLE__
@@ -5861,9 +6015,7 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
                 LOG_INFO_BROWSER("⌨️ Ctrl+N: Creating new window");
-#ifdef _WIN32
                 WindowManager::GetInstance().CreateFullWindow();
-#endif
                 return true;
             }
         }
@@ -5944,6 +6096,16 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                     ShowDownloadPanelOverlay(0, GetOwnerWindow());
                 }
                 NotifyDownloadStateChanged();
+#elif defined(__APPLE__)
+                extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+                extern bool IsDownloadPanelOverlayVisible();
+                extern void HideDownloadPanelOverlayMacOS();
+                if (IsDownloadPanelOverlayVisible()) {
+                    HideDownloadPanelOverlayMacOS();
+                } else {
+                    CreateDownloadPanelOverlayMacOS(0);
+                    NotifyDownloadStateChanged();
+                }
 #endif
                 return true;
             }
@@ -6184,9 +6346,17 @@ static void CreateNewTabWithUrl(const std::string& url) {
     int tabHeight = height - shellHeight;
     TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else
-    extern NSView* g_webview_view;
-    ViewDimensions dims = GetViewDimensions(g_webview_view);
-    TabManager::GetInstance().CreateTab(url, g_webview_view, 0, 0, dims.width, dims.height);
+    BrowserWindow* activeWin = WindowManager::GetInstance().GetActiveWindow();
+    void* parentView = (activeWin && activeWin->webview_view) ? activeWin->webview_view : nullptr;
+    int winId = activeWin ? activeWin->window_id : 0;
+
+    if (!parentView) {
+        extern NSView* g_webview_view;
+        parentView = g_webview_view;
+    }
+
+    ViewDimensions dims = GetViewDimensions(parentView);
+    TabManager::GetInstance().CreateTab(url, parentView, 0, 0, dims.width, dims.height, winId);
 #endif
 }
 
