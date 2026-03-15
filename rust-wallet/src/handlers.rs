@@ -991,9 +991,11 @@ pub async fn create_hmac(
     log::info!("   BRC-43 invoice number: {}", invoice_number);
 
     // Determine HMAC key based on whether counterparty is provided
-    let hmac_key = if let Some(counterparty_hex) = &counterparty_hex {
-        // BRC-42: Derive child key for mutual authentication with actual counterparty
-        let counterparty_bytes = match hex::decode(counterparty_hex) {
+    // CRITICAL: TypeScript SDK resolves counterparty='self' to the wallet's OWN public key,
+    // then performs full BRC-42 ECDH (deriveSymmetricKey). It does NOT use the raw master key.
+    // See KeyDeriver.normalizeCounterparty(): 'self' → rootKey.toPublicKey()
+    let counterparty_bytes = if let Some(counterparty_hex) = &counterparty_hex {
+        match hex::decode(counterparty_hex) {
             Ok(b) => b,
             Err(e) => {
                 log::error!("   Failed to decode counterparty key: {}", e);
@@ -1001,29 +1003,49 @@ pub async fn create_hmac(
                     "error": "Invalid counterparty key"
                 }));
             }
-        };
-
-        log::info!("   Deriving BRC-42 child key for HMAC...");
-        match derive_child_private_key(&private_key_bytes, &counterparty_bytes, &invoice_number) {
-            Ok(key) => {
-                log::info!("   ✅ BRC-42 child key derived");
-                key
-            },
+        }
+    } else {
+        // 'self' → derive our own public key as the counterparty (matches TypeScript SDK)
+        log::info!("   Counterparty 'self' → using own public key for BRC-42 ECDH");
+        use crate::crypto::keys::derive_public_key;
+        match derive_public_key(&private_key_bytes) {
+            Ok(pk) => pk,
             Err(e) => {
-                log::error!("   BRC-42 derivation failed: {}", e);
+                log::error!("   Failed to derive own public key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Key derivation error: {}", e)
                 }));
             }
         }
-    } else {
-        // For "self" counterparty, use raw master key (no BRC-42 derivation)
-        log::info!("   Using raw master key for HMAC (counterparty='self')");
-        private_key_bytes
     };
 
-    // Compute HMAC-SHA256
-    let hmac_result = hmac_sha256(&hmac_key, &data_bytes);
+    log::info!("   Deriving BRC-42 symmetric key for HMAC (ECDH x-coordinate)...");
+    use crate::crypto::brc42::derive_symmetric_key_for_hmac;
+    let hmac_key = match derive_symmetric_key_for_hmac(&private_key_bytes, &counterparty_bytes, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ BRC-42 symmetric key derived ({} bytes)", key.len());
+            key
+        },
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // CRITICAL: TypeScript SDK strips leading zeros from the symmetric key
+    // via SymmetricKey.toArray() (extends BigNumber). Must match for interop.
+    let hmac_key_stripped = {
+        let mut k = hmac_key.as_slice();
+        while k.len() > 1 && k[0] == 0 {
+            k = &k[1..];
+        }
+        k.to_vec()
+    };
+
+    // Compute HMAC-SHA256 with stripped key (matching TypeScript SDK)
+    let hmac_result = hmac_sha256(&hmac_key_stripped, &data_bytes);
     let hmac_hex = hex::encode(&hmac_result);
 
     log::info!("   ✅ HMAC created: {}...", &hmac_hex[..std::cmp::min(32, hmac_hex.len())]);
@@ -1285,9 +1307,11 @@ pub async fn verify_hmac(
     log::info!("   BRC-43 invoice number: {}", invoice_number);
 
     // Determine HMAC key based on whether counterparty is provided
-    let hmac_key = if let Some(counterparty_hex) = &counterparty_hex {
-        // BRC-42: Derive child key for mutual authentication with actual counterparty
-        let counterparty_bytes = match hex::decode(counterparty_hex) {
+    // CRITICAL: TypeScript SDK resolves counterparty='self' to the wallet's OWN public key,
+    // then performs full BRC-42 ECDH (deriveSymmetricKey). It does NOT use the raw master key.
+    // See KeyDeriver.normalizeCounterparty(): 'self' → rootKey.toPublicKey()
+    let counterparty_bytes = if let Some(counterparty_hex) = &counterparty_hex {
+        match hex::decode(counterparty_hex) {
             Ok(b) => b,
             Err(e) => {
                 log::error!("   Failed to decode counterparty key: {}", e);
@@ -1295,29 +1319,48 @@ pub async fn verify_hmac(
                     "error": "Invalid counterparty key"
                 }));
             }
-        };
-
-        log::info!("   Deriving BRC-42 child key for HMAC verification...");
-        match derive_child_private_key(&private_key_bytes, &counterparty_bytes, &invoice_number) {
-            Ok(key) => {
-                log::info!("   ✅ BRC-42 child key derived");
-                key
-            },
+        }
+    } else {
+        // 'self' → derive our own public key as the counterparty (matches TypeScript SDK)
+        log::info!("   Counterparty 'self' → using own public key for BRC-42 ECDH");
+        use crate::crypto::keys::derive_public_key;
+        match derive_public_key(&private_key_bytes) {
+            Ok(pk) => pk,
             Err(e) => {
-                log::error!("   BRC-42 derivation failed: {}", e);
+                log::error!("   Failed to derive own public key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Key derivation error: {}", e)
                 }));
             }
         }
-    } else {
-        // For "self" counterparty, use raw master key (no BRC-42 derivation)
-        log::info!("   Using raw master key for HMAC verification (counterparty='self')");
-        private_key_bytes.clone()
     };
 
-    // Verify HMAC
-    let is_valid = verify_hmac_sha256(&hmac_key, &data_bytes, &expected_hmac);
+    log::info!("   Deriving BRC-42 symmetric key for HMAC verification (ECDH x-coordinate)...");
+    use crate::crypto::brc42::derive_symmetric_key_for_hmac;
+    let hmac_key = match derive_symmetric_key_for_hmac(&private_key_bytes, &counterparty_bytes, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ BRC-42 symmetric key derived ({} bytes)", key.len());
+            key
+        },
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // Strip leading zeros to match TypeScript SDK's SymmetricKey.toArray() behavior
+    let hmac_key_stripped = {
+        let mut k = hmac_key.as_slice();
+        while k.len() > 1 && k[0] == 0 {
+            k = &k[1..];
+        }
+        k.to_vec()
+    };
+
+    // Verify HMAC with stripped key (matching TypeScript SDK)
+    let is_valid = verify_hmac_sha256(&hmac_key_stripped, &data_bytes, &expected_hmac);
 
     log::info!("   ✅ HMAC verification result: {}", is_valid);
 
