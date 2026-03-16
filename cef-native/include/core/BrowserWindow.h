@@ -69,7 +69,37 @@ public:
 #elif defined(__APPLE__)
     void* ns_window = nullptr;        // NSWindow*
     void* header_view = nullptr;      // NSView*
-    // macOS overlay pointers — TODO when porting Phase 3+
+    void* webview_view = nullptr;     // NSView* (container for tab NSViews)
+
+    // Overlay NSWindows (11 total — mirrors Windows overlay HWNDs)
+    void* settings_overlay_window = nullptr;
+    void* wallet_overlay_window = nullptr;
+    void* backup_overlay_window = nullptr;
+    void* brc100_auth_overlay_window = nullptr;
+    void* notification_overlay_window = nullptr;
+    void* settings_menu_overlay_window = nullptr;
+    void* omnibox_overlay_window = nullptr;
+    void* cookie_panel_overlay_window = nullptr;
+    void* download_panel_overlay_window = nullptr;
+    void* profile_panel_overlay_window = nullptr;
+    void* menu_overlay_window = nullptr;
+
+    // NSEvent local monitors for overlay click-outside detection (6 total)
+    void* omnibox_event_monitor = nullptr;
+    void* cookie_panel_event_monitor = nullptr;
+    void* download_panel_event_monitor = nullptr;
+    void* profile_panel_event_monitor = nullptr;
+    void* settings_menu_event_monitor = nullptr;
+    void* menu_event_monitor = nullptr;
+
+    // Icon offsets for right-side panel positioning (physical pixel distance
+    // from icon's right edge to header's right edge)
+    int settings_icon_right_offset = 0;
+    int cookie_icon_right_offset = 0;
+    int download_icon_right_offset = 0;
+    int profile_icon_right_offset = 0;
+    int wallet_icon_right_offset = 0;
+    int menu_icon_right_offset = 0;
 #endif
 
     // ---- CEF browser refs (15 total — mirrors old SimpleHandler statics) ----

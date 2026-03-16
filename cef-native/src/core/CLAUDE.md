@@ -19,8 +19,9 @@ All files are cross-platform (Windows + macOS) unless noted. Windows uses WinHTT
 | `HistoryManager.cpp` | Browser history SQLite database. Singleton. Chromium-compatible schema (`urls` + `visits` tables). Methods: `AddVisit` (with debounce), `GetHistory`, `SearchHistory`, `GetTopSites`, `SearchHistoryWithFrecency` (SQL frecency scoring + post-query domain boost), `DeleteHistoryEntry`, `DeleteAllHistory`, `DeleteHistoryRange`. Uses Chromium epoch timestamps (microseconds since 1601). |
 | `TabManager.cpp` | Tab lifecycle for Windows. Singleton. Creates HWND-per-tab with windowed CEF browsers parented to shell window. Methods: `CreateTab`, `CloseTab`, `SwitchToTab`, `ReorderTabs`, `MoveTabToWindow` (tab tear-off/merge). Tracks per-window active tabs via `active_tab_per_window_`. Auto-closes windows when last tab closes. |
 | `TabManager_mac.mm` | macOS tab lifecycle using NSView instead of HWND. Same API as Windows `TabManager.cpp`. Uses `[view setHidden:]` for show/hide, `[view removeFromSuperview]` for cleanup. Synchronous view removal on close (differs from Windows async pattern). |
-| `WindowManager.cpp` | Multi-window management. Singleton. `CreateWindowRecord()` assigns integer IDs. `CreateFullWindow()` (Windows only) creates shell HWND + header CEF browser + initial NTP tab. `GetWindowByHwnd()`, `GetWindowForBrowser()` for reverse lookups. Forces layout refresh on existing windows when new window created. |
-| `BrowserWindow.cpp` | Simple struct wrapper mapping string roles (`"header"`, `"webview"`, `"wallet"`, `"settings"`, `"omnibox"`, etc.) to `CefRefPtr<CefBrowser>` references. 15 browser role slots. Used by `WindowManager`. |
+| `WindowManager.cpp` | Multi-window management (cross-platform core + Windows `CreateFullWindow`). Singleton. `CreateWindowRecord()` assigns integer IDs. `CreateFullWindow()` creates shell window + header CEF browser + initial NTP tab. `GetWindowByHwnd()` (Windows) / `GetWindowByNSWindow()` (macOS), `GetWindowForBrowser()`, `GetAllWindows()`, `GetWindowCount()` for lookups. Forces layout refresh on existing windows when new window created. |
+| `WindowManager_mac.mm` | macOS `CreateFullWindow()` implementation. Creates NSWindow with header NSView (99px) + webview NSView, `BrowserWindowDelegate` for resize/move/close, per-window delegate lifecycle via `objc_setAssociatedObject`. Also provides `GetWindowAtScreenPointMacOS()` (hit-test for tab merge), `PositionWindowAtScreenPoint()` (tab tear-off), and ghost tab preview window (`ShowGhostTabMacOS`/`HideGhostTabMacOS`) with 60fps cursor-following timer. |
+| `BrowserWindow.cpp` | Struct mapping string roles to `CefRefPtr<CefBrowser>` references. 15 browser role slots (header, webview, wallet_panel, overlay, settings, wallet, backup, brc100auth, notification, settings_menu, omnibox, cookiepanel, downloadpanel, profilepanel, menu). Methods: `SetBrowserForRole()`, `GetBrowserForRole()`, `ClearBrowserForRole()`. macOS fields: `ns_window`, `header_view`, `webview_view` (`void*` pointers to NSWindow/NSView). Used by `WindowManager`. |
 | `WalletService.cpp` | Windows wallet HTTP client. Connects to Rust wallet at `localhost:31301` via WinHTTP. Methods: `getWalletStatus`, `createWallet`, `loadWallet`, `getBalance`, `sendTransaction`, `generateAddress`, etc. Also manages daemon process lifecycle (`startDaemon`, `stopDaemon`, `monitorDaemon`). |
 | `WalletService_mac.cpp` | macOS wallet HTTP client using libcurl. Same API as Windows `WalletService`. No daemon management (developer runs Rust wallet manually). |
 | `BRC100Bridge.cpp` | BRC-100 protocol HTTP bridge to Rust wallet. Windows uses WinHTTP, macOS uses libcurl. 15 API methods: `getStatus`, `isAvailable`, `generateIdentity`, `validateIdentity`, `createSelectiveDisclosure`, `generateChallenge`, `authenticate`, `deriveType42Keys`, `createSession`, `validateSession`, `revokeSession`, `createBEEF`, `verifyBEEF`, `broadcastBEEF`, `verifySPV`, `createSPVProof`. WebSocket stubs (placeholder). |
@@ -48,7 +49,9 @@ SettingsManager& SettingsManager::GetInstance() {
 }
 ```
 
-**Singletons in this module:** `HistoryManager`, `BookmarkManager`, `CookieBlockManager`, `EphemeralCookieManager`, `SettingsManager`, `ProfileManager`, `TabManager`, `WindowManager`, `SessionManager`, `GoogleSuggestService`, `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`.
+**Meyer's singletons (static local):** `HistoryManager`, `BookmarkManager`, `CookieBlockManager`, `EphemeralCookieManager`, `SettingsManager`, `ProfileManager`, `WindowManager`, `SessionManager`, `GoogleSuggestService`, `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`.
+
+**`unique_ptr` singleton:** `TabManager` — uses `std::unique_ptr<TabManager>` with lazy init in `GetInstance()` (not Meyer's pattern).
 
 **Non-singletons:** `WalletService` (instantiated per-use), `BRC100Bridge` (owned by `BRC100Handler`), `BrowserWindow` (one per window, owned by `WindowManager`).
 
@@ -107,9 +110,9 @@ Storage paths:
 | `BRC100Bridge` | WinHTTP in same file | libcurl in same file (`#elif __APPLE__`) |
 | `SyncHttpClient` | WinHTTP | libcurl |
 | `TabManager` | `TabManager.cpp` (HWND) | `TabManager_mac.mm` (NSView) |
+| `WindowManager::CreateFullWindow` | `WindowManager.cpp` (HWND + WM_SIZE) | `WindowManager_mac.mm` (NSWindow + BrowserWindowDelegate) |
 | `GoogleSuggestService` | WinHTTP | Not implemented (returns empty) |
 | `ProfileLock` | `CreateFileA` exclusive lock | `flock()` |
-| `WindowManager::CreateFullWindow` | Implemented | Not implemented (macOS uses `cef_browser_shell_mac.mm`) |
 
 When adding new HTTP-calling singletons, use `SyncHttpClient` (already cross-platform) rather than raw WinHTTP.
 

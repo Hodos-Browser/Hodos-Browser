@@ -58,9 +58,9 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 
 | Type/Function | Purpose |
 |---------------|---------|
-| `SecurityLevel` | Enum: `NoPermissions(0)`, `ProtocolLevel(1)`, `CounterpartyLevel(2)` |
-| `InvoiceNumber` | Struct with `security_level`, `protocol_id`, `key_id`; formats as `"{level}-{protocol}-{keyID}"` |
-| `InvoiceNumber::new()` | Validated construction with protocol ID normalization |
+| `SecurityLevel` | Enum: `NoPermissions(0)`, `ProtocolLevel(1)`, `CounterpartyLevel(2)`. Implements `Display`, `as_u8()`, `from_u8()` |
+| `InvoiceNumber` | Struct with `security_level`, `protocol_id`, `key_id`; formats as `"{level}-{protocol}-{keyID}"` via `Display` |
+| `InvoiceNumber::new()` | Validated construction with protocol ID normalization and key ID length check (1-800 bytes) |
 | `InvoiceNumber::from_string()` | Parse `"0-hello world-1"` format (uses `splitn(3, '-')` so key IDs may contain dashes) |
 | `normalize_protocol_id()` | Lowercase, trim, collapse spaces, validate charset/length (5-280 chars), reject trailing " protocol" |
 
@@ -81,6 +81,13 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 | `aesgcm_custom` | Encrypt: plaintext + AAD + IV + key → (ciphertext, 16-byte auth tag) |
 | `aesgcm_decrypt_custom` | Decrypt: ciphertext + AAD + IV + tag + key → plaintext (verifies tag) |
 
+### ghash.rs
+
+| Function | Purpose |
+|----------|---------|
+| `ghash` | GHASH over input using hash subkey → 16-byte result. Processes input in 16-byte chunks with GF(2^128) multiplication |
+| `generate_hash_subkey` | AES-256 encrypt zero block → 16-byte hash subkey for GHASH |
+
 ### pin.rs
 
 | Function | Purpose |
@@ -94,7 +101,7 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 | Function | Platform | Purpose |
 |----------|----------|---------|
 | `dpapi_encrypt` | Windows | `CryptProtectData` — ties encrypted blob to current Windows user |
-| `dpapi_encrypt` | macOS | `set_generic_password` — stores in Keychain (service: `"HodosBrowser"`, account: `"wallet-mnemonic"`); returns sentinel `b"KEYCHAIN"` for DB |
+| `dpapi_encrypt` | macOS | Deletes existing entry, then `set_generic_password` — stores in Keychain (service: `"HodosBrowser"`, account: `"wallet-mnemonic"`); returns sentinel `b"KEYCHAIN"` for DB |
 | `dpapi_decrypt` | Windows | `CryptUnprotectData` — decrypts if same Windows user |
 | `dpapi_decrypt` | macOS | `get_generic_password` — retrieves from Keychain (ignores sentinel input) |
 | `dpapi_encrypt/decrypt` | Linux | Stubs returning `Err` — wallet still works, just requires PIN |
@@ -206,6 +213,7 @@ Each submodule defines its own error enum with `thiserror::Error`:
 | `rand` | brc2, pin | Cryptographic random IV/nonce/salt generation |
 | `hex` | brc2, pin | Hex encoding for storage format |
 | `base64` | brc2 | Base64 encoding (imported but used in handlers) |
+| `log` | brc2, aesgcm_custom | Debug/info logging for key derivation and encryption operations |
 | `thiserror` | keys, signing, brc42, brc2 | Derive `Error` trait for error enums |
 | `security-framework` | dpapi (macOS) | macOS Keychain access |
 | `windows` | dpapi (Windows) | Windows DPAPI (CryptProtectData/CryptUnprotectData) |

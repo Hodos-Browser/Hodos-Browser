@@ -104,7 +104,7 @@ Syncs addresses flagged with `pending_utxo_check=1`:
 
 1. Clear stale pending flags older than 90 days (`PENDING_TIMEOUT_HOURS`)
 2. Fetch UTXOs from WhatsOnChain for each pending address (DB lock released during network calls)
-3. Insert new outputs via `upsert_received_utxo()`, record notifications via `PeerPayRepository::insert_address_sync_notification()`
+3. Insert new outputs via `upsert_received_utxo()`, record notifications via `PeerPayRepository::insert_address_sync_notification()` with BSV/USD price snapshot
 4. Reconcile stale outputs: mark DB outputs not found in API as `external-spend` (10-minute grace period)
 5. Cache parent transaction raw hex from WhatsOnChain for future BEEF building
 6. Pending flag is NOT cleared on discovery — kept for full 90-day window (addresses may be reused)
@@ -119,7 +119,7 @@ Polls the remote MessageBox API for incoming BRC-29 PeerPay payments:
 4. Parse `PaymentToken` flexibly (base64 string OR byte array for transaction field)
 5. Derive child private key via BRC-42 with `invoice_number = "2-3241645161d8-{prefix} {suffix}"`
 6. Parse Atomic BEEF, find matching P2PKH output by comparing `HASH160(child_pubkey)` to script
-7. Store as spendable output via `store_derived_utxo()`, record in `peerpay_received`
+7. Store as spendable output via `store_derived_utxo()`, record in `peerpay_received` with BSV/USD price snapshot for historical display
 8. Cache all BEEF transactions in `parent_transactions` for future BEEF building
 9. Acknowledge processed messages on MessageBox server (idempotent — duplicates are safe)
 

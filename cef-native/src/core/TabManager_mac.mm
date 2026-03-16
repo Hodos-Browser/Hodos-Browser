@@ -4,6 +4,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "../../include/core/TabManager.h"
+#include "../../include/core/WindowManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/Logger.h"
 #include "../../include/handlers/simple_handler.h"
@@ -68,6 +69,7 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
 
     // Create Tab struct
     Tab new_tab(tab_id, tab_url);
+    new_tab.window_id = window_id;
 
     // Create NSView for this tab's browser
     NSView* parentView = (__bridge NSView*)parent_view;
@@ -93,8 +95,8 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
     role_ss << "tab_" << tab_id;
     std::string role = role_ss.str();
 
-    new_tab.handler = new SimpleHandler(role);
-    LOG_INFO("Created SimpleHandler for tab " + std::to_string(tab_id) + " with role: " + role);
+    new_tab.handler = new SimpleHandler(role, window_id);
+    LOG_INFO("Created SimpleHandler for tab " + std::to_string(tab_id) + " with role: " + role + " window_id: " + std::to_string(window_id));
 
     // Add tab to map BEFORE creating browser
     // OnAfterCreated will be called asynchronously and needs to find the tab
@@ -374,6 +376,106 @@ void TabManager::UpdateTabFavicon(int tab_id, const std::string& favicon_url) {
         tab->favicon_url = favicon_url;
         SimpleHandler::NotifyTabListChanged();
     }
+}
+
+// ========== Tab Reparenting (Multi-Window) ==========
+
+bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_index) {
+    CEF_REQUIRE_UI_THREAD();
+
+    Tab* tab = GetTab(tab_id);
+    if (!tab) {
+        LOG_WARNING("MoveTabToWindow: tab " + std::to_string(tab_id) + " not found");
+        return false;
+    }
+
+    int source_window_id = tab->window_id;
+    if (source_window_id == target_window_id) {
+        LOG_WARNING("MoveTabToWindow: tab " + std::to_string(tab_id) + " already in window " + std::to_string(target_window_id));
+        return false;
+    }
+
+    BrowserWindow* target_bw = WindowManager::GetInstance().GetWindow(target_window_id);
+    if (!target_bw) {
+        LOG_WARNING("MoveTabToWindow: target window " + std::to_string(target_window_id) + " not found");
+        return false;
+    }
+
+    // 1. Reparent the NSView to the target window's webview container
+    if (tab->view_ptr && target_bw->webview_view) {
+        NSView* tabView = (__bridge NSView*)tab->view_ptr;
+        NSView* targetWebview = (__bridge NSView*)target_bw->webview_view;
+
+        // Remove from current parent
+        [tabView removeFromSuperview];
+
+        // Resize to fit target window's webview area
+        NSRect targetBounds = [targetWebview bounds];
+        [tabView setFrame:targetBounds];
+
+        // Add to target
+        [targetWebview addSubview:tabView];
+
+        // Notify CEF of new size
+        if (tab->browser) {
+            tab->browser->GetHost()->WasResized();
+        }
+    }
+
+    // 2. Update tab ownership
+    LOG_INFO("MoveTabToWindow: moving tab " + std::to_string(tab_id) +
+             " from window " + std::to_string(source_window_id) +
+             " to window " + std::to_string(target_window_id));
+    tab->window_id = target_window_id;
+
+    // 3. Update handler's window_id so IPC routes correctly
+    if (tab->handler) {
+        tab->handler->SetWindowId(target_window_id);
+    }
+
+    // 4. If this was the active tab in the source window, switch source to another
+    int source_active = GetActiveTabIdForWindow(source_window_id);
+    if (source_active == tab_id) {
+        int replacement = -1;
+        for (auto& [id, t] : tabs_) {
+            if (id != tab_id && t.window_id == source_window_id) {
+                replacement = id;
+                break;
+            }
+        }
+        if (replacement != -1) {
+            SwitchToTab(replacement);
+        }
+        active_tab_per_window_.erase(source_window_id);
+    }
+
+    // 5. Switch to the moved tab in the target window
+    SwitchToTab(tab_id);
+
+    // 6. Notify both windows
+    SimpleHandler::NotifyWindowTabListChanged(source_window_id);
+    SimpleHandler::NotifyWindowTabListChanged(target_window_id);
+
+    // 7. Auto-close source window if it has no tabs left
+    int remaining = 0;
+    for (auto& [id, t] : tabs_) {
+        if (t.window_id == source_window_id) remaining++;
+    }
+    if (remaining == 0) {
+        BrowserWindow* src_bw = WindowManager::GetInstance().GetWindow(source_window_id);
+        if (src_bw && src_bw->ns_window) {
+            NSWindow* srcWindow = (__bridge NSWindow*)src_bw->ns_window;
+            LOG_INFO("MoveTabToWindow: source window " + std::to_string(source_window_id) +
+                     " has no tabs left — closing");
+            // Defer close to next run loop iteration (we're still inside MoveTabToWindow)
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [srcWindow close];
+            });
+        }
+    }
+
+    LOG_INFO("MoveTabToWindow: tab " + std::to_string(tab_id) + " moved successfully");
+    return true;
 }
 
 // ========== Browser Registration ==========

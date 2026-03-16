@@ -7,6 +7,8 @@ This directory contains 46 ad-hoc test scripts created during development of the
 
 The primary goal was ensuring the Rust wallet produces identical outputs (CSR bodies, serialized requests, auth headers, encrypted fields, signatures) to the TypeScript SDK, which serves as the reference implementation for BRC-100/BRC-31/BRC-2 protocols.
 
+**Note**: JavaScript scripts expect the TS SDK at `reference/ts-brc100/node_modules/@bsv/sdk` relative to `rust-wallet/`. PowerShell scripts target `localhost:31301` (Rust wallet HTTP API).
+
 ## Files
 
 ### CSR (Certificate Signing Request) Validation
@@ -67,7 +69,7 @@ The primary goal was ensuring the Rust wallet produces identical outputs (CSR bo
 | File | Purpose |
 |------|---------|
 | `test_ts_sdk_server.js` | Full BRC-53 certifier server simulation; handles initialRequest/initialResponse, CSR decryption, field validation. Most comprehensive test (537 lines) |
-| `test_interoperability_ts.js` | Interoperability stubs between Rust wallet and TS SDK |
+| `test_interoperability_ts.js` | Encrypts data with TS SDK and outputs test vectors for Rust interoperability tests |
 
 ### PowerShell Test Scripts (Windows)
 
@@ -98,6 +100,7 @@ The primary goal was ensuring the Rust wallet produces identical outputs (CSR bo
 
 | File | Purpose |
 |------|---------|
+| `csr_serialization_ts_sdk.json` | Reference CSR serialization output (371 bytes) with hex/base64/breakdown showing nonce + method + path + search + headers + body structure |
 | `pushdrop_test_vectors.json` | 8 test cases for PushDrop script encoding/decoding: empty fields, single/multiple fields, special opcodes (OP_0, OP_1–OP_16), large fields |
 
 ## Key Testing Patterns
@@ -124,6 +127,21 @@ Revelation keys in `masterKeyring` use BRC-42 ECDH-derived symmetric keys.
 
 ### 4. PowerShell Scripts Target Wallet HTTP API
 PowerShell scripts test the Rust wallet's HTTP endpoints on `localhost:31301` directly, verifying request/response formats for BRC-100 operations.
+
+## Running Scripts
+
+These are archived and not intended for regular use. If needed for debugging:
+
+```bash
+# JavaScript (requires TS SDK at reference/ts-brc100/node_modules/@bsv/sdk)
+cd rust-wallet && node archive/test-scripts/<script>.js
+
+# PowerShell (requires Rust wallet running on localhost:31301)
+cd rust-wallet/archive/test-scripts && pwsh ./<script>.ps1
+
+# Shell
+cd rust-wallet/archive/test-scripts && bash test_acquire_certificate.sh
+```
 
 ## Dependencies
 

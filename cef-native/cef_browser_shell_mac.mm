@@ -35,6 +35,8 @@
 // Forward Declarations
 // ============================================================================
 void ShutdownApplication();
+void HandleCmdD();  // Cmd+D — Bookmark current page
+void HandleCmdL();  // Cmd+L — Focus address bar
 
 // ============================================================================
 // Custom NSApplication for CEF (REQUIRED on macOS)
@@ -57,8 +59,40 @@ void ShutdownApplication();
 }
 
 - (void)sendEvent:(NSEvent*)event {
+  // Intercept Cmd+D and Cmd+L before NSMenu swallows them.
+  // These keys aren't standard Edit menu actions so macOS discards them
+  // before CEF's OnPreKeyEvent ever fires.
+  if (event.type == NSEventTypeKeyDown) {
+    NSUInteger flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (flags & NSEventModifierFlagCommand) {
+      NSString* chars = [event charactersIgnoringModifiers];
+      if ([chars length] == 1) {
+        unichar ch = [chars characterAtIndex:0];
+        if (ch == 'd' || ch == 'D') {
+          HandleCmdD();
+          [CATransaction flush];
+          return;
+        }
+        if (ch == 'l' || ch == 'L') {
+          HandleCmdL();
+          [CATransaction flush];
+          return;
+        }
+      }
+    }
+  }
+
   CefScopedSendingEvent sendingEventScoper;
   [super sendEvent:event];
+
+  // Flush Core Animation transactions after key events to ensure CEF's
+  // compositor output is displayed immediately.  Without this, visual
+  // changes triggered by keyboard shortcuts (e.g. Cmd+A text selection)
+  // may not appear on screen until the window loses focus.
+  if (event.type == NSEventTypeKeyDown &&
+      (event.modifierFlags & NSEventModifierFlagCommand)) {
+    [CATransaction flush];
+  }
 }
 
 - (void)terminate:(id)sender {
@@ -100,6 +134,9 @@ NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
 NSWindow* g_cookie_panel_overlay_window = nullptr;
+NSWindow* g_omnibox_overlay_window = nullptr;
+NSWindow* g_download_panel_overlay_window = nullptr;
+NSWindow* g_profile_panel_overlay_window = nullptr;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
 bool g_file_dialog_active = false;
@@ -111,6 +148,20 @@ int g_peerpay_amount = 0;
 static int g_mac_settings_icon_right_offset = 0;
 static int g_mac_wallet_icon_right_offset = 0;
 static int g_mac_cookie_panel_icon_right_offset = 0;
+
+// Omnibox overlay monitors
+static id g_omnibox_click_monitor = nil;
+static CFAbsoluteTime g_omnibox_last_hide_time = 0;
+
+// Download panel overlay monitors
+static id g_download_panel_click_monitor = nil;
+static CFAbsoluteTime g_download_panel_last_hide_time = 0;
+static int g_mac_download_panel_icon_right_offset = 0;
+
+// Profile panel overlay monitors
+static id g_profile_panel_click_monitor = nil;
+static CFAbsoluteTime g_profile_panel_last_hide_time = 0;
+static int g_mac_profile_panel_icon_right_offset = 0;
 
 // Server process management
 static pid_t g_wallet_server_pid = -1;
@@ -135,6 +186,35 @@ void HandleFullscreenChange(bool fullscreen) {
     LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "enter" : "exit") + " (macOS stub)");
 }
 
+// Toggle fullscreen for the main window (called from menu_action "fullscreen")
+void ToggleFullScreenMacOS() {
+    if (g_main_window) {
+        [g_main_window toggleFullScreen:nil];
+    }
+}
+
+// Cmd+D — Bookmark current page (called from sendEvent: before NSMenu swallows it)
+void HandleCmdD() {
+    auto* activeTab = TabManager::GetInstance().GetActiveTab();
+    if (activeTab && !activeTab->url.empty()) {
+        LOG_INFO("⌨️ Cmd+D: Bookmarking " + activeTab->url);
+        std::vector<std::string> emptyTags;
+        BookmarkManager::GetInstance().AddBookmark(
+            activeTab->url, activeTab->title, -1, emptyTags);
+    }
+}
+
+// Cmd+L — Focus address bar (called from sendEvent: before NSMenu swallows it)
+void HandleCmdL() {
+    LOG_INFO("⌨️ Cmd+L: Focus address bar");
+    CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+    if (header) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("focus_address_bar");
+        header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+        header->GetHost()->SetFocus(true);
+    }
+}
+
 // ============================================================================
 // Forward Declarations
 // ============================================================================
@@ -155,7 +235,18 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
 void ShowCookiePanelOverlay(int iconRightOffset);
 void HideCookiePanelOverlay();
 bool IsCookiePanelOverlayVisible();
+void CreateOmniboxOverlayMacOS();
+void ShowOmniboxOverlayMacOS();
+void HideOmniboxOverlayMacOS();
+bool OmniboxOverlayExists();
+void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+void ShowDownloadPanelOverlayMacOS(int iconRightOffset);
+void HideDownloadPanelOverlayMacOS();
+void CreateProfilePanelOverlayMacOS(int iconRightOffset);
+void ShowProfilePanelOverlayMacOS(int iconRightOffset);
+void HideProfilePanelOverlayMacOS();
 void ShutdownApplication();
+void ToggleFullScreenMacOS();
 
 // ============================================================================
 // Helper Functions (C++ callable from simple_app.cpp)
@@ -307,6 +398,240 @@ ViewDimensions GetViewDimensions(void* nsview) {
     if (settings) {
         settings->GetHost()->SendKeyEvent(key_event);
     }
+}
+
+@end
+
+// ============================================================================
+// Generic Dropdown Overlay Classes (reusable for Omnibox, Download, Profile)
+// ============================================================================
+
+typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
+
+@interface DropdownOverlayWindow : NSWindow
+@end
+
+@implementation DropdownOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+    switch (type) {
+        case NSEventTypeLeftMouseDown:    [view mouseDown:event]; return;
+        case NSEventTypeLeftMouseUp:      [view mouseUp:event]; return;
+        case NSEventTypeLeftMouseDragged: [view mouseDragged:event]; return;
+        case NSEventTypeRightMouseDown:   [view rightMouseDown:event]; return;
+        case NSEventTypeRightMouseUp:     [view rightMouseUp:event]; return;
+        case NSEventTypeMouseMoved:       [view mouseMoved:event]; return;
+        case NSEventTypeScrollWheel:      [view scrollWheel:event]; return;
+        case NSEventTypeMouseEntered:     [view mouseEntered:event]; return;
+        case NSEventTypeMouseExited:      [view mouseExited:event]; return;
+        case NSEventTypeKeyDown:          [view keyDown:event]; return;
+        case NSEventTypeKeyUp:            [view keyUp:event]; return;
+        default: [super sendEvent:event]; return;
+    }
+}
+@end
+
+@interface DropdownOverlayView : NSView
+@property (nonatomic, copy) OverlayBrowserAccessor browserAccessor;
+@property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
+@end
+
+@implementation DropdownOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _renderLayer = [CALayer layer];
+        _renderLayer.opaque = NO;
+        [self setLayer:_renderLayer];
+        [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+- (NSView *)hitTest:(NSPoint)point { return self; }
+
+- (CefRefPtr<CefBrowser>)overlayBrowser {
+    return _browserAccessor ? _browserAccessor() : nullptr;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    b->GetHost()->SetFocus(true);
+    b->GetHost()->SendMouseClickEvent(me, MBT_LEFT, false, 1);
+    b->GetHost()->SendMouseClickEvent(me, MBT_LEFT, true, 1);
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    b->GetHost()->SendMouseClickEvent(me, MBT_LEFT, true, 1);
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+    b->GetHost()->SendMouseMoveEvent(me, false);
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    b->GetHost()->SendMouseClickEvent(me, MBT_RIGHT, false, 1);
+    b->GetHost()->SendMouseClickEvent(me, MBT_RIGHT, true, 1);
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    int deltaX = (int)([event scrollingDeltaX] * 2);
+    int deltaY = (int)([event scrollingDeltaY] * 2);
+    b->GetHost()->SendMouseWheelEvent(me, deltaX, deltaY);
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    b->GetHost()->SendMouseMoveEvent(me, false);
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent me;
+    me.x = loc.x;
+    me.y = self.bounds.size.height - loc.y;
+    me.modifiers = 0;
+    b->GetHost()->SendMouseMoveEvent(me, false);
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+    CefMouseEvent me;
+    me.x = -1;
+    me.y = -1;
+    me.modifiers = 0;
+    b->GetHost()->SendMouseMoveEvent(me, true);
+}
+
+- (void)keyDown:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+
+    CefKeyEvent key_event;
+    key_event.native_key_code = [event keyCode];
+    key_event.modifiers = 0;
+    if ([event modifierFlags] & NSEventModifierFlagShift) key_event.modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagControl) key_event.modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagOption) key_event.modifiers |= EVENTFLAG_ALT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagCommand) key_event.modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    // Send raw key down
+    key_event.type = KEYEVENT_RAWKEYDOWN;
+    NSString* chars = [event charactersIgnoringModifiers];
+    if ([chars length] > 0) {
+        key_event.windows_key_code = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+    }
+    b->GetHost()->SendKeyEvent(key_event);
+
+    // Send char event for printable characters
+    NSString* typedChars = [event characters];
+    if ([typedChars length] > 0) {
+        CefKeyEvent char_event;
+        char_event.type = KEYEVENT_CHAR;
+        char_event.windows_key_code = [typedChars characterAtIndex:0];
+        char_event.character = [typedChars characterAtIndex:0];
+        char_event.unmodified_character = [typedChars characterAtIndex:0];
+        char_event.native_key_code = [event keyCode];
+        char_event.modifiers = key_event.modifiers;
+        b->GetHost()->SendKeyEvent(char_event);
+    }
+}
+
+- (void)keyUp:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+
+    CefKeyEvent key_event;
+    key_event.type = KEYEVENT_KEYUP;
+    key_event.native_key_code = [event keyCode];
+    key_event.modifiers = 0;
+    if ([event modifierFlags] & NSEventModifierFlagShift) key_event.modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagControl) key_event.modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagOption) key_event.modifiers |= EVENTFLAG_ALT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagCommand) key_event.modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    NSString* chars = [event charactersIgnoringModifiers];
+    if ([chars length] > 0) {
+        key_event.windows_key_code = [chars characterAtIndex:0];
+        key_event.unmodified_character = [chars characterAtIndex:0];
+    }
+    b->GetHost()->SendKeyEvent(key_event);
 }
 
 @end
@@ -1511,8 +1836,27 @@ ViewDimensions GetViewDimensions(void* nsview) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    LOG_INFO("❌ Main window close requested - shutting down application");
-    ShutdownApplication();
+    int windowCount = WindowManager::GetInstance().GetWindowCount();
+
+    if (windowCount <= 1) {
+        LOG_INFO("❌ Last window close requested - shutting down application");
+        ShutdownApplication();
+        return YES;
+    }
+
+    // Not the last window — close tabs in window 0 and clean up
+    LOG_INFO("❌ Window 0 close requested (" + std::to_string(windowCount - 1) + " other windows remain)");
+    auto allTabs = TabManager::GetInstance().GetAllTabs();
+    std::vector<int> tabsToClose;
+    for (auto* tab : allTabs) {
+        if (tab->window_id == 0) {
+            tabsToClose.push_back(tab->id);
+        }
+    }
+    for (int tabId : tabsToClose) {
+        TabManager::GetInstance().CloseTab(tabId);
+    }
+    WindowManager::GetInstance().RemoveWindow(0);
     return YES;
 }
 
@@ -1603,6 +1947,28 @@ void CreateMainWindow() {
                                                keyEquivalent:@"q"];
     [appMenu addItem:quitItem];
     [appMenuItem setSubmenu:appMenu];
+
+    // Edit menu with standard text editing shortcuts (Cmd+A/C/V/X/Z).
+    // Required on macOS: without this, Cmd+A bypasses the NSMenu action
+    // dispatch pathway and goes through performKeyEquivalent/keyDown,
+    // which can skip CEF's display invalidation for selection changes.
+    // Menu items auto-validate against the first responder, so they are
+    // automatically disabled when an overlay (OSR) view is focused and
+    // Cmd+A falls through to the existing keyDown: forwarding path.
+    NSMenuItem* editMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:editMenuItem];
+    NSMenu* editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+    [editMenu addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:@"Delete" action:@selector(delete:) keyEquivalent:@""];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenuItem setSubmenu:editMenu];
+
     [NSApp setMainMenu:menuBar];
 
     // Get screen dimensions (work area, excluding menu bar and dock)
@@ -2373,7 +2739,7 @@ void CreateSettingsMenuOverlay() {
     // Position in top-right corner
     NSRect mainFrame = [g_main_window frame];
     int menuWidth = 300;
-    int menuHeight = 400;
+    int menuHeight = 480;
     NSRect menuFrame = NSMakeRect(mainFrame.origin.x + mainFrame.size.width - menuWidth - 20,
                                   mainFrame.origin.y + mainFrame.size.height - menuHeight - 60,
                                   menuWidth, menuHeight);
@@ -2437,6 +2803,424 @@ void CreateSettingsMenuOverlay() {
     [g_settings_menu_overlay_window makeFirstResponder:contentView];
     InstallSettingsMenuClickOutsideMonitor();
     LOG_INFO("✅ Settings menu overlay created successfully");
+}
+
+// ============================================================================
+// Omnibox Overlay (macOS)
+// ============================================================================
+
+static void RemoveOmniboxClickOutsideMonitor() {
+    if (g_omnibox_click_monitor) {
+        [NSEvent removeMonitor:g_omnibox_click_monitor];
+        g_omnibox_click_monitor = nil;
+    }
+}
+
+static void InstallOmniboxClickOutsideMonitor() {
+    if (g_omnibox_click_monitor) return;
+
+    g_omnibox_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_omnibox_overlay_window || ![g_omnibox_overlay_window isVisible]) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_omnibox_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_omnibox_overlay_window orderOut:nil];
+                RemoveOmniboxClickOutsideMonitor();
+                g_omnibox_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideOmniboxOverlayMacOS() {
+    if (g_omnibox_overlay_window) {
+        [g_omnibox_overlay_window orderOut:nil];
+        RemoveOmniboxClickOutsideMonitor();
+        g_omnibox_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Omnibox overlay hidden (macOS)");
+    }
+}
+
+bool IsOmniboxOverlayVisible() {
+    return g_omnibox_overlay_window && [g_omnibox_overlay_window isVisible];
+}
+
+bool OmniboxOverlayExists() {
+    return g_omnibox_overlay_window != nullptr;
+}
+
+bool WasOmniboxJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_omnibox_last_hide_time) < 0.3;
+}
+
+void ShowOmniboxOverlayMacOS() {
+    if (g_omnibox_overlay_window) {
+        // Reposition in case window moved/resized since creation
+        NSRect mainFrame = [g_main_window frame];
+        int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+        if (omniboxWidth < 400) omniboxWidth = 400;
+        int omniboxHeight = 420;
+        CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+        [g_omnibox_overlay_window setFrame:NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight) display:YES];
+
+        [g_omnibox_overlay_window orderFront:nil];
+        InstallOmniboxClickOutsideMonitor();
+        LOG_INFO("Omnibox overlay shown (macOS)");
+    }
+}
+
+void CreateOmniboxOverlayMacOS() {
+    LOG_INFO("Creating omnibox overlay (macOS)");
+
+    NSRect mainFrame = [g_main_window frame];
+    // Position below header (99px) spanning most of the window width
+    int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+    if (omniboxWidth < 400) omniboxWidth = 400;
+    int omniboxHeight = 420;
+    // Center horizontally, position below header
+    CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+    NSRect omniboxFrame = NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight);
+
+    // Keep-alive: don't destroy existing window
+    if (g_omnibox_overlay_window) {
+        ShowOmniboxOverlayMacOS();
+        return;
+    }
+
+    g_omnibox_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:omniboxFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_omnibox_overlay_window) {
+        LOG_ERROR("Failed to create omnibox overlay window");
+        return;
+    }
+
+    [g_omnibox_overlay_window setOpaque:NO];
+    [g_omnibox_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_omnibox_overlay_window setLevel:NSNormalWindowLevel];
+    [g_omnibox_overlay_window setIgnoresMouseEvents:NO];
+    [g_omnibox_overlay_window setReleasedWhenClosed:NO];
+    [g_omnibox_overlay_window setHasShadow:YES];
+    [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    // CRITICAL: Make child of main window so it doesn't steal focus from address bar
+    [g_main_window addChildWindow:g_omnibox_overlay_window ordered:NSWindowAbove];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, omniboxWidth, omniboxHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetOmniboxBrowser(); };
+    [g_omnibox_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("omnibox"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, omniboxWidth, omniboxHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/omnibox",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create omnibox overlay CEF browser");
+        return;
+    }
+
+    // Don't steal focus — keyboard must stay with the header browser (address bar)
+    [g_omnibox_overlay_window orderFront:nil];
+    InstallOmniboxClickOutsideMonitor();
+    LOG_INFO("Omnibox overlay created successfully");
+}
+
+// ============================================================================
+// Download Panel Overlay (macOS)
+// ============================================================================
+
+static void RemoveDownloadPanelClickOutsideMonitor() {
+    if (g_download_panel_click_monitor) {
+        [NSEvent removeMonitor:g_download_panel_click_monitor];
+        g_download_panel_click_monitor = nil;
+    }
+}
+
+static void InstallDownloadPanelClickOutsideMonitor() {
+    if (g_download_panel_click_monitor) return;
+
+    g_download_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_download_panel_overlay_window || ![g_download_panel_overlay_window isVisible]) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_download_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_download_panel_overlay_window orderOut:nil];
+                RemoveDownloadPanelClickOutsideMonitor();
+                g_download_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideDownloadPanelOverlayMacOS() {
+    if (g_download_panel_overlay_window) {
+        [g_download_panel_overlay_window orderOut:nil];
+        RemoveDownloadPanelClickOutsideMonitor();
+        g_download_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Download panel overlay hidden (macOS)");
+    }
+}
+
+bool IsDownloadPanelOverlayVisible() {
+    return g_download_panel_overlay_window && [g_download_panel_overlay_window isVisible];
+}
+
+bool WasDownloadPanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_download_panel_last_hide_time) < 0.3;
+}
+
+void ShowDownloadPanelOverlayMacOS(int iconRightOffset) {
+    if (g_download_panel_overlay_window) {
+        g_mac_download_panel_icon_right_offset = iconRightOffset;
+
+        NSRect mainFrame = [g_main_window frame];
+        CGFloat panelWidth = 400;
+        CGFloat panelHeight = 500;
+        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+        [g_download_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+
+        [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
+        InstallDownloadPanelClickOutsideMonitor();
+        LOG_INFO("Download panel overlay shown (macOS)");
+    }
+}
+
+void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
+    LOG_INFO("Creating download panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_download_panel_icon_right_offset = iconRightOffset;
+
+    NSRect mainFrame = [g_main_window frame];
+    CGFloat panelWidth = 400;
+    CGFloat panelHeight = 500;
+    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+    if (g_download_panel_overlay_window) {
+        [g_download_panel_overlay_window close];
+        g_download_panel_overlay_window = nullptr;
+    }
+
+    g_download_panel_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_download_panel_overlay_window) {
+        LOG_ERROR("Failed to create download panel overlay window");
+        return;
+    }
+
+    [g_download_panel_overlay_window setOpaque:NO];
+    [g_download_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_download_panel_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_download_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_download_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_download_panel_overlay_window setHasShadow:YES];
+    [g_download_panel_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetDownloadPanelBrowser(); };
+    [g_download_panel_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("downloadpanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, (int)panelWidth, (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/downloads",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create download panel overlay CEF browser");
+        return;
+    }
+
+    [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
+    [g_download_panel_overlay_window makeFirstResponder:contentView];
+    InstallDownloadPanelClickOutsideMonitor();
+    LOG_INFO("Download panel overlay created successfully");
+}
+
+// ============================================================================
+// Profile Panel Overlay (macOS)
+// ============================================================================
+
+static void RemoveProfilePanelClickOutsideMonitor() {
+    if (g_profile_panel_click_monitor) {
+        [NSEvent removeMonitor:g_profile_panel_click_monitor];
+        g_profile_panel_click_monitor = nil;
+    }
+}
+
+static void InstallProfilePanelClickOutsideMonitor() {
+    if (g_profile_panel_click_monitor) return;
+
+    g_profile_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_profile_panel_overlay_window || ![g_profile_panel_overlay_window isVisible]) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_profile_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_profile_panel_overlay_window orderOut:nil];
+                RemoveProfilePanelClickOutsideMonitor();
+                g_profile_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideProfilePanelOverlayMacOS() {
+    if (g_profile_panel_overlay_window) {
+        [g_profile_panel_overlay_window orderOut:nil];
+        RemoveProfilePanelClickOutsideMonitor();
+        g_profile_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Profile panel overlay hidden (macOS)");
+    }
+}
+
+bool IsProfilePanelOverlayVisible() {
+    return g_profile_panel_overlay_window && [g_profile_panel_overlay_window isVisible];
+}
+
+bool WasProfilePanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_profile_panel_last_hide_time) < 0.3;
+}
+
+void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
+    if (g_profile_panel_overlay_window) {
+        g_mac_profile_panel_icon_right_offset = iconRightOffset;
+
+        NSRect mainFrame = [g_main_window frame];
+        CGFloat panelWidth = 300;
+        CGFloat panelHeight = 400;
+        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+        [g_profile_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+
+        [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
+        InstallProfilePanelClickOutsideMonitor();
+        LOG_INFO("Profile panel overlay shown (macOS)");
+    }
+}
+
+void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
+    LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+    g_mac_profile_panel_icon_right_offset = iconRightOffset;
+
+    NSRect mainFrame = [g_main_window frame];
+    CGFloat panelWidth = 300;
+    CGFloat panelHeight = 400;
+    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
+    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
+    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+
+    if (g_profile_panel_overlay_window) {
+        [g_profile_panel_overlay_window close];
+        g_profile_panel_overlay_window = nullptr;
+    }
+
+    g_profile_panel_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_profile_panel_overlay_window) {
+        LOG_ERROR("Failed to create profile panel overlay window");
+        return;
+    }
+
+    [g_profile_panel_overlay_window setOpaque:NO];
+    [g_profile_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_profile_panel_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_profile_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_profile_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_profile_panel_overlay_window setHasShadow:YES];
+    [g_profile_panel_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetProfilePanelBrowser(); };
+    [g_profile_panel_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("profilepanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, (int)panelWidth, (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/profile-picker",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create profile panel overlay CEF browser");
+        return;
+    }
+
+    [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
+    [g_profile_panel_overlay_window makeFirstResponder:contentView];
+    InstallProfilePanelClickOutsideMonitor();
+    LOG_INFO("Profile panel overlay created successfully");
 }
 
 // ============================================================================
@@ -2509,6 +3293,23 @@ void ShutdownApplication() {
         cookie_panel_browser->GetHost()->CloseBrowser(false);
     }
 
+    CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
+    CefRefPtr<CefBrowser> download_panel_browser = SimpleHandler::GetDownloadPanelBrowser();
+    CefRefPtr<CefBrowser> profile_panel_browser = SimpleHandler::GetProfilePanelBrowser();
+
+    if (omnibox_browser) {
+        LOG_INFO("Closing omnibox browser...");
+        omnibox_browser->GetHost()->CloseBrowser(false);
+    }
+    if (download_panel_browser) {
+        LOG_INFO("Closing download panel browser...");
+        download_panel_browser->GetHost()->CloseBrowser(false);
+    }
+    if (profile_panel_browser) {
+        LOG_INFO("Closing profile panel browser...");
+        profile_panel_browser->GetHost()->CloseBrowser(false);
+    }
+
     // Step 2: Close overlay windows
     LOG_INFO("🔄 Closing overlay windows...");
 
@@ -2546,6 +3347,19 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing cookie panel overlay window...");
         [g_cookie_panel_overlay_window close];
         g_cookie_panel_overlay_window = nullptr;
+    }
+
+    if (g_omnibox_overlay_window) {
+        [g_omnibox_overlay_window close];
+        g_omnibox_overlay_window = nullptr;
+    }
+    if (g_download_panel_overlay_window) {
+        [g_download_panel_overlay_window close];
+        g_download_panel_overlay_window = nullptr;
+    }
+    if (g_profile_panel_overlay_window) {
+        [g_profile_panel_overlay_window close];
+        g_profile_panel_overlay_window = nullptr;
     }
 
     // Step 3: Close main window
@@ -2827,7 +3641,6 @@ int main(int argc, char* argv[]) {
         settings.command_line_args_disabled = false;
         CefString(&settings.log_file).FromASCII("debug.log");
         settings.log_severity = LOGSEVERITY_INFO;
-        settings.remote_debugging_port = 9222;
         settings.windowless_rendering_enabled = true;  // Required for overlays
 
         // CRITICAL: Disable sandbox on macOS for development (requires code signing otherwise)
@@ -2856,7 +3669,7 @@ int main(int argc, char* argv[]) {
         NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
 
         std::string user_data_path = [hodosBrowserDir UTF8String];
-        CefString(&settings.root_cache_path).FromString(user_data_path);
+        // NOTE: root_cache_path is set AFTER profile resolution below (must be unique per instance)
 
         // Initialize ProfileManager BEFORE CefInitialize so cache_path is correct
         LOG_INFO("Initializing ProfileManager...");
@@ -2924,11 +3737,20 @@ int main(int argc, char* argv[]) {
         BookmarkManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("BookmarkManager initialized");
 
-        // Set cache_path to profile-specific directory (cookie/localStorage isolation!)
+        // Set root_cache_path AND cache_path to profile-specific directory.
+        // CRITICAL: root_cache_path must be unique per CEF instance — two instances
+        // sharing the same root_cache_path will cause CefInitialize to fail.
         std::string cache_path = profile_cache;
+        CefString(&settings.root_cache_path).FromString(cache_path);
         CefString(&settings.cache_path).FromString(cache_path);
 
+        // Remote debugging port: 9222 for Default profile, disabled for others
+        // (avoids port conflict when multiple instances run simultaneously)
+        settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+
         LOG_INFO("Cache path: " + cache_path);
+        LOG_INFO("Root cache path: " + cache_path);
+        LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));
 
         // Enable JavaScript features
         CefString(&settings.javascript_flags).FromASCII("--expose-gc");
@@ -2978,6 +3800,15 @@ int main(int argc, char* argv[]) {
         app->SetMacOSWindow((__bridge void*)g_main_window,
                            (__bridge void*)g_header_view,
                            (__bridge void*)g_webview_view);
+
+        // Populate window 0's BrowserWindow struct for multi-window support
+        BrowserWindow* bw0 = WindowManager::GetInstance().GetWindow(0);
+        if (bw0) {
+            bw0->ns_window = (__bridge void*)g_main_window;
+            bw0->header_view = (__bridge void*)g_header_view;
+            bw0->webview_view = (__bridge void*)g_webview_view;
+            LOG_INFO("✅ BrowserWindow[0] populated with main window views");
+        }
 
         LOG_INFO("✅ Windows created, now manually creating header browser");
 

@@ -149,6 +149,7 @@ if(APPLE)
     list(APPEND SOURCES
         cef_browser_shell_mac.mm
         src/core/TabManager_mac.mm
+        src/core/WindowManager_mac.mm
         src/core/WalletService_mac.cpp
         # Cross-platform modules needed by simple_handler.cpp on macOS
         src/core/BrowserWindow.cpp

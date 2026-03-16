@@ -51,11 +51,6 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
 
       const autocompleteSuggestion = getAutocompleteSuggestion(merged, currentQueryRef.current);
       setAutocomplete(autocompleteSuggestion);
-      // Send IPC directly to avoid React useEffect deduplication
-      // (useEffect won't fire if the same autocomplete string is set twice)
-      if (autocompleteSuggestion && window.cefMessage) {
-        window.cefMessage.send('omnibox_autocomplete', autocompleteSuggestion);
-      }
       setLoading(false);
     };
 
@@ -95,10 +90,6 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
     // Set autocomplete from history immediately
     const autocompleteSuggestion = getAutocompleteSuggestion(historySuggestions, query);
     setAutocomplete(autocompleteSuggestion);
-    // Send IPC directly to avoid React useEffect deduplication
-    if (autocompleteSuggestion && window.cefMessage) {
-      window.cefMessage.send('omnibox_autocomplete', autocompleteSuggestion);
-    }
 
     // Always fetch Google suggestions for queries >= 2 chars
     // (We'll limit display to 6 total in the ranking logic)

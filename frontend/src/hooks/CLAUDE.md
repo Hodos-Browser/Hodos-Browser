@@ -86,6 +86,30 @@ window.addEventListener('message', (event) => {
 
 ## Hook Details
 
+### useAddress
+```typescript
+function useAddress(): {
+  currentAddress: string;
+  isGenerating: boolean;
+  error: string | null;
+  generateAddress: () => Promise<string>;
+  copyToClipboard: (text: string) => Promise<void>;
+  generateAndCopy: () => Promise<string>;
+}
+```
+Generates BSV addresses via `window.hodosBrowser.address.generate()`. `generateAndCopy` is a convenience wrapper that generates then copies to clipboard via `navigator.clipboard.writeText()`.
+
+### useTransaction
+```typescript
+function useTransaction(): {
+  transactions: Transaction[];  // always empty — unused state
+  isLoading: boolean;
+  error: string | null;
+  sendTransaction: (data: TransactionData) => Promise<TransactionResponse>;
+}
+```
+Sends BSV transactions via `window.hodosBrowser.wallet.sendTransaction()`. Converts `amount` from BSV string to satoshis (`Math.round(parseFloat(amount) * 1e8)`). Supports `sendMax` flag and custom `feeRate`. Types imported from `types/transaction.ts`.
+
 ### useHodosBrowser
 ```typescript
 function useHodosBrowser(): {
@@ -383,7 +407,14 @@ Generic debounce utility. Stores latest callback in ref to avoid stale closures.
 |---------|---------|---------|
 | `services/balanceCache.ts` | `useBalance`, `useBackgroundBalancePoller` | localStorage-based balance/price cache shared across CEF subprocesses |
 | `types/identity.ts` | `useHodosBrowser` | `IdentityResult` type |
-| `types/address.ts` | `useHodosBrowser`, `useAddress` | `AddressData` type |
+| `types/address.ts` | `useHodosBrowser` | `AddressData` type |
+| `types/transaction.ts` | `useTransaction` | `TransactionData`, `Transaction`, `TransactionResponse` |
+| `types/cookieBlocking.ts` | `useCookieBlocking` | `BlockedDomainEntry`, `BlockLogEntry`, 4 response types |
+| `types/cookies.ts` | `useCookies` | `CookieData`, `DomainCookieGroup`, response types |
+| `types/history.ts` | `useHistory` | `HistoryEntry`, `HistorySearchParams`, `HistoryGetParams` |
+| `types/TabTypes.ts` | `useTabManager` | `TabListResponse`, `TabManagerState` |
+| `types/omnibox.ts` | `useOmniboxSuggestions` | `HistoryEntryWithFrecency`, `Suggestion` |
+| `utils/suggestionRanker.ts` | `useOmniboxSuggestions` | `rankAndMergeSuggestions()`, `getAutocompleteSuggestion()` |
 
 ## Related
 

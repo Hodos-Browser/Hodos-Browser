@@ -29,6 +29,8 @@ public:
 
 #ifdef _WIN32
     BrowserWindow* GetWindowByHwnd(HWND hwnd);
+#elif defined(__APPLE__)
+    BrowserWindow* GetWindowByNSWindow(void* nsWindow);
 #endif
 
     // Find which window owns a particular CEF browser (by browser identifier).
@@ -45,6 +47,8 @@ public:
     // Creates HWND, header browser, pre-created overlays, and an initial NTP tab.
     // Pass createInitialTab=false during session restore (tabs will be added by caller).
     // Returns the BrowserWindow* (owned by WindowManager).
+    BrowserWindow* CreateFullWindow(bool createInitialTab = true);
+#elif defined(__APPLE__)
     BrowserWindow* CreateFullWindow(bool createInitialTab = true);
 #endif
 

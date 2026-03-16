@@ -36,10 +36,11 @@ The main wallet view, split into left and right columns.
   - **Balance card** — fetches `/wallet/balance`, shows USD primary + BSV secondary, 10s polling interval (only updates state if values change to avoid re-renders)
   - **PeerPay notification banner** — polls `/wallet/peerpay/status` every 60s, auto-refreshes balance on new incoming payments, dismiss calls `/wallet/peerpay/dismiss` + sends `wallet_payment_dismissed` IPC
   - **Receive section** — split left/right: Identity Key (from `localStorage`) with QR + copy, and Legacy Address (from `/wallet/address/current`) with QR + copy + "New Address" button (`/wallet/address/generate`)
-  - **Recent activity** — fetches `/wallet/activity?page=1&limit=5&filter=all`, shows last 5 transactions with relative timestamps
+  - **Recent activity** — fetches `/wallet/activity?page=1&limit=5&filter=all`, shows last 5 transactions with relative timestamps. Each item has a txid pill button (copy) and WoC icon button (opens WhatsOnChain in new tab via `tab_create` IPC)
 - **Right column:**
   - **Send form** — renders memoized `<TransactionForm>` from `../TransactionForm`; transaction results show success/error banner with WhatsOnChain link (opens via `tab_create` IPC)
-- **Local helpers:** `InfoTooltip` (click-to-open tooltip with outside-click dismiss), `formatBsv`, `formatUsd`, `formatUsdCents`, `formatTime`
+- **Local helpers:** `InfoTooltip` (hover tooltip via `onMouseEnter`/`onMouseLeave`), `formatBsv`, `formatUsd`, `formatUsdCents`, `formatTime`
+- **Dependencies:** `QRCodeSVG` from `qrcode.react` for address/key QR codes, `TransactionForm` from `../TransactionForm`, `TransactionResponse` type from `../../types/transaction`
 
 ### ActivityTab
 
@@ -48,8 +49,10 @@ Full paginated transaction history.
 - **Props:** none
 - **State:** page (1-indexed), filter (`'all' | 'sent' | 'received'`), 10 items per page
 - **Endpoint:** `/wallet/activity?page={p}&limit=10&filter={f}` — returns `ActivityResponse` with items, total, page, page_size, current_price_usd_cents
-- **USD display:** Uses historical `price_usd_cents` per transaction when available, falls back to current price; shows "(now: $X.XX)" secondary when historical and current differ
-- **Actions per item:** Copy TxID button, "View on WhatsOnChain" button (opens via `tab_create` IPC)
+- **USD display:** Uses historical `price_usd_cents` per transaction when available, falls back to current price; shows "now: ..." secondary when historical and current differ
+- **Actions per item:** Pill-style "txid"/"Copied" copy button + WoC icon button (opens WhatsOnChain via `tab_create` IPC)
+- **Pagination:** First/prev/next/last buttons, numbered page buttons with ellipsis for large page counts, "Go to" jump input when >7 pages
+- **Local helpers:** `InfoTooltip` (hover, with `align` prop — shown on first item only to explain USD display), `formatBsv`, `formatUsd`, `truncateTxid`, `formatDate` (relative timestamps with short month format for >7 days)
 - **Interfaces:** `ActivityItem` (txid, direction, satoshis, status, timestamp, description, labels, price_usd_cents, source), `ActivityResponse`, `DirectionFilter`
 
 ### CertificatesTab
