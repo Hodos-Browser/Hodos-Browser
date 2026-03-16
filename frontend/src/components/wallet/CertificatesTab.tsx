@@ -19,7 +19,10 @@ const CertificatesTab: React.FC = () => {
   const [certificates, setCertificates] = useState<Certificate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [expandedCert, setExpandedCert] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Certificate | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchCertificates = useCallback(async () => {
     try {
@@ -44,6 +47,14 @@ const CertificatesTab: React.FC = () => {
     fetchCertificates();
   }, [fetchCertificates]);
 
+  // Auto-clear success message after 5 seconds
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
   const getTypeIcon = (typeName: string): string => {
     switch (typeName) {
       case 'X (Twitter)': return '𝕏';
@@ -59,15 +70,11 @@ const CertificatesTab: React.FC = () => {
   const getPrimaryField = (cert: Certificate): string => {
     const df = cert.decrypted_fields;
     if (!df || Object.keys(df).length === 0) return '—';
-
-    // Return the most relevant field based on cert type
     if (df.userName) return `@${df.userName}`;
     if (df.email) return df.email;
     if (df.discordUsername) return df.discordUsername;
     if (df.cool) return `cool: ${df.cool}`;
     if (df.name) return df.name;
-
-    // Fallback: first field
     const firstKey = Object.keys(df)[0];
     return df[firstKey] || '—';
   };
@@ -83,23 +90,41 @@ const CertificatesTab: React.FC = () => {
     return `${hash.substring(0, 8)}...${hash.substring(hash.length - 8)}`;
   };
 
-  const handleDelete = async (cert: Certificate) => {
-    if (!confirm(`Delete this ${cert.type_name} certificate?\n\nThis will remove it from your wallet.`)) return;
+  const hasRealRevocationOutpoint = (cert: Certificate): boolean => {
+    return cert.revocation_outpoint !== 'not supported.0' &&
+           cert.revocation_outpoint !== '0000000000000000000000000000000000000000000000000000000000000000.0' &&
+           cert.revocation_outpoint.length > 10;
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setError(null);
 
     try {
       const res = await fetch('http://127.0.0.1:31301/relinquishCertificate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: cert.type,
-          serial_number: cert.serial_number,
-          certifier: cert.certifier,
+          type: deleteTarget.type,
+          serial_number: deleteTarget.serial_number,
+          certifier: deleteTarget.certifier,
         }),
       });
-      if (!res.ok) throw new Error('Failed to delete certificate');
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed to delete (${res.status})`);
+      }
+
+      setSuccess(`${deleteTarget.type_name} certificate removed from wallet.`);
+      setDeleteTarget(null);
+      setExpandedCert(null);
       fetchCertificates();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete');
+      setError(err instanceof Error ? err.message : 'Failed to delete certificate');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -115,6 +140,111 @@ const CertificatesTab: React.FC = () => {
   return (
     <div className="wd-certificates">
       {error && <div className="wd-error-banner">{error}</div>}
+      {success && (
+        <div style={{
+          background: 'rgba(34, 197, 94, 0.1)',
+          border: '1px solid rgba(34, 197, 94, 0.3)',
+          borderRadius: '6px',
+          padding: '8px 12px',
+          marginBottom: '8px',
+          fontSize: '13px',
+          color: '#22c55e',
+        }}>
+          {success}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: '#1e1e1e',
+            border: '1px solid #333',
+            borderRadius: '8px',
+            padding: '20px',
+            maxWidth: '420px',
+            width: '90%',
+          }}>
+            <h3 style={{ margin: '0 0 12px', color: '#e5e7eb', fontSize: '16px' }}>
+              Delete Certificate?
+            </h3>
+
+            <div style={{ fontSize: '13px', lineHeight: '1.6', color: '#9ca3af', marginBottom: '16px' }}>
+              <p style={{ margin: '0 0 8px' }}>
+                This will remove the <strong style={{ color: '#e5e7eb' }}>
+                  {getTypeIcon(deleteTarget.type_name)} {deleteTarget.type_name}
+                </strong> certificate
+                {deleteTarget.decrypted_fields?.userName && (
+                  <> for <strong style={{ color: '#e5e7eb' }}>@{deleteTarget.decrypted_fields.userName}</strong></>
+                )}
+                {deleteTarget.decrypted_fields?.email && (
+                  <> for <strong style={{ color: '#e5e7eb' }}>{deleteTarget.decrypted_fields.email}</strong></>
+                )}
+                {' '}from your wallet.
+              </p>
+
+              {hasRealRevocationOutpoint(deleteTarget) && (
+                <div style={{
+                  background: 'rgba(234, 179, 8, 0.1)',
+                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                  borderRadius: '4px',
+                  padding: '8px',
+                  marginBottom: '8px',
+                  color: '#eab308',
+                  fontSize: '12px',
+                }}>
+                  ⚠ This certificate has an on-chain record. Removing it from your wallet does not revoke it on the blockchain. The certifier ({deleteTarget.certifier_name}) may still have records of this certificate.
+                </div>
+              )}
+
+              <p style={{ margin: '0', fontSize: '12px', color: '#6b7280' }}>
+                You can re-acquire this certificate later from {deleteTarget.certifier_name} if needed.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                style={{
+                  padding: '8px 16px',
+                  background: '#333',
+                  border: '1px solid #444',
+                  borderRadius: '4px',
+                  color: '#e5e7eb',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={deleting}
+                style={{
+                  padding: '8px 16px',
+                  background: deleting ? '#666' : '#dc2626',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  cursor: deleting ? 'default' : 'pointer',
+                  fontSize: '13px',
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {certificates.length === 0 ? (
         <div className="wd-empty">
@@ -159,9 +289,8 @@ const CertificatesTab: React.FC = () => {
                     <td style={{ fontSize: '12px', color: '#9ca3af' }}>{formatDate(cert.created_at)}</td>
                     <td>
                       <button
-                        className="wd-cert-action-btn"
                         title="Delete certificate"
-                        onClick={(e) => { e.stopPropagation(); handleDelete(cert); }}
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
                         style={{
                           background: 'none',
                           border: 'none',
@@ -209,7 +338,7 @@ const CertificatesTab: React.FC = () => {
                           <div style={{ color: '#6b7280' }}>
                             <div>
                               <span>Certifier: </span>
-                              <span className="wd-cert-hash" title={cert.certifier}>{truncateHash(cert.certifier)}</span>
+                              <span className="wd-cert-hash" title={cert.certifier}>{cert.certifier_name} ({truncateHash(cert.certifier)})</span>
                             </div>
                             <div>
                               <span>Serial: </span>
@@ -217,7 +346,13 @@ const CertificatesTab: React.FC = () => {
                             </div>
                             <div>
                               <span>Revocation: </span>
-                              <span className="wd-cert-hash">{cert.revocation_outpoint === 'not supported.0' ? 'N/A' : truncateHash(cert.revocation_outpoint)}</span>
+                              <span className="wd-cert-hash">
+                                {hasRealRevocationOutpoint(cert) ? (
+                                  <span title={cert.revocation_outpoint}>{truncateHash(cert.revocation_outpoint)} (on-chain)</span>
+                                ) : (
+                                  'N/A'
+                                )}
+                              </span>
                             </div>
                           </div>
                         </div>
