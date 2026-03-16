@@ -188,13 +188,17 @@ pub struct ListCertificatesRequest {
 pub struct CertificateResponse {
     #[serde(rename = "type")]
     pub type_: String,  // Base64
+    pub type_name: String,  // Human-readable name (e.g. "X (Twitter)")
     pub serial_number: String,  // Base64
     pub subject: String,  // Hex
     pub certifier: String,  // Hex
+    pub certifier_name: String,  // Human-readable name (e.g. "SocialCert")
     pub revocation_outpoint: String,
     pub signature: String,  // Hex
     pub fields: serde_json::Value,  // Map of fieldName -> base64 encrypted value
     pub keyring: serde_json::Value,  // Map of fieldName -> base64 keyring value
+    pub decrypted_fields: serde_json::Value,  // Map of fieldName -> plaintext value
+    pub created_at: i64,
 }
 
 /// Response structure for listCertificates
@@ -202,6 +206,37 @@ pub struct CertificateResponse {
 pub struct ListCertificatesResponse {
     pub total_certificates: i64,
     pub certificates: Vec<CertificateResponse>,
+}
+
+/// Map certificate type base64 to human-readable name
+fn get_cert_type_name(type_b64: &str) -> String {
+    match type_b64 {
+        "vdDWvftf1H+5+ZprUw123kjHlywH+v20aPQTuXgMpNc=" => "X (Twitter)".to_string(),
+        "exOl3KM0dIJ04EW5pZgbZmPag6MdJXd3/a1enmUU/BA=" => "Email".to_string(),
+        "2TgqRC35B1zehGmB21xveZNc7i5iqHc0uxMb+1NMPW4=" => "Discord".to_string(),
+        "z40BOInXkI8m7f/wBrv4MJ09bZfzZbTj2fJqCtONqCY=" => "Government ID".to_string(),
+        "YoPsbfR6YQczjzPdHCoGC7nJsOdPQR50+SYqcWpJ0y0=" => "Registrant".to_string(),
+        "AGfk/WrT1eBDXpz3mcw386Zww2HmqcIn3uY6x4Af1eo=" => "CoolCert".to_string(),
+        "jVNgF8+rifnz00856b4TkThCAvfiUE4p+t/aHYl1u0c=" => "CoolCert".to_string(),
+        _ => "Certificate".to_string(),
+    }
+}
+
+/// Map certifier public key hex to human-readable name
+fn get_certifier_name(certifier_hex: &str) -> String {
+    match certifier_hex {
+        "02cf6cdf466951d8dfc9e7c9367511d0007ed6fba35ed42d425cc412fd6cfd4a17" => "SocialCert".to_string(),
+        "03daf815fe38f83da0ad83b5bedc520aa488aef5cbb93a93c67a7fe60406cbffe8" => "Metanet Trust".to_string(),
+        "0220529dc803041a83f4357864a09c717daa24397cf2f3fc3a5745ae08d30924fd" => "CoolCert".to_string(),
+        "02cab461076409998157f05bb90f07886380186fd3d88b99c549f21de4d2511b83" => "CoolCert".to_string(),
+        _ => {
+            if certifier_hex.len() > 16 {
+                format!("{}...{}", &certifier_hex[..8], &certifier_hex[certifier_hex.len()-8..])
+            } else {
+                certifier_hex.to_string()
+            }
+        }
+    }
 }
 
 /// listCertificates - BRC-100 endpoint (Call Code 18)
@@ -250,60 +285,106 @@ pub async fn list_certificates(
     };
 
     // Get total count (for pagination)
-    let total = certificates.len() as i64;  // TODO: Get actual total from database
+    let total = certificates.len() as i64;
+
+    // Get master private key for decrypting certificate fields
+    let master_privkey = match crate::database::helpers::get_master_private_key_from_db(&db) {
+        Ok(key) => Some(key),
+        Err(_) => {
+            log::warn!("   Could not get master private key — fields won't be decrypted");
+            None
+        }
+    };
+
+    // Collect cert data before dropping DB lock
+    let mut cert_data: Vec<(crate::certificate::types::Certificate, std::collections::HashMap<String, crate::certificate::types::CertificateField>)> = Vec::new();
+    for cert in certificates {
+        let fields = if let Some(cert_id) = cert.certificate_id {
+            cert_repo.get_certificate_fields(cert_id).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        cert_data.push((cert, fields));
+    }
+    drop(db); // Release DB lock before crypto operations
 
     // Convert to response format
     let mut cert_responses = Vec::new();
-    for cert in certificates {
-        // Get certificate fields (returns HashMap<String, CertificateField>)
-        let fields_map = if let Some(cert_id) = cert.certificate_id {
-            match cert_repo.get_certificate_fields(cert_id) {
-                Ok(fields) => {
-                    let mut fields_json = serde_json::Map::new();
-                    for (field_name, field) in fields.iter() {
-                        let field_value_base64 = BASE64.encode(&field.field_value);
-                        fields_json.insert(
-                            field_name.clone(),
-                            serde_json::Value::String(field_value_base64),
-                        );
-                    }
-                    serde_json::Value::Object(fields_json)
-                }
-                Err(_) => serde_json::json!({}),
-            }
-        } else {
-            serde_json::json!({})
-        };
+    for (cert, fields) in cert_data {
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
 
-        // Get keyring (from certificate fields' master_key)
-        let keyring_map = if let Some(cert_id) = cert.certificate_id {
-            match cert_repo.get_certificate_fields(cert_id) {
-                Ok(fields) => {
-                    let mut keyring_json = serde_json::Map::new();
-                    for (field_name, field) in fields.iter() {
-                        let master_key_base64 = BASE64.encode(&field.master_key);
-                        keyring_json.insert(
-                            field_name.clone(),
-                            serde_json::Value::String(master_key_base64),
-                        );
+        // Build encrypted fields map
+        let mut fields_json = serde_json::Map::new();
+        let mut keyring_json = serde_json::Map::new();
+        for (field_name, field) in fields.iter() {
+            fields_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.field_value)));
+            keyring_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.master_key)));
+        }
+
+        // Decrypt fields on-the-fly using masterKeyring
+        let mut decrypted_json = serde_json::Map::new();
+        if let Some(ref privkey) = master_privkey {
+            for (field_name, field) in fields.iter() {
+                // Step 1: Decrypt the revelation key (masterKeyring entry) using BRC-2
+                let decrypted_rev_key = match crate::crypto::brc2::decrypt_certificate_field(
+                    privkey,
+                    &cert.certifier,
+                    field_name,
+                    None, // No serial number for master keyring
+                    &field.master_key,
+                ) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        log::warn!("   Failed to decrypt revelation key for field '{}': {}", field_name, e);
+                        continue;
                     }
-                    serde_json::Value::Object(keyring_json)
+                };
+
+                // Step 2: Decrypt the field value using the revelation key
+                // The field value is encrypted with SymmetricKey.encrypt() = [32-byte IV][ciphertext][16-byte tag]
+                if decrypted_rev_key.len() < 16 {
+                    log::warn!("   Revelation key too short for field '{}': {} bytes", field_name, decrypted_rev_key.len());
+                    continue;
                 }
-                Err(_) => serde_json::json!({}),
+
+                // Pad revelation key to 32 bytes (matching SymmetricKey.toArray('be', 32))
+                let mut sym_key = vec![0u8; 32];
+                let start = 32 - decrypted_rev_key.len().min(32);
+                sym_key[start..].copy_from_slice(&decrypted_rev_key[..decrypted_rev_key.len().min(32)]);
+
+                match crate::crypto::brc2::decrypt_brc2(&field.field_value, &sym_key) {
+                    Ok(plaintext) => {
+                        match String::from_utf8(plaintext) {
+                            Ok(text) => {
+                                decrypted_json.insert(field_name.clone(), serde_json::Value::String(text));
+                            }
+                            Err(_) => {
+                                // Binary field — encode as base64
+                                decrypted_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.field_value)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   Failed to decrypt field '{}': {}", field_name, e);
+                    }
+                }
             }
-        } else {
-            serde_json::json!({})
-        };
+        }
 
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_: type_b64.clone(),
+            type_name: get_cert_type_name(&type_b64),
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier: certifier_hex.clone(),
+            certifier_name: get_certifier_name(&certifier_hex),
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
-            fields: fields_map,
-            keyring: keyring_map,
+            fields: serde_json::Value::Object(fields_json),
+            keyring: serde_json::Value::Object(keyring_json),
+            decrypted_fields: serde_json::Value::Object(decrypted_json),
+            created_at: cert.created_at,
         });
     }
 
@@ -3193,15 +3274,21 @@ pub async fn discover_by_identity_key(
             serde_json::json!({})
         };
 
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_name: get_cert_type_name(&type_b64),
+            type_: type_b64,
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier_name: get_certifier_name(&certifier_hex),
+            certifier: certifier_hex,
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
             fields: fields_map,
             keyring: keyring_map,
+            decrypted_fields: serde_json::json!({}),
+            created_at: cert.created_at,
         });
     }
 
@@ -3430,15 +3517,21 @@ pub async fn discover_by_attributes(
             serde_json::json!({})
         };
 
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_name: get_cert_type_name(&type_b64),
+            type_: type_b64,
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier_name: get_certifier_name(&certifier_hex),
+            certifier: certifier_hex,
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
             fields: fields_map,
             keyring: keyring_map,
+            decrypted_fields: serde_json::json!({}),
+            created_at: cert.created_at,
         });
     }
 
