@@ -135,6 +135,61 @@ pub async fn relinquish_certificate(
         }
     };
 
+    // Check if certificate is published on the overlay before allowing delete
+    let subject_hex = hex::encode(&certificate.subject);
+    let certifier_hex_str = req.certifier.clone();
+    drop(db); // Release DB lock before network calls
+
+    // Query overlay to check if cert is publicly visible
+    let overlay_url = "https://overlay-us-1.bsvb.tech/lookup";
+    let overlay_body = serde_json::json!({
+        "service": "ls_identity",
+        "query": {
+            "identityKey": subject_hex,
+            "certifiers": [certifier_hex_str]
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let is_published = match client
+        .post(overlay_url)
+        .header("Content-Type", "application/json")
+        .json(&overlay_body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                let outputs = json.get("outputs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if outputs {
+                    log::info!("   ⚠️  Certificate is published on overlay — checking if it matches");
+                }
+                outputs
+            } else {
+                false
+            }
+        }
+        Err(e) => {
+            log::warn!("   Could not check overlay ({}), proceeding with delete", e);
+            false // If we can't reach the overlay, allow delete but warn
+        }
+    };
+
+    if is_published {
+        log::warn!("   ❌ Certificate appears to be published on the overlay — blocking delete");
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Certificate is publicly visible on the BSV overlay. You must unpublish it before deleting. This feature is coming soon.",
+            "is_published": true
+        }));
+    }
+
+    // Re-acquire DB lock for the update
+    let db = state.database.lock().unwrap();
+    let cert_repo = CertificateRepository::new(db.connection());
+
     // Update certificate to mark as relinquished
     match cert_repo.update_relinquished(
         &type_bytes,

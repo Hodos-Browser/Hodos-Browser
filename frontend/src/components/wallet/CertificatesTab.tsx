@@ -114,6 +114,9 @@ const CertificatesTab: React.FC = () => {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (data.is_published) {
+          throw new Error('This certificate is publicly visible on the BSV overlay. You must unpublish it before deleting. This feature is coming soon.');
+        }
         throw new Error(data.error || `Failed to delete (${res.status})`);
       }
 
