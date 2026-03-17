@@ -1648,24 +1648,17 @@ export default function WalletPanelPage() {
 
   return (
     <div
-      onClick={handleBackgroundClick}
       style={{
         position: 'fixed',
         top: 0,
         left: 0,
-        width: '100vw',
-        height: '100vh',
+        width: '100%',
+        height: '100%',
         margin: 0,
         padding: 0,
-        overflow: 'hidden',
-        display: 'flex',
-        justifyContent: 'flex-end',
-        alignItems: 'flex-start',
-        paddingTop: '150px',
-        paddingRight: paddingRightPx > 0 ? `${Math.max(paddingRightPx, 12)}px` : '12px',
+        overflow: 'auto',
         boxSizing: 'border-box',
-        cursor: 'pointer',
-        backgroundColor: 'rgba(0, 0, 0, 0.01)',
+        backgroundColor: 'transparent',
       }}
     >
       {walletStatus === 'loading' && renderLoading()}

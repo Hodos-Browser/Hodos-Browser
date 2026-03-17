@@ -861,9 +861,8 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         if (message_name == "find_show") {
             LOG_DEBUG_RENDER("🔍 find_show received, dispatching to React");
             std::string js = R"(
-                window.dispatchEvent(new MessageEvent('message', {
-                    data: { type: 'find_show' }
-                }));
+                console.log('[CEF] Executing find_show JS in frame');
+                window.postMessage({ type: 'find_show' }, '*');
             )";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
             return true;

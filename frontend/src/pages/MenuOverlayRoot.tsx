@@ -44,20 +44,20 @@ const MenuItemRow: React.FC<MenuItemRowProps> = ({ icon, label, shortcut, onClic
       py: 0.75,
       cursor: disabled ? 'default' : 'pointer',
       opacity: disabled ? 0.5 : 1,
-      '&:hover': disabled ? {} : { backgroundColor: 'rgba(255,255,255,0.08)' },
+      '&:hover': disabled ? {} : { backgroundColor: 'rgba(0,0,0,0.06)' },
       userSelect: 'none',
     }}
   >
     {icon && (
-      <Box sx={{ width: 24, mr: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#aaa' }}>
+      <Box sx={{ width: 24, mr: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(0,0,0,0.54)' }}>
         {icon}
       </Box>
     )}
-    <Typography sx={{ flex: 1, fontSize: '0.82rem', color: '#e0e0e0' }}>
+    <Typography sx={{ flex: 1, fontSize: '0.82rem', color: 'rgba(0,0,0,0.87)' }}>
       {label}
     </Typography>
     {shortcut && (
-      <Typography sx={{ fontSize: '0.72rem', color: '#777', ml: 2 }}>
+      <Typography sx={{ fontSize: '0.72rem', color: 'rgba(0,0,0,0.38)', ml: 2 }}>
         {shortcut}
       </Typography>
     )}
@@ -66,21 +66,21 @@ const MenuItemRow: React.FC<MenuItemRowProps> = ({ icon, label, shortcut, onClic
 
 const ZoomRow: React.FC<{ currentZoom: number; onAction: (a: string) => void }> = ({ currentZoom, onAction }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 0.5, height: 36 }}>
-    <ZoomOutIcon sx={{ fontSize: 16, color: '#aaa', mr: 0.5 }} />
-    <IconButton size="small" onClick={() => onAction('zoom_out')} sx={{ color: '#e0e0e0', p: 0.5 }}>
+    <ZoomOutIcon sx={{ fontSize: 16, color: 'rgba(0,0,0,0.54)', mr: 0.5 }} />
+    <IconButton size="small" onClick={() => onAction('zoom_out')} sx={{ color: 'rgba(0,0,0,0.87)', p: 0.5 }}>
       <RemoveIcon sx={{ fontSize: 16 }} />
     </IconButton>
-    <Typography sx={{ mx: 1, minWidth: 40, textAlign: 'center', fontSize: '0.78rem', color: '#e0e0e0' }}>
+    <Typography sx={{ mx: 1, minWidth: 40, textAlign: 'center', fontSize: '0.78rem', color: 'rgba(0,0,0,0.87)' }}>
       {currentZoom}%
     </Typography>
-    <IconButton size="small" onClick={() => onAction('zoom_in')} sx={{ color: '#e0e0e0', p: 0.5 }}>
+    <IconButton size="small" onClick={() => onAction('zoom_in')} sx={{ color: 'rgba(0,0,0,0.87)', p: 0.5 }}>
       <AddIcon sx={{ fontSize: 16 }} />
     </IconButton>
     <Box sx={{ flex: 1 }} />
-    <IconButton size="small" onClick={() => onAction('zoom_reset')} title="Reset zoom" sx={{ color: '#aaa', p: 0.5 }}>
+    <IconButton size="small" onClick={() => onAction('zoom_reset')} title="Reset zoom" sx={{ color: 'rgba(0,0,0,0.54)', p: 0.5 }}>
       <ZoomInIcon sx={{ fontSize: 16 }} />
     </IconButton>
-    <IconButton size="small" onClick={() => onAction('fullscreen')} title="Fullscreen" sx={{ color: '#aaa', p: 0.5 }}>
+    <IconButton size="small" onClick={() => onAction('fullscreen')} title="Fullscreen" sx={{ color: 'rgba(0,0,0,0.54)', p: 0.5 }}>
       <FullscreenIcon sx={{ fontSize: 16 }} />
     </IconButton>
   </Box>
@@ -127,12 +127,9 @@ const MenuOverlayRoot: React.FC = () => {
       sx={{
         width: '100%',
         height: '100%',
-        bgcolor: '#1e1e1e',
-        color: '#e0e0e0',
+        bgcolor: '#ffffff',
+        color: 'rgba(0,0,0,0.87)',
         py: 0.5,
-        borderRadius: '4px',
-        boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-        border: '1px solid #333',
         overflowY: 'auto',
       }}
     >
@@ -140,50 +137,50 @@ const MenuOverlayRoot: React.FC = () => {
       <MenuItemRow
         icon={<AddIcon sx={{ fontSize: 18 }} />}
         label="New Tab"
-        shortcut="Ctrl+T"
+        shortcut="Cmd+T"
         onClick={() => handleAction('new_tab')}
       />
 
-      <Divider sx={{ borderColor: '#333', my: 0.5 }} />
+      <Divider sx={{ borderColor: 'rgba(0,0,0,0.12)', my: 0.5 }} />
 
       {/* Section 2: Content Access */}
       <MenuItemRow
         icon={<HistoryIcon sx={{ fontSize: 18 }} />}
         label="History"
-        shortcut="Ctrl+H"
+        shortcut="Cmd+H"
         onClick={() => handleAction('history')}
       />
       <MenuItemRow
         icon={<BookmarkBorderIcon sx={{ fontSize: 18 }} />}
         label="Bookmarks"
-        shortcut="Ctrl+D"
+        shortcut="Cmd+D"
         onClick={() => handleAction('bookmarks')}
       />
       <MenuItemRow
         icon={<DownloadIcon sx={{ fontSize: 18 }} />}
         label="Downloads"
-        shortcut="Ctrl+J"
+        shortcut="Cmd+J"
         onClick={() => handleAction('downloads')}
       />
 
-      <Divider sx={{ borderColor: '#333', my: 0.5 }} />
+      <Divider sx={{ borderColor: 'rgba(0,0,0,0.12)', my: 0.5 }} />
 
       {/* Section 3: Page Actions */}
       <ZoomRow currentZoom={currentZoom} onAction={handleAction} />
       <MenuItemRow
         icon={<PrintIcon sx={{ fontSize: 18 }} />}
         label="Print..."
-        shortcut="Ctrl+P"
+        shortcut="Cmd+P"
         onClick={() => handleAction('print')}
       />
       <MenuItemRow
         icon={<SearchIcon sx={{ fontSize: 18 }} />}
         label="Find in Page"
-        shortcut="Ctrl+F"
+        shortcut="Cmd+F"
         onClick={() => handleAction('find')}
       />
 
-      <Divider sx={{ borderColor: '#333', my: 0.5 }} />
+      <Divider sx={{ borderColor: 'rgba(0,0,0,0.12)', my: 0.5 }} />
 
       {/* Section 4: Developer Tools */}
       <MenuItemRow
@@ -193,7 +190,7 @@ const MenuOverlayRoot: React.FC = () => {
         onClick={() => handleAction('devtools')}
       />
 
-      <Divider sx={{ borderColor: '#333', my: 0.5 }} />
+      <Divider sx={{ borderColor: 'rgba(0,0,0,0.12)', my: 0.5 }} />
 
       {/* Section 5: Settings + Exit */}
       <MenuItemRow

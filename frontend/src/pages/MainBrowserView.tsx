@@ -759,8 +759,7 @@ const MainBrowserView: React.FC = () => {
                         <IconButton
                             onClick={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect();
-                                const dpr = window.devicePixelRatio || 1;
-                                const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                                const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                                 if (window.cefMessage) {
                                     window.cefMessage.send('cookie_panel_show', [iconRightOffset.toString(), currentDomain]);
                                 }
@@ -790,13 +789,11 @@ const MainBrowserView: React.FC = () => {
                 {/* Spacer to help center address bar */}
                 <Box sx={{ flex: 1 }} />
 
-                {/* Download Button - only shown when downloads exist */}
-                {hasDownloads && (
-                    <IconButton
+                {/* Download Button */}
+                <IconButton
                         onClick={(e) => {
                             const rect = e.currentTarget.getBoundingClientRect();
-                            const headerWidth = window.innerWidth;
-                            const iconRightOffset = Math.round(headerWidth - rect.right + rect.width / 2);
+                            const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                             window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
                         }}
                         size="small"
@@ -830,15 +827,13 @@ const MainBrowserView: React.FC = () => {
                             />
                         )}
                     </IconButton>
-                )}
 
                 {/* Wallet Button */}
                 <IconButton
                     onClick={(e) => {
                         console.log('Wallet panel toggle clicked');
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('toggle_wallet_panel', [
                             iconRightOffset.toString(),
                             unreadPaymentCount.toString(),
@@ -875,8 +870,7 @@ const MainBrowserView: React.FC = () => {
                 <IconButton
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('profile_panel_show', [iconRightOffset.toString()]);
                     }}
                     size="small"
@@ -907,8 +901,7 @@ const MainBrowserView: React.FC = () => {
                 <IconButton
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('menu_show', [iconRightOffset.toString()]);
                     }}
                     size="small"
