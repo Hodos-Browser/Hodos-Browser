@@ -148,6 +148,7 @@ if(APPLE)
     # macOS-specific files
     list(APPEND SOURCES
         cef_browser_shell_mac.mm
+        OverlayHelpers_mac.mm
         src/core/TabManager_mac.mm
         src/core/WindowManager_mac.mm
         src/core/WalletService_mac.cpp

@@ -87,6 +87,52 @@ extern std::string g_pendingModalDomain;
 // Forward declaration for cross-platform tab creation helper (defined later in file)
 static void CreateNewTabWithUrl(const std::string& url);
 
+static bool IsInternalFrontendUrl(const std::string& url) {
+    return url.rfind("http://127.0.0.1:5137", 0) == 0 ||
+           url.rfind("http://localhost:5137", 0) == 0 ||
+           url.rfind("hodos://", 0) == 0;
+}
+
+static Tab* GetZoomTargetTab() {
+    Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+    if (!active_tab || !active_tab->browser) {
+        return nullptr;
+    }
+
+    std::string url = active_tab->url;
+    if (url.empty() && active_tab->browser->GetMainFrame()) {
+        url = active_tab->browser->GetMainFrame()->GetURL().ToString();
+    }
+
+    if (IsInternalFrontendUrl(url)) {
+        LOG_WARNING_BROWSER("Ignoring native zoom for internal frontend page: " + url);
+        return nullptr;
+    }
+
+    return active_tab;
+}
+
+static int GetCurrentMenuZoomPercent() {
+    Tab* zoom_tab = GetZoomTargetTab();
+    if (!zoom_tab || !zoom_tab->browser) {
+        return 100;
+    }
+
+    double zoomLevel = zoom_tab->browser->GetHost()->GetZoomLevel();
+    return static_cast<int>(std::round(100.0 * std::pow(1.2, zoomLevel)));
+}
+
+static void SendCurrentZoomToMenuOverlay(CefRefPtr<CefBrowser> menu_browser) {
+    if (!menu_browser || !menu_browser->GetMainFrame()) {
+        return;
+    }
+
+    int zoomPercent = GetCurrentMenuZoomPercent();
+    std::string js =
+        "if (window.setMenuZoomLevel) { window.setMenuZoomLevel(" + std::to_string(zoomPercent) + "); }";
+    menu_browser->GetMainFrame()->ExecuteJavaScript(js, menu_browser->GetMainFrame()->GetURL(), 0);
+}
+
 // Global backup modal state management
 static bool g_backupModalShown = false;
 
@@ -1213,6 +1259,18 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "menu") {
         LOG_DEBUG_BROWSER("Menu overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+        SendCurrentZoomToMenuOverlay(browser);
+
+#ifdef __APPLE__
+        // Populate the OverlayBrowserRef so GenericOverlayView can forward events.
+        // SetMenuOverlayBrowser is defined in cef_browser_shell_mac.mm.
+        {
+            extern void SetMenuOverlayBrowser(CefRefPtr<CefBrowser> browser);
+            SetMenuOverlayBrowser(browser);
+            LOG_DEBUG_BROWSER("Menu overlay OverlayBrowserRef populated via SetMenuOverlayBrowser");
+        }
+#endif
+
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -2063,37 +2121,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             ShowMenuOverlay(iconRightOffset, GetOwnerWindow());
         }
 
-        // Inject current zoom level into menu overlay
-        CefRefPtr<CefBrowser> menu_browser = GetMenuBrowser();
-        BrowserWindow* menu_zoom_win = GetOwnerWindow();
-        int menu_zoom_wid = menu_zoom_win ? menu_zoom_win->window_id : 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(menu_zoom_wid);
-        if (menu_browser && menu_browser->GetMainFrame() && active_tab && active_tab->browser) {
-            double zoomLevel = active_tab->browser->GetHost()->GetZoomLevel();
-            // Convert CEF zoom level to percentage (0.0 = 100%, each 0.5 step ≈ +25%)
-            int zoomPercent = static_cast<int>(100.0 * pow(1.2, zoomLevel));
-            std::string js = "if (window.setMenuZoomLevel) { window.setMenuZoomLevel(" + std::to_string(zoomPercent) + "); }";
-            menu_browser->GetMainFrame()->ExecuteJavaScript(js, menu_browser->GetMainFrame()->GetURL(), 0);
-        }
+        SendCurrentZoomToMenuOverlay(GetMenuBrowser());
 
         LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #elif defined(__APPLE__)
-        extern void CreateSettingsMenuOverlay();
-        extern void ShowSettingsMenuOverlay();
-        extern void HideSettingsMenuOverlay();
-        extern bool IsSettingsMenuOverlayVisible();
-        extern bool WasSettingsMenuJustHidden();
-
-        if (IsSettingsMenuOverlayVisible() || WasSettingsMenuJustHidden()) {
-            if (IsSettingsMenuOverlayVisible()) {
-                HideSettingsMenuOverlay();
-            }
-            return true;
-        }
-
-        // Create each time (simple approach matching cookie panel)
-        CreateSettingsMenuOverlay();
-        LOG_DEBUG_BROWSER("Settings menu overlay shown (macOS)");
+        extern void CreateMenuOverlayMac(int iconRightOffset);
+        CreateMenuOverlayMac(iconRightOffset);
+        LOG_DEBUG_BROWSER("Menu overlay shown (macOS) with iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -2104,9 +2138,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         HideMenuOverlay();
         LOG_DEBUG_BROWSER("Menu overlay hidden");
 #elif defined(__APPLE__)
-        extern void HideSettingsMenuOverlay();
-        HideSettingsMenuOverlay();
-        LOG_DEBUG_BROWSER("Settings menu overlay hidden (macOS)");
+        extern void HideMenuOverlay();
+        HideMenuOverlay();
+        LOG_DEBUG_BROWSER("Menu overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -2121,65 +2155,25 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("Menu action received: " + action);
 
         // Auto-hide menu first
-#ifdef _WIN32
         extern void HideMenuOverlay();
         HideMenuOverlay();
-#elif defined(__APPLE__)
-        extern void HideSettingsMenuOverlay();
-        HideSettingsMenuOverlay();
-#endif
-
-        // Helper lambda to create a tab with current window dimensions
-#ifdef _WIN32
-        auto createTabHelper = [this](const std::string& url) {
-            BrowserWindow* menuWin = GetOwnerWindow();
-            HWND menuHwnd = menuWin ? menuWin->hwnd : nullptr;
-            int menuWid = menuWin ? menuWin->window_id : 0;
-            if (!menuHwnd) {
-                extern HWND g_hwnd;
-                menuHwnd = g_hwnd;
-            }
-            RECT rect;
-            GetClientRect(menuHwnd, &rect);
-            int width = rect.right - rect.left;
-            int height = rect.bottom - rect.top;
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
-            int tabHeight = height - shellHeight;
-            TabManager::GetInstance().CreateTab(url, menuHwnd, 0, shellHeight, width, tabHeight, menuWid);
-        };
-#endif
 
         // Dispatch actions
         if (action == "new_tab") {
-#ifdef _WIN32
-            createTabHelper("");  // Always NTP
-#elif defined(__APPLE__)
-            CreateNewTabWithUrl("");
-#endif
+            CreateNewTabWithUrl("");  // Always NTP
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "history") {
-#ifdef _WIN32
-            createTabHelper("http://127.0.0.1:5137/browser-data");
-#elif defined(__APPLE__)
             CreateNewTabWithUrl("http://127.0.0.1:5137/browser-data");
-#endif
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "settings") {
-#ifdef _WIN32
-            createTabHelper("http://127.0.0.1:5137/settings-page");
-#elif defined(__APPLE__)
-            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page");
-#endif
+            CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/general");
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "wallet") {
-#ifdef _WIN32
-            createTabHelper("http://127.0.0.1:5137/wallet");
-#elif defined(__APPLE__)
             CreateNewTabWithUrl("http://127.0.0.1:5137/wallet");
-#endif
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "about") {
-#ifdef _WIN32
-            createTabHelper("http://127.0.0.1:5137/settings-page/about");
-#elif defined(__APPLE__)
             CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/about");
-#endif
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "downloads") {
 #ifdef _WIN32
             extern void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
@@ -2193,15 +2187,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
             NotifyDownloadStateChanged();
 #elif defined(__APPLE__)
-            extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
-            extern bool IsDownloadPanelOverlayVisible();
-            extern void HideDownloadPanelOverlayMacOS();
-            if (IsDownloadPanelOverlayVisible()) {
-                HideDownloadPanelOverlayMacOS();
-            } else {
-                CreateDownloadPanelOverlayMacOS(100);
-                NotifyDownloadStateChanged();
-            }
+            CreateNewTabWithUrl("http://127.0.0.1:5137/downloads");
+            SimpleHandler::NotifyTabListChanged();
 #endif
         } else if (action == "find") {
             // Send find_show IPC to header browser
@@ -2227,24 +2214,24 @@ bool SimpleHandler::OnProcessMessageReceived(
                 active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
             }
         } else if (action == "zoom_in") {
-            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            auto* active_tab = GetZoomTargetTab();
             if (active_tab && active_tab->browser) {
                 double level = active_tab->browser->GetHost()->GetZoomLevel();
                 active_tab->browser->GetHost()->SetZoomLevel(level + 0.5);
             }
         } else if (action == "zoom_out") {
-            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            auto* active_tab = GetZoomTargetTab();
             if (active_tab && active_tab->browser) {
                 double level = active_tab->browser->GetHost()->GetZoomLevel();
                 active_tab->browser->GetHost()->SetZoomLevel(level - 0.5);
             }
         } else if (action == "zoom_reset") {
-            auto* active_tab = TabManager::GetInstance().GetActiveTab();
+            auto* active_tab = GetZoomTargetTab();
             if (active_tab && active_tab->browser) {
                 active_tab->browser->GetHost()->SetZoomLevel(0.0);
             }
         } else if (action == "fullscreen") {
-            // Toggle fullscreen
+            // Toggle fullscreen via Windows API
 #ifdef _WIN32
             extern HWND g_hwnd;
             extern bool g_is_fullscreen;
@@ -2266,25 +2253,20 @@ bool SimpleHandler::OnProcessMessageReceived(
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
 #elif defined(__APPLE__)
-            extern void ToggleFullScreenMacOS();
-            ToggleFullScreenMacOS();
+            extern void ToggleMainWindowFullscreen();
+            ToggleMainWindowFullscreen();
 #endif
         } else if (action == "exit") {
 #ifdef _WIN32
             extern HWND g_hwnd;
             PostMessage(g_hwnd, WM_CLOSE, 0, 0);
 #elif defined(__APPLE__)
-            extern void ShutdownApplication();
-            ShutdownApplication();
+            extern void ShowQuitConfirmationAndShutdown();
+            ShowQuitConfirmationAndShutdown();
 #endif
         } else if (action == "settings_privacy") {
-#ifdef _WIN32
-            createTabHelper("http://127.0.0.1:5137/settings-page/privacy");
-#elif defined(__APPLE__)
-            extern void HideCookiePanelOverlay();
-            HideCookiePanelOverlay();
             CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/privacy");
-#endif
+            SimpleHandler::NotifyTabListChanged();
         } else if (action == "bookmarks") {
             // TODO: bookmarks page
             LOG_DEBUG_BROWSER("Bookmarks action not yet implemented");
@@ -3536,7 +3518,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "zoom_in") {
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        auto* active_tab = GetZoomTargetTab();
         if (active_tab && active_tab->browser) {
             double level = active_tab->browser->GetHost()->GetZoomLevel();
             active_tab->browser->GetHost()->SetZoomLevel(level + 0.5);
@@ -3545,7 +3527,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "zoom_out") {
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        auto* active_tab = GetZoomTargetTab();
         if (active_tab && active_tab->browser) {
             double level = active_tab->browser->GetHost()->GetZoomLevel();
             active_tab->browser->GetHost()->SetZoomLevel(level - 0.5);
@@ -3554,7 +3536,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "zoom_reset") {
-        auto* active_tab = TabManager::GetInstance().GetActiveTab();
+        auto* active_tab = GetZoomTargetTab();
         if (active_tab && active_tab->browser) {
             active_tab->browser->GetHost()->SetZoomLevel(0.0);
         }
