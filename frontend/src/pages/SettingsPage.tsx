@@ -46,12 +46,13 @@ const SettingsPage: React.FC = () => {
   }, []);
 
   return (
-    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#121212', color: '#e0e0e0' }}>
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#0f1117', color: '#e0e0e0' }}>
       {/* Sidebar */}
       <Box
         sx={{
           width: 240,
-          borderRight: '1px solid #333',
+          bgcolor: '#111827',
+          borderRight: '1px solid #2a2d35',
           py: 2,
           overflowY: 'auto',
           flexShrink: 0,

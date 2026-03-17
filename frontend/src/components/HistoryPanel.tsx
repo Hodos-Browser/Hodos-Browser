@@ -168,17 +168,26 @@ export function HistoryPanel() {
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 2 }}>
       {/* Header */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
-        <Typography variant="h5" component="h2">
+        <Typography variant="h5" component="h2" sx={{ color: '#e0e0e0' }}>
           Browsing History
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           <FormControl size="small" sx={{ minWidth: 140 }}>
-            <InputLabel id="time-range-label">Time Range</InputLabel>
+            <InputLabel id="time-range-label" sx={{ color: '#888', '&.Mui-focused': { color: '#a67c00' } }}>Time Range</InputLabel>
             <Select
               labelId="time-range-label"
               value={timeRange}
               label="Time Range"
               onChange={(e) => setTimeRange(e.target.value as TimeRange)}
+              sx={{
+                bgcolor: '#1e1e1e',
+                color: '#e0e0e0',
+                '& .MuiOutlinedInput-notchedOutline': { borderColor: '#444' },
+                '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#666' },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#a67c00' },
+                '& .MuiSvgIcon-root': { color: '#888' },
+              }}
+              MenuProps={{ PaperProps: { sx: { bgcolor: '#2a2a2a', color: '#e0e0e0' } } }}
             >
               <MenuItem value="hour">Last hour</MenuItem>
               <MenuItem value="day">Last 24 hours</MenuItem>
@@ -205,33 +214,45 @@ export function HistoryPanel() {
         value={searchTerm}
         onChange={(e) => handleSearch(e.target.value)}
         InputProps={{
-          startAdornment: <SearchIcon sx={{ mr: 1, color: 'action.active' }} />
+          startAdornment: <SearchIcon sx={{ mr: 1, color: '#888' }} />
         }}
-        sx={{ mb: 2 }}
+        sx={{
+          mb: 2,
+          '& .MuiOutlinedInput-root': {
+            bgcolor: '#1e1e1e',
+            color: '#e0e0e0',
+            '& fieldset': { borderColor: '#444' },
+            '&:hover fieldset': { borderColor: '#666' },
+            '&.Mui-focused fieldset': { borderColor: '#a67c00' },
+          },
+          '& .MuiInputLabel-root': { color: '#888' },
+          '& .MuiInputLabel-root.Mui-focused': { color: '#a67c00' },
+          '& input::placeholder': { color: '#888', opacity: 1 },
+        }}
         size="small"
       />
 
       {/* Info */}
       {!loading && !error && (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        <Typography variant="body2" sx={{ mb: 1, color: '#888' }}>
           {filteredHistory.length} {filteredHistory.length === 1 ? 'entry' : 'entries'}
           {timeRange !== 'all' && ` (${getTimeRangeLabel()})`}
           {filteredHistory.length > ITEMS_PER_PAGE && ` • Showing ${startIndex}-${endIndex}`}
         </Typography>
       )}
 
-      <Divider sx={{ mb: 2 }} />
+      <Divider sx={{ mb: 2, borderColor: '#333' }} />
 
       {/* Loading State */}
       {loading && (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-          <CircularProgress />
+          <CircularProgress sx={{ color: '#a67c00' }} />
         </Box>
       )}
 
       {/* Error State */}
       {error && (
-        <Paper sx={{ p: 2, bgcolor: 'error.light', color: 'error.contrastText' }}>
+        <Paper sx={{ p: 2, bgcolor: 'rgba(211, 47, 47, 0.15)', color: '#e57373' }}>
           <Typography variant="body2">{error}</Typography>
         </Paper>
       )}
@@ -241,7 +262,7 @@ export function HistoryPanel() {
         <Box sx={{ flex: 1, overflow: 'auto' }}>
           {paginatedHistory.length === 0 ? (
             <Box sx={{ textAlign: 'center', py: 4 }}>
-              <Typography variant="body1" color="text.secondary">
+              <Typography variant="body1" sx={{ color: '#888' }}>
                 No history entries found
               </Typography>
             </Box>
@@ -253,7 +274,8 @@ export function HistoryPanel() {
                   disablePadding
                   sx={{
                     borderBottom: index < paginatedHistory.length - 1 ? '1px solid' : 'none',
-                    borderColor: 'divider'
+                    borderColor: '#333',
+                    '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
                   }}
                   secondaryAction={
                     <IconButton
@@ -261,6 +283,7 @@ export function HistoryPanel() {
                       onClick={() => handleDelete(entry.url)}
                       size="small"
                       title="Delete this entry"
+                      sx={{ color: '#666', '&:hover': { color: '#e57373' } }}
                     >
                       <Delete fontSize="small" />
                     </IconButton>
@@ -271,10 +294,11 @@ export function HistoryPanel() {
                       console.log('📚 Navigating to:', entry.url);
                       window.hodosBrowser?.navigation?.navigate(entry.url);
                     }}
+                    sx={{ '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' } }}
                   >
                     <ListItemText
                       primary={
-                        <Typography variant="body1" noWrap>
+                        <Typography variant="body1" noWrap sx={{ color: '#e0e0e0' }}>
                           {entry.title || entry.url}
                         </Typography>
                       }
@@ -283,20 +307,20 @@ export function HistoryPanel() {
                           <Typography
                             component="span"
                             variant="body2"
-                            color="text.secondary"
-                            sx={{ display: 'block' }}
+                            sx={{ display: 'block', color: '#888' }}
                             noWrap
                           >
                             {entry.url}
                           </Typography>
                           <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center' }}>
-                            <Typography component="span" variant="caption" color="text.secondary">
+                            <Typography component="span" variant="caption" sx={{ color: '#666' }}>
                               {formatDate(entry.visitTime)}
                             </Typography>
                             <Chip
                               label={`${entry.visitCount} ${entry.visitCount === 1 ? 'visit' : 'visits'}`}
                               size="small"
                               variant="outlined"
+                              sx={{ borderColor: '#444', color: '#888' }}
                             />
                           </Box>
                         </Box>
@@ -313,7 +337,7 @@ export function HistoryPanel() {
       {/* Pagination */}
       {!loading && !error && totalPages > 1 && (
         <>
-          <Divider sx={{ mt: 2, mb: 1 }} />
+          <Divider sx={{ mt: 2, mb: 1, borderColor: '#333' }} />
           <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', py: 1 }}>
             <MuiPagination
               count={totalPages}
@@ -323,6 +347,10 @@ export function HistoryPanel() {
               size="small"
               showFirstButton
               showLastButton
+              sx={{
+                '& .MuiPaginationItem-root': { color: '#e0e0e0' },
+                '& .MuiPaginationItem-root.Mui-selected': { bgcolor: 'rgba(166, 124, 0, 0.15)' },
+              }}
             />
           </Box>
         </>
@@ -332,13 +360,14 @@ export function HistoryPanel() {
       <Dialog
         open={confirmClearOpen}
         onClose={() => setConfirmClearOpen(false)}
+        PaperProps={{ sx: { bgcolor: '#1e1e1e' } }}
       >
-        <DialogTitle>
+        <DialogTitle sx={{ color: '#e0e0e0' }}>
           Clear browsing history?
         </DialogTitle>
         <DialogContent>
-          <DialogContentText>
-            {timeRange === 'all' 
+          <DialogContentText sx={{ color: '#888' }}>
+            {timeRange === 'all'
               ? 'This will permanently delete all your browsing history. This action cannot be undone.'
               : `This will permanently delete your browsing history from the ${getTimeRangeLabel()}. This action cannot be undone.`
             }

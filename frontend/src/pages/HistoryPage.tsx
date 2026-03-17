@@ -1,5 +1,12 @@
 import { useState, useEffect } from 'react';
-import { Box, Container, Typography, Paper, Tabs, Tab } from '@mui/material';
+import {
+  Box,
+  Typography,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+} from '@mui/material';
 import {
   History as HistoryIcon,
   Cookie,
@@ -10,10 +17,22 @@ import { HistoryPanel } from '../components/HistoryPanel';
 import { CookiesPanel } from '../components/CookiesPanel';
 import { CachePanel } from '../components/CachePanel';
 
+interface Section {
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+}
+
+const sections: Section[] = [
+  { id: 'history', label: 'History', icon: <HistoryIcon /> },
+  { id: 'cookies', label: 'Cookies', icon: <Cookie /> },
+  { id: 'cache', label: 'Cache & Storage', icon: <Storage /> },
+];
+
 export function HistoryPage() {
   const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get('tab') === 'cookies' ? 1 : searchParams.get('tab') === 'cache' ? 2 : 0;
-  const [tabIndex, setTabIndex] = useState(initialTab);
+  const initialSection = searchParams.get('tab') === 'cookies' ? 'cookies' : searchParams.get('tab') === 'cache' ? 'cache' : 'history';
+  const [activeSection, setActiveSection] = useState(initialSection);
 
   useEffect(() => {
     document.title = 'Hodos Browser Data';
@@ -22,55 +41,75 @@ export function HistoryPage() {
   }, []);
 
   return (
-    <Box
-      sx={{
-        minHeight: '100vh',
-        bgcolor: '#f5f5f5',
-        py: 3,
-      }}
-    >
-      <Container maxWidth="lg">
-        <Paper
-          elevation={0}
-          sx={{
-            bgcolor: 'white',
-            borderRadius: 2,
-            overflow: 'hidden',
-            minHeight: '80vh',
-          }}
-        >
-          <Box sx={{ borderBottom: '1px solid rgba(0, 0, 0, 0.12)', p: 3, pb: 0, bgcolor: '#fafafa' }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-              <img src="/Hodos_Black_Icon.svg" alt="" style={{ height: 40 }} />
-              <Typography variant="h4" component="h1" sx={{ fontWeight: 500 }}>
-                Browsing Data
-              </Typography>
-            </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
-              View and manage your browsing history, cookies, and cache
-            </Typography>
-            <Tabs
-              value={tabIndex}
-              onChange={(_e, newValue) => setTabIndex(newValue)}
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#0f1117', color: '#e0e0e0' }}>
+      {/* Sidebar */}
+      <Box
+        sx={{
+          width: 240,
+          bgcolor: '#111827',
+          borderRight: '1px solid #2a2d35',
+          py: 2,
+          overflowY: 'auto',
+          flexShrink: 0,
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, mb: 2 }}>
+          <img src="/Hodos_Gold_Icon.svg" alt="Hodos" style={{ width: 24, height: 24 }} />
+          <Typography
+            variant="h6"
+            sx={{
+              color: '#a67c00',
+              fontWeight: 600,
+              fontSize: '1.1rem',
+            }}
+          >
+            Browser Data
+          </Typography>
+        </Box>
+        <List sx={{ px: 1 }}>
+          {sections.map((section) => (
+            <ListItemButton
+              key={section.id}
+              selected={activeSection === section.id}
+              onClick={() => setActiveSection(section.id)}
               sx={{
-                '& .MuiTab-root': {
-                  textTransform: 'none',
-                  minHeight: 48,
-                  fontWeight: 500,
+                borderRadius: 1,
+                mb: 0.5,
+                py: 1,
+                '&.Mui-selected': {
+                  bgcolor: 'rgba(166, 124, 0, 0.15)',
+                  color: '#a67c00',
+                  '&:hover': { bgcolor: 'rgba(166, 124, 0, 0.2)' },
                 },
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
               }}
             >
-              <Tab icon={<HistoryIcon />} iconPosition="start" label="History" />
-              <Tab icon={<Cookie />} iconPosition="start" label="Cookies" />
-              <Tab icon={<Storage />} iconPosition="start" label="Cache" />
-            </Tabs>
-          </Box>
+              <ListItemIcon sx={{ minWidth: 36, color: 'inherit' }}>
+                {section.icon}
+              </ListItemIcon>
+              <ListItemText
+                primary={section.label}
+                primaryTypographyProps={{ fontSize: '0.88rem' }}
+              />
+            </ListItemButton>
+          ))}
+        </List>
+      </Box>
 
-          {tabIndex === 0 && <HistoryPanel />}
-          {tabIndex === 1 && <CookiesPanel />}
-          {tabIndex === 2 && <CachePanel />}
-        </Paper>
-      </Container>
+      {/* Main Content */}
+      <Box
+        sx={{
+          flex: 1,
+          overflowY: 'auto',
+          overflowX: 'hidden',
+        }}
+      >
+        <Box sx={{ maxWidth: 780, mx: 'auto', p: 4 }}>
+          {activeSection === 'history' && <HistoryPanel />}
+          {activeSection === 'cookies' && <CookiesPanel />}
+          {activeSection === 'cache' && <CachePanel />}
+        </Box>
+      </Box>
     </Box>
   );
 }
