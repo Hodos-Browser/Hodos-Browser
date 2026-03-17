@@ -5,36 +5,57 @@ import SearchIcon from '@mui/icons-material/Search';
 import { useOmniboxSuggestions } from '../hooks/useOmniboxSuggestions';
 import type { Suggestion } from '../types/omnibox';
 
-/**
- * OmniboxOverlayRoot - Renders the omnibox autocomplete suggestions.
- *
- * Receives query updates via 'omniboxQueryUpdate' window event from address bar.
- * Receives arrow key navigation via 'omniboxSelect' window event.
- * Sends autocomplete suggestion back via cefMessage.
- */
 const OmniboxOverlayRoot: React.FC = () => {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const { suggestions, loading, search } = useOmniboxSuggestions();
 
-  // Track suggestions length for arrow key clamping
   const suggestionsRef = useRef(suggestions);
   suggestionsRef.current = suggestions;
 
-  // Set body data attribute for CEF-level cursor fix
+  // Keep a stable previous suggestions list to avoid flashing empty state
+  const [displaySuggestions, setDisplaySuggestions] = useState<Suggestion[]>([]);
+  const [contentVisible, setContentVisible] = useState(false);
+
+  useEffect(() => {
+    if (suggestions.length > 0) {
+      setDisplaySuggestions(suggestions);
+      setContentVisible(true);
+    } else if (!loading && query) {
+      // Only show empty state after loading finishes, with a brief delay
+      const timer = setTimeout(() => {
+        setDisplaySuggestions([]);
+        setContentVisible(true);
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [suggestions, loading, query]);
+
+  // Fade in when query starts, fade out when cleared
+  useEffect(() => {
+    if (query) {
+      setContentVisible(true);
+    } else {
+      setContentVisible(false);
+      // Clear suggestions after fade out
+      const timer = setTimeout(() => setDisplaySuggestions([]), 200);
+      return () => clearTimeout(timer);
+    }
+  }, [query]);
+
   useEffect(() => {
     document.body.setAttribute('data-overlay', 'omnibox');
+    document.body.style.background = 'transparent';
+    document.documentElement.style.background = 'transparent';
     return () => {
       document.body.removeAttribute('data-overlay');
     };
   }, []);
 
-  // Listen for query updates from address bar
   useEffect(() => {
     const handleQueryUpdate = (event: Event) => {
       const customEvent = event as CustomEvent<{ query: string }>;
       const newQuery = customEvent.detail.query;
-      console.log('Omnibox received query update:', newQuery);
       setQuery(newQuery);
       search(newQuery);
     };
@@ -45,12 +66,10 @@ const OmniboxOverlayRoot: React.FC = () => {
     };
   }, [search]);
 
-  // Reset selectedIndex when suggestions change (user typed new text)
   useEffect(() => {
     setSelectedIndex(-1);
   }, [suggestions]);
 
-  // Listen for arrow key navigation from address bar
   useEffect(() => {
     const handleSelect = (event: Event) => {
       const customEvent = event as CustomEvent<{ direction: string }>;
@@ -58,13 +77,11 @@ const OmniboxOverlayRoot: React.FC = () => {
       const maxIndex = suggestionsRef.current.length - 1;
 
       setSelectedIndex(prev => {
-        let next: number;
         if (direction === 'down') {
-          next = prev < maxIndex ? prev + 1 : maxIndex;
+          return prev < maxIndex ? prev + 1 : maxIndex;
         } else {
-          next = prev > -1 ? prev - 1 : -1;
+          return prev > -1 ? prev - 1 : -1;
         }
-        return next;
       });
     };
 
@@ -74,7 +91,6 @@ const OmniboxOverlayRoot: React.FC = () => {
     };
   }, []);
 
-  // Send selected suggestion back to address bar via IPC when arrow keys change selection
   useEffect(() => {
     if (!window.cefMessage) return;
 
@@ -87,52 +103,43 @@ const OmniboxOverlayRoot: React.FC = () => {
     }
   }, [selectedIndex]);
 
-  // Reset focus when query changes (clears any persistent MUI focus states)
   useEffect(() => {
-    // Force blur any focused elements when query changes
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
   }, [query]);
-
-  // Autocomplete IPC is now sent directly from useOmniboxSuggestions hook
-  // to avoid React useEffect deduplication when the same string is set twice
-
-  // Don't render anything if no query
-  if (!query) {
-    return null;
-  }
 
   return (
     <Box
       sx={{
         width: '100%',
         height: '100%',
-        backgroundColor: 'background.paper',
-        boxShadow: 3,
-        borderRadius: 1,
+        backgroundColor: '#1a1d23',
         overflow: 'hidden',
+        opacity: contentVisible && query ? 1 : 0,
+        transition: 'opacity 0.15s ease',
       }}
     >
-      {loading && suggestions.length === 0 ? (
+      {loading && displaySuggestions.length === 0 ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', p: 2 }}>
-          <CircularProgress size={20} />
+          <CircularProgress size={20} sx={{ color: '#a67c00' }} />
         </Box>
-      ) : suggestions.length === 0 ? (
+      ) : displaySuggestions.length === 0 ? (
         <Box sx={{ p: 2 }}>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{ color: '#9ca3af' }}>
             No suggestions
           </Typography>
         </Box>
       ) : (
         <List dense sx={{ py: 0.5 }}>
-          {suggestions.map((suggestion, index) => (
+          {displaySuggestions.map((suggestion, index) => (
             <SuggestionItem
-              key={`${query}-${suggestion.type}-${suggestion.url}-${index}`}
+              key={`${suggestion.type}-${suggestion.url}-${index}`}
               suggestion={suggestion}
               query={query}
               isFirst={index === 0}
               isSelected={index === selectedIndex}
+              index={index}
             />
           ))}
         </List>
@@ -141,9 +148,6 @@ const OmniboxOverlayRoot: React.FC = () => {
   );
 };
 
-/**
- * Favicon icon with fallback to HistoryIcon on load error
- */
 const FaviconIcon: React.FC<{ url: string }> = ({ url }) => {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -152,12 +156,12 @@ const FaviconIcon: React.FC<{ url: string }> = ({ url }) => {
   }, [url]);
 
   if (!domain || failed) {
-    return <HistoryIcon fontSize="small" color="action" />;
+    return <HistoryIcon fontSize="small" sx={{ color: '#9ca3af' }} />;
   }
 
   return (
     <>
-      {!loaded && <HistoryIcon fontSize="small" color="action" />}
+      {!loaded && <HistoryIcon fontSize="small" sx={{ color: '#9ca3af' }} />}
       <img
         src={`https://www.google.com/s2/favicons?domain=${domain}&sz=16`}
         width={16}
@@ -176,37 +180,34 @@ interface SuggestionItemProps {
   query: string;
   isFirst: boolean;
   isSelected: boolean;
+  index: number;
 }
 
-/**
- * Individual suggestion item with icon and highlighted text
- */
-const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected }) => {
+const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected, index }) => {
   const handleClick = () => {
-    // Navigate to the suggestion URL
     if (window.cefMessage) {
-      if (suggestion.type === 'google') {
-        // For Google suggestions, search for the term
-        window.cefMessage.send('navigate', suggestion.url);
-      } else {
-        // For history, navigate directly
-        window.cefMessage.send('navigate', suggestion.url);
-      }
-      // Hide overlay after navigation
+      window.cefMessage.send('navigate', suggestion.url);
       window.cefMessage.send('omnibox_hide');
     }
   };
 
-  // Highlight matching text in title
   const highlightedTitle = highlightMatch(suggestion.title, query);
 
-  // For history, show URL below title
   const secondaryText = suggestion.type === 'history'
     ? formatUrl(suggestion.url)
     : null;
 
   return (
-    <ListItem disablePadding>
+    <ListItem
+      disablePadding
+      sx={{
+        animation: `omniboxSlideIn 0.12s ease-out ${index * 0.02}s both`,
+        '@keyframes omniboxSlideIn': {
+          '0%': { opacity: 0, transform: 'translateY(-4px)' },
+          '100%': { opacity: 1, transform: 'translateY(0)' },
+        },
+      }}
+    >
       <ListItemButton
         onClick={handleClick}
         disableRipple
@@ -215,26 +216,27 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
           px: 1.5,
           cursor: 'pointer !important',
           userSelect: 'none',
-          backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
+          backgroundColor: isSelected ? '#1a1a2e' : 'transparent',
+          transition: 'background-color 0.1s ease',
           '&:hover': {
-            backgroundColor: isSelected ? '#e0e0e0' : 'action.hover',
+            backgroundColor: isSelected ? '#1a1a2e' : '#1f2937',
           },
           '&:focus': {
-            backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
+            backgroundColor: isSelected ? '#1a1a2e' : 'transparent',
           },
           '&:active': {
-            backgroundColor: 'action.hover',
+            backgroundColor: '#1f2937',
           },
           '&.Mui-focusVisible': {
-            backgroundColor: isSelected ? '#e8e8e8' : 'transparent',
+            backgroundColor: isSelected ? '#1a1a2e' : 'transparent',
           },
         }}
       >
-        <ListItemIcon sx={{ minWidth: 36, cursor: 'pointer' }}>
+        <ListItemIcon sx={{ minWidth: 36, cursor: 'pointer', color: '#9ca3af' }}>
           {suggestion.type === 'history' ? (
             <FaviconIcon url={suggestion.url} />
           ) : (
-            <SearchIcon fontSize="small" color="action" />
+            <SearchIcon fontSize="small" sx={{ color: '#9ca3af' }} />
           )}
         </ListItemIcon>
         <ListItemText
@@ -244,13 +246,12 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
           primaryTypographyProps={{
             variant: 'body2',
             noWrap: true,
-            sx: { fontWeight: isFirst || isSelected ? 500 : 400, cursor: 'pointer' }
+            sx: { fontWeight: isFirst || isSelected ? 500 : 400, cursor: 'pointer', color: '#f0f0f0' }
           }}
           secondaryTypographyProps={{
             variant: 'caption',
             noWrap: true,
-            color: 'text.disabled',
-            sx: { cursor: 'pointer' }
+            sx: { cursor: 'pointer', color: '#9ca3af' }
           }}
         />
       </ListItemButton>
@@ -258,9 +259,6 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
   );
 };
 
-/**
- * Highlight matching characters in text
- */
 function highlightMatch(text: string, query: string): React.ReactNode {
   if (!query) return text;
 
@@ -283,9 +281,6 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   );
 }
 
-/**
- * Format URL for display (remove protocol, truncate)
- */
 function formatUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -293,7 +288,6 @@ function formatUrl(url: string): string {
     if (formatted.endsWith('/')) {
       formatted = formatted.slice(0, -1);
     }
-    // Truncate if too long
     if (formatted.length > 60) {
       formatted = formatted.slice(0, 57) + '...';
     }

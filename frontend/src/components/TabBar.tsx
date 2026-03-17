@@ -231,12 +231,16 @@ export const TabBar: React.FC<TabBarProps> = ({
       sx={{
         display: 'flex',
         alignItems: 'center',
-        backgroundColor: '#111827',
+        backgroundColor: '#0f1117',
         paddingX: '6px',
         height: 42,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,
+        // Hide next tab's left divider when hovering a tab (first-child targets tab body, not corner elements)
+        '& > *:hover + * > *:first-child::after': {
+          opacity: '0 !important',
+        },
         // Custom scrollbar styling
         '&::-webkit-scrollbar': {
           height: 3,
@@ -266,10 +270,10 @@ export const TabBar: React.FC<TabBarProps> = ({
       {/* Render all tabs */}
       {tabs.map((tab, index) => {
         const isActive = tab.id === activeTabId;
-        // Show divider if this tab and the next are both inactive
-        const nextTab = tabs[index + 1];
-        const nextIsActive = nextTab ? nextTab.id === activeTabId : false;
-        const showDivider = !isActive && !nextIsActive && index < tabs.length - 1;
+        // Show left divider if this tab and the previous tab are both inactive
+        const prevTab = tabs[index - 1];
+        const prevIsActive = prevTab ? prevTab.id === activeTabId : false;
+        const showDivider = !isActive && !prevIsActive && index > 0;
         const isDragged = dragIndex === index;
 
         // Drop indicator: show on the side closest to where the dragged tab is coming from

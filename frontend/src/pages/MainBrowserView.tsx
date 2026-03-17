@@ -483,6 +483,7 @@ const MainBrowserView: React.FC = () => {
                 overflow: 'hidden',
                 margin: '-8px',
                 padding: 0,
+                bgcolor: '#0f1117',
             }}
         >
             {/* Tab Bar */}
@@ -499,10 +500,11 @@ const MainBrowserView: React.FC = () => {
 
             {/* Top Navigation Bar */}
             <Toolbar sx={{
-                bgcolor: '#0f1117',
-                borderBottom: '1px solid #2a2d35',
-                minHeight: '54px !important',
-                height: '54px',
+                bgcolor: '#111827',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                borderRadius: '0',
+                minHeight: '53px !important',
+                height: '53px',
                 flexShrink: 0,
                 px: 1,
                 py: 0,
@@ -932,8 +934,6 @@ const MainBrowserView: React.FC = () => {
                 )}
             </Toolbar>
 
-            {/* Spacer fills any remaining header HWND space below toolbar */}
-            <Box sx={{ flex: 1, bgcolor: '#0f1117' }} />
 
             {/* Toast for quick-block */}
             <Snackbar

@@ -114,7 +114,7 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
     window_info.SetAsChild((__bridge void*)tabView, cefRect);
 
     CefBrowserSettings browser_settings;
-    browser_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+    browser_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
 
     // Create browser asynchronously
     bool result = CefBrowserHost::CreateBrowser(

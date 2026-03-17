@@ -2168,6 +2168,7 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     [g_settings_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_overlay_window setReleasedWhenClosed:NO];
     [g_settings_overlay_window setHasShadow:NO];
+    [g_settings_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_settings_overlay_window ordered:NSWindowAbove];
@@ -2328,6 +2329,7 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     [g_cookie_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_cookie_panel_overlay_window setReleasedWhenClosed:NO];
     [g_cookie_panel_overlay_window setHasShadow:NO];
+    [g_cookie_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_cookie_panel_overlay_window ordered:NSWindowAbove];
@@ -2428,6 +2430,7 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     [g_wallet_overlay_window setAcceptsMouseMovedEvents:YES];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
     [g_wallet_overlay_window setHasShadow:YES];
+    [g_wallet_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Child window of main window (moves/minimizes together)
     [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
@@ -2508,6 +2511,7 @@ void CreateBackupOverlayWithSeparateProcess() {
     [g_backup_overlay_window setIgnoresMouseEvents:NO];
     [g_backup_overlay_window setReleasedWhenClosed:NO];
     [g_backup_overlay_window setHasShadow:NO];
+    [g_backup_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_backup_overlay_window ordered:NSWindowAbove];
@@ -2578,6 +2582,7 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
     [g_brc100_auth_overlay_window setIgnoresMouseEvents:NO];
     [g_brc100_auth_overlay_window setReleasedWhenClosed:NO];
     [g_brc100_auth_overlay_window setHasShadow:NO];
+    [g_brc100_auth_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_brc100_auth_overlay_window ordered:NSWindowAbove];
@@ -2682,6 +2687,7 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
     [g_notification_overlay_window setIgnoresMouseEvents:NO];
     [g_notification_overlay_window setReleasedWhenClosed:NO];
     [g_notification_overlay_window setHasShadow:NO];
+    [g_notification_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     [g_main_window addChildWindow:g_notification_overlay_window ordered:NSWindowAbove];
 
@@ -2829,6 +2835,7 @@ void CreateSettingsMenuOverlay() {
     [g_settings_menu_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_menu_overlay_window setReleasedWhenClosed:NO];
     [g_settings_menu_overlay_window setHasShadow:YES];
+    [g_settings_menu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_settings_menu_overlay_window setAcceptsMouseMovedEvents:YES];
 
     SettingsMenuOverlayView* contentView = [[SettingsMenuOverlayView alloc]
@@ -2922,12 +2929,13 @@ bool WasOmniboxJustHidden() {
 void ShowOmniboxOverlayMacOS() {
     if (g_omnibox_overlay_window) {
         // Reposition in case window moved/resized since creation
-        NSRect mainFrame = [g_main_window frame];
-        int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+        NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+        int omniboxWidth = (int)(contentScreen.size.width * 0.69);
         if (omniboxWidth < 400) omniboxWidth = 400;
         int omniboxHeight = 420;
-        CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+        CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
+        CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+        CGFloat overlayY = contentTop - 78 - omniboxHeight;
         [g_omnibox_overlay_window setFrame:NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight) display:YES];
 
         [g_omnibox_overlay_window orderFront:nil];
@@ -2939,14 +2947,15 @@ void ShowOmniboxOverlayMacOS() {
 void CreateOmniboxOverlayMacOS() {
     LOG_INFO("Creating omnibox overlay (macOS)");
 
-    NSRect mainFrame = [g_main_window frame];
+    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
     // Position below header (99px) spanning most of the window width
-    int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+    int omniboxWidth = (int)(contentScreen.size.width * 0.69);
     if (omniboxWidth < 400) omniboxWidth = 400;
     int omniboxHeight = 420;
     // Center horizontally, position below header
-    CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+    CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
+    CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+    CGFloat overlayY = contentTop - 78 - omniboxHeight;
     NSRect omniboxFrame = NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight);
 
     // Keep-alive: don't destroy existing window
@@ -2971,7 +2980,8 @@ void CreateOmniboxOverlayMacOS() {
     [g_omnibox_overlay_window setLevel:NSNormalWindowLevel];
     [g_omnibox_overlay_window setIgnoresMouseEvents:NO];
     [g_omnibox_overlay_window setReleasedWhenClosed:NO];
-    [g_omnibox_overlay_window setHasShadow:YES];
+    [g_omnibox_overlay_window setHasShadow:NO];
+    [g_omnibox_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
 
     // CRITICAL: Make child of main window so it doesn't steal focus from address bar
@@ -3104,6 +3114,7 @@ void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
     [g_download_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_download_panel_overlay_window setReleasedWhenClosed:NO];
     [g_download_panel_overlay_window setHasShadow:YES];
+    [g_download_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_download_panel_overlay_window setAcceptsMouseMovedEvents:YES];
 
     DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
@@ -3233,6 +3244,7 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     [g_profile_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_profile_panel_overlay_window setReleasedWhenClosed:NO];
     [g_profile_panel_overlay_window setHasShadow:YES];
+    [g_profile_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_profile_panel_overlay_window setAcceptsMouseMovedEvents:YES];
 
     DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
@@ -3960,7 +3972,7 @@ int main(int argc, char* argv[]) {
         CefRefPtr<SimpleHandler> webview_handler = new SimpleHandler("webview");
 
         CefBrowserSettings webview_settings;
-        webview_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+        webview_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
 
         bool webview_created = CefBrowserHost::CreateBrowser(
             webview_window_info,
@@ -4124,6 +4136,7 @@ void CreateMenuOverlayMac(int iconRightOffset) {
     [g_menu_overlay_window setIgnoresMouseEvents:NO];
     [g_menu_overlay_window setReleasedWhenClosed:NO];
     [g_menu_overlay_window setHasShadow:YES];
+    [g_menu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Child window of main window (moves/minimizes together)
     [g_main_window addChildWindow:g_menu_overlay_window ordered:NSWindowAbove];

@@ -1,6 +1,6 @@
 /* Transaction Form Styles */
 .transaction-form {
-  background: #ffffff;
+  background: #111827;
   border-radius: 12px;
   padding: 24px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
@@ -13,12 +13,12 @@
   align-items: center;
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid #2a2d35;
 }
 
 .form-header h3 {
   margin: 0;
-  color: #1f2937;
+  color: #f0f0f0;
   font-size: 20px;
   font-weight: 600;
 }
@@ -42,14 +42,14 @@
 }
 
 .error-message {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: rgba(211, 47, 47, 0.1);
+  border: 1px solid rgba(211, 47, 47, 0.3);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 16px;
   display: flex;
   align-items: center;
-  color: #dc2626;
+  color: #ef5350;
 }
 
 .error-icon {
@@ -71,7 +71,7 @@
 .form-group > label {
   font-size: 15px;
   font-weight: 700;
-  color: #374151;
+  color: #9ca3af;
   margin-bottom: 8px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -79,16 +79,19 @@
 
 .form-group input {
   padding: 12px 16px;
-  border: 1px solid #d1d5db;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
   font-size: 16px;
+  background: #111827;
+  color: #f0f0f0;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .form-group input:focus {
   outline: none;
   border-color: #a67c00;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  background: #1a1d23;
+  box-shadow: 0 0 0 3px rgba(166, 124, 0, 0.1);
 }
 
 .form-group input.error {
@@ -96,7 +99,7 @@
 }
 
 .form-group input:disabled {
-  background-color: #f9fafb;
+  background-color: #1a1d23;
   color: #6b7280;
   cursor: not-allowed;
 }
@@ -150,18 +153,18 @@
 
 .max-button {
   padding: 12px 16px;
-  background: #f3f4f6;
-  border: 1px solid #d1d5db;
+  background: #111827;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 500;
-  color: #374151;
+  color: #f0f0f0;
   cursor: pointer;
   transition: background-color 0.2s;
 }
 
 .max-button:hover:not(:disabled) {
-  background: #e5e7eb;
+  background: #1f2937;
 }
 
 .max-button:disabled {
@@ -182,18 +185,18 @@
 
 .fee-presets button {
   padding: 8px 16px;
-  background: #f9fafb;
-  border: 1px solid #d1d5db;
+  background: #1a1d23;
+  border: 1px solid #2a2d35;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 500;
-  color: #374151;
+  color: #9ca3af;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .fee-presets button:hover:not(:disabled) {
-  background: #f3f4f6;
+  background: #1f2937;
 }
 
 .fee-presets button.active {
@@ -338,7 +341,7 @@
 
 /* Transaction History Styles */
 .transaction-history {
-  background: #ffffff;
+  background: #111827;
   border-radius: 12px;
   padding: 24px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
@@ -350,20 +353,20 @@
   align-items: center;
   margin-bottom: 20px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid #2a2d35;
 }
 
 .history-header h3 {
   margin: 0;
-  color: #1f2937;
+  color: #f0f0f0;
   font-size: 18px;
   font-weight: 600;
 }
 
 .transaction-count {
   font-size: 12px;
-  color: #6b7280;
-  background: #f3f4f6;
+  color: #9ca3af;
+  background: #111827;
   padding: 4px 8px;
   border-radius: 4px;
 }
@@ -408,8 +411,8 @@
 }
 
 .transaction-item {
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
+  background: #1a1d23;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
   padding: 16px;
   cursor: pointer;
@@ -417,8 +420,8 @@
 }
 
 .transaction-item:hover {
-  background: #f3f4f6;
-  border-color: #d1d5db;
+  background: #1f2937;
+  border-color: #2a2d35;
 }
 
 .transaction-main {
@@ -453,7 +456,7 @@
 .transaction-amount {
   font-size: 16px;
   font-weight: 600;
-  color: #1f2937;
+  color: #f0f0f0;
 }
 
 .transaction-details {
@@ -465,7 +468,7 @@
 
 .transaction-recipient {
   font-size: 14px;
-  color: #374151;
+  color: #9ca3af;
   font-family: monospace;
 }
 
@@ -496,7 +499,7 @@
 }
 
 .transaction-modal {
-  background: white;
+  background: #1a1d23;
   border-radius: 12px;
   padding: 24px;
   max-width: 500px;
@@ -511,12 +514,12 @@
   align-items: center;
   margin-bottom: 20px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid #2a2d35;
 }
 
 .modal-header h3 {
   margin: 0;
-  color: #1f2937;
+  color: #f0f0f0;
   font-size: 18px;
   font-weight: 600;
 }
@@ -536,7 +539,7 @@
 }
 
 .close-button:hover {
-  color: #374151;
+  color: #f0f0f0;
 }
 
 .modal-content {
@@ -555,13 +558,13 @@
 .detail-label {
   font-size: 14px;
   font-weight: 500;
-  color: #374151;
+  color: #9ca3af;
   min-width: 120px;
 }
 
 .detail-value {
   font-size: 14px;
-  color: #1f2937;
+  color: #f0f0f0;
   text-align: right;
   word-break: break-all;
 }
@@ -592,7 +595,7 @@
 
 .page-header h1 {
   margin: 0;
-  color: #1f2937;
+  color: #f0f0f0;
   font-size: 28px;
   font-weight: 700;
 }
@@ -604,18 +607,18 @@
 
 .toggle-history-button, .refresh-button {
   padding: 8px 16px;
-  background: #f3f4f6;
-  border: 1px solid #d1d5db;
+  background: #111827;
+  border: 1px solid #2a2d35;
   border-radius: 6px;
   font-size: 14px;
   font-weight: 500;
-  color: #374151;
+  color: #f0f0f0;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .toggle-history-button:hover, .refresh-button:hover:not(:disabled) {
-  background: #e5e7eb;
+  background: #1f2937;
 }
 
 .refresh-button:disabled {
@@ -647,8 +650,8 @@
 }
 
 .error-overlay .error-message {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: rgba(211, 47, 47, 0.1);
+  border: 1px solid rgba(211, 47, 47, 0.3);
   border-radius: 8px;
   padding: 16px;
   display: flex;
@@ -681,7 +684,7 @@
 
 .wallet-tabs {
   display: flex;
-  border-bottom: 1px solid #374151;
+  border-bottom: 1px solid #2a2d35;
   margin-bottom: 16px;
 }
 

@@ -240,24 +240,24 @@ const BackupOverlayRoot: React.FC = () => {
       }}>
       {/* Simple backup modal without Material-UI */}
       <div style={{
-        backgroundColor: 'white',
-        color: 'black',
+        backgroundColor: '#1a1d23',
+        color: '#f0f0f0',
         padding: '30px',
         borderRadius: '10px',
         maxWidth: '500px',
         width: '90%',
-        boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
         fontFamily: 'Arial, sans-serif'
       }}>
-        <h2 style={{ margin: '0 0 20px 0', color: '#1976d2' }}>🔐 Wallet Backup Required</h2>
+        <h2 style={{ margin: '0 0 20px 0', color: '#a67c00' }}>Wallet Backup Required</h2>
 
-        <p style={{ margin: '0 0 20px 0', color: '#666' }}>
+        <p style={{ margin: '0 0 20px 0', color: '#9ca3af' }}>
           Your wallet has been created! Please save your seed phrase in a safe place.
           This is the only way to recover your wallet if you lose access.
         </p>
 
         <div style={{ marginBottom: '20px' }}>
-          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#f0f0f0' }}>
             Seed Phrase (Mnemonic):
           </label>
           <textarea
@@ -267,11 +267,13 @@ const BackupOverlayRoot: React.FC = () => {
               width: '100%',
               height: '80px',
               padding: '10px',
-              border: '1px solid #ccc',
+              border: '1px solid #2a2d35',
               borderRadius: '4px',
               fontFamily: 'monospace',
               fontSize: '14px',
-              resize: 'none'
+              resize: 'none',
+              backgroundColor: '#111827',
+              color: '#f0f0f0',
             }}
           />
           <button
@@ -282,8 +284,8 @@ const BackupOverlayRoot: React.FC = () => {
             style={{
               marginTop: '8px',
               padding: '8px 16px',
-              backgroundColor: '#1976d2',
-              color: 'white',
+              backgroundColor: '#a67c00',
+              color: '#f0f0f0',
               border: 'none',
               borderRadius: '4px',
               cursor: 'pointer'
@@ -294,7 +296,7 @@ const BackupOverlayRoot: React.FC = () => {
         </div>
 
         <div style={{ marginBottom: '20px' }}>
-          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#f0f0f0' }}>
             Wallet Address:
           </label>
           <input
@@ -304,16 +306,18 @@ const BackupOverlayRoot: React.FC = () => {
             style={{
               width: '100%',
               padding: '10px',
-              border: '1px solid #ccc',
+              border: '1px solid #2a2d35',
               borderRadius: '4px',
               fontFamily: 'monospace',
-              fontSize: '14px'
+              fontSize: '14px',
+              backgroundColor: '#111827',
+              color: '#f0f0f0',
             }}
           />
         </div>
 
         <div style={{ marginBottom: '20px' }}>
-          <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+          <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', color: '#f0f0f0' }}>
             <input
               type="checkbox"
               checked={wallet.backedUp}
