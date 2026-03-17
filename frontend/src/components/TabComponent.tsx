@@ -60,7 +60,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         height: 32,
         boxSizing: 'border-box',
         opacity: isDragged ? 0.4 : 1,
-        backgroundColor: isActive ? '#ffffff' : 'transparent',
+        backgroundColor: isActive ? '#1a1a2e' : 'transparent',
         borderRadius: isActive ? '7px' : '6px',
         cursor: 'pointer',
         transition: isDragged !== undefined ? 'background-color 0.15s ease' : 'background-color 0.15s ease',
@@ -102,11 +102,11 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           top: '6px',
           bottom: '6px',
           width: '1px',
-          backgroundColor: 'rgba(0, 0, 0, 0.15)',
+          backgroundColor: 'rgba(255, 255, 255, 0.1)',
         } : {},
 
         '&:hover': {
-          backgroundColor: isActive ? '#ffffff' : 'rgba(255, 255, 255, 0.45)',
+          backgroundColor: isActive ? '#1a1a2e' : 'rgba(255, 255, 255, 0.08)',
           '& .tab-close-btn': {
             opacity: 1,
           },
@@ -122,7 +122,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         {showSpinner ? (
           <CircularProgress
             size={12}
-            sx={{ color: 'rgba(0, 0, 0, 0.4)' }}
+            sx={{ color: '#9ca3af' }}
           />
         ) : tab.favicon ? (
           <img
@@ -139,7 +139,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
             }}
           />
         ) : (
-          <PublicIcon sx={{ fontSize: 14, color: 'rgba(0, 0, 0, 0.35)' }} />
+          <PublicIcon sx={{ fontSize: 14, color: '#6b7280' }} />
         )}
       </Box>
 
@@ -153,7 +153,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           whiteSpace: 'nowrap',
           fontSize: 12,
           fontWeight: isActive ? 500 : 400,
-          color: isActive ? 'rgba(0, 0, 0, 0.87)' : 'rgba(0, 0, 0, 0.55)',
+          color: isActive ? '#f0f0f0' : '#9ca3af',
           lineHeight: 1,
         }}
       >
@@ -173,12 +173,12 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           transition: 'opacity 0.15s ease, background-color 0.15s ease',
           flexShrink: 0,
           '&:hover': {
-            backgroundColor: 'rgba(0, 0, 0, 0.1)',
+            backgroundColor: 'rgba(255, 255, 255, 0.15)',
             opacity: 1,
           },
         }}
       >
-        <CloseIcon sx={{ fontSize: 12, color: 'rgba(0, 0, 0, 0.6)' }} />
+        <CloseIcon sx={{ fontSize: 12, color: '#9ca3af' }} />
       </IconButton>
     </Box>
   );

@@ -2,10 +2,6 @@ import { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
-  List,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
 } from '@mui/material';
 import {
   History as HistoryIcon,
@@ -45,18 +41,19 @@ export function HistoryPage() {
       {/* Sidebar */}
       <Box
         sx={{
-          width: 240,
+          width: 220,
+          minWidth: 220,
           bgcolor: '#111827',
           borderRight: '1px solid #2a2d35',
-          py: 2,
+          display: 'flex',
+          flexDirection: 'column',
           overflowY: 'auto',
           flexShrink: 0,
         }}
       >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, mb: 2 }}>
+        <Box sx={{ height: 56, px: 2, borderBottom: '1px solid #2a2d35', display: 'flex', alignItems: 'center', gap: 1, boxSizing: 'border-box' }}>
           <img src="/Hodos_Gold_Icon.svg" alt="Hodos" style={{ width: 24, height: 24 }} />
           <Typography
-            variant="h6"
             sx={{
               color: '#a67c00',
               fontWeight: 600,
@@ -66,48 +63,77 @@ export function HistoryPage() {
             Browser Data
           </Typography>
         </Box>
-        <List sx={{ px: 1 }}>
-          {sections.map((section) => (
-            <ListItemButton
-              key={section.id}
-              selected={activeSection === section.id}
-              onClick={() => setActiveSection(section.id)}
-              sx={{
-                borderRadius: 1,
-                mb: 0.5,
-                py: 1,
-                '&.Mui-selected': {
-                  bgcolor: 'rgba(166, 124, 0, 0.15)',
-                  color: '#a67c00',
-                  '&:hover': { bgcolor: 'rgba(166, 124, 0, 0.2)' },
-                },
-                '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
-              }}
-            >
-              <ListItemIcon sx={{ minWidth: 36, color: 'inherit' }}>
-                {section.icon}
-              </ListItemIcon>
-              <ListItemText
-                primary={section.label}
-                primaryTypographyProps={{ fontSize: '0.88rem' }}
-              />
-            </ListItemButton>
-          ))}
-        </List>
+        <Box sx={{ py: 1.5, flex: 1 }}>
+          {sections.map((section) => {
+            const isActive = activeSection === section.id;
+            return (
+              <Box
+                key={section.id}
+                onClick={() => setActiveSection(section.id)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1.5,
+                  px: 2.5,
+                  py: 1.5,
+                  cursor: 'pointer',
+                  color: isActive ? '#a67c00' : '#9ca3af',
+                  fontSize: '0.88rem',
+                  fontWeight: isActive ? 600 : 500,
+                  borderLeft: `3px solid ${isActive ? '#a67c00' : 'transparent'}`,
+                  bgcolor: isActive ? '#1a1a2e' : 'transparent',
+                  transition: 'all 0.15s ease',
+                  userSelect: 'none',
+                  '&:hover': {
+                    bgcolor: isActive ? '#1a1a2e' : '#1f2937',
+                    color: isActive ? '#a67c00' : '#f0f0f0',
+                  },
+                }}
+              >
+                <Box sx={{ width: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'inherit', fontSize: 18 }}>
+                  {section.icon}
+                </Box>
+                <Box sx={{ flex: 1 }}>{section.label}</Box>
+              </Box>
+            );
+          })}
+        </Box>
       </Box>
 
       {/* Main Content */}
       <Box
         sx={{
           flex: 1,
-          overflowY: 'auto',
-          overflowX: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
         }}
       >
-        <Box sx={{ maxWidth: 780, mx: 'auto', p: 4 }}>
-          {activeSection === 'history' && <HistoryPanel />}
-          {activeSection === 'cookies' && <CookiesPanel />}
-          {activeSection === 'cache' && <CachePanel />}
+        {/* Content Header */}
+        <Box
+          sx={{
+            height: 56,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            px: 3,
+            borderBottom: '1px solid #2a2d35',
+            bgcolor: '#111827',
+            boxSizing: 'border-box',
+            flexShrink: 0,
+          }}
+        >
+          <Typography sx={{ fontSize: 18, fontWeight: 600, color: '#f0f0f0' }}>
+            {sections.find(s => s.id === activeSection)?.label || 'Browser Data'}
+          </Typography>
+        </Box>
+
+        <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+          <Box sx={{ maxWidth: 780, mx: 'auto', p: 4 }}>
+            {activeSection === 'history' && <HistoryPanel />}
+            {activeSection === 'cookies' && <CookiesPanel />}
+            {activeSection === 'cache' && <CachePanel />}
+          </Box>
         </Box>
       </Box>
     </Box>
