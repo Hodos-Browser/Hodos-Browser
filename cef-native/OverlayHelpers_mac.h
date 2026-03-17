@@ -27,6 +27,13 @@ void InstallAppFocusLossHandler();
 // Adjusts proposed overlay frame to stay within the visible screen area.
 NSRect ClampOverlayToScreen(NSRect proposedFrame);
 
+// Toolbar overlay positioning (INFRA-05)
+// Returns an NSRect for a dropdown overlay that is flush-right and
+// flush-below-header relative to the given main window.
+// headerHeight should be 96 (the header view height in points).
+NSRect CalculateToolbarOverlayFrame(NSWindow* mainWindow, CGFloat overlayWidth,
+                                     CGFloat overlayHeight, CGFloat headerHeight);
+
 // C++ bridge for CefBrowser storage in ObjC views.
 // ObjC cannot hold CefRefPtr directly, so we wrap it in a C++ struct
 // and store a void* pointer in the ObjC view.

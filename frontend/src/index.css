@@ -84,6 +84,13 @@ body[data-overlay="omnibox"] .MuiListItemButton-root {
   cursor: pointer !important;
 }
 
+/* Transparent background for overlay subprocesses */
+body[data-overlay="menu"],
+body[data-overlay="menu"] #root {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
 /* Prevent CEF from maintaining focus states */
 body[data-overlay="omnibox"] *:focus,
 body[data-overlay="omnibox"] *:focus-visible,

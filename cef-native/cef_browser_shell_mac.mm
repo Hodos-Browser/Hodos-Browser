@@ -1865,18 +1865,13 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 - (void)windowDidMove:(NSNotification *)notification {
     NSRect mainFrame = [g_main_window frame];
 
-    // Settings overlay: 450x450 right-side popup, right edge under icon
+    // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        CGFloat pw = 450, ph = 450;
-        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
-        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
-        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        [g_settings_overlay_window setFrame:sf display:YES];
     }
 
-    // Wallet overlay: full-window
-    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        [g_wallet_overlay_window setFrame:mainFrame display:YES];
-    }
+    // Wallet is a child window — moves automatically
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
@@ -1921,22 +1916,15 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     // Resize and notify overlay windows
     NSRect mainFrame = [g_main_window frame];
 
-    // Settings overlay: 450x450 right-side popup, right edge under icon
+    // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        CGFloat pw = 450, ph = 450;
-        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
-        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
-        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        [g_settings_overlay_window setFrame:sf display:YES];
         CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
         if (settings) settings->GetHost()->WasResized();
     }
 
-    // Wallet overlay: full-window
-    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        [g_wallet_overlay_window setFrame:mainFrame display:YES];
-        CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-        if (wallet) wallet->GetHost()->WasResized();
-    }
+    // Wallet is a child window — moves automatically, no resize needed for fixed-size panel
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
@@ -2148,18 +2136,11 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating settings overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_settings_icon_right_offset = iconRightOffset;
 
-    // Get main window frame for overlay alignment
-    NSRect mainFrame = [g_main_window frame];
-
-    // Right-side popup panel, right edge aligned under icon
     CGFloat panelWidth = 450;
     CGFloat panelHeight = 450;
-    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
-    LOG_INFO("📐 Settings panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+    LOG_INFO("📐 Settings panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
 
     // Destroy existing overlay if present
@@ -2302,14 +2283,8 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
     if (g_cookie_panel_overlay_window) {
         g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
-        // Reposition based on current main window frame and icon offset
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 400;
-        CGFloat panelHeight = 500;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
-
+        // Reposition: flush right, flush below header
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
         [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
         [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallCookiePanelClickOutsideMonitor();
@@ -2321,18 +2296,11 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
-    // Get main window frame for overlay alignment
-    NSRect mainFrame = [g_main_window frame];
-
-    // Right-side popup panel, right edge aligned under icon
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
-    LOG_INFO("Cookie panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+    LOG_INFO("Cookie panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
 
     // Destroy existing overlay if present
@@ -2406,12 +2374,35 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Cookie panel overlay created successfully");
 }
 
+void CloseWalletOverlay() {
+    if (!g_wallet_overlay_window) return;
+
+    LOG_INFO("Closing wallet overlay (click-outside)");
+    RemoveClickOutsideMonitor(g_wallet_overlay_window);
+
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    if (wallet_browser) {
+        wallet_browser->GetHost()->CloseBrowser(false);
+    }
+
+    if (g_main_window) {
+        [g_main_window removeChildWindow:g_wallet_overlay_window];
+    }
+    [g_wallet_overlay_window orderOut:nil];
+    [g_wallet_overlay_window close];
+    g_wallet_overlay_window = nullptr;
+}
+
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_wallet_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
-    LOG_INFO("📐 Overlay dimensions: " + std::to_string((int)mainFrame.size.width) + " x " + std::to_string((int)mainFrame.size.height));
+    // Position: fixed-width panel, flush right, flush below header, full remaining height
+    CGFloat walletWidth = 400;
+    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+    CGFloat walletHeight = contentScreen.size.height - 96;
+    NSRect walletFrame = CalculateToolbarOverlayFrame(g_main_window, walletWidth, walletHeight, 96);
+    LOG_INFO("📐 Wallet overlay: " + std::to_string((int)walletFrame.size.width) + " x " + std::to_string((int)walletFrame.size.height));
 
     if (g_wallet_overlay_window) {
         LOG_INFO("🔄 Destroying existing wallet overlay");
@@ -2420,7 +2411,7 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     }
 
     g_wallet_overlay_window = [[WalletOverlayWindow alloc]
-        initWithContentRect:mainFrame
+        initWithContentRect:walletFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -2432,19 +2423,17 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
 
     [g_wallet_overlay_window setOpaque:NO];
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];  // Must be floating to stay above main window (not a child)
+    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
     [g_wallet_overlay_window setAcceptsMouseMovedEvents:YES];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
-    [g_wallet_overlay_window setHasShadow:NO];
+    [g_wallet_overlay_window setHasShadow:YES];
 
-    // CRITICAL: Do NOT make this a child window - child windows cannot become key windows
-    // and therefore cannot receive keyboard events (input fields won't work)
-    // Window position sync is handled in MainWindowDelegate::windowDidMove/windowDidResize
-    // [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
+    // Child window of main window (moves/minimizes together)
+    [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
 
     WalletOverlayView* contentView = [[WalletOverlayView alloc]
-        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
+        initWithFrame:NSMakeRect(0, 0, walletFrame.size.width, walletFrame.size.height)];
     [g_wallet_overlay_window setContentView:contentView];
 
     CefWindowInfo window_info;
@@ -2460,8 +2449,8 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     CefRefPtr<SimpleHandler> handler(new SimpleHandler("wallet"));
     CefRefPtr<MyOverlayRenderHandler> render_handler =
         new MyOverlayRenderHandler((__bridge void*)contentView,
-                                   (int)mainFrame.size.width,
-                                   (int)mainFrame.size.height);
+                                   (int)walletFrame.size.width,
+                                   (int)walletFrame.size.height);
     handler->SetRenderHandler(render_handler);
 
     std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
@@ -2485,39 +2474,10 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     // makeKeyAndOrderFront already handles focus transfer for floating windows.
 
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
-
-    // Make content view first responder for keyboard events
     [g_wallet_overlay_window makeFirstResponder:contentView];
+    InstallClickOutsideMonitor(g_wallet_overlay_window);
 
-    NSLog(@"🔍 Wallet overlay is key window: %d", [g_wallet_overlay_window isKeyWindow]);
-    NSLog(@"🔍 First responder: %@", [g_wallet_overlay_window firstResponder]);
-
-    // Global event monitor - captures ALL mouse events in the app
-    static id walletGlobalMonitor = nil;
-    if (walletGlobalMonitor) {
-        [NSEvent removeMonitor:walletGlobalMonitor];
-    }
-    NSString* monLogPath = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject]
-                            stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"];
-    std::string monLogPathStr = [monLogPath UTF8String];
-
-    walletGlobalMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
-        (NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved |
-         NSEventMaskMouseEntered | NSEventMaskMouseExited)
-        handler:^NSEvent*(NSEvent* event) {
-            std::ofstream dbg(monLogPathStr, std::ios::app);
-            NSWindow* w = [event window];
-            dbg << "GLOBAL MONITOR: type=" << (int)[event type]
-                << " window=" << (void*)w
-                << " isWallet=" << (w == g_wallet_overlay_window ? 1 : 0)
-                << " isMain=" << (w == g_main_window ? 1 : 0)
-                << " at (" << [event locationInWindow].x << "," << [event locationInWindow].y << ")"
-                << std::endl;
-            dbg.close();
-            return event;
-        }];
-
-    LOG_INFO("✅ Wallet overlay created successfully (with global event monitor)");
+    LOG_INFO("✅ Wallet overlay created successfully");
 }
 
 void CreateBackupOverlayWithSeparateProcess() {
@@ -2841,14 +2801,10 @@ void ShowSettingsMenuOverlay() {
 void CreateSettingsMenuOverlay() {
     LOG_INFO("🎨 Creating settings menu overlay (macOS)");
 
-    // Settings menu is smaller (dropdown from settings button)
-    // Position in top-right corner
-    NSRect mainFrame = [g_main_window frame];
+    // Settings menu: flush right, flush below header
     int menuWidth = 300;
     int menuHeight = 480;
-    NSRect menuFrame = NSMakeRect(mainFrame.origin.x + mainFrame.size.width - menuWidth - 20,
-                                  mainFrame.origin.y + mainFrame.size.height - menuHeight - 60,
-                                  menuWidth, menuHeight);
+    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
 
     if (g_settings_menu_overlay_window) {
         LOG_INFO("🔄 Destroying existing settings menu overlay");
@@ -3109,12 +3065,8 @@ void ShowDownloadPanelOverlayMacOS(int iconRightOffset) {
     if (g_download_panel_overlay_window) {
         g_mac_download_panel_icon_right_offset = iconRightOffset;
 
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 400;
-        CGFloat panelHeight = 500;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        [g_download_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
+        [g_download_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallDownloadPanelClickOutsideMonitor();
@@ -3126,12 +3078,9 @@ void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating download panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_download_panel_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_download_panel_overlay_window) {
         [g_download_panel_overlay_window close];
@@ -3245,12 +3194,8 @@ void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
     if (g_profile_panel_overlay_window) {
         g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 300;
-        CGFloat panelHeight = 400;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        [g_profile_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 300, 400, 96);
+        [g_profile_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallProfilePanelClickOutsideMonitor();
@@ -3262,12 +3207,9 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
     CGFloat panelWidth = 300;
     CGFloat panelHeight = 400;
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_profile_panel_overlay_window) {
         [g_profile_panel_overlay_window close];
@@ -4153,19 +4095,11 @@ void CreateMenuOverlayMac(int iconRightOffset) {
         DestroyMenuOverlayWindow(true);
     }
 
-    NSRect mainFrame = [g_main_window frame];
     CGFloat menuWidth = 280;
     CGFloat menuHeight = 450;
 
-    // Position: below the toolbar, right edge aligned under the menu icon
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - menuWidth;
-    // Cocoa: Y=0 is bottom. Header is ~99px from top of window.
-    // Title bar is ~28px. So top of content = origin.y + height - 28 (approx).
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - menuHeight - 104;
-    NSRect menuFrame = NSMakeRect(overlayX, overlayY, menuWidth, menuHeight);
-
-    // Clamp to screen edges
-    menuFrame = ClampOverlayToScreen(menuFrame);
+    // Position: flush right, flush below header (96px header)
+    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
 
     LOG_INFO("Menu overlay frame: (" + std::to_string((int)menuFrame.origin.x) + ", "
              + std::to_string((int)menuFrame.origin.y) + ") "

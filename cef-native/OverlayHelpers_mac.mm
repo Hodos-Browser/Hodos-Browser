@@ -28,10 +28,12 @@ extern NSWindow* g_main_window;
 extern NSWindow* g_settings_overlay_window;
 extern NSWindow* g_settings_menu_overlay_window;
 extern NSWindow* g_menu_overlay_window;
+extern NSWindow* g_wallet_overlay_window;
 extern bool g_wallet_overlay_prevent_close;
 
 // Forward declarations for proper overlay cleanup (close browser before window)
 extern void HideMenuOverlay();
+extern void CloseWalletOverlay();
 
 // ============================================================================
 // INFRA-01: Click-Outside Detection
@@ -112,6 +114,13 @@ void InstallClickOutsideMonitor(NSWindow* overlayWindow) {
                     return;
                 }
 
+                if (overlay == g_wallet_overlay_window) {
+                    if (!g_wallet_overlay_prevent_close) {
+                        CloseWalletOverlay();
+                    }
+                    return;
+                }
+
                 // Ignore stale callbacks after another code path has already
                 // removed the monitor and torn down the overlay window.
                 NSValue* liveKey = [NSValue valueWithNonretainedObject:overlay];
@@ -138,6 +147,13 @@ void InstallClickOutsideMonitor(NSWindow* overlayWindow) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (overlay == g_menu_overlay_window) {
                     HideMenuOverlay();
+                    return;
+                }
+
+                if (overlay == g_wallet_overlay_window) {
+                    if (!g_wallet_overlay_prevent_close) {
+                        CloseWalletOverlay();
+                    }
                     return;
                 }
 
@@ -239,6 +255,30 @@ NSRect ClampOverlayToScreen(NSRect proposedFrame) {
     if (y + h > maxY) y = maxY - h;
 
     return NSMakeRect(x, y, w, h);
+}
+
+// ============================================================================
+// INFRA-05: Toolbar Overlay Positioning
+// ============================================================================
+// Positions an overlay flush-right and flush-below-header relative to the
+// main window. Uses the content view's screen rect to avoid guessing
+// the title bar height.
+
+NSRect CalculateToolbarOverlayFrame(NSWindow* mainWindow, CGFloat overlayWidth,
+                                     CGFloat overlayHeight, CGFloat headerHeight) {
+    // Get the content view's rect in screen coordinates — this excludes the title bar
+    NSRect contentScreen = [mainWindow convertRectToScreen:[[mainWindow contentView] frame]];
+
+    // Flush right: overlay's right edge = content area's right edge
+    CGFloat overlayX = contentScreen.origin.x + contentScreen.size.width - overlayWidth;
+
+    // Flush below header: overlay's top edge = content area's top edge minus header height
+    // Cocoa Y grows upward, so top of content = contentScreen.origin.y + contentScreen.size.height
+    CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+    CGFloat overlayY = contentTop - headerHeight - overlayHeight;
+
+    NSRect frame = NSMakeRect(overlayX, overlayY, overlayWidth, overlayHeight);
+    return ClampOverlayToScreen(frame);
 }
 
 // ============================================================================
