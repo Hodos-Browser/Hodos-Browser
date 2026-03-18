@@ -12,6 +12,8 @@ interface Certificate {
   fields: Record<string, string>;
   keyring: Record<string, string>;
   decrypted_fields: Record<string, string>;
+  publish_status: string; // "unpublished", "broadcast", "published"
+  publish_txid?: string;
   created_at: number;
 }
 
@@ -23,6 +25,7 @@ const CertificatesTab: React.FC = () => {
   const [expandedCert, setExpandedCert] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Certificate | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [publishingCert, setPublishingCert] = useState<string | null>(null); // serial_number of cert being published/unpublished
 
   const fetchCertificates = useCallback(async () => {
     try {
@@ -96,6 +99,93 @@ const CertificatesTab: React.FC = () => {
            cert.revocation_outpoint.length > 10;
   };
 
+  const getPublishStatusBadge = (cert: Certificate) => {
+    const status = cert.publish_status || 'unpublished';
+    switch (status) {
+      case 'published':
+        return <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(34,197,94,0.15)', color: '#22c55e' }}>Public</span>;
+      case 'broadcast':
+        return <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(234,179,8,0.15)', color: '#eab308' }}>Broadcast</span>;
+      default:
+        return <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(107,114,128,0.15)', color: '#6b7280' }}>Private</span>;
+    }
+  };
+
+  const handlePublish = async (cert: Certificate) => {
+    setPublishingCert(cert.serial_number);
+    setError(null);
+
+    try {
+      // Get all field names from decrypted_fields to reveal publicly
+      const fieldNames = Object.keys(cert.decrypted_fields || {});
+
+      const res = await fetch('http://127.0.0.1:31301/wallet/certificate/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: cert.type,
+          serial_number: cert.serial_number,
+          certifier: cert.certifier,
+          fields_to_reveal: fieldNames,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || `Publish failed (${res.status})`);
+      }
+
+      if (data.success) {
+        const statusMsg = data.publish_status === 'published'
+          ? 'Certificate published to BSV overlay.'
+          : 'Certificate broadcast to network. Overlay confirmation pending.';
+        setSuccess(`${cert.type_name}: ${statusMsg}`);
+        fetchCertificates();
+      } else {
+        throw new Error(data.error || 'Publish failed');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish certificate');
+    } finally {
+      setPublishingCert(null);
+    }
+  };
+
+  const handleUnpublish = async (cert: Certificate) => {
+    setPublishingCert(cert.serial_number);
+    setError(null);
+
+    try {
+      const res = await fetch('http://127.0.0.1:31301/wallet/certificate/unpublish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: cert.type,
+          serial_number: cert.serial_number,
+          certifier: cert.certifier,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || `Unpublish failed (${res.status})`);
+      }
+
+      if (data.success) {
+        setSuccess(`${cert.type_name} certificate unpublished.`);
+        fetchCertificates();
+      } else {
+        throw new Error(data.error || 'Unpublish failed');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unpublish certificate');
+    } finally {
+      setPublishingCert(null);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -115,7 +205,7 @@ const CertificatesTab: React.FC = () => {
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         if (data.is_published) {
-          throw new Error('This certificate is publicly visible on the BSV overlay. You must unpublish it before deleting. This feature is coming soon.');
+          throw new Error('This certificate is publicly visible on the BSV overlay. Unpublish it first before deleting.');
         }
         throw new Error(data.error || `Failed to delete (${res.status})`);
       }
@@ -194,6 +284,20 @@ const CertificatesTab: React.FC = () => {
                 {' '}from your wallet.
               </p>
 
+              {(deleteTarget.publish_status === 'published' || deleteTarget.publish_status === 'broadcast') && (
+                <div style={{
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: '4px',
+                  padding: '8px',
+                  marginBottom: '8px',
+                  color: '#ef4444',
+                  fontSize: '12px',
+                }}>
+                  This certificate is publicly visible. It will be unpublished automatically before deletion.
+                </div>
+              )}
+
               {hasRealRevocationOutpoint(deleteTarget) && (
                 <div style={{
                   background: 'rgba(234, 179, 8, 0.1)',
@@ -204,7 +308,7 @@ const CertificatesTab: React.FC = () => {
                   color: '#eab308',
                   fontSize: '12px',
                 }}>
-                  ⚠ This certificate has an on-chain record. Removing it from your wallet does not revoke it on the blockchain. The certifier ({deleteTarget.certifier_name}) may still have records of this certificate.
+                  This certificate has an on-chain record. Removing it from your wallet does not revoke it on the blockchain. The certifier ({deleteTarget.certifier_name}) may still have records of this certificate.
                 </div>
               )}
 
@@ -270,8 +374,9 @@ const CertificatesTab: React.FC = () => {
                 <th>Type</th>
                 <th>Identity</th>
                 <th>Certifier</th>
+                <th>Status</th>
                 <th>Issued</th>
-                <th style={{ width: '60px' }}>Actions</th>
+                <th style={{ width: '80px' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -289,31 +394,77 @@ const CertificatesTab: React.FC = () => {
                       {getPrimaryField(cert)}
                     </td>
                     <td>{cert.certifier_name}</td>
+                    <td>{getPublishStatusBadge(cert)}</td>
                     <td style={{ fontSize: '12px', color: '#9ca3af' }}>{formatDate(cert.created_at)}</td>
                     <td>
-                      <button
-                        title="Delete certificate"
-                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          cursor: 'pointer',
-                          color: '#ef4444',
-                          fontSize: '14px',
-                          padding: '4px 8px',
-                          borderRadius: '4px',
-                        }}
-                        onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}
-                        onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
-                      >
-                        🗑
-                      </button>
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        {/* Publish/Unpublish button */}
+                        {cert.publish_status === 'published' ? (
+                          <button
+                            title="Unpublish from overlay"
+                            onClick={(e) => { e.stopPropagation(); handleUnpublish(cert); }}
+                            disabled={publishingCert === cert.serial_number}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: publishingCert === cert.serial_number ? 'default' : 'pointer',
+                              color: publishingCert === cert.serial_number ? '#666' : '#eab308',
+                              fontSize: '13px',
+                              padding: '4px 6px',
+                              borderRadius: '4px',
+                              opacity: publishingCert === cert.serial_number ? 0.5 : 1,
+                            }}
+                            onMouseOver={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'rgba(234,179,8,0.1)'; }}
+                            onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                          >
+                            {publishingCert === cert.serial_number ? '...' : '🔒'}
+                          </button>
+                        ) : (
+                          <button
+                            title="Publish to BSV overlay"
+                            onClick={(e) => { e.stopPropagation(); handlePublish(cert); }}
+                            disabled={publishingCert === cert.serial_number}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: publishingCert === cert.serial_number ? 'default' : 'pointer',
+                              color: publishingCert === cert.serial_number ? '#666' : '#22c55e',
+                              fontSize: '13px',
+                              padding: '4px 6px',
+                              borderRadius: '4px',
+                              opacity: publishingCert === cert.serial_number ? 0.5 : 1,
+                            }}
+                            onMouseOver={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'rgba(34,197,94,0.1)'; }}
+                            onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                          >
+                            {publishingCert === cert.serial_number ? '...' : '🌐'}
+                          </button>
+                        )}
+                        {/* Delete button */}
+                        <button
+                          title="Delete certificate"
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#ef4444',
+                            fontSize: '14px',
+                            padding: '4px 6px',
+                            borderRadius: '4px',
+                          }}
+                          onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}
+                          onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                        >
+                          🗑
+                        </button>
+                      </div>
                     </td>
                   </tr>
 
                   {expandedCert === idx && (
                     <tr>
-                      <td colSpan={5} style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)' }}>
+                      <td colSpan={6} style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)' }}>
                         <div style={{ fontSize: '12px', lineHeight: '1.8' }}>
                           {/* Decrypted fields */}
                           {cert.decrypted_fields && Object.keys(cert.decrypted_fields).length > 0 && (
@@ -336,6 +487,19 @@ const CertificatesTab: React.FC = () => {
                               ))}
                             </div>
                           )}
+
+                          {/* Publish status detail */}
+                          <div style={{ marginBottom: '8px' }}>
+                            <strong style={{ color: '#d1d5db' }}>Visibility:</strong>
+                            <span style={{ marginLeft: '8px' }}>
+                              {getPublishStatusBadge(cert)}
+                            </span>
+                            {cert.publish_txid && (
+                              <span style={{ marginLeft: '8px', color: '#6b7280' }}>
+                                tx: <span className="wd-cert-hash" title={cert.publish_txid}>{truncateHash(cert.publish_txid)}</span>
+                              </span>
+                            )}
+                          </div>
 
                           {/* Technical details */}
                           <div style={{ color: '#6b7280' }}>

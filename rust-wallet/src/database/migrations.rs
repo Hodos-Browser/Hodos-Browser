@@ -766,3 +766,45 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     info!("   ✅ V11 migration applied (price at transaction time)");
     Ok(())
 }
+
+/// V12: Add certificate publish tracking columns
+///
+/// Adds columns to track whether a certificate has been published to the BSV overlay:
+/// - `publish_status`: 'unpublished' (default), 'broadcast' (tx on-chain), 'published' (overlay confirmed)
+/// - `publish_txid`: Transaction ID of the PushDrop publishing transaction
+/// - `publish_vout`: Output index of the PushDrop output (typically 0)
+pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    info!("   Adding certificate publish tracking columns...");
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(certificates)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !cols.iter().any(|c| c == "publish_status") {
+        conn.execute(
+            "ALTER TABLE certificates ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'unpublished'",
+            [],
+        )?;
+    }
+
+    if !cols.iter().any(|c| c == "publish_txid") {
+        conn.execute(
+            "ALTER TABLE certificates ADD COLUMN publish_txid TEXT",
+            [],
+        )?;
+    }
+
+    if !cols.iter().any(|c| c == "publish_vout") {
+        conn.execute(
+            "ALTER TABLE certificates ADD COLUMN publish_vout INTEGER DEFAULT 0",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V12 migration applied (certificate publish tracking)");
+    Ok(())
+}

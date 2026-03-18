@@ -302,6 +302,112 @@ pub fn encode(
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // Sprint 3-pre: PushDrop P2PK signing verification tests
+    // =========================================================================
+
+    /// Verify the "anyone" public key: PrivateKey(0x01) should produce
+    /// the secp256k1 generator point G.
+    #[test]
+    fn test_anyone_public_key() {
+        use secp256k1::{Secp256k1, SecretKey, PublicKey};
+
+        let mut privkey_bytes = [0u8; 32];
+        privkey_bytes[31] = 1; // PrivateKey(1)
+
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&privkey_bytes).unwrap();
+        let pubkey = PublicKey::from_secret_key(&secp, &secret);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+
+        // This is the secp256k1 generator point G (compressed)
+        assert_eq!(
+            pubkey_hex,
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+    }
+
+    /// Verify BRC-42 key derivation with the "anyone" counterparty produces
+    /// a valid key pair (child_privkey → child_pubkey matches derived pubkey).
+    #[test]
+    fn test_brc42_anyone_derivation_roundtrip() {
+        use secp256k1::{Secp256k1, SecretKey, PublicKey};
+
+        // Use a test master key (not real)
+        let master_privkey = hex::decode(
+            "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35"
+        ).unwrap();
+
+        let secp = Secp256k1::new();
+        let master_secret = SecretKey::from_slice(&master_privkey).unwrap();
+        let master_pubkey = PublicKey::from_secret_key(&secp, &master_secret).serialize().to_vec();
+
+        // Anyone pubkey (PrivateKey(1))
+        let mut anyone_privkey = [0u8; 32];
+        anyone_privkey[31] = 1;
+        let anyone_secret = SecretKey::from_slice(&anyone_privkey).unwrap();
+        let anyone_pubkey = PublicKey::from_secret_key(&secp, &anyone_secret).serialize().to_vec();
+
+        let invoice = "1-identity-1";
+
+        // Derive child private key (our perspective: master_priv + anyone_pub)
+        let child_privkey = crate::crypto::brc42::derive_child_private_key(
+            &master_privkey, &anyone_pubkey, invoice,
+        ).unwrap();
+
+        // Derive child public key (anyone's perspective: anyone_priv + master_pub)
+        let child_pubkey = crate::crypto::brc42::derive_child_public_key(
+            &anyone_privkey, &master_pubkey, invoice,
+        ).unwrap();
+
+        // Verify roundtrip: child_privkey should produce child_pubkey
+        let child_secret = SecretKey::from_slice(&child_privkey).unwrap();
+        let derived_pubkey = PublicKey::from_secret_key(&secp, &child_secret).serialize().to_vec();
+        assert_eq!(derived_pubkey, child_pubkey);
+        assert_eq!(child_pubkey.len(), 33);
+    }
+
+    /// Verify PushDrop P2PK signing pattern:
+    /// Encode PushDrop → create sighash → sign → verify.
+    /// The unlocking script for P2PK is just <signature> (no pubkey push).
+    #[test]
+    fn test_pushdrop_p2pk_sign_verify() {
+        use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
+        use sha2::{Sha256, Digest};
+
+        let secp = Secp256k1::new();
+
+        // Generate a key pair
+        let privkey_bytes = hex::decode(
+            "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35"
+        ).unwrap();
+        let secret = SecretKey::from_slice(&privkey_bytes).unwrap();
+        let pubkey = PublicKey::from_secret_key(&secp, &secret);
+        let pubkey_bytes = pubkey.serialize();
+
+        // Create PushDrop script with certificate data
+        let cert_data = br#"{"type":"test","subject":"02abc"}"#.to_vec();
+        let locking_script = encode(&[cert_data.clone()], &pubkey_bytes, LockPosition::Before).unwrap();
+
+        // Verify we can decode it back
+        let decoded = decode(&locking_script).unwrap();
+        assert_eq!(decoded.locking_public_key, pubkey_bytes.to_vec());
+        assert_eq!(decoded.fields[0], cert_data);
+
+        // Simulate P2PK signing: sign a hash with the private key
+        let test_sighash = Sha256::digest(b"test sighash preimage");
+        let message = Message::from_digest_slice(&test_sighash).unwrap();
+        let signature = secp.sign_ecdsa(&message, &secret);
+
+        // Verify with public key (this is what OP_CHECKSIG does)
+        assert!(secp.verify_ecdsa(&message, &signature, &pubkey).is_ok());
+
+        // P2PK unlocking script is just <sig_der + sighash_byte>
+        let sig_der = signature.serialize_der().to_vec();
+        assert!(sig_der.len() > 0);
+        // In a real tx, we'd append the sighash type byte (0x41)
+    }
+
     #[test]
     fn test_decode_before_position() {
         // Create a simple PushDrop script: [pubkey(33), OP_CHECKSIG, field1, OP_DROP]

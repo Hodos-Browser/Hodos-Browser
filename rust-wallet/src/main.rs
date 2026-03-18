@@ -27,6 +27,7 @@ mod authfetch;  // BRC-103 AuthFetch client for authenticated HTTP requests
 mod messagebox;  // MessageBox API client with BRC-2 encryption
 mod paymail;  // Paymail (bsvalias) client for human-readable address resolution
 mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 certificates)
+mod overlay;  // BSV Overlay Services client for certificate publish/unpublish
 
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
@@ -471,6 +472,8 @@ async fn main() -> std::io::Result<()> {
             .route("/relinquishCertificate", web::post().to(handlers::relinquish_certificate))  // Group C - Part 3
             .route("/discoverByIdentityKey", web::post().to(handlers::discover_by_identity_key))  // Group C - Part 4
             .route("/discoverByAttributes", web::post().to(handlers::discover_by_attributes))  // Group C - Part 4
+            .route("/wallet/certificate/publish", web::post().to(handlers::publish_certificate))  // Certificate publish to overlay
+            .route("/wallet/certificate/unpublish", web::post().to(handlers::unpublish_certificate))  // Certificate unpublish from overlay
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

@@ -554,6 +554,32 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
+    /// Update derivation prefix/suffix for an output (e.g., PushDrop outputs).
+    ///
+    /// Used when createAction creates a generic output that needs identity derivation
+    /// info set after the fact (for later signing during unpublish).
+    pub fn update_derivation(
+        &self,
+        output_id: i64,
+        prefix: Option<&str>,
+        suffix: Option<&str>,
+    ) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows = self.conn.execute(
+            "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2, updated_at = ?3 WHERE outputId = ?4",
+            rusqlite::params![prefix, suffix, now, output_id],
+        )?;
+
+        if rows > 0 {
+            info!("   ✅ Updated derivation for output_id={}: prefix={:?}, suffix={:?}", output_id, prefix, suffix);
+        }
+        Ok(rows)
+    }
+
     /// Update all outputs with a given txid (batch update after signing)
     ///
     /// # Arguments

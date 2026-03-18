@@ -16,6 +16,8 @@ pub use certificate_handlers::{
     prove_certificate,
     discover_by_identity_key,
     discover_by_attributes,
+    publish_certificate,
+    unpublish_certificate,
 };
 
 // ============================================================================
@@ -3372,6 +3374,18 @@ pub async fn create_action(
         }
     }
 
+    create_action_internal(state, req).await
+}
+
+/// Internal implementation of createAction — callable from other Rust handlers.
+///
+/// Handles: serialization lock, UTXO selection, tx building, signing, BEEF,
+/// broadcast, change output tracking, rollback on failure.
+/// Skips domain permission check (caller is responsible).
+pub(crate) async fn create_action_internal(
+    state: web::Data<AppState>,
+    req: CreateActionRequest,
+) -> HttpResponse {
     // ============================================================
     // SERIALIZATION LOCK: Only one createAction can run at a time.
     // This prevents race conditions where:
@@ -4787,9 +4801,14 @@ pub async fn create_action(
                sign_and_process, accept_delayed_broadcast, no_send, send_with_txids);
 
     // Determine if we should sign and/or broadcast
-    // Per BRC-100 spec: sendWith trumps noSend (isSendWith forces broadcast of batched txids)
+    // Per BRC-100 spec:
+    //   noSend=true  → don't broadcast (caller will handle overlay submission)
+    //   noSend=false → wallet MUST broadcast
+    //   acceptDelayedBroadcast=true → caller doesn't need to wait for broadcast result (default)
+    //   acceptDelayedBroadcast=false → caller wants synchronous broadcast result
+    //   sendWith trumps noSend (forces broadcast of batched txids)
     let should_sign = sign_and_process;
-    let should_broadcast = (!accept_delayed_broadcast && !no_send) || is_send_with;
+    let should_broadcast = !no_send || is_send_with;
 
     // Save the pre-signing txid for post-signing reconciliation
     // (BSV txids include unlocking scripts, so signing changes the txid)
@@ -5026,6 +5045,53 @@ pub async fn create_action(
                         }
                     }
 
+                    // After successful ARC broadcast, check if this transaction contains
+                    // identity token outputs and submit to the BSV overlay service.
+                    // The overlay is UTXO-based and idempotent — duplicate submissions
+                    // return empty outputsToAdmit, so this is safe even if the calling
+                    // SDK also submits (belt-and-suspenders).
+                    let has_identity_output = req.outputs.iter().any(|o| {
+                        o.output_description.as_deref() == Some("Identity Token")
+                            || o.output_description.as_deref() == Some("identity_certificates")
+                    });
+                    if has_identity_output {
+                        log::info!("   🌐 Identity token detected — submitting to overlay...");
+                        // Convert to BEEF V1 for overlay submission.
+                        // The tx_bytes may be Atomic BEEF (01010101 + txid + V2 BEEF)
+                        // or plain V2 BEEF. Overlay services expect V1 format (0100beef).
+                        let overlay_beef_result = {
+                            let beef_data = if tx_bytes.len() > 36 && tx_bytes[..4] == [0x01, 0x01, 0x01, 0x01] {
+                                &tx_bytes[36..] // Strip Atomic header
+                            } else {
+                                tx_bytes
+                            };
+                            // Parse and re-serialize as V1
+                            crate::beef::Beef::from_bytes(beef_data)
+                                .and_then(|beef| beef.to_v1_bytes())
+                        };
+                        let overlay_beef = match &overlay_beef_result {
+                            Ok(v1_bytes) => {
+                                log::info!("   📦 Converted to BEEF V1 ({} bytes) for overlay submission", v1_bytes.len());
+                                v1_bytes.as_slice()
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️  BEEF V1 conversion failed: {}, using raw bytes", e);
+                                tx_bytes
+                            }
+                        };
+                        match crate::overlay::submit_to_identity_overlay(overlay_beef).await {
+                            Ok(true) => {
+                                log::info!("   ✅ Overlay accepted the identity token");
+                            }
+                            Ok(false) => {
+                                log::warn!("   ⚠️  Overlay rejected the identity token (may already exist)");
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️  Overlay submission failed (non-fatal): {}", e);
+                            }
+                        }
+                    }
+
                     // Note: Do NOT populate send_with_results here.
                     // sendWithResults is only for transactions listed in sendWith[],
                     // not for the current transaction's broadcast result.
@@ -5098,8 +5164,7 @@ pub async fn create_action(
             log::warn!("   ⚠️  No transaction bytes available for broadcast");
         }
     } else {
-        log::info!("   ℹ️  Skipping broadcast (acceptDelayedBroadcast={}, noSend={})",
-                   accept_delayed_broadcast, no_send);
+        log::info!("   ℹ️  Skipping broadcast (noSend={})", no_send);
     }
 
     // ═══════════════════════════════════════════════════════════════

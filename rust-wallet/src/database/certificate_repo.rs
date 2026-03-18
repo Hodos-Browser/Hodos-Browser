@@ -277,6 +277,76 @@ impl<'a> CertificateRepository<'a> {
         Ok(rows_affected > 0)
     }
 
+    /// Update publish status for a certificate
+    ///
+    /// Sets `publish_status`, `publish_txid`, `publish_vout`, and `updated_at`.
+    pub fn update_publish_status(
+        &self,
+        type_: &[u8],
+        serial_number: &[u8],
+        certifier: &[u8],
+        publish_status: &str,
+        publish_txid: Option<&str>,
+        publish_vout: Option<i32>,
+    ) -> SqliteResult<bool> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE certificates
+             SET publish_status = ?1, publish_txid = ?2, publish_vout = ?3, updated_at = ?4
+             WHERE type = ?5 AND serial_number = ?6 AND certifier = ?7",
+            params![
+                publish_status,
+                publish_txid,
+                publish_vout,
+                now,
+                STANDARD.encode(type_),
+                STANDARD.encode(serial_number),
+                hex::encode(certifier),
+            ],
+        )?;
+
+        Ok(rows_affected > 0)
+    }
+
+    /// Get publish info for a certificate
+    ///
+    /// Returns `(publish_status, publish_txid, publish_vout)`.
+    pub fn get_publish_info(
+        &self,
+        type_: &[u8],
+        serial_number: &[u8],
+        certifier: &[u8],
+    ) -> SqliteResult<Option<(String, Option<String>, Option<i32>)>> {
+        let result = self.conn.query_row(
+            "SELECT publish_status, publish_txid, publish_vout
+             FROM certificates
+             WHERE type = ?1 AND serial_number = ?2 AND certifier = ?3
+             LIMIT 1",
+            params![
+                STANDARD.encode(type_),
+                STANDARD.encode(serial_number),
+                hex::encode(certifier),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap_or_else(|_| "unpublished".to_string()),
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i32>>(2)?,
+                ))
+            },
+        );
+
+        match result {
+            Ok(info) => Ok(Some(info)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Helper: Build certificate from database row
     ///
     /// Column order: certificateId(0), user_id(1), type(2), serial_number(3),

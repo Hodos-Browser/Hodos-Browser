@@ -705,6 +705,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V11 applied");
         }
 
+        if current_version < 12 {
+            info!("   Applying migration V12 (certificate publish tracking)...");
+            migrations::migrate_v11_to_v12(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (12)", [])?;
+            info!("   ✅ Schema V12 applied");
+        }
+
         Ok(())
     }
 
