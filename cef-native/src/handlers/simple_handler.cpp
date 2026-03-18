@@ -46,6 +46,7 @@
 
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
+#include "include/cef_app.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/cef_task.h"
@@ -1276,6 +1277,19 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     // Unregister from handler map
     browser_handler_map_.erase(browser->GetIdentifier());
+
+    // Check shutdown IMMEDIATELY after erase, before any early returns.
+    // Tab and popup branches return early, so this must come first.
+#ifdef _WIN32
+    {
+        extern bool g_app_shutting_down;
+        if (g_app_shutting_down && browser_handler_map_.empty()) {
+            LOG_INFO_BROWSER("🛑 All browsers closed during shutdown — quitting CEF message loop");
+            CefQuitMessageLoop();
+            return;  // No further cleanup needed during shutdown
+        }
+    }
+#endif
 
     std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
     std::cout << "  Role: " << role_ << std::endl;
