@@ -2285,7 +2285,12 @@ void StartWalletServer() {
     if (lastSlash != std::string::npos) {
         exeDir = exeDir.substr(0, lastSlash);
     }
-    std::string walletExe = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+    // Production: same directory as browser exe
+    std::string walletExe = exeDir + "\\hodos-wallet.exe";
+    if (GetFileAttributesA(walletExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // Dev fallback: source tree relative path
+        walletExe = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+    }
 
     // Check if the exe exists
     if (GetFileAttributesA(walletExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -2453,7 +2458,12 @@ void StartAdblockServer() {
     if (lastSlash != std::string::npos) {
         exeDir = exeDir.substr(0, lastSlash);
     }
-    std::string adblockExe = exeDir + "\\..\\..\\..\\..\\adblock-engine\\target\\release\\hodos-adblock.exe";
+    // Production: same directory as browser exe
+    std::string adblockExe = exeDir + "\\hodos-adblock.exe";
+    if (GetFileAttributesA(adblockExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // Dev fallback: source tree relative path
+        adblockExe = exeDir + "\\..\\..\\..\\..\\adblock-engine\\target\\release\\hodos-adblock.exe";
+    }
 
     // Check if the exe exists
     if (GetFileAttributesA(adblockExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -2669,9 +2679,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
 
-    // Set CEF paths - use relative paths from the executable
-    CefString(&settings.resources_dir_path).FromWString(L"cef-binaries\\Resources");
-    CefString(&settings.locales_dir_path).FromWString(L"cef-binaries\\Resources\\locales");
+    // Set CEF resource paths — production vs dev
+    {
+        char exe_path_a[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe_path_a, MAX_PATH);
+        std::string exe_dir_str(exe_path_a);
+        size_t ls = exe_dir_str.find_last_of("\\/");
+        if (ls != std::string::npos) exe_dir_str = exe_dir_str.substr(0, ls);
+
+        std::string res_pak = exe_dir_str + "\\resources.pak";
+        if (GetFileAttributesA(res_pak.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            // Production: resources are next to the exe
+            CefString(&settings.resources_dir_path).FromString(exe_dir_str);
+            CefString(&settings.locales_dir_path).FromString(exe_dir_str + "\\locales");
+        } else {
+            // Dev: use relative path to cef-binaries
+            CefString(&settings.resources_dir_path).FromWString(L"cef-binaries\\Resources");
+            CefString(&settings.locales_dir_path).FromWString(L"cef-binaries\\Resources\\locales");
+        }
+    }
     CefString(&settings.browser_subprocess_path).FromWString(exe_path);
 
     RECT rect;
