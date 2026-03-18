@@ -36,6 +36,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
+SetupIconFile={#ProjectRoot}\cef-native\hodos.ico
 UninstallDisplayIcon={app}\HodosBrowserShell.exe
 
 [Languages]
