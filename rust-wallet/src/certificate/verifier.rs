@@ -75,6 +75,8 @@ pub fn serialize_certificate_preimage(
     writer.extend_from_slice(&certificate.certifier);
 
     // 5. revocationOutpoint
+    // SDK's Certificate.toBinary() serializes as: hex-decode(txid) + VarInt(vout)
+    // where revocationOutpoint = "txid.vout"
     let parts: Vec<&str> = certificate.revocation_outpoint.split('.').collect();
     if parts.len() != 2 {
         return Err(CertificateError::InvalidFormat(
@@ -82,7 +84,6 @@ pub fn serialize_certificate_preimage(
         ));
     }
 
-    // Parse txid (32 bytes, hex-decoded)
     let txid_bytes = hex::decode(parts[0])
         .map_err(|e| CertificateError::InvalidHex(format!("revocationOutpoint txid: {}", e)))?;
     if txid_bytes.len() != 32 {
@@ -92,7 +93,6 @@ pub fn serialize_certificate_preimage(
     }
     writer.extend_from_slice(&txid_bytes);
 
-    // Parse vout (VarInt)
     let vout: u64 = parts[1].parse()
         .map_err(|e| CertificateError::InvalidFormat(format!("revocationOutpoint vout: {}", e)))?;
     writer.extend_from_slice(&encode_varint(vout));

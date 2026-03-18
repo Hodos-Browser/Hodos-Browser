@@ -17,9 +17,11 @@
 5. [Step-by-Step Build Instructions](#5-step-by-step-build-instructions)
 6. [Integrating with Hodos Browser](#6-integrating-with-hodos-browser)
 7. [Verification & Testing](#7-verification--testing)
-8. [Troubleshooting](#8-troubleshooting)
-9. [Maintenance & Updates](#9-maintenance--updates)
-10. [Appendix](#10-appendix)
+8. [Lessons Learned](#8-lessons-learned-real-world-build-notes)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Maintenance & Updates](#10-maintenance--updates)
+11. [macOS Build](#11-macos-build)
+12. [Appendix](#12-appendix)
 
 ---
 
@@ -39,14 +41,21 @@
 |-------|----------|-------|
 | Environment setup | 1-2 hours | One-time |
 | Source download | 1-3 hours | ~30GB download, depends on connection |
-| Build | 3-6 hours | First build; depends on CPU/RAM |
+| Build (compile) | 6-10 hours | First build; depends on CPU/RAM. ~96K object files total |
+| Packaging (make_distrib.py) | ~7 minutes | ~404 seconds |
 | Integration | 1-2 hours | Replace binaries, rebuild wrapper |
 | Testing | 1-2 hours | Verify codecs work |
-| **Total** | **8-15 hours** | Can be split across days |
+| **Total** | **~10-15 hours** | Expect overnight; can be split across days |
+
+### Actual Build Experience (2026-03-12)
+
+The full build (download + compile + package) took roughly overnight (~10-12 hours total). The compile phase produced 78,821 object files before an interruption (Windows auto-restart — see Lessons Learned), then ~17,336 more on resume. Packaging via `make_distrib.py` took ~404 seconds (~7 minutes).
+
+**The build IS resumable.** Ninja tracks completed work in `.ninja_log`. If the build is interrupted, just re-run the script — ninja skips already-compiled objects and picks up where it left off.
 
 ### Can We Do This Now?
 
-**YES.** The built binaries work identically in dev and production. Building now gives you:
+**YES — and it has been done successfully (2026-03-12).** The built binaries work identically in dev and production. Building now gives you:
 - Time to troubleshoot any build issues
 - Ability to test codec support immediately
 - Confidence the production build will work
@@ -157,7 +166,18 @@ If you need to install Python 3.11:
 2. During install, check "Add Python to PATH"
 3. Verify: `python --version`
 
-### 4.4 Create Directory Structure
+### 4.4 Disable Windows Defender Real-Time Scanning for Build Directory
+
+**This is critical for build performance.** Windows Defender scans every file read/write. Chromium builds touch millions of files — Defender can 2-5x your build time.
+
+1. Open **Windows Security** → **Virus & threat protection** → **Manage settings**
+2. Scroll to **Exclusions** → **Add or remove exclusions**
+3. Add folder exclusion: `C:\cef\` (or wherever your build dir is)
+4. Also exclude `C:\cef\depot_tools\`
+
+**Re-enable scanning after the build is complete** if you want.
+
+### 4.5 Create Directory Structure
 
 **Important**: Use short paths with ASCII-only characters!
 
@@ -228,41 +248,102 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/chromiumembedded/cef/m
 
 ### Step 4: Create the Build Script
 
-Create `C:\cef\chromium_git\build_cef.bat`:
+Create `C:\cef\chromium_git\build_cef.bat` (also saved as `development-docs/build_hodos_cef.bat`):
 
 ```batch
 @echo off
 REM ============================================
 REM CEF Build Script for Hodos Browser
-REM Builds CEF with proprietary codecs enabled
+REM Builds CEF 136 with proprietary codecs (H.264, AAC, MP3)
+REM
+REM USAGE: Copy this file to C:\cef\chromium_git\ and run from there
+REM        Run in a normal cmd or PowerShell (NOT Developer Command Prompt)
 REM ============================================
 
-REM Set Visual Studio version
+REM Set Visual Studio version and path
 set GYP_MSVS_VERSION=2022
 
-REM Set GN build defines for proprietary codecs
-set GN_DEFINES=is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome
+REM CRITICAL: Use local VS install, not Google's internal toolchain
+set DEPOT_TOOLS_WIN_TOOLCHAIN=0
 
-REM Set archive format (optional, for smaller distribution)
+REM Tell Chromium where BuildTools edition is installed
+set GYP_MSVS_OVERRIDE_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
+set vs2022_install=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
+
+REM GN build defines for proprietary codecs
+REM NOTE: chrome_pgo_phase=0 disables PGO profiling (avoids needing PGO profile data)
+set GN_DEFINES=is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0
+
+REM Archive format
 set CEF_ARCHIVE_FORMAT=tar.bz2
 
-REM Run the build
+REM Ensure depot_tools is on PATH
+set PATH=C:\cef\depot_tools;%PATH%
+
+REM Step 1: Run gclient sync to download all dependencies (ninja, node, etc.)
+echo.
+echo === Step 1: Running gclient sync to download dependencies ===
+echo.
+cd /d C:\cef\chromium_git\chromium
+call C:\cef\depot_tools\gclient.bat sync --nohooks --no-history
+if %ERRORLEVEL% NEQ 0 (
+  echo.
+  echo WARNING: gclient sync had errors, continuing...
+  echo.
+)
+
+REM Step 1b: Run hooks
+echo.
+echo === Step 1b: Running gclient runhooks ===
+echo.
+call C:\cef\depot_tools\gclient.bat runhooks
+if %ERRORLEVEL% NEQ 0 (
+  echo.
+  echo WARNING: gclient runhooks had errors, attempting build anyway...
+  echo.
+)
+
+REM Step 2: Run the automated build
+echo.
+echo === Step 2: Running automate-git.py build ===
+echo.
+cd /d C:\cef\chromium_git
 python C:\cef\automate\automate-git.py ^
   --download-dir=C:\cef\chromium_git ^
   --depot-tools-dir=C:\cef\depot_tools ^
   --branch=7103 ^
   --x64-build ^
-  --proprietary-codecs ^
   --minimal-distrib ^
   --client-distrib ^
   --no-debug-build ^
-  --force-clean
+  --force-build
 
-REM Note: Remove --force-clean after first successful build for faster rebuilds
-REM Note: Add --no-chromium-history to save disk space (removes git history)
+REM Exit code check
+if %ERRORLEVEL% NEQ 0 (
+  echo.
+  echo BUILD FAILED with error code %ERRORLEVEL%
+  echo Check output above for errors.
+) else (
+  echo.
+  echo BUILD SUCCEEDED
+  echo Output: C:\cef\chromium_git\chromium\src\cef\binary_distrib\
+)
 
 pause
 ```
+
+**Key differences from the original guide (lessons from actual build):**
+
+| Change | Why |
+|--------|-----|
+| Added `chrome_pgo_phase=0` to GN_DEFINES | Disables PGO profiling; avoids needing profile data files |
+| Added `GYP_MSVS_OVERRIDE_PATH` and `vs2022_install` | Explicitly points to BuildTools edition of VS 2022 |
+| Added Step 1 (`gclient sync --nohooks --no-history`) | Downloads dependencies (ninja, node, etc.) before automate-git.py |
+| Added Step 1b (`gclient runhooks`) | Runs hooks separately for cleaner error handling |
+| Uses `--force-build` instead of `--force-clean` | Forces rebuild but does NOT wipe the build dir (allows resume) |
+| Removed `--proprietary-codecs` flag | Codecs are enabled via `GN_DEFINES` instead (more reliable) |
+| Removed `--no-chromium-history` flag | Not needed with `--no-history` in gclient sync |
+| Added `PATH` setup for depot_tools | Ensures depot_tools is available regardless of system PATH |
 
 **Key flags explained:**
 
@@ -270,11 +351,10 @@ pause
 |------|---------|
 | `--branch=7103` | CEF 136 / Chromium 136 |
 | `--x64-build` | 64-bit Windows build |
-| `--proprietary-codecs` | Enable H.264, AAC, MP3 |
 | `--minimal-distrib` | Smaller output (no debug symbols) |
 | `--client-distrib` | Build cefclient for testing |
 | `--no-debug-build` | Skip Debug build (faster, Release only) |
-| `--force-clean` | Clean build (remove for incremental) |
+| `--force-build` | Force rebuild but keep existing objects (resumable) |
 
 ### Step 5: Run the Build
 
@@ -316,14 +396,14 @@ C:\cef\chromium_git\chromium\src\cef\binary_distrib\
 
 Look for a folder named something like:
 ```
-cef_binary_136.1.1+g[hash]+chromium-136.0.7103.33_windows64/
+cef_binary_136.1.7+g15882fe+chromium-136.0.7103.114_windows64_minimal/
 ```
 
 Inside you'll find:
 ```
 ├── Debug/           (if built)
 ├── Release/
-│   ├── libcef.dll          # Main CEF library (~150 MB)
+│   ├── libcef.dll          # Main CEF library (~239 MB with codecs)
 │   ├── chrome_elf.dll      # Chrome helper
 │   ├── d3dcompiler_47.dll  # DirectX shader compiler
 │   ├── icudtl.dat          # Unicode data
@@ -426,6 +506,15 @@ start cef.sln
 dir C:\Users\archb\Hodos-Browser\cef-native\build\bin\Release\libcef.dll
 ```
 
+### Note: Widevine DRM Support
+
+With proprietary codecs enabled, Widevine DRM is also available:
+
+- **`enable_widevine=true`** is set automatically by CEF's build system — you do NOT need to add it manually.
+- The actual Widevine CDM (`widevinecdm.dll`) is **NOT included** in the build output. It auto-downloads via Chromium's component updater at runtime (~5 minutes after first launch).
+- Once the CDM downloads, DRM-protected content (Netflix, Disney+, Spotify) should work.
+- **No license is needed** for the auto-download approach. The CDM is distributed by Google under their own license terms.
+
 ---
 
 ## 7. Verification & Testing
@@ -475,9 +564,65 @@ AV1: probably
 2. Verify AAC audio plays
 3. Verify MP3 audio plays
 
+### Actual Test Results (2026-03-12)
+
+| Site | Before (prebuilt, no codecs) | After (custom build) |
+|------|------------------------------|----------------------|
+| **x.com** | Videos broken, animated GIFs broken | Videos and animated GIFs now play |
+| **Reddit** | Embedded videos broken | Embedded videos now play |
+| **YouTube** | Worked (VP9/AV1 fallback) | Still works; now also has H.264 |
+| **Audio** | AAC/MP3 not supported | AAC/MP3 working on music sites |
+
 ---
 
-## 8. Troubleshooting
+## 8. Lessons Learned (Real-World Build Notes)
+
+These are hard-won lessons from the actual build on 2026-03-12.
+
+### CRITICAL: Disable Windows Automatic Restarts
+
+The build takes overnight. Windows Update **WILL** auto-restart your machine in the middle of the compile, killing the build process. Before starting:
+
+1. **Pause Windows Update**: Settings > Windows Update > Pause updates for 1 week
+2. **Set Active Hours**: Settings > Windows Update > Advanced options > Active hours > set to cover your build window (e.g., 6 PM to 12 PM next day)
+3. **Disable automatic restart**: Group Policy (`gpedit.msc`) > Computer Configuration > Administrative Templates > Windows Components > Windows Update > "No auto-restart with logged on users"
+
+Our build was interrupted at 78,821 objects by a Windows auto-restart. Fortunately, the build is resumable.
+
+### The Build IS Resumable
+
+If interrupted (power loss, crash, Windows restart), just re-run the build script. Ninja tracks completed work in `.ninja_log` and skips already-compiled objects. After our interruption, the resumed build only needed to compile ~17,336 additional objects instead of starting from scratch.
+
+### Build Output Size
+
+- **Build output name**: `cef_binary_136.1.7+g15882fe+chromium-136.0.7103.114_windows64_minimal`
+- **libcef.dll**: 239 MB (vs 224 MB prebuilt — the 15 MB increase is the codec code)
+- **Total disk usage for Release_GN_x64 build dir**: ~18 GB at interruption point
+- **Total disk usage overall**: ~80-100 GB for the full source + build tree
+
+### chrome_pgo_phase=0
+
+Profile-Guided Optimization (PGO) requires pre-existing profiling data. Setting `chrome_pgo_phase=0` disables PGO, which avoids build failures from missing profile data. The performance difference is minimal for CEF usage.
+
+---
+
+## 9. Troubleshooting
+
+### External Drive Considerations
+
+Building on an external drive is viable but has tradeoffs:
+
+| Drive Type | Impact | Recommended? |
+|-----------|--------|-------------|
+| **USB 3.0+ SSD** | ~1.5-2x slower than internal. Compile is CPU-bound so main slowdown is `gclient sync` (millions of small files). Workable. | Yes |
+| **USB 3.0 HDD** | 2-3x slower. Random I/O on millions of small files is brutal on spinning disk. | Avoid if possible |
+| **USB 2.0 anything** | Unworkable. | No |
+
+**Tips for external drive builds:**
+- Use NTFS (not exFAT) — Chromium uses symlinks and case-sensitive paths
+- Connect to USB 3.0+ port (blue ports)
+- Don't disconnect during build (corruption risk)
+- Windows Defender real-time scanning will destroy performance on external drives — add an exclusion for `C:\cef\` (or `E:\cef\` etc.)
 
 ### Build Errors
 
@@ -498,6 +643,13 @@ set PATH=C:\Python311;%PATH%
 # Set version explicitly
 set GYP_MSVS_VERSION=2022
 ```
+
+#### "Failed to download VS toolchain" or "hash check failed"
+This happens when `DEPOT_TOOLS_WIN_TOOLCHAIN` is not set to `0`. Without it, depot_tools tries to download Google's internal Windows toolchain (not public).
+```powershell
+set DEPOT_TOOLS_WIN_TOOLCHAIN=0
+```
+This tells the build system to use your locally installed Visual Studio 2022 instead.
 
 #### "Debugging Tools for Windows not found"
 - Reinstall Windows SDK with "Debugging Tools for Windows" checked
@@ -538,7 +690,7 @@ set GYP_MSVS_VERSION=2022
 
 ---
 
-## 9. Maintenance & Updates
+## 10. Maintenance & Updates
 
 ### When to Rebuild
 
@@ -583,7 +735,35 @@ For automated builds, consider:
 
 ---
 
-## 10. Appendix
+## 11. macOS Build
+
+macOS requires a **separate build** — Windows DLLs cannot be used on macOS. The macOS build produces `Chromium Embedded Framework.framework` instead of `libcef.dll`.
+
+### macOS Build Script
+
+A macOS build script is provided at `development-docs/build_hodos_cef_mac.sh`.
+
+### Key Differences from Windows
+
+| Aspect | Windows | macOS |
+|--------|---------|-------|
+| Output | `libcef.dll` (239 MB) | `Chromium Embedded Framework.framework` |
+| Architecture | `--x64-build` | `--arm64-build` (Apple Silicon M1+) or `--x64-build` (Intel) |
+| Toolchain | Visual Studio 2022 | Xcode + Command Line Tools |
+| Build system | Same (ninja) | Same (ninja) |
+
+### Architecture Selection
+
+- **Apple Silicon (M1, M2, M3, M4)**: Use `--arm64-build`
+- **Intel Mac**: Use `--x64-build`
+
+### Requirements
+
+Same disk space (~100 GB) and RAM (16 GB min, 32 GB recommended) requirements as Windows. macOS needs Xcode and its Command Line Tools installed.
+
+---
+
+## 12. Appendix
 
 ### A. All automate-git.py Flags
 
@@ -680,13 +860,12 @@ Remove-Item -Path "C:\cef\chromium_git\chromium\src\out" -Recurse -Force
 │ Output:           chromium_git\chromium\src\cef\binary_distrib\ │
 ├─────────────────────────────────────────────────────────────┤
 │ CEF 136 branch:   7103                                      │
-│ Build time:       3-6 hours (first), 30-60 min (incremental)│
+│ Build time:       ~10-12 hours (first), 30-60 min (incremental)│
 │ Disk needed:      100GB minimum                             │
 ├─────────────────────────────────────────────────────────────┤
-│ Key flags:        --proprietary-codecs                      │
-│                   --branch=7103                             │
-│                   --x64-build                               │
-│                   --no-debug-build                          │
+│ Key GN_DEFINES:   proprietary_codecs=true ffmpeg_branding=Chrome│
+│ Key flags:        --branch=7103 --x64-build --no-debug-build│
+│                   --force-build (resumable)                 │
 ├─────────────────────────────────────────────────────────────┤
 │ Verify codecs:    video.canPlayType('video/mp4; ...')       │
 │                   Should return "probably" not ""           │
@@ -695,4 +874,4 @@ Remove-Item -Path "C:\cef\chromium_git\chromium\src\out" -Recurse -Force
 
 ---
 
-*Document created 2026-03-01. Update this guide when CEF versions change or build process evolves.*
+*Document created 2026-03-01. Updated 2026-03-12 with actual build results and lessons learned. Update this guide when CEF versions change or build process evolves.*

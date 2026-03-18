@@ -1,166 +1,310 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ============================================
 # CEF Build Script for Hodos Browser (macOS)
-# Builds CEF 136 with proprietary codecs
-# (H.264, AAC, MP3) + Widevine DRM
+# Builds CEF 136 (branch 7103) with proprietary codecs (H.264, AAC, MP3)
 #
-# Usage: ./build_hodos_cef_mac.sh
-# Resumable: if interrupted, just re-run it
+# WHAT THIS DOES:
+#   1. Checks prerequisites (Xcode CLI tools, Python, git, disk space)
+#   2. Downloads depot_tools and automate-git.py if not present
+#   3. Runs automate-git.py to download Chromium/CEF source and build
+#   4. Outputs a CEF binary distribution with proprietary codecs enabled
+#
+# REQUIREMENTS:
+#   - macOS 13+ (Ventura or later recommended)
+#   - Xcode Command Line Tools (full Xcode NOT required)
+#   - Python 3.9 - 3.11 (NOT 3.12+ due to compatibility issues)
+#   - git (comes with Xcode CLI tools)
+#   - ~100 GB free disk space (SSD strongly recommended)
+#   - 16 GB RAM minimum, 32 GB recommended
+#   - Build time: 4-6 hours first build, 30-60 min incremental
+#
+# USAGE:
+#   chmod +x build_hodos_cef_mac.sh
+#   ./build_hodos_cef_mac.sh
+#
+# OUTPUT:
+#   ~/cef/chromium_git/chromium/src/cef/binary_distrib/
+#   Look for: cef_binary_136.*_macos{arm64,x86_64}/
 # ============================================
-set -eo pipefail
 
-# --- Configuration ---
-CEF_BRANCH="7103"               # CEF 136 / Chromium 136
-BASE_DIR="$HOME/cef"
-DOWNLOAD_DIR="$BASE_DIR/chromium_git"
-DEPOT_TOOLS_DIR="$BASE_DIR/depot_tools"
-AUTOMATE_DIR="$BASE_DIR/automate"
-LOG_FILE="$BASE_DIR/build.log"
+set -euo pipefail
 
-# --- Colors ---
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
 
-# --- Auto-detect architecture ---
-ARCH=$(uname -m)
-if [ "$ARCH" = "arm64" ]; then
-    BUILD_FLAG="--arm64-build"
-    ARCH_LABEL="ARM64 (Apple Silicon)"
-elif [ "$ARCH" = "x86_64" ]; then
-    BUILD_FLAG="--x64-build"
-    ARCH_LABEL="x64 (Intel)"
-else
-    error "Unknown architecture: $ARCH"
-fi
+CEF_BASE_DIR="$HOME/cef"
+CEF_AUTOMATE_DIR="$CEF_BASE_DIR/automate"
+CEF_DEPOT_TOOLS_DIR="$CEF_BASE_DIR/depot_tools"
+CEF_CHROMIUM_DIR="$CEF_BASE_DIR/chromium_git"
+CEF_BRANCH="7103"
 
-echo ""
-echo "============================================"
-echo "  CEF Build for Hodos Browser (macOS)"
-echo "  Branch: $CEF_BRANCH (CEF 136)"
-echo "  Architecture: $ARCH_LABEL"
-echo "============================================"
-echo ""
+# GN build defines for proprietary codecs
+export GN_DEFINES="is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0"
 
-# --- Prerequisite Checks ---
-info "Checking prerequisites..."
-
-# Xcode CLI tools
-xcode-select -p &>/dev/null || error "Xcode CLI tools not installed. Run: xcode-select --install"
-info "  Xcode CLI tools: $(xcode-select -p)"
-
-# Python 3.9-3.11 (required by Chromium build tooling)
-PYTHON_CMD=""
-if command -v python3.11 &>/dev/null; then
-    PYTHON_CMD="python3.11"
-elif [ -f "$(brew --prefix python@3.11 2>/dev/null)/bin/python3.11" ]; then
-    PYTHON_CMD="$(brew --prefix python@3.11)/bin/python3.11"
-elif command -v python3 &>/dev/null; then
-    PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
-    if [ "$PY_MINOR" -ge 9 ] && [ "$PY_MINOR" -le 11 ]; then
-        PYTHON_CMD="python3"
-    fi
-fi
-[ -z "$PYTHON_CMD" ] && error "Python 3.9-3.11 required. Install with: brew install python@3.11"
-PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
-info "  Python: $PYTHON_VERSION ($PYTHON_CMD)"
-
-# RAM
-RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
-[ "$RAM_GB" -lt 16 ] && error "Need 16+ GB RAM, found ${RAM_GB} GB"
-info "  RAM: ${RAM_GB} GB"
-
-# Disk space
-FREE_GB=$(( $(df -k "$HOME" | tail -1 | awk '{print $4}') / 1048576 ))
-[ "$FREE_GB" -lt 80 ] && error "Need 80+ GB free disk, found ${FREE_GB} GB"
-[ "$FREE_GB" -lt 100 ] && warn "  Disk: ${FREE_GB} GB free (tight — 100 GB recommended)"
-[ "$FREE_GB" -ge 100 ] && info "  Disk: ${FREE_GB} GB free"
-
-# cmake
-command -v cmake &>/dev/null || error "cmake not found. Install with: brew install cmake"
-info "  cmake: $(cmake --version | head -1)"
-
-# ninja (optional — depot_tools provides it, but good to check)
-command -v ninja &>/dev/null && info "  ninja: $(ninja --version)" || info "  ninja: will use depot_tools version"
-
-echo ""
-info "All prerequisites passed!"
-echo ""
-
-# --- Confirmation ---
-echo "This will:"
-echo "  1. Download depot_tools (~500 MB)"
-echo "  2. Download Chromium source (~30 GB)"
-echo "  3. Build CEF with proprietary codecs (4-6 hours)"
-echo ""
-echo "  Base directory: $BASE_DIR"
-echo "  Log file:       $LOG_FILE"
-echo "  Total disk:     ~60-80 GB"
-echo ""
-echo "  TIP: The build uses caffeinate to prevent sleep."
-echo "  TIP: If interrupted, just re-run this script — ninja resumes."
-echo ""
-read -p "Continue? [y/N] " -n 1 -r
-echo ""
-[[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Aborted."; exit 0; }
-
-# --- Setup directories ---
-mkdir -p "$BASE_DIR" "$DOWNLOAD_DIR" "$AUTOMATE_DIR"
-
-# --- Install/update depot_tools ---
-if [ -d "$DEPOT_TOOLS_DIR/.git" ]; then
-    info "Updating depot_tools..."
-    git -C "$DEPOT_TOOLS_DIR" pull --quiet
-else
-    info "Cloning depot_tools..."
-    rm -rf "$DEPOT_TOOLS_DIR"
-    git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
-fi
-
-# --- Set PATH: Python 3.11 first, then depot_tools ---
-PYTHON_BIN_DIR=$(dirname "$($PYTHON_CMD -c 'import sys; print(sys.executable)')")
-export PATH="$PYTHON_BIN_DIR:$DEPOT_TOOLS_DIR:$PATH"
-info "PATH updated: Python at $PYTHON_BIN_DIR, depot_tools at $DEPOT_TOOLS_DIR"
-
-# --- Download automate-git.py ---
-AUTOMATE_SCRIPT="$AUTOMATE_DIR/automate-git.py"
-info "Downloading automate-git.py..."
-curl -sL -o "$AUTOMATE_SCRIPT" \
-    "https://raw.githubusercontent.com/chromiumembedded/cef/master/tools/automate/automate-git.py"
-
-# --- Set build environment ---
-export GN_DEFINES="is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome enable_widevine=true"
+# Archive format
 export CEF_ARCHIVE_FORMAT="tar.bz2"
 
-info "GN_DEFINES=$GN_DEFINES"
-echo ""
-echo "============================================"
-echo "  BUILD STARTED: $(date)"
-echo "============================================"
-echo ""
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
 
-# --- Run the build (with caffeinate to prevent sleep) ---
-caffeinate -dims $PYTHON_CMD "$AUTOMATE_SCRIPT" \
-    --download-dir="$DOWNLOAD_DIR" \
-    --depot-tools-dir="$DEPOT_TOOLS_DIR" \
+log_info() {
+    echo ""
+    echo "=== $1 ==="
+    echo ""
+}
+
+log_error() {
+    echo ""
+    echo "ERROR: $1" >&2
+    echo ""
+}
+
+log_warn() {
+    echo ""
+    echo "WARNING: $1"
+    echo ""
+}
+
+# --------------------------------------------------
+# Step 0: Detect architecture
+# --------------------------------------------------
+
+log_info "Detecting architecture"
+
+ARCH=$(uname -m)
+if [ "$ARCH" = "arm64" ]; then
+    echo "Detected Apple Silicon (ARM64) - M1/M2/M3/M4"
+    BUILD_ARCH_FLAG="--arm64-build"
+    ARCH_LABEL="arm64"
+elif [ "$ARCH" = "x86_64" ]; then
+    echo "Detected Intel x86_64"
+    BUILD_ARCH_FLAG="--x64-build"
+    ARCH_LABEL="x86_64"
+else
+    log_error "Unknown architecture: $ARCH. Expected arm64 or x86_64."
+    exit 1
+fi
+
+# --------------------------------------------------
+# Step 1: Check prerequisites
+# --------------------------------------------------
+
+log_info "Checking prerequisites"
+
+# Check Xcode Command Line Tools
+if ! xcode-select -p &>/dev/null; then
+    log_error "Xcode Command Line Tools not installed."
+    echo "Install with: xcode-select --install"
+    echo "Then re-run this script."
+    exit 1
+fi
+echo "[OK] Xcode Command Line Tools: $(xcode-select -p)"
+
+# Check Python version (need 3.9 - 3.11)
+if ! command -v python3 &>/dev/null; then
+    log_error "Python 3 not found. Install Python 3.9-3.11."
+    echo "  brew install python@3.11"
+    exit 1
+fi
+
+PYTHON_VERSION=$(python3 --version 2>&1 | sed 's/Python //')
+PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+
+if [ "$PYTHON_MAJOR" -ne 3 ] || [ "$PYTHON_MINOR" -lt 9 ] || [ "$PYTHON_MINOR" -gt 11 ]; then
+    log_warn "Python $PYTHON_VERSION detected. Recommended: 3.9-3.11."
+    echo "Python 3.12+ has known compatibility issues with Chromium builds."
+    echo "Install 3.11 with: brew install python@3.11"
+    echo "Then: export PATH=\"\$(brew --prefix python@3.11)/bin:\$PATH\""
+    read -p "Continue anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+else
+    echo "[OK] Python: $PYTHON_VERSION"
+fi
+
+# Check git
+if ! command -v git &>/dev/null; then
+    log_error "git not found. Should come with Xcode CLI tools."
+    exit 1
+fi
+echo "[OK] git: $(git --version)"
+
+# Check disk space (~100GB needed)
+AVAILABLE_GB=$(df -g "$HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
+# Fallback for systems where df -g doesn't work
+if [ "$AVAILABLE_GB" = "0" ]; then
+    AVAILABLE_GB=$(df -Pk "$HOME" | tail -1 | awk '{print int($4/1048576)}')
+fi
+
+if [ "$AVAILABLE_GB" -lt 100 ]; then
+    log_warn "Only ${AVAILABLE_GB}GB free disk space. 100GB+ recommended."
+    echo "The build may fail due to insufficient disk space."
+    read -p "Continue anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+else
+    echo "[OK] Disk space: ${AVAILABLE_GB}GB available"
+fi
+
+# Check RAM
+TOTAL_RAM_GB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1073741824)}' || echo "0")
+if [ "$TOTAL_RAM_GB" -lt 16 ]; then
+    log_warn "Only ${TOTAL_RAM_GB}GB RAM detected. 16GB minimum, 32GB recommended."
+fi
+echo "[OK] RAM: ${TOTAL_RAM_GB}GB"
+
+echo ""
+echo "All prerequisites satisfied."
+
+# --------------------------------------------------
+# Step 2: Create directory structure
+# --------------------------------------------------
+
+log_info "Creating directory structure at $CEF_BASE_DIR"
+
+mkdir -p "$CEF_AUTOMATE_DIR"
+mkdir -p "$CEF_DEPOT_TOOLS_DIR"
+mkdir -p "$CEF_CHROMIUM_DIR"
+
+echo "  $CEF_AUTOMATE_DIR"
+echo "  $CEF_DEPOT_TOOLS_DIR"
+echo "  $CEF_CHROMIUM_DIR"
+
+# --------------------------------------------------
+# Step 3: Download depot_tools (if not present)
+# --------------------------------------------------
+
+log_info "Setting up depot_tools"
+
+if [ -d "$CEF_DEPOT_TOOLS_DIR/.git" ]; then
+    echo "depot_tools already cloned. Updating..."
+    cd "$CEF_DEPOT_TOOLS_DIR"
+    git pull --quiet
+else
+    echo "Cloning depot_tools from chromium.googlesource.com..."
+    # Remove directory contents if it exists but isn't a git repo
+    rm -rf "${CEF_DEPOT_TOOLS_DIR:?}/"*
+    git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$CEF_DEPOT_TOOLS_DIR"
+fi
+
+echo "[OK] depot_tools ready"
+
+# Add depot_tools to PATH for this session
+export PATH="$CEF_DEPOT_TOOLS_DIR:$PATH"
+
+# --------------------------------------------------
+# Step 4: Download automate-git.py (if not present)
+# --------------------------------------------------
+
+log_info "Setting up automate-git.py"
+
+AUTOMATE_SCRIPT="$CEF_AUTOMATE_DIR/automate-git.py"
+
+if [ -f "$AUTOMATE_SCRIPT" ]; then
+    echo "automate-git.py already exists. Downloading fresh copy..."
+fi
+
+curl -fsSL \
+    "https://raw.githubusercontent.com/chromiumembedded/cef/master/tools/automate/automate-git.py" \
+    -o "$AUTOMATE_SCRIPT"
+
+echo "[OK] automate-git.py downloaded"
+
+# --------------------------------------------------
+# Step 5: Print build configuration
+# --------------------------------------------------
+
+log_info "Build Configuration"
+
+echo "  CEF Branch:     $CEF_BRANCH (CEF 136 / Chromium 136)"
+echo "  Architecture:   $ARCH_LABEL ($BUILD_ARCH_FLAG)"
+echo "  GN_DEFINES:     $GN_DEFINES"
+echo "  Archive Format: $CEF_ARCHIVE_FORMAT"
+echo "  Download Dir:   $CEF_CHROMIUM_DIR"
+echo "  depot_tools:    $CEF_DEPOT_TOOLS_DIR"
+echo ""
+echo "This will take 4-6 hours for a first build."
+echo "Chromium source download is ~30GB."
+echo ""
+read -p "Start the build? (y/N) " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+# --------------------------------------------------
+# Step 6: Run automate-git.py
+# --------------------------------------------------
+
+log_info "Starting CEF build (branch $CEF_BRANCH, $ARCH_LABEL)"
+
+BUILD_START=$(date +%s)
+
+python3 "$AUTOMATE_SCRIPT" \
+    --download-dir="$CEF_CHROMIUM_DIR" \
+    --depot-tools-dir="$CEF_DEPOT_TOOLS_DIR" \
     --branch="$CEF_BRANCH" \
-    $BUILD_FLAG \
+    "$BUILD_ARCH_FLAG" \
     --minimal-distrib \
     --client-distrib \
     --no-debug-build \
-    2>&1 | tee "$LOG_FILE"
+    --force-build
+
+BUILD_EXIT_CODE=$?
+BUILD_END=$(date +%s)
+BUILD_DURATION=$(( (BUILD_END - BUILD_START) / 60 ))
+
+# --------------------------------------------------
+# Step 7: Report results
+# --------------------------------------------------
 
 echo ""
 echo "============================================"
-echo "  BUILD SUCCEEDED: $(date)"
+
+if [ $BUILD_EXIT_CODE -ne 0 ]; then
+    echo "BUILD FAILED (exit code $BUILD_EXIT_CODE)"
+    echo "Build duration: ${BUILD_DURATION} minutes"
+    echo ""
+    echo "Common issues:"
+    echo "  - Python version incompatibility (need 3.9-3.11)"
+    echo "  - Insufficient disk space (need ~100GB)"
+    echo "  - Insufficient RAM (need 16GB+)"
+    echo "  - Network interruption during source download"
+    echo ""
+    echo "Try re-running the script. automate-git.py supports"
+    echo "incremental builds and will resume where it left off."
+    echo "============================================"
+    exit $BUILD_EXIT_CODE
+fi
+
+echo "BUILD SUCCEEDED"
+echo "Build duration: ${BUILD_DURATION} minutes"
+echo ""
+echo "Output directory:"
+echo "  $CEF_CHROMIUM_DIR/chromium/src/cef/binary_distrib/"
+echo ""
+echo "Look for a folder named:"
+echo "  cef_binary_136.*_macos${ARCH_LABEL}/"
+echo ""
+echo "Inside you will find:"
+echo "  Release/                    - CEF framework and libraries"
+echo "    Chromium Embedded Framework.framework/"
+echo "  Resources/                  - CEF resources (pak files, locales)"
+echo "  include/                    - CEF C/C++ headers"
+echo "  libcef_dll_wrapper/         - Wrapper source to build"
+echo ""
+echo "Next steps:"
+echo "  1. Copy the output to Hodos-Browser/cef-binaries/"
+echo "  2. Rebuild libcef_dll_wrapper (cmake .. && make)"
+echo "  3. Rebuild cef-native (cmake .. && make)"
+echo "  4. Verify codecs: video.canPlayType('video/mp4; codecs=\"avc1.42E01E\"')"
+echo "     Should return 'probably' (not empty string)"
 echo "============================================"
-echo ""
-info "Output directory:"
-ls -d "$DOWNLOAD_DIR/chromium/src/cef/binary_distrib/cef_binary_"* 2>/dev/null || warn "Output not found — check $LOG_FILE"
-echo ""
-info "Next steps:"
-echo "  cd ~/Hodos-Browser"
-echo "  mv cef-binaries cef-binaries-backup"
-echo "  cp -r ~/cef/chromium_git/chromium/src/cef/binary_distrib/cef_binary_136.*_macosarm64_minimal cef-binaries"
-echo "  # Then rebuild wrapper + cef-native (see issue #37)"
