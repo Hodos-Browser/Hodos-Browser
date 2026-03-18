@@ -837,6 +837,19 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
+            // Show main window on first header load (smooth startup)
+#ifdef _WIN32
+            {
+                extern HWND g_hwnd;
+                extern bool g_window_shown;
+                if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+                    ShowWindow(g_hwnd, SW_SHOW);
+                    UpdateWindow(g_hwnd);
+                    g_window_shown = true;
+                    LOG_INFO_BROWSER("Main window shown - header browser loaded");
+                }
+            }
+#endif
             // Inject the hodosBrowser API into header browser (where React app runs)
             LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
 

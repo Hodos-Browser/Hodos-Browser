@@ -18,6 +18,9 @@
 #include "cef_command_line.h"
 #include "cef_life_span_handler.h"
 #include "wrapper/cef_helpers.h"
+#include "include/cef_task.h"
+#include "include/base/cef_callback.h"
+#include "include/wrapper/cef_closure_task.h"
 #include "include/cef_render_process_handler.h"
 #include "include/cef_v8.h"
 #include "include/cef_browser.h"
@@ -99,6 +102,9 @@ bool g_is_fullscreen = false;
 // Shutdown state: set when app is shutting down, checked by OnBeforeClose
 // to call PostQuitMessage only after all browsers have fully closed.
 bool g_app_shutting_down = false;
+
+// Startup: window is hidden until header browser loads (smooth startup)
+bool g_window_shown = false;
 
 // Wallet server process management
 PROCESS_INFORMATION g_walletServerProcess = {};
@@ -2819,7 +2825,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
 
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
@@ -2847,8 +2853,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Store BrowserWindow* in HWND user data so ShellWindowProc can find it
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(mainWin));
 
-    ShowWindow(hwnd, SW_SHOW);        UpdateWindow(hwnd);
-    ShowWindow(header_hwnd, SW_SHOW); UpdateWindow(header_hwnd);
     // Don't show webview_hwnd - it's no longer used (tabs handle content now)
     // ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
 
@@ -2926,6 +2930,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CreateProfilePanelOverlay(g_hInstance, false, 50);
     CreateMenuOverlay(g_hInstance, false, 30);
     LOG_INFO("Pre-created panel overlays (hidden) for warm startup");
+
+    // Safety timeout: force-show window after 5s if header browser hasn't loaded
+    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+        extern HWND g_hwnd;
+        extern bool g_window_shown;
+        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+            LOG_WARNING("Startup timeout - force-showing window after 5 seconds");
+            ShowWindow(g_hwnd, SW_SHOW);
+            UpdateWindow(g_hwnd);
+            g_window_shown = true;
+        }
+    }), 5000);
 
     CefRunMessageLoop();
 
