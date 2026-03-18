@@ -55,3 +55,8 @@ rust-wallet/HodosBrowser/
 temp/
 temp/cef-binaries
 cef-native/win_build_run.sh
+docs/
+
+# Release packaging artifacts
+/staging/
+/installer/Output/
