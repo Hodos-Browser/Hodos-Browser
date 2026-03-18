@@ -7,6 +7,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LocalFileResourceHandler.h"
     #include "../../include/core/LayoutHelpers.h"
     #include <windows.h>
     #include <shobjidl.h>
