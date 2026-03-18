@@ -14,8 +14,7 @@
 #include "include/cef_v8.h"
 #include <iostream>
 #include <fstream>
-#include <sstream>
-#include <iomanip>
+#include <cstdio>
 
 #include "../../include/core/Logger.h"
 #include "../../include/core/FingerprintScript.h"
@@ -60,11 +59,11 @@ static std::string escapeJsonForJs(const std::string& json) {
                 if (static_cast<unsigned char>(c) >= 32 || c == '\t' || c == '\n' || c == '\r') {
                     escaped += c;
                 } else {
-                    // Escape other control characters as \xXX using stringstream
-                    std::ostringstream oss;
-                    oss << "\\x" << std::hex << std::setfill('0') << std::setw(2)
-                        << static_cast<unsigned int>(static_cast<unsigned char>(c));
-                    escaped += oss.str();
+                    // Escape other control characters as \xXX (snprintf avoids heap alloc — F7 perf fix)
+                    char buf[5];
+                    snprintf(buf, sizeof(buf), "\\x%02x",
+                             static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                    escaped.append(buf, 4);
                 }
                 break;
         }

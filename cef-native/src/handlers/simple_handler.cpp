@@ -285,7 +285,12 @@ std::string SimpleHandler::pending_panel_;
 bool SimpleHandler::needs_overlay_reload_ = false;
 
 SimpleHandler::SimpleHandler(const std::string& role, int window_id)
-    : role_(role), window_id_(window_id) {}
+    : role_(role), window_id_(window_id)
+#ifdef _WIN32
+    , is_windowed_browser_(role.empty() || role == "header" ||
+                           role.compare(0, 4, "tab_") == 0)
+#endif
+{}
 
 BrowserWindow* SimpleHandler::GetOwnerWindow() const {
     return WindowManager::GetInstance().GetWindow(window_id_);
@@ -510,9 +515,7 @@ bool SimpleHandler::OnCursorChange(CefRefPtr<CefBrowser> browser,
     // For windowed browsers (tabs, header), return false so CEF updates the
     // window class cursor via SetClassLongPtr(GCLP_HCURSOR) — without this,
     // WM_SETCURSOR resets the cursor to IDC_ARROW on every mouse move.
-    bool is_windowed = role_.empty() || role_ == "header" ||
-                       role_.compare(0, 4, "tab_") == 0;
-    if (!is_windowed) {
+    if (!is_windowed_browser_) {
         ::SetCursor(cursor);
         return true;
     }
@@ -743,27 +746,8 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
     if (isLoading && tab_id != -1) {
         AdblockCache::GetInstance().resetBlockedCount(browser->GetIdentifier());
         last_cosmetic_url_.clear();
-
-        // 8e-2: Pre-fetch scriptlets for the new URL and send to renderer BEFORE page JS runs.
-        // OnContextCreated (renderer) will inject them synchronously.
-        CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
-        if (mainFrame && mainFrame->IsValid() && g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled()) {
-            std::string navUrl = mainFrame->GetURL().ToString();
-            if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
-                // Sprint 10b: Check if scriptlets are disabled for this domain
-                bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(navUrl);
-                auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl, skipScriptlets);
-                if (!cosmetic.injectedScript.empty()) {
-                    LOG_INFO_BROWSER("💉 Pre-caching scriptlets for " + navUrl +
-                        " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
-                    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("preload_cosmetic_script");
-                    CefRefPtr<CefListValue> args = msg->GetArgumentList();
-                    args->SetString(0, navUrl);
-                    args->SetString(1, cosmetic.injectedScript);
-                    mainFrame->SendProcessMessage(PID_RENDERER, msg);
-                }
-            }
-        }
+        // NOTE: Scriptlet pre-caching is handled in OnBeforeBrowse (fires earlier).
+        // Duplicate fetch here was removed — F10 perf fix.
     }
 #endif
 
@@ -1442,9 +1426,6 @@ bool SimpleHandler::OnProcessMessageReceived(
     std::string message_name = message->GetName();
     LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
-    // Additional logging for debugging
-    LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
-
     // ========== TAB MANAGEMENT MESSAGES ==========
     // Tab management available on both platforms now
 
@@ -1499,7 +1480,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("📑 Tab close: ID " + std::to_string(tab_id) +
                              (success ? " succeeded" : " failed"));
 
-            // TODO: Send tab list update to frontend
+            if (success) {
+                NotifyWindowTabListChanged(window_id_);
+            }
         }
         return true;
     }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { TabListResponse, TabManagerState } from '../types/TabTypes';
 
 /**
@@ -11,6 +11,10 @@ export const useTabManager = () => {
     activeTabId: -1,
     isLoading: true,
   });
+
+  // Track recently closed tab IDs so incoming tab_list_response doesn't re-add them
+  // during the async window between IPC close and CEF OnBeforeClose cleanup
+  const recentlyClosedRef = useRef<Set<number>>(new Set());
 
   // Fetch tab list from backend
   const refreshTabList = useCallback(() => {
@@ -28,14 +32,32 @@ export const useTabManager = () => {
     }
   }, [refreshTabList]);
 
-  // Close a tab
+  // Close a tab — optimistic removal for instant visual feedback
   const closeTab = useCallback((tabId: number) => {
     if (window.cefMessage) {
       window.cefMessage.send('tab_close', tabId);
-      // Refresh tab list after a short delay to get updated state
-      setTimeout(refreshTabList, 500);
+
+      // Suppress this tab from incoming tab_list_response until C++ confirms removal
+      recentlyClosedRef.current.add(tabId);
+      setTimeout(() => recentlyClosedRef.current.delete(tabId), 3000);
+
+      // Remove tab from local state immediately
+      setState(prev => {
+        const remaining = prev.tabs.filter(t => t.id !== tabId);
+        let newActiveId = prev.activeTabId;
+        if (tabId === prev.activeTabId && remaining.length > 0) {
+          const closedIndex = prev.tabs.findIndex(t => t.id === tabId);
+          const newIndex = Math.min(closedIndex, remaining.length - 1);
+          newActiveId = remaining[newIndex].id;
+        }
+        return {
+          ...prev,
+          tabs: remaining.map(t => ({ ...t, isActive: t.id === newActiveId })),
+          activeTabId: newActiveId,
+        };
+      });
     }
-  }, [refreshTabList]);
+  }, []);
 
   // Switch to a tab
   const switchToTab = useCallback((tabId: number) => {
@@ -109,8 +131,16 @@ export const useTabManager = () => {
       if (event.data && event.data.type === 'tab_list_response') {
         try {
           const response: TabListResponse = JSON.parse(event.data.data);
+          // Filter out tabs that were optimistically closed but C++ hasn't confirmed yet
+          const closed = recentlyClosedRef.current;
+          const filteredTabs = closed.size > 0
+            ? response.tabs.filter(t => !closed.has(t.id))
+            : response.tabs;
+          // If C++ no longer includes the tab, clear it from the suppression set
+          const serverIds = new Set(response.tabs.map(t => t.id));
+          closed.forEach(id => { if (!serverIds.has(id)) closed.delete(id); });
           setState({
-            tabs: response.tabs,
+            tabs: filteredTabs,
             activeTabId: response.activeTabId,
             isLoading: false,
           });

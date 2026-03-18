@@ -11,7 +11,6 @@
 #include "../handlers/simple_handler.h"
 #include "../handlers/simple_app.h"
 #include <iostream>
-#include <regex>
 
 #include "../../include/core/PendingAuthRequest.h"
 #include "../../include/core/SessionManager.h"
@@ -102,26 +101,32 @@ private:
     DomainPermissionCache& operator=(const DomainPermissionCache&) = delete;
 
     std::mutex mutex_;
-    std::map<std::string, Permission> cache_;
+    std::unordered_map<std::string, Permission> cache_;
 
 #ifdef _WIN32
+    // Reusable WinHTTP session handle — thread-safe per MSDN (P2 perf fix)
+    HINTERNET hSession_ = nullptr;
+
+    HINTERNET getSession() {
+        if (!hSession_) {
+            hSession_ = WinHttpOpen(L"DomainPermissionCache/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
+        }
+        return hSession_;
+    }
+
     Permission fetchFromBackend(const std::string& domain) {
         Permission result;
         result.trustLevel = "unknown";
 
-        HINTERNET hSession = WinHttpOpen(L"DomainPermissionCache/1.0",
-                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                         WINHTTP_NO_PROXY_NAME,
-                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        HINTERNET hSession = getSession();
         if (!hSession) return result;
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
+        if (!hConnect) return result;
 
-        // Build endpoint: /domain/permissions?domain=<url-encoded-domain>
         std::string endpoint = "/domain/permissions?domain=" + domain;
         std::wstring wideEndpoint(endpoint.begin(), endpoint.end());
 
@@ -132,12 +137,11 @@ private:
                                                 WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return result;
         }
 
-        // Set a short timeout (5 seconds) to not block the IO thread too long
-        DWORD timeout = 5000;
+        // 1s timeout for localhost (P2 perf fix — reduced from 5s)
+        DWORD timeout = 1000;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -146,12 +150,11 @@ private:
             !WinHttpReceiveResponse(hRequest, nullptr)) {
             WinHttpCloseHandle(hRequest);
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return result;
         }
 
-        // Read response body
         std::string responseBody;
+        responseBody.reserve(512);
         DWORD bytesRead = 0;
         char buffer[4096];
         do {
@@ -161,9 +164,7 @@ private:
 
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
 
-        // Parse JSON response
         try {
             auto json = nlohmann::json::parse(responseBody);
             result.trustLevel = json.value("trustLevel", "unknown");
@@ -210,16 +211,23 @@ public:
         return instance;
     }
 
+    // P2 perf fix: mutex released before blocking I/O to allow concurrent cached reads
     bool walletExists() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto now = std::chrono::steady_clock::now();
-        if (valid_ && (now - lastCheck_) < std::chrono::seconds(30)) {
-            return exists_;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto now = std::chrono::steady_clock::now();
+            if (valid_ && (now - lastCheck_) < std::chrono::seconds(30)) {
+                return exists_;
+            }
         }
-        exists_ = fetchWalletStatus();
-        valid_ = true;
-        lastCheck_ = now;
-        return exists_;
+        bool result = fetchWalletStatus();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exists_ = result;
+            valid_ = true;
+            lastCheck_ = std::chrono::steady_clock::now();
+        }
+        return result;
     }
 
     void invalidate() {
@@ -238,18 +246,24 @@ private:
     std::chrono::steady_clock::time_point lastCheck_;
 
 #ifdef _WIN32
+    HINTERNET hSession_ = nullptr;
+
+    HINTERNET getSession() {
+        if (!hSession_) {
+            hSession_ = WinHttpOpen(L"WalletStatusCache/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
+        }
+        return hSession_;
+    }
+
     bool fetchWalletStatus() {
-        HINTERNET hSession = WinHttpOpen(L"WalletStatusCache/1.0",
-                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                         WINHTTP_NO_PROXY_NAME,
-                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        HINTERNET hSession = getSession();
         if (!hSession) return false;
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return false;
-        }
+        if (!hConnect) return false;
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
                                                 L"/wallet/status",
@@ -258,11 +272,10 @@ private:
                                                 WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return false;
         }
 
-        DWORD timeout = 5000;
+        DWORD timeout = 1000;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -271,11 +284,11 @@ private:
             !WinHttpReceiveResponse(hRequest, nullptr)) {
             WinHttpCloseHandle(hRequest);
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return false;
         }
 
         std::string responseBody;
+        responseBody.reserve(256);
         DWORD bytesRead = 0;
         char buffer[1024];
         do {
@@ -285,7 +298,6 @@ private:
 
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
 
         try {
             auto json = nlohmann::json::parse(responseBody);
@@ -296,7 +308,7 @@ private:
     }
 #else
     bool fetchWalletStatus() {
-        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status", 5000);
+        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status", 1000);
         if (!resp.success) return false;
 
         try {
@@ -317,28 +329,32 @@ public:
         return instance;
     }
 
+    // P2 perf fix: mutex released before blocking I/O
     double getPrice() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto now = std::chrono::steady_clock::now();
-        if (valid_ && (now - lastCheck_) < std::chrono::minutes(5)) {
-            return priceUsd_;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto now = std::chrono::steady_clock::now();
+            if (valid_ && (now - lastCheck_) < std::chrono::minutes(5)) {
+                return priceUsd_;
+            }
         }
         double fetched = fetchFromBackend();
-        if (fetched > 0.0) {
-            priceUsd_ = fetched;
-            lastSuccessfulPrice_ = fetched;
-        } else if (lastSuccessfulPrice_ > 0.0) {
-            // Fetch failed — return last known good price (stale but safe)
-            priceUsd_ = lastSuccessfulPrice_;
-            LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed, using stale price $" + std::to_string(lastSuccessfulPrice_));
-        } else {
-            // Never successfully fetched — sentinel value signals "unknown"
-            priceUsd_ = -1.0;
-            LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed and no stale price available");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (fetched > 0.0) {
+                priceUsd_ = fetched;
+                lastSuccessfulPrice_ = fetched;
+            } else if (lastSuccessfulPrice_ > 0.0) {
+                priceUsd_ = lastSuccessfulPrice_;
+                LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed, using stale price $" + std::to_string(lastSuccessfulPrice_));
+            } else {
+                priceUsd_ = -1.0;
+                LOG_DEBUG_HTTP("⚠️ BSVPriceCache: fetch failed and no stale price available");
+            }
+            valid_ = true;
+            lastCheck_ = std::chrono::steady_clock::now();
+            return priceUsd_;
         }
-        valid_ = true;
-        lastCheck_ = now;
-        return priceUsd_;
     }
 
     void invalidate() {
@@ -358,18 +374,24 @@ private:
     std::chrono::steady_clock::time_point lastCheck_;
 
 #ifdef _WIN32
+    HINTERNET hSession_ = nullptr;
+
+    HINTERNET getSession() {
+        if (!hSession_) {
+            hSession_ = WinHttpOpen(L"BSVPriceCache/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
+        }
+        return hSession_;
+    }
+
     double fetchFromBackend() {
-        HINTERNET hSession = WinHttpOpen(L"BSVPriceCache/1.0",
-                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                         WINHTTP_NO_PROXY_NAME,
-                                         WINHTTP_NO_PROXY_BYPASS, 0);
+        HINTERNET hSession = getSession();
         if (!hSession) return -1.0;
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return -1.0;
-        }
+        if (!hConnect) return -1.0;
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
                                                 L"/wallet/bsv-price",
@@ -378,11 +400,10 @@ private:
                                                 WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return -1.0;
         }
 
-        DWORD timeout = 5000;
+        DWORD timeout = 1000;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -391,11 +412,11 @@ private:
             !WinHttpReceiveResponse(hRequest, nullptr)) {
             WinHttpCloseHandle(hRequest);
             WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
             return -1.0;
         }
 
         std::string responseBody;
+        responseBody.reserve(256);
         DWORD bytesRead = 0;
         char buffer[1024];
         do {
@@ -405,7 +426,6 @@ private:
 
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
 
         try {
             auto json = nlohmann::json::parse(responseBody);
@@ -417,7 +437,7 @@ private:
     }
 #else
     double fetchFromBackend() {
-        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/bsv-price", 5000);
+        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/bsv-price", 1000);
         if (!resp.success) return -1.0;
 
         try {
@@ -480,7 +500,7 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
         return result;
     }
 
-    DWORD timeout = 5000;
+    DWORD timeout = 1000;  // P2 perf fix — reduced from 5s for localhost
     WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -494,6 +514,7 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
     }
 
     std::string responseBody;
+    responseBody.reserve(1024);  // Typical cert fields JSON < 1KB
     DWORD bytesRead = 0;
     char buffer[4096];
     do {
@@ -1713,27 +1734,23 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     // Normalize BRC-100 wallet requests to our standard port 31301
     std::string originalUrl = url;
 
-    // Handle localhost port redirection
-    std::regex localhostPortPattern(R"(localhost:\d{4})");
-    if (std::regex_search(url, localhostPortPattern)) {
-        // Only redirect if it's not already port 31301
-        if (url.find("localhost:31301") == std::string::npos) {
-            url = std::regex_replace(url, localhostPortPattern, "localhost:31301");
-            LOG_DEBUG_HTTP("🌐 localhost Port redirection: " + originalUrl + " -> " + url);
+    // Handle localhost/127.0.0.1 port redirection (string ops instead of regex — F5 perf fix)
+    auto redirectPort = [&](const std::string& host, const std::string& target) {
+        size_t pos = url.find(host);
+        if (pos == std::string::npos) return;
+        if (url.find(target) != std::string::npos) return;  // Already correct port
+        // Find the 4-digit port after the host prefix
+        size_t portStart = pos + host.length();
+        size_t portEnd = portStart;
+        while (portEnd < url.length() && url[portEnd] >= '0' && url[portEnd] <= '9') portEnd++;
+        if (portEnd > portStart && (portEnd - portStart) <= 5) {
+            url.replace(pos, portEnd - pos, target);
+            LOG_DEBUG_HTTP("🌐 Port redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
         }
-    }
-
-    // Handle 127.0.0.1 port redirection
-    std::regex localhostIPPattern(R"(127\.0\.0\.1:\d{4})");
-    if (std::regex_search(url, localhostIPPattern)) {
-        // Only redirect if it's not already port 31301
-        if (url.find("127.0.0.1:31301") == std::string::npos) {
-            url = std::regex_replace(url, localhostIPPattern, "127.0.0.1:31301");
-            LOG_DEBUG_HTTP("🌐 127.0.0.1 Port redirection: " + originalUrl + " -> " + url);
-            request->SetURL(url);
-        }
-    }
+    };
+    redirectPort("localhost:", "localhost:31301");
+    redirectPort("127.0.0.1:", "127.0.0.1:31301");
 
     LOG_DEBUG_HTTP("🌐 About to check if wallet endpoint...");
 
@@ -1758,9 +1775,16 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
                 }
             }
 
-            // Replace the domain with localhost:31301
-            std::regex domainPattern(R"(https?://[^/]+)");
-            url = std::regex_replace(url, domainPattern, "http://localhost:31301");
+            // Replace the domain with localhost:31301 (string ops instead of regex — F5 perf fix)
+            size_t schemeEnd = url.find("://");
+            if (schemeEnd != std::string::npos) {
+                size_t hostEnd = url.find('/', schemeEnd + 3);
+                if (hostEnd != std::string::npos) {
+                    url = "http://localhost:31301" + url.substr(hostEnd);
+                } else {
+                    url = "http://localhost:31301";
+                }
+            }
 
             LOG_DEBUG_HTTP("🌐 BRC-104 auth redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
