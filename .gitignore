@@ -52,3 +52,6 @@ rust-wallet/HodosBrowser/
 **/wallet/wallet.db-wal 
 .planning/
 .claude
+temp/
+temp/cef-binaries
+cef-native/win_build_run.sh
