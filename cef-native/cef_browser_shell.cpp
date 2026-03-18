@@ -47,6 +47,7 @@
 #include <fstream>
 #include <chrono>
 #include <iomanip>
+#include <thread>
 #include <sstream>
 
 HWND g_hwnd = nullptr;
@@ -2845,44 +2846,62 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         return 1;
     }
 
-    // Initialize HistoryManager with profile-specific path
-    LOG_INFO("Initializing HistoryManager...");
-    if (HistoryManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("HistoryManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize HistoryManager");
-    }
+    // P3 perf fix: parallelize DB initialization + backend server startup.
+    // Each SQLite DB opens its own file (no shared state). Backend daemons are
+    // independent processes. SettingsManager and AdblockCache are already initialized
+    // before CefInitialize (lines 2625-2637), so no ordering conflict.
+    LOG_INFO("Starting parallel initialization (3 DBs + 2 backend servers)...");
+    auto initStart = std::chrono::steady_clock::now();
 
-    // Initialize CookieBlockManager with same cache path
-    LOG_INFO("Initializing CookieBlockManager...");
-    if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("CookieBlockManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize CookieBlockManager");
-    }
+    std::thread historyThread([&profile_cache]() {
+        if (HistoryManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("HistoryManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize HistoryManager");
+        }
+    });
 
-    // Initialize BookmarkManager with same cache path
-    LOG_INFO("Initializing BookmarkManager...");
-    if (BookmarkManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("BookmarkManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize BookmarkManager");
-    }
+    std::thread cookieThread([&profile_cache]() {
+        if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("CookieBlockManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize CookieBlockManager");
+        }
+    });
 
-    // Start wallet server (auto-launch or detect already running)
-    LOG_INFO("Starting wallet server...");
-    StartWalletServer();
+    std::thread bookmarkThread([&profile_cache]() {
+        if (BookmarkManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("BookmarkManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize BookmarkManager");
+        }
+    });
 
-    // Start adblock engine (non-critical — browser works without it)
-    LOG_INFO("Starting adblock engine...");
-    StartAdblockServer();
+    std::thread walletThread([]() {
+        LOG_INFO("Starting wallet server...");
+        StartWalletServer();
+    });
+
+    std::thread adblockThread([]() {
+        LOG_INFO("Starting adblock engine...");
+        StartAdblockServer();
+    });
+
+    historyThread.join();
+    cookieThread.join();
+    bookmarkThread.join();
+    walletThread.join();
+    adblockThread.join();
+
+    auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - initStart).count();
+    LOG_INFO("Parallel initialization complete in " + std::to_string(initMs) + "ms");
 
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
 
     // Pre-create panel overlays hidden so React is warm when user first clicks.
-    // This eliminates the first-open race condition where JS injection fires before
-    // React mounts and registers callbacks.
+    // This eliminates the first-open lag from subprocess spawn + React mount.
     extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);

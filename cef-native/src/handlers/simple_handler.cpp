@@ -498,6 +498,8 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id != -1) {
         TabManager::GetInstance().UpdateTabTitle(tab_id, title.ToString());
+        // F13 perf fix: push title change immediately instead of waiting for 5s poll
+        NotifyWindowTabListChanged(window_id_);
     }
 
 #if defined(OS_WIN)

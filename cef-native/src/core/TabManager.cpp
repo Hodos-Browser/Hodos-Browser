@@ -113,7 +113,9 @@ int TabManager::CreateTab(const std::string& url, HWND parent_hwnd, int x, int y
     window_info.SetAsChild(tab_hwnd, CefRect(0, 0, cef_width, cef_height));
 
     CefBrowserSettings browser_settings;
-    // Use default settings for now
+    // Match new tab page background color to eliminate white/black flash during tab switch.
+    // Same value as macOS TabManager_mac.mm — dark grey (26, 26, 26).
+    browser_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
 
     // Create browser asynchronously
     // The browser will be associated with the tab in RegisterTabBrowser()
@@ -266,26 +268,28 @@ bool TabManager::SwitchToTab(int tab_id) {
     int target_window = it->second.window_id;
     LOG(INFO) << "Switching to tab " << tab_id << " in window " << target_window;
 
-    // Hide only tabs in the same window (don't affect other windows)
-    for (auto& pair : tabs_) {
-        Tab& tab = pair.second;
-        if (tab.window_id == target_window && tab.hwnd && IsWindow(tab.hwnd)) {
-            ShowWindow(tab.hwnd, SW_HIDE);
-            tab.is_visible = false;
-        }
-    }
-
-    // Show the selected tab
+    // Show the new tab FIRST, then hide the others.
+    // This eliminates the black flash caused by the parent window's BLACK_BRUSH
+    // background being exposed between hide-all and show-new.
     Tab& tab = it->second;
     if (tab.hwnd && IsWindow(tab.hwnd)) {
         ShowWindow(tab.hwnd, SW_SHOW);
         tab.is_visible = true;
         tab.last_accessed = std::chrono::system_clock::now();
 
-        // Set focus and notify CEF of resize
         if (tab.browser) {
             tab.browser->GetHost()->SetFocus(true);
             tab.browser->GetHost()->WasResized();
+        }
+    }
+
+    // Now hide all other tabs in the same window
+    for (auto& pair : tabs_) {
+        Tab& other = pair.second;
+        if (other.id != tab_id && other.window_id == target_window &&
+            other.hwnd && IsWindow(other.hwnd) && other.is_visible) {
+            ShowWindow(other.hwnd, SW_HIDE);
+            other.is_visible = false;
         }
     }
 
