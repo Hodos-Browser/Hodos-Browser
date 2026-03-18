@@ -5785,6 +5785,18 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
+    // Production frontend serving: if frontend/ exists next to .exe,
+    // serve files from disk instead of hitting the Vite dev server.
+    // MUST be before adblock/cookie checks — those handlers would try to
+    // network-fetch from port 5137, which has no server in production.
+    {
+        std::string frontend_dir;
+        if (url.find("127.0.0.1:5137") != std::string::npos &&
+            IsFrontendAvailable(frontend_dir)) {
+            return new LocalFileResourceRequestHandler(frontend_dir, url);
+        }
+    }
+
     // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
     // bypass ALL resource handlers — let CEF's native network stack handle them.
     // This avoids CefURLRequest forwarding issues on macOS.
