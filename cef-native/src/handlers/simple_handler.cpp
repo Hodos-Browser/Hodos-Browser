@@ -837,16 +837,23 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
-            // Show main window on first header load (smooth startup)
+            // Show main window shortly after header load (smooth startup).
+            // Delay 150ms to give React time to mount and paint the toolbar,
+            // so the window appears with the header fully rendered.
 #ifdef _WIN32
             {
-                extern HWND g_hwnd;
                 extern bool g_window_shown;
-                if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
-                    ShowWindow(g_hwnd, SW_SHOW);
-                    UpdateWindow(g_hwnd);
-                    g_window_shown = true;
-                    LOG_INFO_BROWSER("Main window shown - header browser loaded");
+                if (!g_window_shown) {
+                    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+                        extern HWND g_hwnd;
+                        extern bool g_window_shown;
+                        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+                            ShowWindow(g_hwnd, SW_SHOW);
+                            UpdateWindow(g_hwnd);
+                            g_window_shown = true;
+                            Logger::Log("Main window shown - header browser rendered", 1, 2);
+                        }
+                    }), 150);
                 }
             }
 #endif
