@@ -7,6 +7,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LayoutHelpers.h"
     #include <windows.h>
     #include <shobjidl.h>
     #include <shlobj.h>
@@ -1410,7 +1411,7 @@ bool SimpleHandler::OnBeforePopup(
         GetClientRect(popupHwnd, &rect);
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+        int shellHeight = GetHeaderHeightPx(popupHwnd);
         int tabHeight = height - shellHeight;
 
         // Create new tab with the popup URL in the same window
@@ -1468,8 +1469,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
 
-        // Account for header height (10% for tab bar + toolbar)
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+        int shellHeight = GetHeaderHeightPx(parentHwnd);
         int tabHeight = height - shellHeight;
 
         int tab_id = TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, window_id_);
@@ -6324,7 +6324,7 @@ static void CreateNewTabWithUrl(const std::string& url) {
     GetClientRect(parentHwnd, &rect);
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+    int shellHeight = GetHeaderHeightPx(parentHwnd);
     int tabHeight = height - shellHeight;
     TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight, width, tabHeight, winId);
 #else

@@ -4,6 +4,7 @@
 #include "../../include/handlers/simple_app.h"
 #include "../../include/handlers/my_overlay_render_handler.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LayoutHelpers.h"
 #include "include/cef_browser.h"
 #include "include/cef_request_context.h"
 #include <algorithm>
@@ -138,7 +139,7 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     int winX = workArea.left + 50 + offset;
     int winY = workArea.top + 50 + offset;
 
-    int shellHeight = (std::max)(100, static_cast<int>(winH * 0.10));
+    int shellHeight = GetHeaderHeightPxSystem();
     int tabHeight = winH - shellHeight;
 
     // --- Create main shell HWND ---

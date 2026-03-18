@@ -36,6 +36,7 @@
 #include "include/core/ProfileLock.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
+#include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -173,7 +174,7 @@ void HandleFullscreenChange(bool fullscreen) {
             ShowWindow(g_header_hwnd, SW_SHOW);
         }
         // Restore normal layout (same as WM_SIZE)
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+        int shellHeight = GetHeaderHeightPx(g_hwnd);
         int webviewHeight = height - shellHeight;
 
         if (g_header_hwnd && IsWindow(g_header_hwnd)) {
@@ -648,10 +649,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
-            // Move wallet overlay if it exists and is visible
+            // Move wallet overlay if it exists and is visible (right-side panel below header)
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int wpWidth = 400;
+                int wpHeight = mainRect.bottom - hdrRect.bottom;
+                int wpX = hdrRect.right - wpWidth;
+                int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    wpX, wpY, wpWidth, wpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
@@ -716,8 +723,8 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
 
-            // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+            // Fixed header height, DPI-scaled (tab bar 42px + toolbar 53px + 1px buffer = 96 CSS px)
+            int shellHeight = GetHeaderHeightPx(hwnd);
             int webviewHeight = height - shellHeight;
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
@@ -862,10 +869,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Resize wallet overlay
+            // Resize wallet overlay (right-side panel below header)
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int wpWidth = 400;
+                int wpHeight = mainRect.bottom - hdrRect.bottom;
+                int wpX = hdrRect.right - wpWidth;
+                int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    wpX, wpY, wpWidth, wpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
                 CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
@@ -2664,8 +2677,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+    // Fixed header height, DPI-scaled (no HWND yet, use system DPI)
+    int shellHeight = GetHeaderHeightPxSystem();
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;

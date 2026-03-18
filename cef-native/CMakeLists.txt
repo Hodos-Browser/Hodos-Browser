@@ -225,6 +225,7 @@ elseif(WIN32)
         src/core/ProfileLock.cpp
         include/core/ProfileImporter.h
         src/core/ProfileImporter.cpp
+        include/core/LayoutHelpers.h
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
 endif()
