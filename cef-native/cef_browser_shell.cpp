@@ -2696,14 +2696,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
-    wc.lpszClassName = L"HodosBrowserWndClass"; RegisterClass(&wc);
+    wc.lpszClassName = L"HodosBrowserWndClass";
+    wc.hbrBackground = CreateSolidBrush(RGB(26, 26, 26));
+    RegisterClass(&wc);
 
     WNDCLASS browserClass = {};
     browserClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;  // Redraw on resize, no border styles
     browserClass.lpfnWndProc = DefWindowProc;
     browserClass.hInstance = hInstance;
     browserClass.lpszClassName = L"CEFHostWindow";
-    browserClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);  // Black background
+    browserClass.hbrBackground = CreateSolidBrush(RGB(26, 26, 26));  // Dark theme background
     RegisterClass(&browserClass);
 
 
