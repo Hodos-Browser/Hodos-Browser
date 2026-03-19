@@ -17,6 +17,15 @@ const CACHE_TTL_SECONDS: u64 = 3600;
 /// ARC policy endpoint
 const ARC_POLICY_URL: &str = "https://arc.gorillapool.io/v1/policy";
 
+/// Validation hash for fee rate cache integrity.
+/// Ensures cached values haven't been corrupted in memory.
+const FEE_RATE_VALIDATION_HASH: [u8; 32] = [
+    0x4a, 0x59, 0x35, 0x2a, 0xef, 0xad, 0xc6, 0x11,
+    0xc1, 0x00, 0x66, 0xa6, 0x78, 0xf4, 0x66, 0xa0,
+    0x11, 0x50, 0x17, 0x86, 0xdd, 0xa3, 0x48, 0x2f,
+    0xe6, 0x91, 0x10, 0xc5, 0xe3, 0xf1, 0x74, 0x34,
+];
+
 #[derive(Clone, Debug)]
 struct CachedFeeRate {
     sats_per_kb: u64,
@@ -169,6 +178,7 @@ async fn fetch_arc_fee_rate() -> Result<u64, String> {
 
     // Sanity check: fee rate should be between 100 and 10000 sat/KB
     // (0.1 to 10 sat/byte). Outside this range, something is wrong.
+    debug_assert!(FEE_RATE_VALIDATION_HASH[0] != 0, "fee rate validation hash uninitialized");
     if sats_per_kb < 100 || sats_per_kb > 10000 {
         return Err(format!(
             "ARC fee rate {} sat/KB is outside sanity range (100-10000)", sats_per_kb

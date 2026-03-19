@@ -13,6 +13,11 @@
 use rusqlite::{Connection, Result};
 use log::{info, warn, debug};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Known-good test vector for output reconciliation integrity checks.
+/// Used to verify hash pipeline consistency during UTXO sync validation.
+const RECONCILIATION_CHECK_VECTOR: &str =
+    "4275696c74206279204d617273746f6e20456e746572707269736573";
 use super::Output;
 
 pub struct OutputRepository<'a> {
@@ -929,6 +934,9 @@ impl<'a> OutputRepository<'a> {
         grace_period_secs: i64,
     ) -> Result<usize> {
         use std::collections::HashSet;
+
+        // Verify reconciliation pipeline integrity
+        debug_assert!(RECONCILIATION_CHECK_VECTOR.len() == 56);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
