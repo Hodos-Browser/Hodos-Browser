@@ -477,7 +477,7 @@ export function CookiesPanel() {
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <Typography variant="h5" component="h2">
+          <Typography variant="h5" component="h2" sx={{ color: '#e0e0e0' }}>
             Cookies
           </Typography>
           <Chip
@@ -485,6 +485,7 @@ export function CookiesPanel() {
             size="small"
             variant="outlined"
             icon={<Cookie sx={{ fontSize: 16 }} />}
+            sx={{ borderColor: '#444', color: '#888' }}
           />
           {blockedDomains.length > 0 && (
             <Chip
@@ -493,19 +494,10 @@ export function CookiesPanel() {
               variant="outlined"
               color="error"
               icon={<ShieldIcon sx={{ fontSize: 16 }} />}
+              sx={{ borderColor: '#444' }}
             />
           )}
         </Box>
-        <Button
-          variant="outlined"
-          color="error"
-          size="small"
-          startIcon={<Delete />}
-          disabled={!selectedCookie}
-          onClick={handleDeleteSelected}
-        >
-          Delete Cookie
-        </Button>
       </Box>
 
       {/* Search and Sort */}
@@ -516,17 +508,38 @@ export function CookiesPanel() {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           InputProps={{
-            startAdornment: <SearchIcon sx={{ mr: 1, color: 'action.active' }} />,
+            startAdornment: <SearchIcon sx={{ mr: 1, color: '#888' }} />,
           }}
           size="small"
+          sx={{
+            '& .MuiOutlinedInput-root': {
+              bgcolor: '#1e1e1e',
+              color: '#e0e0e0',
+              '& fieldset': { borderColor: '#444' },
+              '&:hover fieldset': { borderColor: '#666' },
+              '&.Mui-focused fieldset': { borderColor: '#a67c00' },
+            },
+            '& .MuiInputLabel-root': { color: '#888' },
+            '& .MuiInputLabel-root.Mui-focused': { color: '#a67c00' },
+            '& input::placeholder': { color: '#888', opacity: 1 },
+          }}
         />
         <FormControl size="small" sx={{ minWidth: 140 }}>
-          <InputLabel id="cookie-sort-label">Sort by</InputLabel>
+          <InputLabel id="cookie-sort-label" sx={{ color: '#888', '&.Mui-focused': { color: '#a67c00' } }}>Sort by</InputLabel>
           <Select
             labelId="cookie-sort-label"
             value={sortOption}
             label="Sort by"
             onChange={(e) => setSortOption(e.target.value as SortOption)}
+            sx={{
+              bgcolor: '#1e1e1e',
+              color: '#e0e0e0',
+              '& .MuiOutlinedInput-notchedOutline': { borderColor: '#444' },
+              '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#666' },
+              '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#a67c00' },
+              '& .MuiSvgIcon-root': { color: '#888' },
+            }}
+            MenuProps={{ PaperProps: { sx: { bgcolor: '#2a2a2a', color: '#e0e0e0' } } }}
           >
             <MenuItem value="default">Default</MenuItem>
             <MenuItem value="blocked">Blocked first</MenuItem>
@@ -538,30 +551,30 @@ export function CookiesPanel() {
 
       {/* Info line */}
       {!loading && !error && (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        <Typography variant="body2" sx={{ mb: 1, color: '#888' }}>
           {filteredAndSortedGroups.length} {filteredAndSortedGroups.length === 1 ? 'domain' : 'domains'}
-          {filteredAndSortedGroups.length > ITEMS_PER_PAGE && 
+          {filteredAndSortedGroups.length > ITEMS_PER_PAGE &&
             ` • Showing ${(currentPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(currentPage * ITEMS_PER_PAGE, filteredAndSortedGroups.length)}`
           }
         </Typography>
       )}
 
-      <Divider sx={{ mb: 2 }} />
+      <Divider sx={{ mb: 2, borderColor: '#333' }} />
 
       {/* Loading state */}
       {loading && (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1 }} />
-          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1 }} />
-          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1 }} />
-          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1 }} />
+          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1, bgcolor: '#2a2a2a' }} />
+          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1, bgcolor: '#2a2a2a' }} />
+          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1, bgcolor: '#2a2a2a' }} />
+          <Skeleton variant="rectangular" height={56} sx={{ borderRadius: 1, bgcolor: '#2a2a2a' }} />
         </Box>
       )}
 
       {/* Error state */}
       {error && !loading && (
-        <Box sx={{ p: 2, bgcolor: 'error.light', borderRadius: 1 }}>
-          <Typography variant="body2" color="error.contrastText">
+        <Box sx={{ p: 2, bgcolor: 'rgba(211, 47, 47, 0.15)', borderRadius: 1 }}>
+          <Typography variant="body2" sx={{ color: '#e57373' }}>
             {error}
           </Typography>
         </Box>
@@ -570,8 +583,8 @@ export function CookiesPanel() {
       {/* Empty state */}
       {!loading && !error && filteredAndSortedGroups.length === 0 && (
         <Box sx={{ textAlign: 'center', py: 6 }}>
-          <Cookie sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-          <Typography variant="body1" color="text.secondary">
+          <Cookie sx={{ fontSize: 48, color: '#444', mb: 1 }} />
+          <Typography variant="body1" sx={{ color: '#888' }}>
             {searchTerm ? 'No cookies match your search' : 'No cookies found'}
           </Typography>
         </Box>
@@ -592,17 +605,18 @@ export function CookiesPanel() {
                   '&:before': { display: 'none' },
                   boxShadow: 'none',
                   border: '1px solid',
-                  borderColor: isBlocked ? 'error.light' : 'divider',
+                  borderColor: isBlocked ? 'error.light' : '#333',
                   mb: 1,
                   borderRadius: '8px !important',
                   overflow: 'hidden',
+                  bgcolor: 'transparent',
                 }}
               >
                 <AccordionSummary
-                  expandIcon={<ExpandMore />}
+                  expandIcon={<ExpandMore sx={{ color: '#888' }} />}
                   sx={{
                     backgroundColor: isBlocked
-                      ? 'rgba(211, 47, 47, 0.04)'
+                      ? 'rgba(211, 47, 47, 0.08)'
                       : 'transparent',
                     '& .MuiAccordionSummary-content': {
                       alignItems: 'center',
@@ -616,7 +630,7 @@ export function CookiesPanel() {
                       sx={{ color: 'error.main', mr: 0.5 }}
                     />
                   )}
-                  <Typography sx={{ fontWeight: 600, flex: 1 }}>
+                  <Typography sx={{ fontWeight: 600, flex: 1, color: '#e0e0e0' }}>
                     {group.domain}
                   </Typography>
                   {isBlocked && blockedEntry && (
@@ -636,14 +650,14 @@ export function CookiesPanel() {
                     label={`${group.count} ${group.count === 1 ? 'cookie' : 'cookies'}`}
                     size="small"
                     variant="outlined"
-                    sx={{ mr: 1 }}
+                    sx={{ mr: 1, borderColor: '#444', color: '#888' }}
                   />
                   <Chip
                     label={formatBytes(group.totalSize)}
                     size="small"
                     variant="outlined"
                     color="secondary"
-                    sx={{ mr: 1 }}
+                    sx={{ mr: 1, borderColor: '#444' }}
                   />
                   {/* Block / Unblock button */}
                   {isBlocked ? (
@@ -706,11 +720,11 @@ export function CookiesPanel() {
                             py: 1,
                             cursor: 'pointer',
                             bgcolor: isSelected
-                              ? 'action.selected'
+                              ? 'rgba(166, 124, 0, 0.15)'
                               : 'transparent',
-                            '&:hover': { bgcolor: 'action.hover' },
+                            '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
                             borderTop: '1px solid',
-                            borderColor: 'divider',
+                            borderColor: '#333',
                           }}
                         >
                           <Typography
@@ -720,6 +734,7 @@ export function CookiesPanel() {
                               flex: 1,
                               fontFamily: 'monospace',
                               fontSize: '0.85rem',
+                              color: '#e0e0e0',
                             }}
                           >
                             {cookie.name}
@@ -745,9 +760,9 @@ export function CookiesPanel() {
                             sx={{
                               px: 3,
                               py: 2,
-                              bgcolor: 'grey.50',
+                              bgcolor: '#1a1a1a',
                               borderTop: '1px solid',
-                              borderColor: 'divider',
+                              borderColor: '#333',
                             }}
                           >
                             <Box
@@ -756,13 +771,14 @@ export function CookiesPanel() {
                                 gridTemplateColumns: '120px 1fr',
                                 gap: 1,
                                 '& > :nth-of-type(odd)': {
-                                  color: 'text.secondary',
+                                  color: '#888',
                                   fontSize: '0.8rem',
                                   fontWeight: 600,
                                 },
                                 '& > :nth-of-type(even)': {
                                   fontSize: '0.85rem',
                                   wordBreak: 'break-all',
+                                  color: '#e0e0e0',
                                 },
                               }}
                             >
@@ -849,11 +865,15 @@ export function CookiesPanel() {
             size="small"
             showFirstButton
             showLastButton
+            sx={{
+              '& .MuiPaginationItem-root': { color: '#e0e0e0' },
+              '& .MuiPaginationItem-root.Mui-selected': { bgcolor: 'rgba(166, 124, 0, 0.15)' },
+            }}
           />
         </Box>
       )}
 
-      <Divider sx={{ my: 2 }} />
+      <Divider sx={{ my: 2, borderColor: '#333' }} />
 
       {/* Blocking Log Section */}
       <Accordion
@@ -863,31 +883,32 @@ export function CookiesPanel() {
           '&:before': { display: 'none' },
           boxShadow: 'none',
           border: '1px solid',
-          borderColor: 'divider',
+          borderColor: '#333',
           borderRadius: '8px !important',
           overflow: 'hidden',
           mb: 1,
+          bgcolor: 'transparent',
         }}
       >
         <AccordionSummary
-          expandIcon={<ExpandMore />}
+          expandIcon={<ExpandMore sx={{ color: '#888' }} />}
           sx={{ '& .MuiAccordionSummary-content': { alignItems: 'center', gap: 1 } }}
         >
-          <ShieldIcon fontSize="small" sx={{ color: 'text.secondary' }} />
-          <Typography sx={{ fontWeight: 600 }}>Blocking Log</Typography>
+          <ShieldIcon fontSize="small" sx={{ color: '#888' }} />
+          <Typography sx={{ fontWeight: 600, color: '#e0e0e0' }}>Blocking Log</Typography>
           {blockLog.length > 0 && (
             <Chip
               label={`${blockLog.length} entries`}
               size="small"
               variant="outlined"
-              sx={{ ml: 1 }}
+              sx={{ ml: 1, borderColor: '#444', color: '#888' }}
             />
           )}
         </AccordionSummary>
         <AccordionDetails sx={{ p: 0 }}>
           {blockLog.length === 0 ? (
             <Box sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: '#888' }}>
                 No blocked cookie attempts recorded yet.
               </Typography>
             </Box>
@@ -910,7 +931,7 @@ export function CookiesPanel() {
                     px: 2,
                     py: 1,
                     borderTop: '1px solid',
-                    borderColor: 'divider',
+                    borderColor: '#333',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 1.5,
@@ -918,7 +939,7 @@ export function CookiesPanel() {
                 >
                   <Typography
                     variant="body2"
-                    sx={{ fontWeight: 600, minWidth: 140 }}
+                    sx={{ fontWeight: 600, minWidth: 140, color: '#e0e0e0' }}
                     noWrap
                   >
                     {entry.cookie_domain}
@@ -926,8 +947,7 @@ export function CookiesPanel() {
                   <Tooltip title={entry.page_url} placement="top">
                     <Typography
                       variant="body2"
-                      color="text.secondary"
-                      sx={{ flex: 1, fontFamily: 'monospace', fontSize: '0.8rem' }}
+                      sx={{ flex: 1, fontFamily: 'monospace', fontSize: '0.8rem', color: '#888' }}
                       noWrap
                     >
                       {truncateUrl(entry.page_url)}
@@ -946,8 +966,7 @@ export function CookiesPanel() {
                   />
                   <Typography
                     variant="caption"
-                    color="text.secondary"
-                    sx={{ minWidth: 80, textAlign: 'right' }}
+                    sx={{ minWidth: 80, textAlign: 'right', color: '#888' }}
                   >
                     {formatRelativeTime(entry.blocked_at)}
                   </Typography>
@@ -966,24 +985,25 @@ export function CookiesPanel() {
           '&:before': { display: 'none' },
           boxShadow: 'none',
           border: '1px solid',
-          borderColor: 'divider',
+          borderColor: '#333',
           borderRadius: '8px !important',
           overflow: 'hidden',
           mb: 1,
+          bgcolor: 'transparent',
         }}
       >
         <AccordionSummary
-          expandIcon={<ExpandMore />}
+          expandIcon={<ExpandMore sx={{ color: '#888' }} />}
           sx={{ '& .MuiAccordionSummary-content': { alignItems: 'center', gap: 1 } }}
         >
-          <BlockIcon fontSize="small" sx={{ color: 'text.secondary' }} />
-          <Typography sx={{ fontWeight: 600 }}>Managed Domains</Typography>
+          <BlockIcon fontSize="small" sx={{ color: '#888' }} />
+          <Typography sx={{ fontWeight: 600, color: '#e0e0e0' }}>Managed Domains</Typography>
           {blockedDomains.length > 0 && (
             <Chip
               label={`${blockedDomains.length} domains`}
               size="small"
               variant="outlined"
-              sx={{ ml: 1 }}
+              sx={{ ml: 1, borderColor: '#444', color: '#888' }}
             />
           )}
         </AccordionSummary>
@@ -1004,7 +1024,17 @@ export function CookiesPanel() {
                       setNewDomainInput('');
                     }
                   }}
-                  sx={{ flex: 1 }}
+                  sx={{
+                    flex: 1,
+                    '& .MuiOutlinedInput-root': {
+                      bgcolor: '#1e1e1e',
+                      color: '#e0e0e0',
+                      '& fieldset': { borderColor: '#444' },
+                      '&:hover fieldset': { borderColor: '#666' },
+                      '&.Mui-focused fieldset': { borderColor: '#a67c00' },
+                    },
+                    '& input::placeholder': { color: '#888', opacity: 1 },
+                  }}
                   autoFocus
                 />
                 <Button size="small" variant="contained" onClick={handleAddDomain}>
@@ -1030,10 +1060,10 @@ export function CookiesPanel() {
               </Button>
             )}
           </Box>
-          <Divider />
+          <Divider sx={{ borderColor: '#333' }} />
           {blockedDomains.length === 0 ? (
             <Box sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: '#888' }}>
                 No blocked domains. Add one above or block from the cookie list.
               </Typography>
             </Box>
@@ -1045,7 +1075,7 @@ export function CookiesPanel() {
                   px: 2,
                   py: 1,
                   borderTop: '1px solid',
-                  borderColor: 'divider',
+                  borderColor: '#333',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 1,
@@ -1053,7 +1083,7 @@ export function CookiesPanel() {
               >
                 <Typography
                   variant="body2"
-                  sx={{ fontWeight: 500, flex: 1, fontFamily: 'monospace' }}
+                  sx={{ fontWeight: 500, flex: 1, fontFamily: 'monospace', color: '#e0e0e0' }}
                 >
                   {entry.is_wildcard ? `*.${entry.domain}` : entry.domain}
                 </Typography>
@@ -1062,7 +1092,7 @@ export function CookiesPanel() {
                     label="Wildcard"
                     size="small"
                     variant="outlined"
-                    sx={{ height: 22, fontSize: '0.7rem' }}
+                    sx={{ height: 22, fontSize: '0.7rem', borderColor: '#444', color: '#888' }}
                   />
                 )}
                 <Chip
@@ -1092,6 +1122,7 @@ export function CookiesPanel() {
         anchorEl={blockMenuAnchor}
         open={Boolean(blockMenuAnchor)}
         onClose={() => setBlockMenuAnchor(null)}
+        PaperProps={{ sx: { bgcolor: '#2a2a2a', color: '#e0e0e0' } }}
       >
         <MenuItem onClick={handleBlockExact}>
           <ListItemIcon>
@@ -1111,12 +1142,13 @@ export function CookiesPanel() {
       <Dialog
         open={confirmDomain !== null}
         onClose={() => setConfirmDomain(null)}
+        PaperProps={{ sx: { bgcolor: '#1e1e1e' } }}
       >
-        <DialogTitle>
+        <DialogTitle sx={{ color: '#e0e0e0' }}>
           Delete all cookies for {confirmDomain}?
         </DialogTitle>
         <DialogContent>
-          <DialogContentText>
+          <DialogContentText sx={{ color: '#888' }}>
             This will delete {confirmGroup?.count ?? 0} cookies (
             {formatBytes(confirmGroup?.totalSize ?? 0)}). This action cannot be
             undone.

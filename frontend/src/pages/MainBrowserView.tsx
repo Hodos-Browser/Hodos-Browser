@@ -483,6 +483,7 @@ const MainBrowserView: React.FC = () => {
                 overflow: 'hidden',
                 margin: '-8px',
                 padding: 0,
+                bgcolor: '#0f1117',
             }}
         >
             {/* Tab Bar */}
@@ -499,10 +500,11 @@ const MainBrowserView: React.FC = () => {
 
             {/* Top Navigation Bar */}
             <Toolbar sx={{
-                bgcolor: '#ffffff',
-                borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
-                minHeight: '54px !important',
-                height: '54px',
+                bgcolor: '#111827',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                borderRadius: '0',
+                minHeight: '53px !important',
+                height: '53px',
                 flexShrink: 0,
                 px: 1,
                 py: 0,
@@ -516,10 +518,10 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        color: 'rgba(0, 0, 0, 0.6)',
+                        color: '#9ca3af',
                         '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
                         }
                     }}
                 >
@@ -532,10 +534,10 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        color: 'rgba(0, 0, 0, 0.6)',
+                        color: '#9ca3af',
                         '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
                         }
                     }}
                 >
@@ -548,10 +550,10 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        color: 'rgba(0, 0, 0, 0.6)',
+                        color: '#9ca3af',
                         '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
                         }
                     }}
                 >
@@ -580,7 +582,7 @@ const MainBrowserView: React.FC = () => {
                                 <LockIcon sx={{ fontSize: 16, color: '#188038' }} />
                             )}
                             {securityState === 'insecure' && (
-                                <LockOpenIcon sx={{ fontSize: 16, color: 'rgba(0,0,0,0.4)' }} />
+                                <LockOpenIcon sx={{ fontSize: 16, color: '#6b7280' }} />
                             )}
                             {securityState === 'error' && (
                                 <ErrorOutlineIcon sx={{ fontSize: 16, color: '#d93025' }} />
@@ -690,10 +692,10 @@ const MainBrowserView: React.FC = () => {
                             borderRadius: 20,
                             paddingLeft: securityState !== 'none' ? 30 : 16,
                             paddingRight: 110,
-                            backgroundColor: '#f1f3f4',
-                            border: '1px solid transparent',
+                            backgroundColor: '#1a1d23',
+                            border: '1px solid #2a2d35',
                             fontSize: 14,
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            color: '#f0f0f0',
                             outline: 'none',
                         }}
                     />
@@ -754,20 +756,19 @@ const MainBrowserView: React.FC = () => {
                         <Box sx={{
                             width: '1px',
                             height: 20,
-                            bgcolor: 'rgba(0,0,0,0.2)',
+                            bgcolor: 'rgba(255,255,255,0.15)',
                         }} />
                         <IconButton
                             onClick={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect();
-                                const dpr = window.devicePixelRatio || 1;
-                                const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                                const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                                 if (window.cefMessage) {
                                     window.cefMessage.send('cookie_panel_show', [iconRightOffset.toString(), currentDomain]);
                                 }
                             }}
                             size="small"
                             title="Privacy Shield"
-                            sx={{ p: 0.25, color: adblockEnabled ? '#a67c00' : 'rgba(0,0,0,0.4)' }}
+                            sx={{ p: 0.25, color: adblockEnabled ? '#a67c00' : '#6b7280' }}
                         >
                             <Badge
                                 variant="dot"
@@ -790,13 +791,11 @@ const MainBrowserView: React.FC = () => {
                 {/* Spacer to help center address bar */}
                 <Box sx={{ flex: 1 }} />
 
-                {/* Download Button - only shown when downloads exist */}
-                {hasDownloads && (
-                    <IconButton
+                {/* Download Button */}
+                <IconButton
                         onClick={(e) => {
                             const rect = e.currentTarget.getBoundingClientRect();
-                            const headerWidth = window.innerWidth;
-                            const iconRightOffset = Math.round(headerWidth - rect.right + rect.width / 2);
+                            const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                             window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
                         }}
                         size="small"
@@ -804,10 +803,10 @@ const MainBrowserView: React.FC = () => {
                         sx={{
                             flexShrink: 0,
                             position: 'relative',
-                            color: allComplete ? '#188038' : hasActiveDownloads ? 'primary.main' : 'rgba(0, 0, 0, 0.6)',
+                            color: allComplete ? '#188038' : hasActiveDownloads ? 'primary.main' : '#9ca3af',
                             '&:hover': {
-                                backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                                color: allComplete ? '#188038' : 'rgba(0, 0, 0, 0.87)',
+                                backgroundColor: '#1f2937',
+                                color: allComplete ? '#188038' : '#f0f0f0',
                             }
                         }}
                     >
@@ -830,15 +829,13 @@ const MainBrowserView: React.FC = () => {
                             />
                         )}
                     </IconButton>
-                )}
 
                 {/* Wallet Button */}
                 <IconButton
                     onClick={(e) => {
                         console.log('Wallet panel toggle clicked');
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('toggle_wallet_panel', [
                             iconRightOffset.toString(),
                             unreadPaymentCount.toString(),
@@ -848,10 +845,10 @@ const MainBrowserView: React.FC = () => {
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        color: 'rgba(0, 0, 0, 0.6)',
+                        color: '#9ca3af',
                         '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
                         }
                     }}
                 >
@@ -875,14 +872,18 @@ const MainBrowserView: React.FC = () => {
                 <IconButton
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('profile_panel_show', [iconRightOffset.toString()]);
                     }}
                     size="small"
                     sx={{
                         flexShrink: 0,
                         p: 0.25,
+                        color: '#9ca3af',
+                        '&:hover': {
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
+                        }
                     }}
                     title={currentProfile ? `Profile: ${currentProfile.name}` : 'Profile'}
                 >
@@ -907,17 +908,16 @@ const MainBrowserView: React.FC = () => {
                 <IconButton
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        const iconRightOffset = Math.round((window.innerWidth - rect.right) * dpr);
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('menu_show', [iconRightOffset.toString()]);
                     }}
                     size="small"
                     sx={{
                         flexShrink: 0,
-                        color: 'rgba(0, 0, 0, 0.6)',
+                        color: '#9ca3af',
                         '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                            color: 'rgba(0, 0, 0, 0.87)',
+                            backgroundColor: '#1f2937',
+                            color: '#f0f0f0',
                         }
                     }}
                     title="Menu"
@@ -934,8 +934,6 @@ const MainBrowserView: React.FC = () => {
                 )}
             </Toolbar>
 
-            {/* Spacer fills any remaining header HWND space below toolbar */}
-            <Box sx={{ flex: 1, bgcolor: '#ffffff' }} />
 
             {/* Toast for quick-block */}
             <Snackbar

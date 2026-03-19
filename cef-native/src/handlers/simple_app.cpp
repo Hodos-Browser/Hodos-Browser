@@ -16,6 +16,7 @@
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/Logger.h"
 #include "../../include/core/WindowManager.h"
+#include "../../include/core/LayoutHelpers.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 
@@ -203,7 +204,7 @@ void SimpleApp::OnContextInitialized() {
     GetClientRect(g_hwnd, &mainRect);
     int width = mainRect.right - mainRect.left;
     int height = mainRect.bottom - mainRect.top;
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+    int shellHeight = GetHeaderHeightPx(g_hwnd);
     int tabHeight = height - shellHeight;
 
     LOG_INFO_APP("📑 Creating initial tab(s) with TabManager...");
@@ -672,13 +673,19 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
-    int width = mainRect.right - mainRect.left;
-    int height = mainRect.bottom - mainRect.top;
+
+    // Position: right-side panel, flush right, below header (matches macOS)
+    extern HWND g_header_hwnd;
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+    int panelWidth = 400;
+    int panelHeight = mainRect.bottom - headerRect.bottom;
+    int overlayX = headerRect.right - panelWidth;
+    int overlayY = headerRect.bottom;
 
     // DEBUG: Log the position we're using
-    LOG_INFO_APP("💰 Main window position: (" + std::to_string(mainRect.left) + ", " +
-        std::to_string(mainRect.top) + ") size: " + std::to_string(width) + "x" + std::to_string(height));
-    LOG_INFO_APP("💰 Creating overlay at these coordinates");
+    LOG_INFO_APP("💰 Wallet panel position: (" + std::to_string(overlayX) + ", " +
+        std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" + std::to_string(panelHeight));
 
     // Check if overlay already exists
     if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
@@ -689,14 +696,14 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
 
     // Create new HWND for wallet overlay
     LOG_INFO_APP("💰 Creating wallet overlay HWND at position: (" +
-        std::to_string(mainRect.left) + ", " + std::to_string(mainRect.top) + ")");
+        std::to_string(overlayX) + ", " + std::to_string(overlayY) + ")");
 
     HWND wallet_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFWalletOverlayWindow",
         L"Wallet Overlay",
         WS_POPUP | WS_VISIBLE,
-        mainRect.left, mainRect.top, width, height,
+        overlayX, overlayY, panelWidth, panelHeight,
         posHwnd, nullptr, hInstance, nullptr);
 
     if (!wallet_hwnd) {
@@ -714,13 +721,13 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
         std::to_string(createdRect.bottom - createdRect.top));
 
     // WORKAROUND: Force position in case Windows cached the old position
-    if (createdRect.left != mainRect.left || createdRect.top != mainRect.top) {
+    if (createdRect.left != overlayX || createdRect.top != overlayY) {
         LOG_WARNING_APP("🔧 Window position mismatch! Forcing correct position...");
-        LOG_WARNING_APP("🔧 Expected: (" + std::to_string(mainRect.left) + ", " + std::to_string(mainRect.top) + ")");
+        LOG_WARNING_APP("🔧 Expected: (" + std::to_string(overlayX) + ", " + std::to_string(overlayY) + ")");
         LOG_WARNING_APP("🔧 Actual: (" + std::to_string(createdRect.left) + ", " + std::to_string(createdRect.top) + ")");
 
         SetWindowPos(wallet_hwnd, HWND_TOPMOST,
-            mainRect.left, mainRect.top, width, height,
+            overlayX, overlayY, panelWidth, panelHeight,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
         // Verify again
@@ -771,7 +778,7 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     CefRefPtr<SimpleHandler> wallet_handler(new SimpleHandler("wallet", walletWinId));
 
     // Set render handler for wallet overlay (same as settings overlay)
-    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(wallet_hwnd, width, height);
+    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(wallet_hwnd, panelWidth, panelHeight);
     wallet_handler->SetRenderHandler(render_handler);
 
     // Create new browser with subprocess (pass icon offset as URL param for CSS positioning)

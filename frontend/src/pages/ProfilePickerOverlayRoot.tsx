@@ -101,9 +101,9 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         <Box sx={{
             width: '100%',
             height: '100%',
-            bgcolor: '#fff',
+            bgcolor: '#1a1d23',
             borderRadius: '8px',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
             overflow: 'hidden',
             display: 'flex',
             flexDirection: 'column',
@@ -111,18 +111,18 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             {/* Header */}
             <Box sx={{
                 p: 1.5,
-                borderBottom: '1px solid rgba(0,0,0,0.08)',
+                borderBottom: '1px solid #2a2d35',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
             }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'rgba(0,0,0,0.87)' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
                     Profiles
                 </Typography>
                 <IconButton
                     size="small"
                     onClick={handleClose}
-                    sx={{ p: 0.5 }}
+                    sx={{ p: 0.5, color: '#9ca3af' }}
                 >
                     <CloseIcon sx={{ fontSize: 16 }} />
                 </IconButton>
@@ -141,9 +141,9 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             p: 1,
                             borderRadius: 1,
                             cursor: 'pointer',
-                            bgcolor: profile.id === currentProfile?.id ? 'rgba(0,0,0,0.04)' : 'transparent',
+                            bgcolor: profile.id === currentProfile?.id ? '#1a1a2e' : 'transparent',
                             '&:hover': {
-                                bgcolor: 'rgba(0,0,0,0.06)',
+                                bgcolor: '#1f2937',
                             },
                         }}
                     >
@@ -163,6 +163,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             sx={{
                                 flex: 1,
                                 fontWeight: profile.id === currentProfile?.id ? 600 : 400,
+                                color: '#f0f0f0',
                             }}
                         >
                             {profile.name}
@@ -173,7 +174,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                     </Box>
                 ))}
 
-                <Divider sx={{ my: 1 }} />
+                <Divider sx={{ my: 1, borderColor: '#2a2d35' }} />
 
                 {/* Add Profile Section */}
                 {!showCreateForm ? (
@@ -187,7 +188,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             borderRadius: 1,
                             cursor: 'pointer',
                             '&:hover': {
-                                bgcolor: 'rgba(0,0,0,0.06)',
+                                bgcolor: '#1f2937',
                             },
                         }}
                     >
@@ -196,12 +197,12 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 width: 32,
                                 height: 32,
                                 bgcolor: 'transparent',
-                                border: '2px dashed rgba(0,0,0,0.2)',
+                                border: '2px dashed #6b7280',
                             }}
                         >
-                            <AddIcon sx={{ color: 'rgba(0,0,0,0.4)' }} />
+                            <AddIcon sx={{ color: '#9ca3af' }} />
                         </Avatar>
-                        <Typography variant="body2" sx={{ color: 'rgba(0,0,0,0.6)' }}>
+                        <Typography variant="body2" sx={{ color: '#9ca3af' }}>
                             Add profile
                         </Typography>
                     </Box>
@@ -223,8 +224,8 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             <Box sx={{ flex: 1 }}>
                                 {/* Visible file input - CEF handles these better than hidden ones */}
                                 <div style={{
-                                    background: '#f5f5f5',
-                                    border: `1px solid ${avatarImage ? '#a67c00' : 'rgba(0,0,0,0.12)'}`,
+                                    background: '#111827',
+                                    border: `1px solid ${avatarImage ? '#a67c00' : '#2a2d35'}`,
                                     borderRadius: '4px',
                                     padding: '6px 8px',
                                     marginBottom: avatarImage ? '4px' : '0',
@@ -236,7 +237,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                         onChange={handleImageSelect}
                                         style={{
                                             fontSize: '12px',
-                                            color: 'rgba(0,0,0,0.7)',
+                                            color: '#9ca3af',
                                             width: '100%',
                                             cursor: 'pointer',
                                         }}
@@ -269,18 +270,20 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 width: '100%',
                                 padding: '8px 12px',
                                 fontSize: '14px',
-                                border: '1px solid rgba(0,0,0,0.23)',
+                                border: '1px solid #2a2d35',
                                 borderRadius: '4px',
                                 marginBottom: '12px',
                                 boxSizing: 'border-box',
                                 outline: 'none',
+                                backgroundColor: '#111827',
+                                color: '#f0f0f0',
                             }}
                             onFocus={(e) => e.target.style.borderColor = '#a67c00'}
-                            onBlur={(e) => e.target.style.borderColor = 'rgba(0,0,0,0.23)'}
+                            onBlur={(e) => e.target.style.borderColor = '#2a2d35'}
                         />
                         
                         {/* Color Picker */}
-                        <Typography variant="caption" sx={{ color: 'rgba(0,0,0,0.5)', mb: 0.5, display: 'block' }}>
+                        <Typography variant="caption" sx={{ color: '#9ca3af', mb: 0.5, display: 'block' }}>
                             Choose color
                         </Typography>
                         <Box sx={{ display: 'flex', gap: 0.5, mb: 1.5, flexWrap: 'wrap' }}>
@@ -294,7 +297,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                         borderRadius: '50%',
                                         bgcolor: color,
                                         cursor: 'pointer',
-                                        border: selectedColor === color ? '2px solid #000' : '2px solid transparent',
+                                        border: selectedColor === color ? '2px solid #f0f0f0' : '2px solid transparent',
                                         '&:hover': {
                                             transform: 'scale(1.1)',
                                         },
@@ -309,9 +312,10 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 style={{
                                     padding: '6px 16px',
                                     fontSize: '13px',
-                                    border: '1px solid rgba(0,0,0,0.23)',
+                                    border: '1px solid #2a2d35',
                                     borderRadius: '4px',
-                                    background: 'white',
+                                    background: '#111827',
+                                    color: '#f0f0f0',
                                     cursor: 'pointer',
                                 }}
                             >
@@ -340,10 +344,10 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             {/* Footer hint */}
             <Box sx={{
                 p: 1,
-                borderTop: '1px solid rgba(0,0,0,0.08)',
-                bgcolor: 'rgba(0,0,0,0.02)',
+                borderTop: '1px solid #2a2d35',
+                bgcolor: '#111827',
             }}>
-                <Typography variant="caption" sx={{ color: 'rgba(0,0,0,0.5)', display: 'block', textAlign: 'center' }}>
+                <Typography variant="caption" sx={{ color: '#6b7280', display: 'block', textAlign: 'center' }}>
                     Switching profiles opens a new window
                 </Typography>
             </Box>

@@ -29,11 +29,11 @@ const CookiePanelOverlayRoot: React.FC = () => {
       sx={{
         width: '100%',
         height: '100%',
-        backgroundColor: 'background.paper',
+        backgroundColor: '#1a1d23',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.1)',
+        boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.2)',
       }}
     >
       {/* Header with close button */}
@@ -44,21 +44,21 @@ const CookiePanelOverlayRoot: React.FC = () => {
           justifyContent: 'space-between',
           p: 2,
           borderBottom: 1,
-          borderColor: 'divider',
-          backgroundColor: 'background.default',
+          borderColor: '#2a2d35',
+          backgroundColor: '#111827',
         }}
       >
-        <Typography variant="h6" sx={{ fontWeight: 600 }}>
+        <Typography variant="h6" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
           Cookie Management
         </Typography>
         <IconButton
           onClick={handleClose}
           size="small"
           sx={{
-            color: 'text.secondary',
+            color: '#9ca3af',
             '&:hover': {
-              color: 'text.primary',
-              backgroundColor: 'action.hover',
+              color: '#f0f0f0',
+              backgroundColor: '#1f2937',
             },
           }}
         >

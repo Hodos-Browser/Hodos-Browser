@@ -36,6 +36,7 @@
 #include "include/core/ProfileLock.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
+#include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
@@ -46,6 +47,7 @@
 #include <fstream>
 #include <chrono>
 #include <iomanip>
+#include <thread>
 #include <sstream>
 
 HWND g_hwnd = nullptr;
@@ -173,7 +175,7 @@ void HandleFullscreenChange(bool fullscreen) {
             ShowWindow(g_header_hwnd, SW_SHOW);
         }
         // Restore normal layout (same as WM_SIZE)
-        int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+        int shellHeight = GetHeaderHeightPx(g_hwnd);
         int webviewHeight = height - shellHeight;
 
         if (g_header_hwnd && IsWindow(g_header_hwnd)) {
@@ -648,10 +650,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
-            // Move wallet overlay if it exists and is visible
+            // Move wallet overlay if it exists and is visible (right-side panel below header)
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int wpWidth = 400;
+                int wpHeight = mainRect.bottom - hdrRect.bottom;
+                int wpX = hdrRect.right - wpWidth;
+                int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    wpX, wpY, wpWidth, wpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
@@ -716,8 +724,8 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
 
-            // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
-            int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+            // Fixed header height, DPI-scaled (tab bar 42px + toolbar 53px + 1px buffer = 96 CSS px)
+            int shellHeight = GetHeaderHeightPx(hwnd);
             int webviewHeight = height - shellHeight;
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
@@ -862,10 +870,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Resize wallet overlay
+            // Resize wallet overlay (right-side panel below header)
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int wpWidth = 400;
+                int wpHeight = mainRect.bottom - hdrRect.bottom;
+                int wpX = hdrRect.right - wpWidth;
+                int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
+                    wpX, wpY, wpWidth, wpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
                 CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
@@ -2664,8 +2678,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
-    // Header: 10% of parent height, minimum 100px (for tab bar 42px + toolbar 54px)
-    int shellHeight = (std::max)(100, static_cast<int>(height * 0.10));
+    // Fixed header height, DPI-scaled (no HWND yet, use system DPI)
+    int shellHeight = GetHeaderHeightPxSystem();
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
@@ -2832,44 +2846,62 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         return 1;
     }
 
-    // Initialize HistoryManager with profile-specific path
-    LOG_INFO("Initializing HistoryManager...");
-    if (HistoryManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("HistoryManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize HistoryManager");
-    }
+    // P3 perf fix: parallelize DB initialization + backend server startup.
+    // Each SQLite DB opens its own file (no shared state). Backend daemons are
+    // independent processes. SettingsManager and AdblockCache are already initialized
+    // before CefInitialize (lines 2625-2637), so no ordering conflict.
+    LOG_INFO("Starting parallel initialization (3 DBs + 2 backend servers)...");
+    auto initStart = std::chrono::steady_clock::now();
 
-    // Initialize CookieBlockManager with same cache path
-    LOG_INFO("Initializing CookieBlockManager...");
-    if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("CookieBlockManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize CookieBlockManager");
-    }
+    std::thread historyThread([&profile_cache]() {
+        if (HistoryManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("HistoryManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize HistoryManager");
+        }
+    });
 
-    // Initialize BookmarkManager with same cache path
-    LOG_INFO("Initializing BookmarkManager...");
-    if (BookmarkManager::GetInstance().Initialize(profile_cache)) {
-        LOG_INFO("BookmarkManager initialized successfully");
-    } else {
-        LOG_ERROR("Failed to initialize BookmarkManager");
-    }
+    std::thread cookieThread([&profile_cache]() {
+        if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("CookieBlockManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize CookieBlockManager");
+        }
+    });
 
-    // Start wallet server (auto-launch or detect already running)
-    LOG_INFO("Starting wallet server...");
-    StartWalletServer();
+    std::thread bookmarkThread([&profile_cache]() {
+        if (BookmarkManager::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("BookmarkManager initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize BookmarkManager");
+        }
+    });
 
-    // Start adblock engine (non-critical — browser works without it)
-    LOG_INFO("Starting adblock engine...");
-    StartAdblockServer();
+    std::thread walletThread([]() {
+        LOG_INFO("Starting wallet server...");
+        StartWalletServer();
+    });
+
+    std::thread adblockThread([]() {
+        LOG_INFO("Starting adblock engine...");
+        StartAdblockServer();
+    });
+
+    historyThread.join();
+    cookieThread.join();
+    bookmarkThread.join();
+    walletThread.join();
+    adblockThread.join();
+
+    auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - initStart).count();
+    LOG_INFO("Parallel initialization complete in " + std::to_string(initMs) + "ms");
 
     // 💡 Optionally pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
 
     // Pre-create panel overlays hidden so React is warm when user first clicks.
-    // This eliminates the first-open race condition where JS injection fires before
-    // React mounts and registers callbacks.
+    // This eliminates the first-open lag from subprocess spawn + React mount.
     extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);

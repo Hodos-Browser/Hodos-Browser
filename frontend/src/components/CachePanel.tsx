@@ -87,7 +87,7 @@ export function CachePanel() {
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 2 }}>
       {/* Header */}
-      <Typography variant="h5" component="h2" sx={{ mb: 3 }}>
+      <Typography variant="h5" component="h2" sx={{ mb: 3, color: '#e0e0e0' }}>
         Cache & Storage
       </Typography>
 
@@ -105,23 +105,24 @@ export function CachePanel() {
             alignItems: 'center',
             textAlign: 'center',
             borderRadius: 2,
+            bgcolor: '#1e1e1e',
+            borderColor: '#333',
           }}
         >
-          <Storage sx={{ fontSize: 40, color: 'primary.main', mb: 1 }} />
-          <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+          <Storage sx={{ fontSize: 40, color: '#a67c00', mb: 1 }} />
+          <Typography variant="subtitle2" sx={{ mb: 1, color: '#888' }}>
             Cached Data
           </Typography>
           {cacheSizeLoading ? (
-            <Skeleton width={100} height={40} />
+            <Skeleton width={100} height={40} sx={{ bgcolor: '#2a2a2a' }} />
           ) : (
-            <Typography variant="h4" sx={{ fontWeight: 600 }}>
+            <Typography variant="h4" sx={{ fontWeight: 600, color: '#e0e0e0' }}>
               {formatBytes(cacheSize)}
             </Typography>
           )}
           <Typography
             variant="caption"
-            color="text.secondary"
-            sx={{ mt: 1, maxWidth: 200 }}
+            sx={{ mt: 1, maxWidth: 200, color: '#666' }}
           >
             Images, scripts, stylesheets, and other cached files
           </Typography>
@@ -139,23 +140,24 @@ export function CachePanel() {
             alignItems: 'center',
             textAlign: 'center',
             borderRadius: 2,
+            bgcolor: '#1e1e1e',
+            borderColor: '#333',
           }}
         >
-          <Cookie sx={{ fontSize: 40, color: 'warning.main', mb: 1 }} />
-          <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+          <Cookie sx={{ fontSize: 40, color: '#a67c00', mb: 1 }} />
+          <Typography variant="subtitle2" sx={{ mb: 1, color: '#888' }}>
             Cookies
           </Typography>
           {loading ? (
-            <Skeleton width={100} height={40} />
+            <Skeleton width={100} height={40} sx={{ bgcolor: '#2a2a2a' }} />
           ) : (
-            <Typography variant="h4" sx={{ fontWeight: 600 }}>
+            <Typography variant="h4" sx={{ fontWeight: 600, color: '#e0e0e0' }}>
               {cookies.length}
             </Typography>
           )}
           <Typography
             variant="caption"
-            color="text.secondary"
-            sx={{ mt: 1 }}
+            sx={{ mt: 1, color: '#666' }}
           >
             {loading
               ? 'Loading...'
@@ -190,10 +192,11 @@ export function CachePanel() {
       <Dialog
         open={confirmCacheClear}
         onClose={() => setConfirmCacheClear(false)}
+        PaperProps={{ sx: { bgcolor: '#1e1e1e' } }}
       >
-        <DialogTitle>Clear browser cache?</DialogTitle>
+        <DialogTitle sx={{ color: '#e0e0e0' }}>Clear browser cache?</DialogTitle>
         <DialogContent>
-          <DialogContentText>
+          <DialogContentText sx={{ color: '#888' }}>
             This will clear {formatBytes(cacheSize)} of cached data including
             images, scripts, and stylesheets. Pages may load slower until the
             cache is rebuilt.
@@ -215,13 +218,14 @@ export function CachePanel() {
       <Dialog
         open={confirmCookieClear}
         onClose={() => setConfirmCookieClear(false)}
+        PaperProps={{ sx: { bgcolor: '#1e1e1e' } }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#e0e0e0' }}>
           <Warning color="warning" />
           Delete all cookies?
         </DialogTitle>
         <DialogContent>
-          <DialogContentText>
+          <DialogContentText sx={{ color: '#888' }}>
             This will sign you out of all websites. You'll need to log back in to
             sites like Google, YouTube, Twitter, and any other accounts you're
             currently signed into.

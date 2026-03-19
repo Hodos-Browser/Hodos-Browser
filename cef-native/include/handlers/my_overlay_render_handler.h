@@ -18,6 +18,10 @@ public:
     // Destructor for proper resource cleanup
     ~MyOverlayRenderHandler();
 
+    // Detach the view pointer to prevent OnPaint from accessing a deallocated view.
+    // Must be called before closing the overlay window.
+    void DetachView();
+
     void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
     void OnPaint(CefRefPtr<CefBrowser> browser,
                  PaintElementType type,

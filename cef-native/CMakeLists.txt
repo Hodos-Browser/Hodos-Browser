@@ -148,6 +148,7 @@ if(APPLE)
     # macOS-specific files
     list(APPEND SOURCES
         cef_browser_shell_mac.mm
+        OverlayHelpers_mac.mm
         src/core/TabManager_mac.mm
         src/core/WindowManager_mac.mm
         src/core/WalletService_mac.cpp
@@ -224,6 +225,7 @@ elseif(WIN32)
         src/core/ProfileLock.cpp
         include/core/ProfileImporter.h
         src/core/ProfileImporter.cpp
+        include/core/LayoutHelpers.h
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
 endif()

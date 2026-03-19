@@ -12,9 +12,9 @@ html, body, #root {
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
+  color-scheme: dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #ffffff;
+  background-color: transparent;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -82,6 +82,13 @@ body[data-overlay="omnibox"] [role="button"],
 body[data-overlay="omnibox"] a,
 body[data-overlay="omnibox"] .MuiListItemButton-root {
   cursor: pointer !important;
+}
+
+/* Transparent background for overlay subprocesses */
+body[data-overlay="menu"],
+body[data-overlay="menu"] #root {
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 /* Prevent CEF from maintaining focus states */

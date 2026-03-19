@@ -23,6 +23,7 @@
 #include "include/handlers/simple_app.h"
 #include "include/handlers/my_overlay_render_handler.h"
 #include "include/wrapper/cef_library_loader.h"
+#include "OverlayHelpers_mac.h"
 
 #include <iostream>
 #include <fstream>
@@ -30,13 +31,20 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
+#include <nlohmann/json.hpp>
 
 // ============================================================================
 // Forward Declarations
 // ============================================================================
 void ShutdownApplication();
+void ShowQuitConfirmationAndShutdown();
+void HideApplication();
 void HandleCmdD();  // Cmd+D — Bookmark current page
 void HandleCmdL();  // Cmd+L — Focus address bar
+
+using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 // ============================================================================
 // Custom NSApplication for CEF (REQUIRED on macOS)
@@ -133,10 +141,15 @@ NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
+NSWindow* g_menu_overlay_window = nullptr;
 NSWindow* g_cookie_panel_overlay_window = nullptr;
 NSWindow* g_omnibox_overlay_window = nullptr;
 NSWindow* g_download_panel_overlay_window = nullptr;
 NSWindow* g_profile_panel_overlay_window = nullptr;
+
+// OverlayBrowserRef instances for overlays using GenericOverlayView
+static OverlayBrowserRef* g_menu_overlay_browser_ref = nullptr;
+static CefRefPtr<MyOverlayRenderHandler> g_menu_overlay_render_handler = nullptr;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
 bool g_file_dialog_active = false;
@@ -193,6 +206,109 @@ void ToggleFullScreenMacOS() {
     }
 }
 
+void ToggleMainWindowFullscreen() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_main_window) {
+            [g_main_window toggleFullScreen:nil];
+        }
+    });
+}
+
+static void DestroyMenuOverlayWindow(bool closeBrowser) {
+    if (!g_menu_overlay_window && !g_menu_overlay_browser_ref && !g_menu_overlay_render_handler) {
+        return;
+    }
+
+    NSWindow* overlayWindow = g_menu_overlay_window;
+    OverlayBrowserRef* browserRef = g_menu_overlay_browser_ref;
+    CefRefPtr<MyOverlayRenderHandler> renderHandler = g_menu_overlay_render_handler;
+    CefRefPtr<CefBrowser> menuBrowser =
+        (browserRef && browserRef->browser) ? browserRef->browser : SimpleHandler::GetMenuBrowser();
+
+    g_menu_overlay_window = nullptr;
+    g_menu_overlay_browser_ref = nullptr;
+    g_menu_overlay_render_handler = nullptr;
+
+    if (overlayWindow) {
+        RemoveClickOutsideMonitor(overlayWindow);
+    }
+
+    if (renderHandler) {
+        renderHandler->DetachView();
+    }
+
+    if (overlayWindow) {
+        NSView* contentView = [overlayWindow contentView];
+        if ([contentView isKindOfClass:[GenericOverlayView class]]) {
+            [(GenericOverlayView*)contentView detachBrowser];
+        }
+
+        if (g_main_window) {
+            [g_main_window removeChildWindow:overlayWindow];
+        }
+
+        [overlayWindow orderOut:nil];
+        [overlayWindow close];
+    }
+
+    if (closeBrowser && menuBrowser) {
+        menuBrowser->GetHost()->CloseBrowser(false);
+    }
+
+    delete browserRef;
+    LOG_INFO("Menu overlay hidden/closed");
+}
+
+static void ClearPersistedInternalFrontendZoom(const std::string& profileCachePath) {
+    try {
+        fs::path preferencesPath = fs::path(profileCachePath) / "Preferences";
+        if (!fs::exists(preferencesPath)) {
+            return;
+        }
+
+        std::ifstream input(preferencesPath);
+        if (!input.is_open()) {
+            LOG_WARNING("Could not open Preferences to clear internal frontend zoom");
+            return;
+        }
+
+        json prefs;
+        input >> prefs;
+        input.close();
+
+        bool changed = false;
+        auto partitionIt = prefs.find("partition");
+        if (partitionIt != prefs.end() && partitionIt->is_object()) {
+            auto zoomsIt = partitionIt->find("per_host_zoom_levels");
+            if (zoomsIt != partitionIt->end() && zoomsIt->is_object()) {
+                for (auto& [partitionKey, hostMap] : zoomsIt->items()) {
+                    if (!hostMap.is_object()) {
+                        continue;
+                    }
+                    changed = hostMap.erase("127.0.0.1") > 0 || changed;
+                    changed = hostMap.erase("localhost") > 0 || changed;
+                }
+            }
+        }
+
+        if (!changed) {
+            return;
+        }
+
+        std::ofstream output(preferencesPath);
+        if (!output.is_open()) {
+            LOG_WARNING("Could not rewrite Preferences after clearing internal frontend zoom");
+            return;
+        }
+
+        output << prefs.dump();
+        output.close();
+        LOG_INFO("Cleared persisted Chromium zoom for internal frontend hosts");
+    } catch (const std::exception& ex) {
+        LOG_WARNING("Failed to clear persisted internal frontend zoom: " + std::string(ex.what()));
+    }
+}
+
 // Cmd+D — Bookmark current page (called from sendEvent: before NSMenu swallows it)
 void HandleCmdD() {
     auto* activeTab = TabManager::GetInstance().GetActiveTab();
@@ -227,6 +343,7 @@ void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
+void CreateMenuOverlayMac(int iconRightOffset);
 void ShowSettingsMenuOverlay();
 void HideSettingsMenuOverlay();
 bool IsSettingsMenuOverlayVisible();
@@ -1748,18 +1865,13 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 - (void)windowDidMove:(NSNotification *)notification {
     NSRect mainFrame = [g_main_window frame];
 
-    // Settings overlay: 450x450 right-side popup, right edge under icon
+    // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        CGFloat pw = 450, ph = 450;
-        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
-        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
-        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        [g_settings_overlay_window setFrame:sf display:YES];
     }
 
-    // Wallet overlay: full-window
-    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        [g_wallet_overlay_window setFrame:mainFrame display:YES];
-    }
+    // Wallet is a child window — moves automatically
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
@@ -1804,22 +1916,15 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     // Resize and notify overlay windows
     NSRect mainFrame = [g_main_window frame];
 
-    // Settings overlay: 450x450 right-side popup, right edge under icon
+    // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        CGFloat pw = 450, ph = 450;
-        CGFloat ox = mainFrame.origin.x + mainFrame.size.width - g_mac_settings_icon_right_offset - pw;
-        CGFloat oy = mainFrame.origin.y + mainFrame.size.height - ph - 104;
-        [g_settings_overlay_window setFrame:NSMakeRect(ox, oy, pw, ph) display:YES];
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        [g_settings_overlay_window setFrame:sf display:YES];
         CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
         if (settings) settings->GetHost()->WasResized();
     }
 
-    // Wallet overlay: full-window
-    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        [g_wallet_overlay_window setFrame:mainFrame display:YES];
-        CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
-        if (wallet) wallet->GetHost()->WasResized();
-    }
+    // Wallet is a child window — moves automatically, no resize needed for fixed-size panel
 
     if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
         [g_backup_overlay_window setFrame:mainFrame display:YES];
@@ -1865,23 +1970,10 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
-    // App is losing focus - close all overlays (matches Windows WM_ACTIVATEAPP behavior)
-    LOG_DEBUG("📱 Main window resigned key - closing overlays if open");
-
-    // Close wallet overlay
-    if (g_wallet_overlay_window && [g_wallet_overlay_window isVisible]) {
-        LOG_INFO("💰 Closing wallet overlay due to app focus loss");
-        CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
-        if (wallet_browser) {
-            wallet_browser->GetHost()->CloseBrowser(false);
-        }
-        // No removeChildWindow needed - wallet overlay is not a child window
-        [g_wallet_overlay_window close];
-        g_wallet_overlay_window = nullptr;
-    }
-
-    // Note: Settings and other overlays can remain open when app loses focus
-    // Only wallet overlay auto-closes for security (matches Windows behavior)
+    // Overlay close-on-focus-loss is now handled by InstallAppFocusLossHandler()
+    // in OverlayHelpers_mac.mm via NSApplicationDidResignActiveNotification.
+    // This method is intentionally empty -- keeping it for documentation.
+    LOG_DEBUG("Main window resigned key (overlay close handled by OverlayHelpers)");
 }
 
 @end
@@ -2044,18 +2136,11 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating settings overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_settings_icon_right_offset = iconRightOffset;
 
-    // Get main window frame for overlay alignment
-    NSRect mainFrame = [g_main_window frame];
-
-    // Right-side popup panel, right edge aligned under icon
     CGFloat panelWidth = 450;
     CGFloat panelHeight = 450;
-    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
-    LOG_INFO("📐 Settings panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+    LOG_INFO("📐 Settings panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
 
     // Destroy existing overlay if present
@@ -2083,6 +2168,7 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
     [g_settings_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_overlay_window setReleasedWhenClosed:NO];
     [g_settings_overlay_window setHasShadow:NO];
+    [g_settings_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_settings_overlay_window ordered:NSWindowAbove];
@@ -2198,14 +2284,8 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
     if (g_cookie_panel_overlay_window) {
         g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
-        // Reposition based on current main window frame and icon offset
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 400;
-        CGFloat panelHeight = 500;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
-
+        // Reposition: flush right, flush below header
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
         [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
         [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallCookiePanelClickOutsideMonitor();
@@ -2217,18 +2297,11 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
-    // Get main window frame for overlay alignment
-    NSRect mainFrame = [g_main_window frame];
-
-    // Right-side popup panel, right edge aligned under icon
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    // Cocoa origin is bottom-left: position right edge under icon, offset from top by ~104px for header
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
-    LOG_INFO("Cookie panel: (" + std::to_string((int)overlayX) + ", " + std::to_string((int)overlayY)
+    LOG_INFO("Cookie panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
 
     // Destroy existing overlay if present
@@ -2256,6 +2329,7 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     [g_cookie_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_cookie_panel_overlay_window setReleasedWhenClosed:NO];
     [g_cookie_panel_overlay_window setHasShadow:NO];
+    [g_cookie_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_cookie_panel_overlay_window ordered:NSWindowAbove];
@@ -2302,12 +2376,35 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Cookie panel overlay created successfully");
 }
 
+void CloseWalletOverlay() {
+    if (!g_wallet_overlay_window) return;
+
+    LOG_INFO("Closing wallet overlay (click-outside)");
+    RemoveClickOutsideMonitor(g_wallet_overlay_window);
+
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    if (wallet_browser) {
+        wallet_browser->GetHost()->CloseBrowser(false);
+    }
+
+    if (g_main_window) {
+        [g_main_window removeChildWindow:g_wallet_overlay_window];
+    }
+    [g_wallet_overlay_window orderOut:nil];
+    [g_wallet_overlay_window close];
+    g_wallet_overlay_window = nullptr;
+}
+
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_wallet_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
-    LOG_INFO("📐 Overlay dimensions: " + std::to_string((int)mainFrame.size.width) + " x " + std::to_string((int)mainFrame.size.height));
+    // Position: fixed-width panel, flush right, flush below header, full remaining height
+    CGFloat walletWidth = 400;
+    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+    CGFloat walletHeight = contentScreen.size.height - 96;
+    NSRect walletFrame = CalculateToolbarOverlayFrame(g_main_window, walletWidth, walletHeight, 96);
+    LOG_INFO("📐 Wallet overlay: " + std::to_string((int)walletFrame.size.width) + " x " + std::to_string((int)walletFrame.size.height));
 
     if (g_wallet_overlay_window) {
         LOG_INFO("🔄 Destroying existing wallet overlay");
@@ -2316,7 +2413,7 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     }
 
     g_wallet_overlay_window = [[WalletOverlayWindow alloc]
-        initWithContentRect:mainFrame
+        initWithContentRect:walletFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -2328,19 +2425,18 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
 
     [g_wallet_overlay_window setOpaque:NO];
     [g_wallet_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];  // Must be floating to stay above main window (not a child)
+    [g_wallet_overlay_window setLevel:NSFloatingWindowLevel];
     [g_wallet_overlay_window setIgnoresMouseEvents:NO];
     [g_wallet_overlay_window setAcceptsMouseMovedEvents:YES];
     [g_wallet_overlay_window setReleasedWhenClosed:NO];
-    [g_wallet_overlay_window setHasShadow:NO];
+    [g_wallet_overlay_window setHasShadow:YES];
+    [g_wallet_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
-    // CRITICAL: Do NOT make this a child window - child windows cannot become key windows
-    // and therefore cannot receive keyboard events (input fields won't work)
-    // Window position sync is handled in MainWindowDelegate::windowDidMove/windowDidResize
-    // [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
+    // Child window of main window (moves/minimizes together)
+    [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
 
     WalletOverlayView* contentView = [[WalletOverlayView alloc]
-        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
+        initWithFrame:NSMakeRect(0, 0, walletFrame.size.width, walletFrame.size.height)];
     [g_wallet_overlay_window setContentView:contentView];
 
     CefWindowInfo window_info;
@@ -2356,8 +2452,8 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     CefRefPtr<SimpleHandler> handler(new SimpleHandler("wallet"));
     CefRefPtr<MyOverlayRenderHandler> render_handler =
         new MyOverlayRenderHandler((__bridge void*)contentView,
-                                   (int)mainFrame.size.width,
-                                   (int)mainFrame.size.height);
+                                   (int)walletFrame.size.width,
+                                   (int)walletFrame.size.height);
     handler->SetRenderHandler(render_handler);
 
     std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
@@ -2375,43 +2471,16 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
         return;
     }
 
-    // CRITICAL: Resign main window first so overlay can become key
-    [g_main_window resignKeyWindow];
+    // NOTE: Do NOT call [g_main_window resignKeyWindow] here.
+    // resignKeyWindow triggers MainWindowDelegate::windowDidResignKey synchronously,
+    // which would destroy the wallet overlay that was just created (self-destruction loop).
+    // makeKeyAndOrderFront already handles focus transfer for floating windows.
 
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
-
-    // Make content view first responder for keyboard events
     [g_wallet_overlay_window makeFirstResponder:contentView];
+    InstallClickOutsideMonitor(g_wallet_overlay_window);
 
-    NSLog(@"🔍 Wallet overlay is key window: %d", [g_wallet_overlay_window isKeyWindow]);
-    NSLog(@"🔍 First responder: %@", [g_wallet_overlay_window firstResponder]);
-
-    // Global event monitor - captures ALL mouse events in the app
-    static id walletGlobalMonitor = nil;
-    if (walletGlobalMonitor) {
-        [NSEvent removeMonitor:walletGlobalMonitor];
-    }
-    NSString* monLogPath = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject]
-                            stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"];
-    std::string monLogPathStr = [monLogPath UTF8String];
-
-    walletGlobalMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
-        (NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved |
-         NSEventMaskMouseEntered | NSEventMaskMouseExited)
-        handler:^NSEvent*(NSEvent* event) {
-            std::ofstream dbg(monLogPathStr, std::ios::app);
-            NSWindow* w = [event window];
-            dbg << "GLOBAL MONITOR: type=" << (int)[event type]
-                << " window=" << (void*)w
-                << " isWallet=" << (w == g_wallet_overlay_window ? 1 : 0)
-                << " isMain=" << (w == g_main_window ? 1 : 0)
-                << " at (" << [event locationInWindow].x << "," << [event locationInWindow].y << ")"
-                << std::endl;
-            dbg.close();
-            return event;
-        }];
-
-    LOG_INFO("✅ Wallet overlay created successfully (with global event monitor)");
+    LOG_INFO("✅ Wallet overlay created successfully");
 }
 
 void CreateBackupOverlayWithSeparateProcess() {
@@ -2442,6 +2511,7 @@ void CreateBackupOverlayWithSeparateProcess() {
     [g_backup_overlay_window setIgnoresMouseEvents:NO];
     [g_backup_overlay_window setReleasedWhenClosed:NO];
     [g_backup_overlay_window setHasShadow:NO];
+    [g_backup_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_backup_overlay_window ordered:NSWindowAbove];
@@ -2512,6 +2582,7 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
     [g_brc100_auth_overlay_window setIgnoresMouseEvents:NO];
     [g_brc100_auth_overlay_window setReleasedWhenClosed:NO];
     [g_brc100_auth_overlay_window setHasShadow:NO];
+    [g_brc100_auth_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     // Make this a child window of the main window
     [g_main_window addChildWindow:g_brc100_auth_overlay_window ordered:NSWindowAbove];
@@ -2616,6 +2687,7 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
     [g_notification_overlay_window setIgnoresMouseEvents:NO];
     [g_notification_overlay_window setReleasedWhenClosed:NO];
     [g_notification_overlay_window setHasShadow:NO];
+    [g_notification_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
     [g_main_window addChildWindow:g_notification_overlay_window ordered:NSWindowAbove];
 
@@ -2735,14 +2807,10 @@ void ShowSettingsMenuOverlay() {
 void CreateSettingsMenuOverlay() {
     LOG_INFO("🎨 Creating settings menu overlay (macOS)");
 
-    // Settings menu is smaller (dropdown from settings button)
-    // Position in top-right corner
-    NSRect mainFrame = [g_main_window frame];
+    // Settings menu: flush right, flush below header
     int menuWidth = 300;
     int menuHeight = 480;
-    NSRect menuFrame = NSMakeRect(mainFrame.origin.x + mainFrame.size.width - menuWidth - 20,
-                                  mainFrame.origin.y + mainFrame.size.height - menuHeight - 60,
-                                  menuWidth, menuHeight);
+    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
 
     if (g_settings_menu_overlay_window) {
         LOG_INFO("🔄 Destroying existing settings menu overlay");
@@ -2767,6 +2835,7 @@ void CreateSettingsMenuOverlay() {
     [g_settings_menu_overlay_window setIgnoresMouseEvents:NO];
     [g_settings_menu_overlay_window setReleasedWhenClosed:NO];
     [g_settings_menu_overlay_window setHasShadow:YES];
+    [g_settings_menu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_settings_menu_overlay_window setAcceptsMouseMovedEvents:YES];
 
     SettingsMenuOverlayView* contentView = [[SettingsMenuOverlayView alloc]
@@ -2860,12 +2929,13 @@ bool WasOmniboxJustHidden() {
 void ShowOmniboxOverlayMacOS() {
     if (g_omnibox_overlay_window) {
         // Reposition in case window moved/resized since creation
-        NSRect mainFrame = [g_main_window frame];
-        int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+        NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+        int omniboxWidth = (int)(contentScreen.size.width * 0.69);
         if (omniboxWidth < 400) omniboxWidth = 400;
         int omniboxHeight = 420;
-        CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+        CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
+        CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+        CGFloat overlayY = contentTop - 78 - omniboxHeight;
         [g_omnibox_overlay_window setFrame:NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight) display:YES];
 
         [g_omnibox_overlay_window orderFront:nil];
@@ -2877,14 +2947,15 @@ void ShowOmniboxOverlayMacOS() {
 void CreateOmniboxOverlayMacOS() {
     LOG_INFO("Creating omnibox overlay (macOS)");
 
-    NSRect mainFrame = [g_main_window frame];
+    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
     // Position below header (99px) spanning most of the window width
-    int omniboxWidth = (int)(mainFrame.size.width * 0.6);
+    int omniboxWidth = (int)(contentScreen.size.width * 0.69);
     if (omniboxWidth < 400) omniboxWidth = 400;
     int omniboxHeight = 420;
     // Center horizontally, position below header
-    CGFloat overlayX = mainFrame.origin.x + (mainFrame.size.width - omniboxWidth) / 2;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - omniboxHeight - 104;
+    CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
+    CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+    CGFloat overlayY = contentTop - 78 - omniboxHeight;
     NSRect omniboxFrame = NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight);
 
     // Keep-alive: don't destroy existing window
@@ -2909,7 +2980,8 @@ void CreateOmniboxOverlayMacOS() {
     [g_omnibox_overlay_window setLevel:NSNormalWindowLevel];
     [g_omnibox_overlay_window setIgnoresMouseEvents:NO];
     [g_omnibox_overlay_window setReleasedWhenClosed:NO];
-    [g_omnibox_overlay_window setHasShadow:YES];
+    [g_omnibox_overlay_window setHasShadow:NO];
+    [g_omnibox_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
 
     // CRITICAL: Make child of main window so it doesn't steal focus from address bar
@@ -3003,12 +3075,8 @@ void ShowDownloadPanelOverlayMacOS(int iconRightOffset) {
     if (g_download_panel_overlay_window) {
         g_mac_download_panel_icon_right_offset = iconRightOffset;
 
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 400;
-        CGFloat panelHeight = 500;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        [g_download_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
+        [g_download_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallDownloadPanelClickOutsideMonitor();
@@ -3020,12 +3088,9 @@ void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating download panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_download_panel_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_download_panel_overlay_window) {
         [g_download_panel_overlay_window close];
@@ -3049,6 +3114,7 @@ void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
     [g_download_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_download_panel_overlay_window setReleasedWhenClosed:NO];
     [g_download_panel_overlay_window setHasShadow:YES];
+    [g_download_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_download_panel_overlay_window setAcceptsMouseMovedEvents:YES];
 
     DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
@@ -3139,12 +3205,8 @@ void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
     if (g_profile_panel_overlay_window) {
         g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-        NSRect mainFrame = [g_main_window frame];
-        CGFloat panelWidth = 300;
-        CGFloat panelHeight = 400;
-        CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-        CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-        [g_profile_panel_overlay_window setFrame:NSMakeRect(overlayX, overlayY, panelWidth, panelHeight) display:YES];
+        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 300, 400, 96);
+        [g_profile_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallProfilePanelClickOutsideMonitor();
@@ -3156,12 +3218,9 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-    NSRect mainFrame = [g_main_window frame];
     CGFloat panelWidth = 300;
     CGFloat panelHeight = 400;
-    CGFloat overlayX = mainFrame.origin.x + mainFrame.size.width - iconRightOffset - panelWidth;
-    CGFloat overlayY = mainFrame.origin.y + mainFrame.size.height - panelHeight - 104;
-    NSRect panelFrame = NSMakeRect(overlayX, overlayY, panelWidth, panelHeight);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_profile_panel_overlay_window) {
         [g_profile_panel_overlay_window close];
@@ -3185,6 +3244,7 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     [g_profile_panel_overlay_window setIgnoresMouseEvents:NO];
     [g_profile_panel_overlay_window setReleasedWhenClosed:NO];
     [g_profile_panel_overlay_window setHasShadow:YES];
+    [g_profile_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_profile_panel_overlay_window setAcceptsMouseMovedEvents:YES];
 
     DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
@@ -3221,6 +3281,40 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     [g_profile_panel_overlay_window makeFirstResponder:contentView];
     InstallProfilePanelClickOutsideMonitor();
     LOG_INFO("Profile panel overlay created successfully");
+}
+
+// ============================================================================
+// Hide Application (Cmd+H)
+// ============================================================================
+
+void HideApplication() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp hide:nil];
+    });
+}
+
+// ============================================================================
+// Quit Confirmation and Shutdown
+// ============================================================================
+
+void ShowQuitConfirmationAndShutdown() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Check if there are multiple tabs open
+        auto allTabs = TabManager::GetInstance().GetAllTabs();
+        if (allTabs.size() > 1) {
+            NSAlert* alert = [[NSAlert alloc] init];
+            [alert setMessageText:@"Quit HodosBrowser?"];
+            [alert setInformativeText:[NSString stringWithFormat:@"You have %lu tabs open. Are you sure you want to quit?", (unsigned long)allTabs.size()]];
+            [alert addButtonWithTitle:@"Quit"];
+            [alert addButtonWithTitle:@"Cancel"];
+            [alert setAlertStyle:NSAlertStyleWarning];
+            if ([alert runModal] == NSAlertFirstButtonReturn) {
+                ShutdownApplication();
+            }
+        } else {
+            ShutdownApplication();
+        }
+    });
 }
 
 // ============================================================================
@@ -3288,6 +3382,12 @@ void ShutdownApplication() {
         settings_menu_browser->GetHost()->CloseBrowser(false);
     }
 
+    // Close menu overlay browser
+    if (g_menu_overlay_browser_ref && g_menu_overlay_browser_ref->browser) {
+        LOG_INFO("Closing menu overlay browser...");
+        g_menu_overlay_browser_ref->browser->GetHost()->CloseBrowser(false);
+    }
+
     if (cookie_panel_browser) {
         LOG_INFO("🔄 Closing cookie panel browser...");
         cookie_panel_browser->GetHost()->CloseBrowser(false);
@@ -3341,6 +3441,11 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing settings menu overlay window...");
         [g_settings_menu_overlay_window close];
         g_settings_menu_overlay_window = nullptr;
+    }
+
+    if (g_menu_overlay_window || g_menu_overlay_browser_ref || g_menu_overlay_render_handler) {
+        LOG_INFO("Closing menu overlay window...");
+        DestroyMenuOverlayWindow(false);
     }
 
     if (g_cookie_panel_overlay_window) {
@@ -3716,6 +3821,11 @@ int main(int argc, char* argv[]) {
         SettingsManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("Settings loaded for profile: " + profileId);
 
+        // Internal UI pages also live on 127.0.0.1. Chromium persists zoom by
+        // host, so a user zoom on an internal tab can otherwise scale the header
+        // and overlay chrome across restarts.
+        ClearPersistedInternalFrontendZoom(profile_cache);
+
         // Initialize AdblockCache with profile path (loads per-site settings)
         AdblockCache::GetInstance().Initialize(profile_cache);
         AdblockCache::GetInstance().SetGlobalEnabled(
@@ -3790,6 +3900,9 @@ int main(int argc, char* argv[]) {
         // (Activation policy already set above for main process only)
         CreateMainWindow();
 
+        // Install shared overlay focus-loss handler (closes dropdown overlays on Cmd+Tab)
+        InstallAppFocusLossHandler();
+
         if (!g_main_window || !g_header_view || !g_webview_view) {
             LOG_ERROR("❌ Window creation failed - exiting");
             CefShutdown();
@@ -3859,7 +3972,7 @@ int main(int argc, char* argv[]) {
         CefRefPtr<SimpleHandler> webview_handler = new SimpleHandler("webview");
 
         CefBrowserSettings webview_settings;
-        webview_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+        webview_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
 
         bool webview_created = CefBrowserHost::CreateBrowser(
             webview_window_info,
@@ -3963,15 +4076,135 @@ int main(int argc, char* argv[]) {
     }
 }
 
-// macOS stubs for menu overlay (Windows-only for now)
+// ============================================================================
+// Menu Overlay (three-dot menu) -- uses GenericOverlayView infrastructure
+// ============================================================================
+
+// Called from simple_handler.cpp OnAfterCreated when the "menu" role browser is ready
+void SetMenuOverlayBrowser(CefRefPtr<CefBrowser> browser) {
+    if (g_menu_overlay_browser_ref) {
+        g_menu_overlay_browser_ref->browser = browser;
+        LOG_INFO("SetMenuOverlayBrowser: browser ref populated");
+    } else {
+        LOG_WARNING("SetMenuOverlayBrowser: overlay already closed before browser attach; closing browser");
+        if (browser) {
+            browser->GetHost()->CloseBrowser(false);
+        }
+    }
+}
+
+void CreateMenuOverlayMac(int iconRightOffset) {
+    LOG_INFO("Creating menu overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+
+    if (!g_main_window) {
+        LOG_ERROR("Cannot create menu overlay: main window is null");
+        return;
+    }
+
+    // Destroy existing menu overlay
+    if (g_menu_overlay_window) {
+        LOG_INFO("Destroying existing menu overlay");
+        DestroyMenuOverlayWindow(true);
+    }
+
+    CGFloat menuWidth = 280;
+    CGFloat menuHeight = 450;
+
+    // Position: flush right, flush below header (96px header)
+    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
+
+    LOG_INFO("Menu overlay frame: (" + std::to_string((int)menuFrame.origin.x) + ", "
+             + std::to_string((int)menuFrame.origin.y) + ") "
+             + std::to_string((int)menuFrame.size.width) + "x"
+             + std::to_string((int)menuFrame.size.height));
+
+    // Create borderless floating window using GenericOverlayWindow
+    g_menu_overlay_window = [[GenericOverlayWindow alloc]
+        initWithContentRect:menuFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_menu_overlay_window) {
+        LOG_ERROR("Failed to create menu overlay window");
+        return;
+    }
+
+    [g_menu_overlay_window setOpaque:NO];
+    [g_menu_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_menu_overlay_window setLevel:NSFloatingWindowLevel];
+    [g_menu_overlay_window setIgnoresMouseEvents:NO];
+    [g_menu_overlay_window setReleasedWhenClosed:NO];
+    [g_menu_overlay_window setHasShadow:YES];
+    [g_menu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+
+    // Child window of main window (moves/minimizes together)
+    [g_main_window addChildWindow:g_menu_overlay_window ordered:NSWindowAbove];
+
+    // Create GenericOverlayView as content view
+    GenericOverlayView* contentView = [[GenericOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, menuWidth, menuHeight)];
+    [g_menu_overlay_window setContentView:contentView];
+
+    // Create CEF browser with OSR
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("menu"));
+    g_menu_overlay_render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)menuWidth, (int)menuHeight);
+    handler->SetRenderHandler(g_menu_overlay_render_handler);
+
+    std::string menuUrl = "http://127.0.0.1:5137/menu";
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info,
+        handler,
+        menuUrl,
+        settings,
+        nullptr,
+        CefRequestContext::GetGlobalContext()
+    );
+
+    if (!result) {
+        LOG_ERROR("Failed to create menu overlay CEF browser");
+        [g_menu_overlay_window close];
+        g_menu_overlay_window = nullptr;
+        return;
+    }
+
+    // Allocate OverlayBrowserRef -- will be populated when OnAfterCreated fires
+    // via SimpleHandler, which sets the browser by role "menu".
+    g_menu_overlay_browser_ref = new OverlayBrowserRef();
+
+    // Attach browser ref to the GenericOverlayView (will be populated async)
+    [contentView attachBrowser:g_menu_overlay_browser_ref];
+
+    // Show and install click-outside monitor
+    [g_menu_overlay_window makeKeyAndOrderFront:nil];
+    [g_menu_overlay_window makeFirstResponder:contentView];
+    InstallClickOutsideMonitor(g_menu_overlay_window);
+
+    LOG_INFO("Menu overlay created successfully (using GenericOverlayView)");
+}
+
+// C-linkage stubs called from simple_handler.cpp via extern
 void CreateMenuOverlay(void* hInstance, bool showImmediately, int iconRightOffset) {
-    LOG_INFO("CreateMenuOverlay not yet implemented on macOS");
+    // hInstance is Windows-only, ignored on macOS
+    CreateMenuOverlayMac(iconRightOffset);
 }
 
 void ShowMenuOverlay(int iconRightOffset) {
-    LOG_INFO("ShowMenuOverlay not yet implemented on macOS");
+    CreateMenuOverlayMac(iconRightOffset);
 }
 
 void HideMenuOverlay() {
-    LOG_INFO("HideMenuOverlay not yet implemented on macOS");
+    DestroyMenuOverlayWindow(true);
 }

@@ -532,6 +532,7 @@ private:
             if (ok) {
                 // Read all response data (cosmetic responses can be large)
                 std::string response;
+                response.reserve(4096);  // Pre-allocate for typical cosmetic response
                 DWORD dwSize = 0;
                 do {
                     dwSize = 0;
@@ -680,6 +681,7 @@ private:
             ok = WinHttpReceiveResponse(hRequest, nullptr);
             if (ok) {
                 std::string response;
+                response.reserve(2048);  // Pre-allocate for typical hidden-ids response
                 DWORD dwSize = 0;
                 do {
                     dwSize = 0;

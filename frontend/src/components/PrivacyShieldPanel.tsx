@@ -18,7 +18,7 @@ interface PrivacyShieldPanelProps {
 
 const InfoTip: React.FC<{ tip: string }> = ({ tip }) => (
   <Tooltip title={tip} arrow placement="top" enterDelay={200}>
-    <InfoOutlinedIcon sx={{ fontSize: 14, color: 'text.disabled', cursor: 'help', ml: 0.5 }} />
+    <InfoOutlinedIcon sx={{ fontSize: 14, color: '#6b7280', cursor: 'help', ml: 0.5 }} />
   </Tooltip>
 );
 
@@ -76,11 +76,11 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
   };
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto', backgroundColor: '#1a1d23' }}>
       {/* Domain display */}
       {domain && (
         <Box sx={{ px: 2, pt: 1.5, pb: 0.5 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
+          <Typography variant="caption" sx={{ fontSize: '0.75rem', color: '#9ca3af' }}>
             {domain}
           </Typography>
         </Box>
@@ -97,7 +97,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography variant="body1" sx={{ fontWeight: 600, fontSize: '0.9rem' }}>
+          <Typography variant="body1" sx={{ fontWeight: 600, fontSize: '0.9rem', color: '#f0f0f0' }}>
             Protection enabled
           </Typography>
           <InfoTip tip={globalAdblockOff && globalCookieOff
@@ -112,7 +112,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         />
       </Box>
 
-      <Divider />
+      <Divider sx={{ borderColor: '#2a2d35' }} />
 
       {/* Ad blocking row */}
       <Box
@@ -126,7 +126,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? 'text.disabled' : 'text.primary' }}>
+          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? '#6b7280' : '#f0f0f0' }}>
             {adblockBlockedCount > 0 && !globalAdblockOff
               ? `${adblockBlockedCount} tracker${adblockBlockedCount !== 1 ? 's' : ''} blocked`
               : 'Tracker blocking'}
@@ -153,7 +153,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? 'text.disabled' : 'text.primary' }}>
+          <Typography sx={{ fontSize: '0.85rem', color: globalAdblockOff ? '#6b7280' : '#f0f0f0' }}>
             Scriptlet injection
           </Typography>
           <InfoTip tip={globalAdblockOff ? globalOverrideText : "Overrides ad scripts on the page. Disable if a site behaves oddly."} />
@@ -178,7 +178,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem', color: globalCookieOff ? 'text.disabled' : 'text.primary' }}>
+          <Typography sx={{ fontSize: '0.85rem', color: globalCookieOff ? '#6b7280' : '#f0f0f0' }}>
             {cookieBlockedCount > 0 && !globalCookieOff
               ? `${cookieBlockedCount} cookie${cookieBlockedCount !== 1 ? 's' : ''} blocked`
               : 'Cookie blocking'}
@@ -205,17 +205,17 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem' }}>
+          <Typography sx={{ fontSize: '0.85rem', color: '#f0f0f0' }}>
             Fingerprint shield
           </Typography>
           <InfoTip tip="Randomizes your browser fingerprint to prevent cross-site tracking. Always on." />
         </Box>
-        <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', fontStyle: 'italic' }}>
+        <Typography sx={{ fontSize: '0.75rem', color: '#9ca3af', fontStyle: 'italic' }}>
           Always on
         </Typography>
       </Box>
 
-      <Divider />
+      <Divider sx={{ borderColor: '#2a2d35' }} />
 
       {/* Link to full privacy settings */}
       <Box
@@ -230,13 +230,13 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           px: 2,
           py: 1.25,
           cursor: 'pointer',
-          '&:hover': { backgroundColor: 'action.hover' },
+          '&:hover': { backgroundColor: '#1f2937' },
         }}
       >
-        <Typography variant="body2" sx={{ fontSize: '0.85rem', color: 'text.secondary' }}>
+        <Typography variant="body2" sx={{ fontSize: '0.85rem', color: '#9ca3af' }}>
           Privacy settings
         </Typography>
-        <OpenInNewIcon fontSize="small" sx={{ color: 'text.secondary', fontSize: 16 }} />
+        <OpenInNewIcon fontSize="small" sx={{ color: '#9ca3af', fontSize: 16 }} />
       </Box>
     </Box>
   );

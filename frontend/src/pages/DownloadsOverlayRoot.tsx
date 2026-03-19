@@ -55,7 +55,7 @@ const DownloadsOverlayRoot: React.FC = () => {
         <Box sx={{
             width: '100%',
             height: '100%',
-            bgcolor: '#fff',
+            bgcolor: '#1a1d23',
             borderRadius: '8px',
             boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
             overflow: 'hidden',
@@ -64,18 +64,18 @@ const DownloadsOverlayRoot: React.FC = () => {
         }}>
             <Box sx={{
                 p: 1.5,
-                borderBottom: '1px solid rgba(0,0,0,0.08)',
+                borderBottom: '1px solid #2a2d35',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
             }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'rgba(0,0,0,0.87)' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
                     Downloads
                 </Typography>
                 <IconButton
                     size="small"
                     onClick={() => window.cefMessage?.send('download_panel_hide')}
-                    sx={{ p: 0.5 }}
+                    sx={{ p: 0.5, color: '#9ca3af' }}
                 >
                     <CloseIcon sx={{ fontSize: 16 }} />
                 </IconButton>
@@ -83,7 +83,7 @@ const DownloadsOverlayRoot: React.FC = () => {
 
             <Box sx={{ flex: 1, overflow: 'auto', p: 1.5, pt: 0.5 }}>
                 {downloads.length === 0 && (
-                    <Typography variant="body2" sx={{ textAlign: 'center', py: 3, color: 'rgba(0,0,0,0.4)' }}>
+                    <Typography variant="body2" sx={{ textAlign: 'center', py: 3, color: '#6b7280' }}>
                         No downloads
                     </Typography>
                 )}
@@ -94,7 +94,7 @@ const DownloadsOverlayRoot: React.FC = () => {
                         sx={{
                             py: 1,
                             px: 0.5,
-                            borderBottom: '1px solid rgba(0,0,0,0.06)',
+                            borderBottom: '1px solid #2a2d35',
                             '&:last-child': { borderBottom: 'none' },
                         }}
                     >
@@ -102,7 +102,7 @@ const DownloadsOverlayRoot: React.FC = () => {
                             variant="body2"
                             sx={{
                                 fontWeight: 500,
-                                color: 'rgba(0,0,0,0.87)',
+                                color: '#f0f0f0',
                                 mb: 0.5,
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
@@ -122,7 +122,7 @@ const DownloadsOverlayRoot: React.FC = () => {
                                     sx={{ mb: 0.5, height: 4, borderRadius: 2 }}
                                 />
                                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                    <Typography variant="caption" sx={{ color: 'rgba(0,0,0,0.5)' }}>
+                                    <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                                         {formatBytes(dl.receivedBytes)}
                                         {dl.totalBytes > 0 ? ` / ${formatBytes(dl.totalBytes)}` : ''}
                                         {dl.currentSpeed > 0 ? ` — ${formatSpeed(dl.currentSpeed)}` : ''}
@@ -168,8 +168,8 @@ const DownloadsOverlayRoot: React.FC = () => {
                         {/* Complete */}
                         {dl.isComplete && (
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                <CheckCircleIcon sx={{ fontSize: 16, color: '#188038' }} />
-                                <Typography variant="caption" sx={{ color: 'rgba(0,0,0,0.5)' }}>
+                                <CheckCircleIcon sx={{ fontSize: 16, color: '#2e7d32' }} />
+                                <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                                     {formatBytes(dl.totalBytes > 0 ? dl.totalBytes : dl.receivedBytes)}
                                 </Typography>
                                 <Link
@@ -193,7 +193,7 @@ const DownloadsOverlayRoot: React.FC = () => {
 
                         {/* Canceled */}
                         {dl.isCanceled && !dl.isComplete && (
-                            <Typography variant="caption" sx={{ color: 'rgba(0,0,0,0.35)' }}>
+                            <Typography variant="caption" sx={{ color: '#6b7280' }}>
                                 Canceled
                             </Typography>
                         )}
@@ -205,7 +205,7 @@ const DownloadsOverlayRoot: React.FC = () => {
                         <Button
                             size="small"
                             onClick={handleClearCompleted}
-                            sx={{ textTransform: 'none', fontSize: '0.75rem' }}
+                            sx={{ textTransform: 'none', fontSize: '0.75rem', color: '#9ca3af' }}
                         >
                             Clear completed
                         </Button>

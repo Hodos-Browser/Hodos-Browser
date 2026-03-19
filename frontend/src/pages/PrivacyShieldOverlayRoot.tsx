@@ -51,7 +51,7 @@ const PrivacyShieldOverlayRoot: React.FC = () => {
       sx={{
         width: '100%',
         height: '100%',
-        backgroundColor: 'background.paper',
+        backgroundColor: '#1a1d23',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -68,21 +68,21 @@ const PrivacyShieldOverlayRoot: React.FC = () => {
           px: 2,
           py: 1.5,
           borderBottom: 1,
-          borderColor: 'divider',
-          backgroundColor: '#fafafa',
+          borderColor: '#2a2d35',
+          backgroundColor: '#111827',
         }}
       >
-        <Typography variant="subtitle1" sx={{ fontWeight: 600, fontSize: '0.95rem' }}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 600, fontSize: '0.95rem', color: '#f0f0f0' }}>
           Privacy Shield
         </Typography>
         <IconButton
           onClick={handleClose}
           size="small"
           sx={{
-            color: 'text.secondary',
+            color: '#9ca3af',
             '&:hover': {
-              color: 'text.primary',
-              backgroundColor: 'action.hover',
+              color: '#f0f0f0',
+              backgroundColor: '#1f2937',
             },
           }}
         >
