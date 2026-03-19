@@ -1575,6 +1575,34 @@ pub fn parse_bump_hex_to_tsc(bump_hex: &str) -> Result<serde_json::Value, String
     }))
 }
 
+/// Compute the merkle root from a TSC proof and transaction ID.
+///
+/// This does a full merkle root computation: converts TSC to BUMP, then walks
+/// the tree from the txid leaf up to the root using double-SHA256 at each level.
+///
+/// Returns the merkle root in display (reversed) byte order as a hex string.
+/// Use this to verify proofs against block headers before storing or using them.
+pub fn compute_merkle_root_from_tsc(
+    txid: &str,
+    block_height: u32,
+    tx_index: u64,
+    nodes: &[serde_json::Value],
+) -> Result<String, String> {
+    let bump = tsc_proof_to_bump(txid, block_height, tx_index, nodes)?;
+
+    let txid_bytes = hex::decode(txid)
+        .map_err(|e| format!("Invalid txid hex: {}", e))?;
+    let mut txid_natural = txid_bytes;
+    txid_natural.reverse(); // display → natural
+
+    let root_natural = compute_root_from_bump(&bump, &txid_natural)?;
+
+    // Convert to display order
+    let mut root_display = root_natural;
+    root_display.reverse();
+    Ok(hex::encode(root_display))
+}
+
 /// Write a merkle proof (BUMP)
 fn write_bump(bytes: &mut Vec<u8>, bump: &MerkleProof) -> Result<(), String> {
     // Write block height as varint (NOT fixed 4 bytes!)

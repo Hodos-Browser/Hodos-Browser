@@ -244,6 +244,81 @@ fn fix_tsc_byte_order(txid: &str, tsc: &Value) -> Option<Value> {
     }
 }
 
+/// Verify a TSC proof's merkle root against the actual block header.
+///
+/// Returns Ok(true) if the proof's computed root matches the block's merkle root,
+/// Ok(false) if they don't match, or Err if the block header can't be fetched.
+pub async fn verify_tsc_proof_against_block(
+    client: &Client,
+    txid: &str,
+    tsc: &Value,
+) -> CacheResult<bool> {
+    let block_height = match tsc["height"].as_u64() {
+        Some(h) if h > 0 => h as u32,
+        _ => {
+            // WoC TSC proofs often lack height — try target (block hash) to look it up
+            if let Some(target) = tsc["target"].as_str().filter(|t| !t.is_empty()) {
+                let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
+                let resp = client.get(&header_url).send().await
+                    .map_err(|e| CacheError::Api(format!("Failed to fetch block header for target {}: {}", target, e)))?;
+                if !resp.status().is_success() {
+                    return Err(CacheError::Api(format!("Block header API returned {} for target {}", resp.status(), target)));
+                }
+                let header_json: Value = resp.json().await
+                    .map_err(|e| CacheError::Api(format!("Failed to parse block header JSON: {}", e)))?;
+                match header_json["height"].as_u64() {
+                    Some(h) if h > 0 => h as u32,
+                    _ => return Err(CacheError::InvalidData("Could not resolve height from target block hash".to_string())),
+                }
+            } else {
+                return Err(CacheError::InvalidData("No height or target in TSC proof".to_string()));
+            }
+        }
+    };
+
+    let tx_index = tsc["index"].as_u64().unwrap_or(0);
+    let nodes = match tsc["nodes"].as_array() {
+        Some(n) => n,
+        None => return Ok(false),
+    };
+
+    // Compute merkle root from the proof
+    let computed_root = match crate::beef::compute_merkle_root_from_tsc(txid, block_height, tx_index, nodes) {
+        Ok(root) => root,
+        Err(e) => {
+            log::warn!("   Failed to compute merkle root for {}: {}", txid, e);
+            return Ok(false);
+        }
+    };
+
+    // Fetch the actual block header from WoC
+    let block_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", block_height);
+    let response = client.get(&block_url).send().await
+        .map_err(|e| CacheError::Api(format!("Failed to fetch block {}: {}", block_height, e)))?;
+
+    if !response.status().is_success() {
+        return Err(CacheError::Api(format!(
+            "Block API returned status {} for height {}", response.status(), block_height
+        )));
+    }
+
+    let block_json: Value = response.json().await
+        .map_err(|e| CacheError::Api(format!("Failed to parse block JSON: {}", e)))?;
+
+    let actual_root = block_json["merkleroot"].as_str()
+        .ok_or_else(|| CacheError::InvalidData("Missing merkleroot in block header".to_string()))?;
+
+    if computed_root == actual_root {
+        log::info!("   Merkle root verified for {} at height {}", txid, block_height);
+        Ok(true)
+    } else {
+        log::error!("   Merkle root MISMATCH for {} at height {}!", txid, block_height);
+        log::error!("      Computed: {}", computed_root);
+        log::error!("      Actual:   {}", actual_root);
+        Ok(false)
+    }
+}
+
 /// Enhance TSC proof with block height (fetch from cache or API)
 pub async fn enhance_tsc_with_height<'a>(
     client: &Client,

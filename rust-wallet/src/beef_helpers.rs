@@ -302,8 +302,15 @@ pub async fn build_beef_for_txid(
                                     enhanced_tsc
                                 },
                                 Err(e) => {
-                                    log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", current_txid, e);
-                                    serde_json::Value::Null
+                                    // Enhancement failed (e.g. WoC block header 404),
+                                    // but if the proof already has a height (from ARC), use it as-is.
+                                    if tsc_json["height"].as_u64().unwrap_or(0) > 0 {
+                                        log::warn!("   ⚠️  Enhancement failed ({}), but proof already has height — using as-is", e);
+                                        tsc_json.clone()
+                                    } else {
+                                        log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", current_txid, e);
+                                        serde_json::Value::Null
+                                    }
                                 },
                             }
                         },

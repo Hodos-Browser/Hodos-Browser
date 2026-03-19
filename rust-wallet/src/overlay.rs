@@ -555,7 +555,8 @@ async fn submit_beef_to_host(
     topics_json: &str,
 ) -> Result<bool, String> {
     let url = format!("{}/submit", host);
-    debug!("Overlay: POST {} ({} bytes, topics: {})", url, beef_bytes.len(), topics_json);
+    let header_hex = if beef_bytes.len() >= 8 { hex::encode(&beef_bytes[..8]) } else { hex::encode(beef_bytes) };
+    info!("Overlay: POST {} ({} bytes, header: {}, topics: {})", url, beef_bytes.len(), header_hex, topics_json);
 
     let response = client
         .post(&url)
@@ -573,33 +574,54 @@ async fn submit_beef_to_host(
         return Err(format!("HTTP {}: {}", status, body));
     }
 
-    // Parse STEAK response
+    // Parse STEAK (Submitted Transaction Execution AcKnowledgement)
+    //
+    // Format: { "topic_name": { outputsToAdmit: [], coinsToRetain: [], coinsRemoved?: [] } }
+    //
+    // IMPORTANT: The overlay-express `onSteakReady` callback sends the HTTP response BEFORE
+    // Phase 3 (storage mutation) completes. This means `coinsRemoved` may be absent even
+    // for successful removals — the field is only populated in Phase 3 which runs after
+    // the response is sent. This is a known limitation of the overlay-express implementation.
+    //
+    // Therefore:
+    //   outputsToAdmit > 0  → definitive publish success
+    //   coinsRemoved > 0    → definitive removal success (rare — may not arrive due to callback race)
+    //   both empty           → AMBIGUOUS: could be rejection, dupe, or removal-in-progress
+    //
+    // Callers must verify removal separately via /lookup if confirmation is needed.
     if let Ok(steak) = serde_json::from_str::<serde_json::Value>(&body) {
         info!("Overlay: STEAK from {}: {}", host, body);
 
-        // Check each topic in the STEAK
         if let Some(obj) = steak.as_object() {
             for (topic, topic_data) in obj {
-                let outputs_admitted = topic_data
-                    .get("outputsToAdmit")
-                    .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-                let coins_removed = topic_data
-                    .get("coinsRemoved")
-                    .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
+                let outputs_to_admit = topic_data.get("outputsToAdmit").and_then(|v| v.as_array());
+                let coins_to_retain = topic_data.get("coinsToRetain").and_then(|v| v.as_array());
+                let coins_removed = topic_data.get("coinsRemoved").and_then(|v| v.as_array());
 
-                if outputs_admitted || coins_removed {
-                    info!("Overlay: STEAK confirms admission/removal for '{}' on {}", topic, host);
+                let admitted_count = outputs_to_admit.map(|a| a.len()).unwrap_or(0);
+                let removed_count = coins_removed.map(|a| a.len()).unwrap_or(0);
+                let coins_removed_present = topic_data.get("coinsRemoved").is_some();
+
+                info!("Overlay: STEAK '{}': outputsToAdmit={}, coinsToRetain={:?}, coinsRemoved={} (field present: {})",
+                    topic, admitted_count,
+                    coins_to_retain.map(|a| a.len()),
+                    removed_count,
+                    coins_removed_present,
+                );
+
+                if admitted_count > 0 {
+                    info!("Overlay: ✅ {} new output(s) admitted for '{}' on {}", admitted_count, topic, host);
                     return Ok(true);
                 }
+                if removed_count > 0 {
+                    info!("Overlay: ✅ {} coin(s) explicitly removed for '{}' on {}", removed_count, topic, host);
+                    return Ok(true);
+                }
+                // Empty response — ambiguous (rejection, dupe, or removal with early callback)
+                warn!("Overlay: STEAK from {} has empty outputsToAdmit and no coinsRemoved — ambiguous (could be rejection, dupe, or removal-in-progress)", host);
             }
         }
 
-        // STEAK returned but nothing admitted
-        warn!("Overlay: STEAK from {} has no admitted outputs", host);
         return Ok(false);
     }
 

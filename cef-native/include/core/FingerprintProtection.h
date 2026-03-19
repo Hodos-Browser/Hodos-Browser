@@ -141,6 +141,7 @@ public:
             "discord.com",
             "x.com",
             "twitter.com",
+            "socialcert.net",       // BRC-52 certificate issuer (OAuth redirect)
         };
         for (const auto& auth : authDomains) {
             if (lower == auth) return true;

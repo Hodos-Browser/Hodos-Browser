@@ -25,6 +25,7 @@ pub mod task_review_status;
 pub mod task_purge;
 pub mod task_sync_pending;
 pub mod task_check_peerpay;
+pub mod task_validate_utxos;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -46,6 +47,7 @@ struct TaskSchedule {
     purge: u64,
     sync_pending: u64,
     check_peerpay: u64,
+    validate_utxos: u64,
 }
 
 impl Default for TaskSchedule {
@@ -59,6 +61,7 @@ impl Default for TaskSchedule {
             purge: 3600,              // 1 hour
             sync_pending: 30,         // 30 seconds
             check_peerpay: 60,        // 1 minute
+            validate_utxos: 600,      // 10 minutes
         }
     }
 }
@@ -121,7 +124,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 8 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 9 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -130,6 +133,7 @@ impl Monitor {
         info!("   TaskPurge: every {}s", self.schedule.purge);
         info!("   TaskSyncPending: every {}s (pending addresses only)", self.schedule.sync_pending);
         info!("   TaskCheckPeerPay: every {}s", self.schedule.check_peerpay);
+        info!("   TaskValidateUtxos: every {}s (all spendable outputs)", self.schedule.validate_utxos);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -140,6 +144,7 @@ impl Monitor {
         let mut last_purge: u64 = 0;
         let mut last_sync_pending: u64 = 0;
         let mut last_check_peerpay: u64 = 0;
+        let mut last_validate_utxos: u64 = 0; // 0 = runs on first tick
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -236,6 +241,15 @@ impl Monitor {
                     self.log_event("TaskCheckPeerPay:error", Some(&e));
                 }
             }
+
+            // TaskValidateUtxos — DISABLED
+            // Removed: was too aggressive, marking valid outputs as stale.
+            // TaskSyncPending handles ongoing UTXO reconciliation for pending addresses.
+            // The BSV SDK/wallet-toolbox does not have an equivalent background validator.
+            // If we re-enable in the future, it needs to:
+            // - Only validate P2PKH outputs (skip PushDrop/token outputs)
+            // - Only act on 200 responses (never on API errors/404s)
+            // - Have a much longer grace period
         }
 
         info!("🛑 Monitor stopped");

@@ -29,6 +29,9 @@ mod paymail;  // Paymail (bsvalias) client for human-readable address resolution
 mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 certificates)
 mod overlay;  // BSV Overlay Services client for certificate publish/unpublish
 
+// Re-export for monitor tasks (avoids rust-analyzer resolution issues when only lib is checked)
+pub use cache_helpers::verify_tsc_proof_against_block;
+
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
 use std::sync::Arc;
@@ -474,6 +477,7 @@ async fn main() -> std::io::Result<()> {
             .route("/discoverByAttributes", web::post().to(handlers::discover_by_attributes))  // Group C - Part 4
             .route("/wallet/certificate/publish", web::post().to(handlers::publish_certificate))  // Certificate publish to overlay
             .route("/wallet/certificate/unpublish", web::post().to(handlers::unpublish_certificate))  // Certificate unpublish from overlay
+            .route("/admin/prepare-unpublish", web::post().to(handlers::admin_prepare_unpublish))  // Admin: populate DB for unpublish
 
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))

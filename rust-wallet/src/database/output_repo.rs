@@ -564,18 +564,32 @@ impl<'a> OutputRepository<'a> {
         prefix: Option<&str>,
         suffix: Option<&str>,
     ) -> Result<usize> {
+        self.update_derivation_with_sender(output_id, prefix, suffix, None)
+    }
+
+    /// Update derivation fields AND sender_identity_key on an output.
+    ///
+    /// Used for PushDrop/token outputs where the counterparty key (e.g. "anyone")
+    /// is needed for correct key derivation during spending.
+    pub fn update_derivation_with_sender(
+        &self,
+        output_id: i64,
+        prefix: Option<&str>,
+        suffix: Option<&str>,
+        sender_identity_key: Option<&str>,
+    ) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
         let rows = self.conn.execute(
-            "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2, updated_at = ?3 WHERE outputId = ?4",
-            rusqlite::params![prefix, suffix, now, output_id],
+            "UPDATE outputs SET derivation_prefix = ?1, derivation_suffix = ?2, sender_identity_key = ?3, updated_at = ?4 WHERE outputId = ?5",
+            rusqlite::params![prefix, suffix, sender_identity_key, now, output_id],
         )?;
 
         if rows > 0 {
-            info!("   ✅ Updated derivation for output_id={}: prefix={:?}, suffix={:?}", output_id, prefix, suffix);
+            info!("   ✅ Updated derivation for output_id={}: prefix={:?}, suffix={:?}, sender={:?}", output_id, prefix, suffix, sender_identity_key);
         }
         Ok(rows)
     }

@@ -34,6 +34,7 @@ pub struct RelinquishCertificateRequest {
     pub type_: String,  // Base64 string
 
     /// Certificate serial number (base64-encoded, 32 bytes)
+    #[serde(alias = "serialNumber")]
     pub serial_number: String,  // Base64 string
 
     /// Certifier's public key (33-byte compressed, hex-encoded)
@@ -685,9 +686,11 @@ pub struct AcquireCertificateRequest {
     pub fields: Option<serde_json::Value>,
 
     /// Serial number (base64, required for 'direct')
+    #[serde(alias = "serialNumber")]
     pub serial_number: Option<String>,
 
     /// Revocation outpoint (required for 'direct')
+    #[serde(alias = "revocationOutpoint")]
     pub revocation_outpoint: Option<String>,
 
     /// Certificate signature (hex, required for 'direct')
@@ -909,14 +912,82 @@ async fn acquire_certificate_direct(
         }
     }
 
+    // Get master private key using the ALREADY-HELD db lock (don't re-acquire — Mutex is not reentrant)
+    let master_privkey_for_keyring =
+        crate::database::helpers::get_master_private_key_from_db(&db).ok();
+
     // Store certificate in database
     match cert_repo.insert_certificate_with_fields(&mut certificate) {
         Ok(certificate_id) => {
             log::info!("   ✅ Certificate stored with ID: {}", certificate_id);
 
-            // Return certificate as JSON object (matching other wallets' format)
+            // Return certificate with PUBLIC keyring (encrypted for "anyone")
+            //
+            // NEVER expose the master keyring (keyringForSubject) — it's an internal
+            // wallet secret encrypted for subject+certifier. Instead, generate the
+            // public keyring (encrypted for the "anyone" verifier) so the PushDrop
+            // can be built with fields anyone can decrypt.
+            //
+            // SocialCert's IdentityClient spreads the cert object into the PushDrop
+            // without overriding keyring from proveCertificate, so we must provide
+            // the correct public keyring here.
+            let mut response_cert = cert_json_value.clone();
+            if let Some(obj) = response_cert.as_object_mut() {
+                obj.remove("keyringForSubject");
+
+                // Generate public keyring for "anyone" verifier
+                let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX).unwrap();
+                let serial_b64 = {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                    BASE64.encode(&certificate.serial_number)
+                };
+                let mut public_keyring = serde_json::Map::new();
+                if let Some(ref master_privkey) = master_privkey_for_keyring {
+                for (field_name, field) in &certificate.fields {
+                    // Decrypt master key to get raw revelation key
+                    let revelation_key = if field.master_key.len() >= 48 {
+                        match crate::crypto::brc2::decrypt_certificate_field(
+                            master_privkey,
+                            &hex::decode(
+                                obj.get("certifier").and_then(|v| v.as_str()).unwrap_or("")
+                            ).unwrap_or_default(),
+                            field_name,
+                            None,
+                            &field.master_key,
+                        ) {
+                            Ok(key) => key,
+                            Err(_) => field.master_key.clone(),
+                        }
+                    } else {
+                        field.master_key.clone()
+                    };
+
+                    // Re-encrypt for "anyone" verifier (with serial number in keyID)
+                    match crate::crypto::brc2::encrypt_certificate_field(
+                        master_privkey,
+                        &anyone_pubkey,
+                        field_name,
+                        Some(&serial_b64),
+                        &revelation_key,
+                    ) {
+                        Ok(encrypted) => {
+                            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                            public_keyring.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&encrypted)));
+                        }
+                        Err(e) => {
+                            log::warn!("   Failed to generate public keyring for '{}': {}", field_name, e);
+                        }
+                    }
+                }
+                } // end if let Some(master_privkey)
+
+                if !public_keyring.is_empty() {
+                    obj.insert("keyring".to_string(), serde_json::Value::Object(public_keyring));
+                    log::info!("   ✅ Generated public keyring for {} field(s) in acquireCertificate response", certificate.fields.len());
+                }
+            }
             HttpResponse::Ok().json(AcquireCertificateResponse {
-                certificate: cert_json_value,
+                certificate: response_cert,
             })
         }
         Err(e) => {
@@ -3000,7 +3071,7 @@ pub struct CertificateIdentifier {
     pub type_: Option<String>,
 
     /// Serial number (base64-encoded, optional)
-    #[serde(default)]
+    #[serde(default, alias = "serialNumber")]
     pub serial_number: Option<String>,
 
     /// Certifier (hex-encoded, optional)
@@ -3022,6 +3093,7 @@ pub struct CertificateIdentifier {
 
 /// Response structure for proveCertificate
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProveCertificateResponse {
     /// Keyring for verifier (fieldName → base64-encoded encrypted revelation key)
     pub keyring_for_verifier: std::collections::HashMap<String, String>,
@@ -3623,6 +3695,7 @@ pub struct PublishCertificateRequest {
     pub type_: String,
 
     /// Certificate serial number (base64-encoded)
+    #[serde(alias = "serialNumber")]
     pub serial_number: String,
 
     /// Certifier public key (hex-encoded)
@@ -3630,7 +3703,7 @@ pub struct PublishCertificateRequest {
 
     /// Which fields to publicly reveal (field names)
     /// If empty, all fields are revealed
-    #[serde(default)]
+    #[serde(default, alias = "fieldsToReveal")]
     pub fields_to_reveal: Vec<String>,
 }
 
@@ -3663,6 +3736,18 @@ async fn auto_unpublish_certificate(
     unpublish_certificate_core(
         state, type_bytes, serial_bytes, certifier_bytes, publish_txid, publish_vout,
     ).await.map(|_txid| ())
+}
+
+/// Public wrapper for auto_unpublish_certificate — callable from createAction in handlers.rs
+pub async fn auto_unpublish_certificate_pub(
+    state: &web::Data<AppState>,
+    type_bytes: &[u8],
+    serial_bytes: &[u8],
+    certifier_bytes: &[u8],
+    publish_txid: &str,
+    publish_vout: u32,
+) -> Result<(), String> {
+    auto_unpublish_certificate(state, type_bytes, serial_bytes, certifier_bytes, publish_txid, publish_vout).await
 }
 
 /// POST /wallet/certificate/publish — Publish a certificate to the BSV overlay
@@ -4439,6 +4524,40 @@ async fn unpublish_certificate_core(
     };
     log::info!("   📦 Built BEEF with ancestry: {} bytes", beef_bytes.len());
 
+    // Create transaction record BEFORE updating spent_by (so FK lookup succeeds)
+    // This is the critical step that was missing — without it, spent_by stays NULL
+    // and TaskReviewStatus restores the outputs to spendable=1.
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+    let unpublish_tx_id: Option<i64> = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+        match db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                1i64, // user_id
+                txid,
+                format!("unpublish-{}", &txid[..8]),
+                "Unpublish identity certificate",
+                raw_tx_bytes,
+                now, now,
+            ],
+        ) {
+            Ok(_) => {
+                let id = db.connection().last_insert_rowid();
+                log::info!("   💾 Created transaction record for unpublish tx {} (id: {})", &txid[..16], id);
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to create transaction record: {}", e);
+                None
+            }
+        }
+    };
+
     // Record change output in DB BEFORE broadcast (same as createAction pattern)
     if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
         let db = state.database.lock().unwrap();
@@ -4452,24 +4571,48 @@ async fn unpublish_certificate_core(
             Some("2-receive address"), Some(&addr_idx.to_string()),
             None, None, true, // is_change
         );
+        // Link change output to the transaction record
+        if let Some(tx_id) = unpublish_tx_id {
+            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
+        }
         log::info!("   💾 Change output recorded: {}:0 = {} sats", &txid[..16], change_amount);
     }
 
     // Update input reservations from placeholder to real txid
+    // Now that the transaction record exists, spent_by will be set correctly
     {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
         let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
     }
 
+    // Create proven_tx_req so TaskCheckForProofs tracks this transaction
+    {
+        let db = state.database.lock().unwrap();
+        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
+        // Cache signed tx for BEEF ancestry
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
+        log::info!("   📋 Created proven_tx_req + cached tx for {}", &txid[..16]);
+    }
+
     // Broadcast using BEEF (not raw tx) so ARC can validate parent transactions
     let beef_hex = hex::encode(&beef_bytes);
     match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
-        Ok(_) => log::info!("   ✅ Unpublish broadcast successful"),
+        Ok(_) => {
+            log::info!("   ✅ Unpublish broadcast successful");
+            // Update transaction status to unproven (broadcast succeeded, waiting for mining)
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
+        }
         Err(e) => {
             log::error!("   ❌ Broadcast failed: {} — rolling back", e);
-            // Rollback: delete ghost change output, restore reserved inputs
+            // Rollback: mark tx failed, delete ghost change output, restore reserved inputs
             let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
             let output_repo = OutputRepository::new(db.connection());
             let _ = output_repo.delete_by_txid(&txid);
             let _ = output_repo.restore_by_spending_description(&txid);
@@ -4482,8 +4625,36 @@ async fn unpublish_certificate_core(
 
     state.balance_cache.invalidate();
 
-    // Submit BEEF to overlay (best-effort)
-    let _ = crate::overlay::submit_to_identity_overlay(&beef_bytes).await;
+    // Submit spending tx to overlay and verify removal
+    {
+        let overlay_result = match crate::beef::Beef::from_bytes(&beef_bytes).and_then(|b| b.to_v1_bytes()) {
+            Ok(v1_bytes) => {
+                log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay", v1_bytes.len());
+                crate::overlay::submit_to_identity_overlay(&v1_bytes).await
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  BEEF V1 conversion failed: {}, trying raw", e);
+                crate::overlay::submit_to_identity_overlay(&beef_bytes).await
+            }
+        };
+
+        // STEAK response is ambiguous for removals (overlay-express sends response before
+        // Phase 3 completes, so coinsRemoved may be absent). Verify via lookup instead.
+        match overlay_result {
+            Ok(true) => log::info!("   ✅ Overlay confirmed removal (outputsToAdmit or coinsRemoved present)"),
+            Ok(false) => log::info!("   ℹ️  Overlay STEAK ambiguous — verifying removal via lookup..."),
+            Err(e) => log::warn!("   ⚠️  Overlay submission error: {} — verifying via lookup...", e),
+        }
+
+        // Verify removal by querying the overlay for this certificate
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let serial_b64 = BASE64.encode(serial_bytes);
+        match crate::overlay::lookup_published_certificate(&serial_b64).await {
+            Ok(None) => log::info!("   ✅ Overlay lookup confirms token removed (not found)"),
+            Ok(Some(_)) => log::warn!("   ⚠️  Overlay lookup still returns the token — removal may be pending or failed"),
+            Err(e) => log::warn!("   ⚠️  Overlay lookup verification failed: {}", e),
+        }
+    }
 
     // Update certificate publish status
     {
@@ -4497,4 +4668,268 @@ async fn unpublish_certificate_core(
 
     log::info!("   ✅ Certificate unpublished successfully");
     Ok(txid)
+}
+
+/// POST /admin/prepare-unpublish — Populate DB with everything needed to unpublish a token
+///
+/// Fetches raw tx, stores in parent_transactions, creates output record with
+/// correct identity derivation info, fetches merkle proof, creates certificate record.
+pub async fn admin_prepare_unpublish(
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+    _body_bytes: web::Bytes,
+) -> HttpResponse {
+    let txid = match body["txid"].as_str() {
+        Some(t) => t.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing txid"})),
+    };
+    let vout = body["vout"].as_u64().unwrap_or(0) as u32;
+    let cert_type_b64 = match body["type"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing type"})),
+    };
+    let serial_b64 = match body["serialNumber"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing serialNumber"})),
+    };
+    let certifier_hex = match body["certifier"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing certifier"})),
+    };
+    let subject_hex = match body["subject"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing subject"})),
+    };
+    let revocation_outpoint = body["revocationOutpoint"].as_str().unwrap_or("").to_string();
+
+    log::info!("📋 POST /admin/prepare-unpublish: {}:{}", &txid[..16.min(txid.len())], vout);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut steps: Vec<String> = Vec::new();
+
+    // Step 1: Fetch raw tx from WoC and store in parent_transactions
+    let tx_hex = match client
+        .get(&format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid))
+        .send().await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.text().await {
+                Ok(hex) => hex.trim().to_string(),
+                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to read tx hex: {}", e)})),
+            }
+        }
+        _ => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to fetch raw tx from WoC"})),
+    };
+    log::info!("   ✅ Fetched raw tx: {} hex chars", tx_hex.len());
+
+    {
+        let db = state.database.lock().unwrap();
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &tx_hex);
+        steps.push("parent_transactions: stored raw tx".into());
+    }
+
+    // Parse the tx to extract PushDrop output
+    let tx_bytes = match hex::decode(&tx_hex) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid tx hex: {}", e)})),
+    };
+    let parsed = match crate::beef::ParsedTransaction::from_bytes(&tx_bytes) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to parse tx: {}", e)})),
+    };
+    if vout as usize >= parsed.outputs.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("vout {} out of range", vout)}));
+    }
+    let token_output = &parsed.outputs[vout as usize];
+    let locking_script_hex = hex::encode(&token_output.script);
+    log::info!("   📜 Token output {}: {} sats, script {} bytes", vout, token_output.value, token_output.script.len());
+
+    // Step 2: Create transaction record
+    {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        if tx_repo.get_by_txid(&txid).ok().flatten().is_none() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let _ = db.connection().execute(
+                "INSERT OR IGNORE INTO transactions (
+                    user_id, txid, new_status, reference_number,
+                    description, raw_tx, created_at, updated_at
+                ) VALUES (?1, ?2, 'completed', ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    state.current_user_id, txid,
+                    format!("admin-{}", &txid[..8]),
+                    "Identity certificate publish (admin-prepared)",
+                    tx_bytes, now, now,
+                ],
+            );
+            steps.push("transactions: created".into());
+            log::info!("   ✅ Created transaction record");
+        } else {
+            steps.push("transactions: already exists".into());
+        }
+    }
+
+    // Step 3: Insert PushDrop output with identity derivation info
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        if output_repo.get_by_txid_vout(&txid, vout).ok().flatten().is_none() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let locking_script_bytes = hex::decode(&locking_script_hex).ok();
+            let _ = db.connection().execute(
+                "INSERT OR IGNORE INTO outputs (
+                    user_id, txid, vout, satoshis, locking_script,
+                    derivation_prefix, derivation_suffix, sender_identity_key,
+                    spendable, change, provided_by, purpose, type, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, 'you', 'receive', 'custom', ?9, ?10)",
+                rusqlite::params![
+                    state.current_user_id, txid, vout as i32,
+                    token_output.value as i64, locking_script_bytes,
+                    "1-identity", "1", ANYONE_PUBKEY_HEX, now, now,
+                ],
+            );
+            steps.push("outputs: inserted PushDrop with identity derivation".into());
+            log::info!("   ✅ Inserted PushDrop output");
+        } else {
+            // Ensure derivation is correct on existing output
+            if let Ok(Some(existing)) = output_repo.get_by_txid_vout(&txid, vout) {
+                if existing.sender_identity_key.is_none() {
+                    if let Some(oid) = existing.output_id {
+                        let _ = output_repo.update_derivation_with_sender(
+                            oid, Some("1-identity"), Some("1"), Some(ANYONE_PUBKEY_HEX),
+                        );
+                        steps.push("outputs: updated derivation on existing".into());
+                    }
+                } else {
+                    steps.push("outputs: already correct".into());
+                }
+            }
+        }
+
+        // Assign to identity_certificates basket
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        if let Ok(basket_id) = basket_repo.find_or_insert("identity_certificates", state.current_user_id) {
+            if let Ok(Some(out)) = output_repo.get_by_txid_vout(&txid, vout) {
+                if let Some(oid) = out.output_id {
+                    let _ = output_repo.assign_basket(oid, basket_id);
+                }
+            }
+        }
+    }
+
+    // Step 4: Fetch and store merkle proof
+    {
+        let proof_result = crate::cache_helpers::fetch_tsc_proof_from_api(&client, &txid).await;
+        match proof_result {
+            Ok(Some(tsc_json)) => {
+                let db = state.database.lock().unwrap();
+                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                let height = tsc_json["height"].as_u64().unwrap_or(0) as u32;
+                let tx_index = tsc_json["index"].as_u64().unwrap_or(0) as u64;
+                let merkle_path_blob = serde_json::to_vec(&tsc_json).unwrap_or_default();
+                match proven_tx_repo.insert_or_get(&txid, height, tx_index, &merkle_path_blob, &tx_bytes, "", "") {
+                    Ok(proven_tx_id) => {
+                        let _ = proven_tx_repo.link_transaction(&txid, proven_tx_id);
+                        steps.push(format!("proven_txs: stored (height: {}, index: {})", height, tx_index));
+                        log::info!("   ✅ Stored merkle proof");
+                    }
+                    Err(e) => {
+                        steps.push(format!("proven_txs: insert failed: {}", e));
+                        log::warn!("   ⚠️  Failed to store merkle proof: {}", e);
+                    }
+                }
+            }
+            Ok(None) => {
+                steps.push("proven_txs: no proof available yet".into());
+                log::warn!("   ⚠️  No merkle proof available yet");
+            }
+            Err(e) => {
+                steps.push(format!("proven_txs: fetch failed: {}", e));
+                log::warn!("   ⚠️  Could not fetch merkle proof: {}", e);
+            }
+        }
+    }
+
+    // Step 5: Create certificate record
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        let type_bytes = match BASE64.decode(&cert_type_b64) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid type base64: {}", e)})),
+        };
+        let serial_bytes = match BASE64.decode(&serial_b64) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid serial base64: {}", e)})),
+        };
+        let certifier_bytes = match hex::decode(&certifier_hex) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid certifier hex: {}", e)})),
+        };
+        let subject_bytes = match hex::decode(&subject_hex) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid subject hex: {}", e)})),
+        };
+
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+
+        if cert_repo.get_by_identifiers(&type_bytes, &serial_bytes, &certifier_bytes).ok().flatten().is_none() {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let mut cert = crate::certificate::Certificate {
+                certificate_id: None,
+                user_id: Some(state.current_user_id),
+                type_: type_bytes.clone(),
+                serial_number: serial_bytes.clone(),
+                certifier: certifier_bytes.clone(),
+                subject: subject_bytes,
+                verifier: None,
+                revocation_outpoint: revocation_outpoint.clone(),
+                signature: vec![],
+                is_deleted: false,
+                created_at: now_ts,
+                updated_at: now_ts,
+                fields: std::collections::HashMap::new(),
+                keyring: std::collections::HashMap::new(),
+            };
+            match cert_repo.insert_certificate_with_fields(&mut cert) {
+                Ok(cert_id) => {
+                    let _ = cert_repo.update_publish_status(
+                        &type_bytes, &serial_bytes, &certifier_bytes,
+                        "published", Some(&txid), Some(vout as i32),
+                    );
+                    steps.push(format!("certificates: created (id: {}) + marked published", cert_id));
+                    log::info!("   ✅ Created certificate record");
+                }
+                Err(e) => {
+                    steps.push(format!("certificates: insert failed: {}", e));
+                    log::error!("   ❌ Failed to insert certificate: {}", e);
+                }
+            }
+        } else {
+            let _ = cert_repo.update_publish_status(
+                &type_bytes, &serial_bytes, &certifier_bytes,
+                "published", Some(&txid), Some(vout as i32),
+            );
+            steps.push("certificates: already exists, updated publish status".into());
+        }
+    }
+
+    log::info!("   ✅ Prepare-unpublish complete: {} steps", steps.len());
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "vout": vout,
+        "steps": steps,
+        "next": "Call POST /wallet/certificate/unpublish with type, serialNumber, certifier"
+    }))
 }

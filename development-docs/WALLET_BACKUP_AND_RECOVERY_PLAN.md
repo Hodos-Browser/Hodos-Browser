@@ -1,9 +1,10 @@
 # Wallet Backup & Recovery — Implementation Outline
 
 **Created**: 2026-02-03
-**Status**: Draft — design outline for review
-**Related**: `STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` (Phases 2, 5, 7)
-**Objective**: Enable full wallet recovery from mnemonic alone by combining three backup mechanisms — local file export, on-chain encrypted backup, and cloud sync scaffolding.
+**Updated**: 2026-03-16 — Section 4 revised: PushDrop full wallet backup (see `ONCHAIN_FULL_BACKUP_RESEARCH.md`)
+**Status**: Section 4 ready for implementation; Sections 3, 5 unchanged
+**Related**: `STATE_MAINTENANCE_AND_RECONCILIATION_TRANSITION_PLAN.md` (Phases 2, 5, 7), `ONCHAIN_FULL_BACKUP_RESEARCH.md`
+**Objective**: Enable full wallet recovery from mnemonic alone by combining three backup mechanisms — on-chain full backup (primary), local file export (user-initiated), and optional cloud sync.
 
 ---
 
@@ -31,23 +32,25 @@ BRC-42 self-derived receive addresses (`"2-receive address-0"`, `"2-receive addr
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Layer 1: On-Chain Encrypted Backup (automatic)         │
-│  Mnemonic-only recovery. Encrypted derivation data      │
-│  stored in a BIP32 UTXO on the blockchain.              │
-│  Always available. No user action needed.               │
+│  Layer 1: On-Chain Full Wallet Backup (automatic)       │
+│  Entire wallet DB compressed+encrypted in PushDrop UTXO │
+│  at deterministic BRC-42 address. Mnemonic-only recovery│
+│  No scanning needed. Built-in multi-device sync.        │
+│  Cost: $0.08-$6/year for daily backups.                 │
 ├─────────────────────────────────────────────────────────┤
 │  Layer 2: Local Encrypted Backup File (user-initiated)  │
-│  Full wallet export in BSV SDK sync-compatible JSON.     │
+│  Full wallet export in BSV SDK sync-compatible JSON.    │
 │  User saves to USB, cloud drive, etc.                   │
 ├─────────────────────────────────────────────────────────┤
-│  Layer 3: Cloud Sync (future, scaffolding only)         │
-│  Same JSON format as Layer 2, pushed to remote storage. │
-│  Infrastructure for multi-device sync.                  │
-│  Commented out / behind feature flag until needed.      │
+│  Layer 3: Cloud Sync (optional, simplified)             │
+│  Same JSON format. On-chain backup serves as            │
+│  primary sync mechanism; cloud is supplementary.        │
 └─────────────────────────────────────────────────────────┘
 ```
 
 All three layers use the **same JSON entity format** matching the BSV SDK wallet-toolbox sync protocol. Data serialized for one layer can be deserialized by any other.
+
+> **Key Insight (2026-03-16)**: JSON wallet data compresses 96-97% with gzip (e.g., 500 KB → 18 KB). This makes full wallet on-chain backup feasible at negligible cost, eliminating the need for partial backups + scanning.
 
 ---
 
@@ -253,153 +256,346 @@ POST /wallet/import
 
 ---
 
-## 4. Mechanism B: On-Chain Encrypted Backup
+## 4. Mechanism B: On-Chain Full Wallet Backup (PushDrop)
+
+> **Updated 2026-03-16**: Revised approach using PushDrop with full wallet backup instead of OP_RETURN with partial data. See `ONCHAIN_FULL_BACKUP_RESEARCH.md` for feasibility analysis.
 
 ### Concept
 
-Store encrypted derivation data for **counterparty-derived** outputs in a special UTXO on the blockchain. Self-derived BRC-42 outputs (`"2-receive address-{0..N}"`) are recoverable from the seed alone by sequential scanning and do NOT need on-chain backup. Only counterparty-derived outputs (where `senderIdentityKey != self`), certificates, and baskets need to be stored. The backup UTXO lives at a deterministic BIP32 address derived from the mnemonic, so it can be found during recovery by scanning sequential addresses.
+Store the **entire encrypted wallet database** in a PushDrop UTXO at a deterministic BRC-42 self-counterparty address. This approach:
+
+1. **Eliminates scanning** — Recovery checks one known address, not sequential scan
+2. **Backs up everything** — Full wallet state, not just counterparty outputs
+3. **Enables multi-device sync** — All devices check the same address
+4. **Recovers satoshis** — PushDrop is spendable; each update reclaims previous sats
+
+### Why Full Backup Instead of Partial?
+
+The original plan backed up only counterparty-derived outputs (assuming self-derived could be scanned). However:
+
+| Approach | Backup Size | Recovery Speed | Multi-Device Sync | Complexity |
+|----------|-------------|----------------|-------------------|------------|
+| **Partial (original)** | 2-15 KB | Minutes (scanning) | Manual | Higher |
+| **Full (revised)** | 2-170 KB | Seconds (one lookup) | Built-in | Lower |
+
+**Cost difference is negligible** (~$5/year more for full backup), but full backup provides dramatically simpler recovery and built-in sync.
 
 ### Design
 
-**Backup address derivation**:
+**Address Derivation (BRC-42 Self-Counterparty)**:
 ```
-Backup address = m/{BACKUP_INDEX}
-where BACKUP_INDEX is a well-known constant (e.g., 2147483647 = max i32)
-This is high enough to never collide with normal HD address indices.
+Security Level: 2 (high security, authenticated)
+Protocol ID:    "wallet-backup"
+Key ID:         "1"
+Counterparty:   "self"
+
+derived_key = BRC-42(master_privkey, own_pubkey, "2-wallet-backup-1")
 ```
 
-**Transaction structure**:
+This is deterministic from the seed alone — no scanning required.
+
+**Transaction Structure (PushDrop)**:
 ```
 Input:  previous backup UTXO (or any wallet UTXO for first backup)
-Output 0: P2PKH to backup address (dust amount, e.g., 546 sat)
-            — this is the "marker" that recovery scanning finds
-Output 1: OP_RETURN
-            OP_FALSE OP_RETURN
-            <protocol_flag: "hodos-backup-v1">
-            <encrypted_payload>
+Output: PushDrop token to derived backup key
+        
+        <derived_pubkey> OP_CHECKSIG
+        <compressed_encrypted_payload>
+        
+        Token amount: 1000 sats (recoverable on next update)
 ```
 
-**Encrypted payload contents** (subset of full backup — only what's NOT recoverable from seed scanning):
+**Why PushDrop Over OP_RETURN**:
+
+| Aspect | OP_RETURN | PushDrop |
+|--------|-----------|----------|
+| Spendable? | ❌ No (burned) | ✅ Yes (recover sats) |
+| Outputs needed | 2 (marker + data) | 1 (combined) |
+| Cost over time | Accumulates | Effectively free after first |
+| Discovery | Scan for marker | Check derived address |
+
+### Compression: The Key to Feasibility
+
+JSON wallet data compresses **96-97%** with gzip:
+
+| Wallet Size | Transactions | Outputs | Raw JSON | Compressed | Ratio |
+|-------------|--------------|---------|----------|------------|-------|
+| Light | 50 | 100 | 47 KB | **2.1 KB** | 4.5% |
+| Moderate | 500 | 1,000 | 462 KB | **18.5 KB** | 4.0% |
+| Heavy | 2,000 | 5,000 | 2.1 MB | **82 KB** | 3.9% |
+| Very Heavy | 5,000 | 10,000 | 4.6 MB | **170 KB** | 3.7% |
+
+**⚠️ CRITICAL: Compress BEFORE encrypting!**
+
+Encrypted data doesn't compress. The correct order is:
+```
+JSON → gzip → AES-256-GCM → on-chain
+```
+
+Not:
+```
+JSON → AES-256-GCM → gzip → on-chain  ❌ (won't compress)
+```
+
+### Cost Analysis
+
+**Fee Assumptions**:
+- BSV relay fee: 0.25 sat/byte (conservative; often 0.1 or lower)
+- BSV price: ~$40 USD
+- Transaction overhead: ~200 bytes (inputs, outputs, signatures)
+
+**Per-Backup Cost by Wallet Size**:
+
+| Wallet Size | Data (compressed) | Total Tx Size | Fee @ 0.5 sat/byte | Fee @ 0.25 sat/byte | Fee @ 0.1 sat/byte |
+|-------------|-------------------|---------------|--------------------|--------------------|-------------------|
+| Light | 2.1 KB | 2.3 KB | 1,150 sats ($0.0005) | 575 sats ($0.0002) | 230 sats ($0.0001) |
+| Moderate | 18.5 KB | 18.7 KB | 9,350 sats ($0.004) | 4,675 sats ($0.002) | 1,870 sats ($0.0008) |
+| Heavy | 82 KB | 82.5 KB | 41,250 sats ($0.017) | 20,625 sats ($0.008) | 8,250 sats ($0.003) |
+| Very Heavy | 170 KB | 170.7 KB | 85,350 sats ($0.034) | 42,675 sats ($0.017) | 17,070 sats ($0.007) |
+
+**Annual Cost by Update Frequency** (at 0.25 sat/byte):
+
+| Wallet Size | Per Backup | Hourly | Daily | Weekly | Monthly |
+|-------------|------------|--------|-------|--------|---------|
+| Light | $0.0002 | $1.75/yr | $0.08/yr | $0.01/yr | $0.002/yr |
+| Moderate | $0.002 | $17.52/yr | $0.68/yr | $0.10/yr | $0.02/yr |
+| Heavy | $0.008 | $70.08/yr | $3.01/yr | $0.43/yr | $0.10/yr |
+| Very Heavy | $0.017 | $148.92/yr | $6.23/yr | $0.89/yr | $0.20/yr |
+
+**Key Insight**: Even with daily backups, the cost is **$0.08 - $6.23 per year** — invisible to users.
+
+### Backup Frequency Recommendations
+
+**Tradeoff: Cost vs. Data Integrity**
+
+More frequent backups = less data loss if device is lost, but higher cost.
+
+| Frequency | Annual Cost (Moderate) | Max Data Loss Window | Recommendation |
+|-----------|------------------------|----------------------|----------------|
+| Every transaction | ~$50-100/yr | None | ❌ Overkill, unnecessary cost |
+| Hourly | ~$17/yr | 1 hour | ❌ Still overkill for most users |
+| **Daily** | **$0.68/yr** | 24 hours | ✅ **Recommended default** |
+| Weekly | $0.10/yr | 7 days | ⚠️ Acceptable for light users |
+| Monthly | $0.02/yr | 30 days | ❌ Too risky, certificates could be lost |
+
+**Recommended Strategy: Event-Triggered + Daily Minimum**
+
+```
+TRIGGER backup when:
+  ├── New certificate acquired
+  ├── New counterparty-derived output confirmed
+  ├── High-value transaction (> 1M sats)
+  ├── Every 10 transactions (batch)
+  └── 24 hours since last backup (if ANY changes exist)
+
+DEBOUNCE:
+  └── Wait 5-10 minutes after trigger before backing up
+      (batches multiple rapid changes into single backup)
+```
+
+**Data Integrity Guarantees**:
+
+| Event Type | Backup Latency | Risk of Loss |
+|------------|----------------|--------------|
+| Certificate acquired | 5-10 min | ✅ Minimal |
+| Counterparty output | 5-10 min | ✅ Minimal |
+| Regular payments | < 24 hours | ✅ Acceptable |
+| Settings change | < 24 hours | ✅ Acceptable |
+| Device lost same day as activity | < 24 hours of activity | ⚠️ Possible, but rare |
+
+### Payload Format
+
+**Full wallet backup** (same as local file export):
+
 ```json
 {
   "version": 1,
-  "updated_at": "2026-02-03T12:00:00Z",
-  "counterparty_outputs": [
-    {
-      "txid": "abc123...",
-      "vout": 0,
-      "derivationPrefix": "2-authrite",
-      "derivationSuffix": "session-xyz",
-      "senderIdentityKey": "03fed...cba",
-      "basketId": 3,
-      "customInstructions": null
-    }
-  ],
-  "certificates": [
-    {
-      "type": "identity",
-      "serialNumber": "cert-001",
-      "certifier": "03aaa...",
-      "subject": "02abc...",
-      "signature": "3045...",
-      "fields": [ ... ]
-    }
-  ],
-  "baskets": [
-    { "name": "auth-tokens" }
-  ]
+  "chain": "main",
+  "created_at": "2026-03-16T12:00:00Z",
+  "backup_type": "full",
+  "wallet_identity_key": "02abc...def",
+
+  "transactions": [ ... ],
+  "outputs": [ ... ],
+  "proven_txs": [ ... ],
+  "certificates": [ ... ],
+  "certificate_fields": [ ... ],
+  "output_baskets": [ ... ],
+  "tx_labels": [ ... ],
+  "output_tags": [ ... ],
+  "settings": { ... }
 }
 ```
 
-**What's included vs excluded from on-chain backup**:
+**What's included**:
+- All transactions (with rawTx for offline history)
+- All outputs (with full derivation data)
+- All proven_txs (with merkle proofs)
+- All certificates + fields
+- Baskets, tags, labels
+- Settings
 
-| Output Type | In on-chain backup? | Why |
-|-------------|--------------------|----|
-| BRC-42 self-derived (`"2-receive address-{N}"`, senderIdentityKey=NULL) | NO | Recoverable by sequential scanning from seed |
-| Master key outputs (derivation=NULL) | NO | Derivable directly from seed |
-| Legacy BIP32 outputs (`"bip32-{N}"`) | NO | Recoverable by BIP32 sequential scanning |
-| Counterparty-derived BRC-42 (senderIdentityKey != NULL) | YES | Cannot be guessed — need prefix, suffix, and counterparty pubkey |
-| Certificates | YES | Not derivable from seed |
-| Basket definitions | YES | Metadata not derivable from seed |
+**What's excluded**:
+- Mnemonic (user re-enters on recovery)
+- Balance cache (recomputed)
+- Derived key cache (recomputed)
+- Browser-specific data (domain whitelist)
 
-**Note**: This selective approach keeps the on-chain payload small. Most wallet outputs are self-derived receive addresses which don't need backup.
+### Encryption
 
-**Encryption**:
-```
-key = HKDF-SHA256(master_private_key, salt="hodos-onchain-backup", info="v1")
-payload = AES-256-GCM(key, nonce=random_12_bytes, plaintext=json_bytes)
-on_chain_data = nonce || ciphertext || auth_tag
+```rust
+// Key derivation
+let key = HKDF-SHA256(
+    master_private_key,
+    salt = "hodos-wallet-backup-v1",
+    info = "aes-256-gcm"
+);
+
+// Encryption
+let nonce = random_12_bytes();
+let (ciphertext, tag) = AES-256-GCM::encrypt(key, nonce, compressed_json);
+
+// On-chain format
+let payload = nonce || ciphertext || tag;  // 12 + len + 16 bytes
 ```
 
 Only the holder of the master private key (derived from mnemonic) can decrypt.
 
 ### Lifecycle
 
+**Create/Update Backup**:
 ```
-Trigger: a non-HD output is confirmed (proven)
-  OR: periodic timer (e.g., daily if any non-HD data changed)
-  OR: wallet shutdown (if dirty flag set)
+1. Check for existing backup UTXO at derived address
+2. Serialize full wallet state to JSON
+3. Compress with gzip (level 9)
+4. Encrypt with AES-256-GCM (key from master privkey via HKDF)
+5. Build PushDrop transaction:
+   - Input: previous backup UTXO (or any wallet UTXO for first backup)
+   - Output: PushDrop to backup address, 1000 sats, contains encrypted payload
+6. Broadcast transaction
+7. Update local `last_backup_txid`
+```
 
-Create/Update:
-  1. Gather all non-HD output derivation data + certificates
-  2. Serialize to JSON, encrypt
-  3. If previous backup UTXO exists:
-       Spend it as input (reclaims the dust)
-     Else:
-       Use a normal wallet UTXO as input
-  4. Create new backup UTXO + OP_RETURN
-  5. Broadcast
-  6. Track the backup UTXO txid locally (for next update)
+**Recovery from Mnemonic Only**:
+```
+1. Derive master key from mnemonic
+2. Derive backup address: BRC-42(master, self, "1-wallet-backup-1")
+3. Query blockchain for UTXO at this address
+4. If found:
+   a. Fetch full transaction
+   b. Extract PushDrop payload
+   c. Decrypt using master private key
+   d. Decompress JSON
+   e. Initialize new wallet DB with recovered data
+   f. Recompute balance cache
+   → Full wallet restored in seconds!
+5. If not found:
+   a. Brand new wallet, OR
+   b. No backups ever made (shouldn't happen after MVP)
+   → Fall back to sequential scanning for self-derived addresses
+```
 
-Recovery:
-  1. Derive backup address from mnemonic: m/{BACKUP_INDEX}
-  2. Query blockchain for UTXOs at this address
-  3. If found: fetch the transaction, extract OP_RETURN data
-  4. Decrypt using master private key
-  5. Import non-HD derivation data into database
-  6. Now can derive keys for BRC-42 outputs, certificates, etc.
-  7. Verify each recovered output still exists on-chain
+**Multi-Device Sync**:
+```
+Device A creates transaction:
+  1. Update local DB
+  2. Trigger backup (per frequency rules)
+  3. Broadcast (spends old backup UTXO, creates new)
+
+Device B syncs:
+  1. Check backup address for UTXO
+  2. If txid != local last_sync_txid:
+     a. Fetch and decrypt new backup
+     b. Merge into local DB (newer updated_at wins)
+     c. Update last_sync_txid
 ```
 
 ### Rust Implementation
 
 ```
 New files:
-  src/backup/onchain.rs       — On-chain backup create/update/recover
-  src/backup/onchain_tx.rs    — Build backup transaction (input + P2PKH + OP_RETURN)
+  src/backup/onchain.rs           — PushDrop backup create/update/recover
+  src/backup/onchain_pushdrop.rs  — PushDrop encode/decode for backup
+  src/backup/compression.rs       — gzip compress/decompress
 
 Modified files:
-  src/monitor/task_onchain_backup.rs  — Background task: check dirty flag,
-                                         create/update backup when needed
+  src/monitor/task_onchain_backup.rs  — Background task: check triggers,
+                                         debounce, create backup when needed
   src/main.rs                          — Register backup task with monitor
   src/handlers.rs                      — Recovery endpoint uses onchain restore
+  src/backup/encryption.rs             — Add HKDF key derivation for backup
 ```
 
 ### Constants
 
 ```rust
-/// Well-known address index for on-chain backup UTXO
-/// Max i32 value — will never collide with normal HD indices
-const BACKUP_ADDRESS_INDEX: i32 = 2_147_483_647;
+/// BRC-42 protocol ID for backup address derivation
+const BACKUP_PROTOCOL_ID: [u8; 2] = [1, 0];  // [1, "wallet-backup"]
+const BACKUP_KEY_ID: &str = "1";
+const BACKUP_INVOICE: &str = "1-wallet-backup-1";
 
-/// Minimum satoshis for backup UTXO (dust limit)
-const BACKUP_DUST_AMOUNT: i64 = 546;
+/// Satoshis for backup UTXO (above dust, recoverable)
+const BACKUP_TOKEN_AMOUNT: i64 = 1000;
 
-/// Protocol flag in OP_RETURN for backup identification
-const BACKUP_PROTOCOL_FLAG: &str = "hodos-backup-v1";
+/// HKDF salt for encryption key derivation
+const BACKUP_ENCRYPTION_SALT: &[u8] = b"hodos-wallet-backup-v1";
 
-/// HKDF salt for on-chain backup encryption key derivation
-const BACKUP_ENCRYPTION_SALT: &[u8] = b"hodos-onchain-backup";
+/// Backup trigger thresholds
+const BACKUP_TX_BATCH_SIZE: u32 = 10;  // Backup every N transactions
+const BACKUP_DEBOUNCE_MS: u64 = 300_000;  // 5 minutes
+const BACKUP_MAX_INTERVAL_HOURS: u32 = 24;  // At least daily if changes exist
+
+/// High-value transaction threshold (triggers immediate backup)
+const HIGH_VALUE_THRESHOLD_SATS: i64 = 1_000_000;  // 1M sats
 ```
 
-### Cost Analysis
+### Edge Cases
 
-| Scenario | Backup Size | Tx Size | Fee (~1 sat/byte) |
-|---|---|---|---|
-| 10 BRC-42 outputs + 2 certs | ~2 KB | ~2.5 KB | ~2,500 sat (~$0.001) |
-| 100 BRC-42 outputs + 10 certs | ~15 KB | ~16 KB | ~16,000 sat (~$0.006) |
-| 1000 BRC-42 outputs + 50 certs | ~120 KB | ~121 KB | ~121,000 sat (~$0.05) |
-| Update frequency: weekly | | | ~$0.05-$2.50/year |
+**Concurrent Updates (Two Devices Backup Simultaneously)**:
+```
+Problem: Device A and B both try to spend the same backup UTXO
+
+Solution:
+1. Before building backup tx, fetch current UTXO at backup address
+2. Build tx spending that specific UTXO
+3. Broadcast
+4. If broadcast fails (UTXO already spent):
+   a. Wait 10-30 seconds
+   b. Fetch new backup from chain
+   c. Merge local changes with fetched data
+   d. Retry backup with new UTXO as input
+```
+
+**Network Offline**:
+```
+1. Set dirty flag when backup is due but network unavailable
+2. Queue backup request
+3. When network returns, process queue
+4. If multiple queued, only latest state needs backup
+```
+
+**First Backup (No Previous UTXO)**:
+```
+1. Use any spendable wallet UTXO as input
+2. Create PushDrop output at backup address
+3. Track txid for future updates
+```
+
+### Comparison: Original vs Revised Approach
+
+| Aspect | Original (OP_RETURN, partial) | Revised (PushDrop, full) |
+|--------|------------------------------|--------------------------|
+| Data backed up | Counterparty outputs + certs only | **Entire wallet DB** |
+| Recovery model | Scan self-derived + check backup | **Single address lookup** |
+| Address type | BIP32 m/2147483647 | **BRC-42 self-counterparty** |
+| Storage method | OP_RETURN + P2PKH marker | **PushDrop (single output)** |
+| Sats recoverable? | No (OP_RETURN unspendable) | **Yes (spend on update)** |
+| Multi-device sync | Manual / needs cloud | **Built-in via chain** |
+| Size per backup | 2-15 KB | 2-170 KB |
+| Annual cost (heavy user) | ~$1.50 | ~$3-7 |
+| Complexity | Higher (scanning + backup) | **Lower (one mechanism)** |
+
+**Verdict**: The revised approach costs marginally more (~$5/year) but provides dramatically simpler recovery and built-in multi-device sync
 
 ---
 

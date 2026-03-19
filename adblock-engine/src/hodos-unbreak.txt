@@ -94,6 +94,12 @@ www.reddit.com#@#+js()
 @@||apis.google.com/js/api.js$script
 @@||accounts.google.com^$subdocument
 
+! --- SocialCert ---
+! BRC-52 certificate issuer. OAuth redirects to X.com/Discord for identity proof.
+! Scriptlet injection + cosmetic filtering break the OAuth redirect flow.
+socialcert.net#@#+js()
+@@||socialcert.net^$generichide
+
 ! =====================================================================
 ! Banking / Financial — scriptlet + cosmetic exceptions
 ! Banks have strict CSP and auth flows that break with API hooks

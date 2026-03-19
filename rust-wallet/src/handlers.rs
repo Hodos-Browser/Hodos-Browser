@@ -18,6 +18,7 @@ pub use certificate_handlers::{
     discover_by_attributes,
     publish_certificate,
     unpublish_certificate,
+    admin_prepare_unpublish,
 };
 
 // ============================================================================
@@ -3377,6 +3378,96 @@ pub async fn create_action(
     create_action_internal(state, req).await
 }
 
+/// Extract certificate type, serial number, and certifier from a PushDrop locking script.
+///
+/// The PushDrop script embeds certificate JSON as a hex-encoded data push.
+/// We decode the hex script, search for the JSON object containing "type",
+/// "serialNumber", and "certifier" fields, and return their decoded bytes.
+fn extract_cert_identifiers_from_pushdrop(script_hex: &str) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    use base64::Engine;
+    let script_bytes = match hex::decode(script_hex) {
+        Ok(b) => b,
+        Err(e) => { log::warn!("   cert_ids: hex decode failed: {}", e); return None; }
+    };
+    // PushDrop structure: [push 33][33-byte pubkey][OP_CHECKSIG=0xac][push data][JSON][push sig][sig][OP_DROP]
+    // Skip pubkey+checksig (35 bytes), then parse the push opcode to find the exact JSON data range.
+    // This avoids false '{' matches in binary data (e.g. pubkey byte 0x7b).
+    let data_start = if script_bytes.len() > 36 && script_bytes[34] == 0xac {
+        let push_op = script_bytes[35];
+        match push_op {
+            0x01..=0x4b => 36,  // direct push
+            0x4c if script_bytes.len() > 37 => 37,  // OP_PUSHDATA1
+            0x4d if script_bytes.len() > 38 => 38,  // OP_PUSHDATA2
+            0x4e if script_bytes.len() > 40 => 40,  // OP_PUSHDATA4
+            _ => 35,
+        }
+    } else {
+        0 // fallback: scan from start
+    };
+    // Find JSON start ({) in the data portion only
+    let json_start = match script_bytes[data_start..].iter().position(|&b| b == b'{') {
+        Some(p) => data_start + p,
+        None => { log::warn!("   cert_ids: no '{{' found in script data bytes"); return None; }
+    };
+    // Find matching closing brace by counting depth
+    let mut depth = 0;
+    let mut json_end = None;
+    for (i, &b) in script_bytes[json_start..].iter().enumerate() {
+        if b == b'{' { depth += 1; }
+        if b == b'}' { depth -= 1; }
+        if depth == 0 {
+            json_end = Some(json_start + i + 1);
+            break;
+        }
+    }
+    let json_end = match json_end {
+        Some(e) => e,
+        None => { log::warn!("   cert_ids: no matching '}}' found (unbalanced braces)"); return None; }
+    };
+    let json_str = match std::str::from_utf8(&script_bytes[json_start..json_end]) {
+        Ok(s) => s,
+        Err(e) => { log::warn!("   cert_ids: UTF-8 decode failed: {}", e); return None; }
+    };
+    let json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(j) => j,
+        Err(e) => { log::warn!("   cert_ids: JSON parse failed: {}", e); return None; }
+    };
+
+    // Log which fields are present
+    let has_type = json.get("type").is_some();
+    let has_serial = json.get("serialNumber").is_some();
+    let has_certifier = json.get("certifier").is_some();
+    let has_keyring = json.get("keyring").is_some();
+    let has_keyring_for_subject = json.get("keyringForSubject").is_some();
+    log::info!("   cert_ids: JSON fields — type:{}, serialNumber:{}, certifier:{}, keyring:{}, keyringForSubject:{}",
+        has_type, has_serial, has_certifier, has_keyring, has_keyring_for_subject);
+
+    let type_b64 = match json["type"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'type' field missing or not a string"); return None; }
+    };
+    let serial_b64 = match json["serialNumber"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'serialNumber' field missing or not a string"); return None; }
+    };
+    let certifier_hex = match json["certifier"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'certifier' field missing or not a string"); return None; }
+    };
+
+    let type_bytes = base64::engine::general_purpose::STANDARD.decode(type_b64).ok()?;
+    let serial_bytes = base64::engine::general_purpose::STANDARD.decode(serial_b64).ok()?;
+    let certifier_bytes = hex::decode(certifier_hex).ok()?;
+
+    if type_bytes.len() == 32 && serial_bytes.len() == 32 && certifier_bytes.len() == 33 {
+        Some((type_bytes, serial_bytes, certifier_bytes))
+    } else {
+        log::warn!("   cert_ids: invalid lengths — type:{}, serial:{}, certifier:{}",
+            type_bytes.len(), serial_bytes.len(), certifier_bytes.len());
+        None
+    }
+}
+
 /// Internal implementation of createAction — callable from other Rust handlers.
 ///
 /// Handles: serialization lock, UTXO selection, tx building, signing, BEEF,
@@ -4263,6 +4354,19 @@ pub(crate) async fn create_action_internal(
                 output_description: output.output_description.clone(),
             });
             log::info!("   Output {}: tracked for basket '{}'", i, basket_name);
+        } else if output.output_description.as_deref() == Some("Identity Token") {
+            // SDK-initiated identity tokens don't specify a basket — auto-assign to
+            // identity_certificates so the locking script is stored and we can unpublish later.
+            pending_basket_outputs.push(PendingBasketOutput {
+                vout: i as u32,
+                satoshis,
+                script_hex: hex::encode(&script_bytes),
+                basket_name: "identity_certificates".to_string(),
+                tags: vec!["certificate".to_string(), "pushdrop".to_string()],
+                custom_instructions: output.custom_instructions.clone(),
+                output_description: output.output_description.clone(),
+            });
+            log::info!("   Output {}: identity token auto-tracked for basket 'identity_certificates'", i);
         }
 
         tx.add_output(TxOutput::new(satoshis, script_bytes));
@@ -5079,15 +5183,59 @@ pub(crate) async fn create_action_internal(
                                 tx_bytes
                             }
                         };
+                        // Parse cert identifiers from the PushDrop script (needed for both success and failure)
+                        let cert_ids = req.outputs.first()
+                            .and_then(|o| o.script.as_ref())
+                            .and_then(|s| extract_cert_identifiers_from_pushdrop(s));
+                        if cert_ids.is_none() {
+                            log::warn!("   ⚠️  Could not extract cert identifiers from PushDrop script — DB publish status will not be updated");
+                            if let Some(first_output) = req.outputs.first() {
+                                log::warn!("      script present: {}, script length: {}",
+                                    first_output.script.is_some(),
+                                    first_output.script.as_ref().map(|s| s.len()).unwrap_or(0));
+                            }
+                        }
+
                         match crate::overlay::submit_to_identity_overlay(overlay_beef).await {
                             Ok(true) => {
                                 log::info!("   ✅ Overlay accepted the identity token");
+                                // Mark certificate as published in DB
+                                if let Some((ref cert_type, ref cert_serial, ref cert_certifier)) = cert_ids {
+                                    let db = state.database.lock().unwrap();
+                                    let cert_repo = crate::database::CertificateRepository::new(db.connection());
+                                    match cert_repo.update_publish_status(
+                                        cert_type, cert_serial, cert_certifier,
+                                        "published", Some(&final_txid), Some(0),
+                                    ) {
+                                        Ok(_) => log::info!("   ✅ Certificate marked as 'published' in DB"),
+                                        Err(e) => log::warn!("   ⚠️  Failed to update cert publish status: {}", e),
+                                    }
+                                }
                             }
-                            Ok(false) => {
-                                log::warn!("   ⚠️  Overlay rejected the identity token (may already exist)");
-                            }
-                            Err(e) => {
-                                log::warn!("   ⚠️  Overlay submission failed (non-fatal): {}", e);
+                            Ok(false) | Err(_) => {
+                                log::warn!("   ⚠️  Overlay did not accept the identity token — auto-reclaiming");
+                                // Auto-reclaim: spend the PushDrop token back to ourselves
+                                // so the UTXO isn't stuck and user can retry from wallet UI
+                                if let Some((ref cert_type, ref cert_serial, ref cert_certifier)) = cert_ids {
+                                    match crate::handlers::certificate_handlers::auto_unpublish_certificate_pub(
+                                        &state, cert_type, cert_serial, cert_certifier, &final_txid, 0,
+                                    ).await {
+                                        Ok(()) => {
+                                            log::info!("   ✅ PushDrop token reclaimed — user can retry publish from wallet");
+                                            let db = state.database.lock().unwrap();
+                                            let cert_repo = crate::database::CertificateRepository::new(db.connection());
+                                            let _ = cert_repo.update_publish_status(
+                                                cert_type, cert_serial, cert_certifier,
+                                                "unpublished", None, None,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!("   ⚠️  Auto-reclaim failed: {} — token on-chain at {}:0", e, final_txid);
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("   ⚠️  Could not parse cert identifiers — cannot auto-reclaim");
+                                }
                             }
                         }
                     }
@@ -5154,10 +5302,12 @@ pub(crate) async fn create_action_internal(
                         state.balance_cache.invalidate();
                     }
 
-                    // Note: Do NOT populate send_with_results here.
-                    // sendWithResults is only for transactions listed in sendWith[].
-                    // Don't return error - still return the signed tx
-                    // The app might want to retry broadcasting
+                    // Broadcast failed — return error to caller.
+                    // The tx is cleaned up (ghost outputs deleted, inputs restored).
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Transaction broadcast failed: {}", e),
+                        "code": "ERR_BROADCAST_FAILED"
+                    }));
                 }
             }
         } else {
@@ -6095,11 +6245,27 @@ pub async fn sign_action(
         log::info!("   Public key: {}", hex::encode(&pubkey_bytes));
         log::info!("   Private key (first 8 bytes): {}...", hex::encode(&private_key_bytes[..8]));
 
-        // Build unlocking script: <signature> <pubkey>
-        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes);
+        // Detect script type from the locking script to choose signing format.
+        // P2PK (PushDrop tokens): locking script starts with <33-byte pubkey push> OP_CHECKSIG
+        // P2PKH (standard):       locking script starts with OP_DUP OP_HASH160
+        let is_p2pk = prev_script.len() > 34
+            && prev_script[0] == 0x21  // OP_PUSHBYTES_33 (33-byte pubkey)
+            && prev_script[34] == 0xac; // OP_CHECKSIG
+
+        let unlocking_bytes = if is_p2pk {
+            // P2PK: unlocking script is just <sig> (no pubkey)
+            log::info!("   P2PK input detected — signing with signature only (no pubkey)");
+            let mut script = Vec::new();
+            script.push(sig_der.len() as u8);
+            script.extend_from_slice(&sig_der);
+            script
+        } else {
+            // P2PKH: unlocking script is <sig> <pubkey>
+            Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes).bytes
+        };
 
         // Update input with unlocking script
-        tx.inputs[i].set_script(unlocking_script.bytes);
+        tx.inputs[i].set_script(unlocking_bytes);
 
         log::info!("   ✅ Input {} signed", i);
     }
@@ -7119,7 +7285,10 @@ pub async fn process_action(
                     state.balance_cache.invalidate();
                 }
 
-                "failed"
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Transaction broadcast failed: {}", e),
+                    "code": "ERR_BROADCAST_FAILED"
+                }));
             }
         }
     } else {
@@ -7305,13 +7474,21 @@ pub(crate) async fn broadcast_transaction(
                         let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
                         log::info!("   🎉 ARC broadcast successful: {}", msg);
 
-                        // Cache merkle proof from ARC if available
-                        if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
-                            (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
+                        // Cache merkle proof from ARC if available.
+                        // IMPORTANT: Use ARC's returned txid (arc_txid), NOT our submitted txid (cache_txid).
+                        // When broadcasting a BEEF with unconfirmed parents, ARC may return a
+                        // merklePath for a PARENT tx that just got mined, not for our new tx.
+                        // Storing the parent's proof under our txid causes "Invalid BUMPs" on next use.
+                        if let (Some(ref merkle_path), Some(db)) =
+                            (&arc_resp.merkle_path, db_for_cache)
                         {
-                            if !merkle_path.is_empty() {
-                                log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
-                                cache_arc_merkle_proof(db, cache_txid, merkle_path);
+                            if !merkle_path.is_empty() && arc_txid != "unknown" {
+                                log::info!("   📋 ARC returned merklePath ({} hex chars)", merkle_path.len());
+                                log::info!("   📋 ARC merklePath txid: {} (our txid: {})",
+                                    &arc_txid[..arc_txid.len().min(16)],
+                                    txid_for_cache.map(|t| &t[..t.len().min(16)]).unwrap_or("none"));
+                                // Store under ARC's txid, not ours
+                                cache_arc_merkle_proof(db, arc_txid, merkle_path);
                             }
                         }
 
@@ -7661,9 +7838,19 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
     let arc_response: ArcResponse = serde_json::from_str(&text)
         .map_err(|e| format!("ARC: Failed to parse response: {} - Body: {}", e, &text[..text.len().min(200)]))?;
 
+    // Check txStatus BEFORE HTTP status — ARC can return double-spend with any HTTP code
+    let tx_status = arc_response.tx_status.as_deref().unwrap_or("");
+    if tx_status == "DOUBLE_SPEND_ATTEMPTED" || tx_status == "REJECTED" {
+        let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+        let competing = arc_response.competing_txs.as_ref()
+            .map(|v| v.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        log::error!("   ❌ ARC: {} for txid={} — competing: {}", tx_status, txid, competing);
+        return Err(format!("Transaction rejected: {} (competing: {})", tx_status, competing));
+    }
+
     match status.as_u16() {
         200 | 201 => {
-            // Success - transaction accepted
             let txid = arc_response.txid.as_deref().unwrap_or("unknown");
             let tx_status = arc_response.tx_status.as_deref().unwrap_or("ACCEPTED");
             log::info!("   ✅ ARC accepted: txid={}, status={}", txid, tx_status);
@@ -8481,6 +8668,7 @@ pub struct SetDomainPermissionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApproveCertFieldsRequest {
     pub domain: String,
+    #[serde(alias = "cert_type")]
     pub cert_type: String,
     pub fields: Vec<String>,
     pub remember: bool,

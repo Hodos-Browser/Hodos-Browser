@@ -78,17 +78,31 @@ pub fn create_keyring_for_verifier(
                 format!("Master keyring missing for field '{}'", field_name)
             ))?;
 
-        // Step 1: Decrypt master keyring entry (encrypted for subject/certifier)
-        // Invoice number: "2-certificate field encryption-{fieldName}" (no serialNumber for master keyring)
-        let field_revelation_key = decrypt_certificate_field(
-            subject_private_key,
-            certifier_public_key,
-            field_name,
-            None, // Master keyring uses fieldName only (no serialNumber)
-            encrypted_master_key,
-        ).map_err(|e| CertificateError::Database(
-            format!("Failed to decrypt master key for field '{}': {}", field_name, e)
-        ))?;
+        // Step 1: Get the field revelation key from the master keyring.
+        //
+        // The master keyring entry is EITHER:
+        // a) A raw symmetric key (32 bytes) — used by some certifiers (e.g., SocialCert)
+        // b) A BRC-2 encrypted symmetric key (≥48 bytes: 32 IV + ciphertext + 16 tag)
+        //
+        // We try BRC-2 decryption first; if the data is too short, use it as a raw key.
+        let field_revelation_key = if encrypted_master_key.len() < 48 {
+            // Raw symmetric key — use directly (no decryption needed)
+            log::info!("   ℹ️  Master key for field '{}' is {} bytes (raw key, not BRC-2 encrypted)",
+                field_name, encrypted_master_key.len());
+            encrypted_master_key.clone()
+        } else {
+            // BRC-2 encrypted — decrypt it
+            // Invoice number: "2-certificate field encryption-{fieldName}" (no serialNumber for master keyring)
+            decrypt_certificate_field(
+                subject_private_key,
+                certifier_public_key,
+                field_name,
+                None, // Master keyring uses fieldName only (no serialNumber)
+                encrypted_master_key,
+            ).map_err(|e| CertificateError::Database(
+                format!("Failed to decrypt master key for field '{}': {}", field_name, e)
+            ))?
+        };
 
         // Step 2: Re-encrypt field revelation key for verifier
         // Invoice number: "2-certificate field encryption-{serialNumber} {fieldName}"
