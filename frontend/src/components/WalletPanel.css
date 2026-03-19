@@ -1,17 +1,17 @@
-/* Wallet Panel Color Scheme - Black & Gold */
+/* Wallet Panel Color Scheme - Dark Blue & Gold */
 :root {
   /* Primary Colors */
-  --wallet-primary: #000000;
-  --wallet-primary-hover: #111111;
-  --wallet-subdued-gold: #f5f5f5;
+  --wallet-primary: #0f1117;
+  --wallet-primary-hover: #1f2937;
+  --wallet-subdued-gold: #111827;
   --wallet-gold-accent: #a67c00;
 
   /* Supporting Colors */
-  --wallet-text-dark: #111111;
-  --wallet-text-light: #f5f5f5;
-  --wallet-border-light: #d0d0d0;
-  --wallet-shadow: rgba(0, 0, 0, 0.15);
-  --wallet-shadow-hover: rgba(0, 0, 0, 0.25);
+  --wallet-text-dark: #f0f0f0;
+  --wallet-text-light: #f0f0f0;
+  --wallet-border-light: #2a2d35;
+  --wallet-shadow: rgba(0, 0, 0, 0.3);
+  --wallet-shadow-hover: rgba(0, 0, 0, 0.4);
 }
 
 /* Main Wallet Panel Layout */
@@ -345,7 +345,7 @@
 
 .form-group input.error {
   border-color: #dc2626;
-  background: #fef2f2;
+  background: rgba(211, 47, 47, 0.1);
 }
 
 .max-button {
@@ -527,7 +527,7 @@
 
 .receive-address-container p {
   margin: 0 0 20px 0;
-  color: var(--wallet-primary);
+  color: #9ca3af;
   font-size: 14px;
   font-weight: 600;
 }
@@ -542,7 +542,7 @@
 }
 
 .address-display code {
-  color: var(--wallet-primary);
+  color: #a67c00;
   font-family: 'Courier New', monospace;
   font-size: 12px;
   line-height: 1.4;
@@ -772,14 +772,12 @@
    ======================================== */
 
 .wallet-panel-light {
-  background: #ffffff;
-  border: 1px solid #c0c0c0;
+  background: #1a1d23;
+  border: 1px solid #2a2d35;
   border-radius: 12px;
   box-shadow:
-    0 0 0 1px rgba(192, 192, 192, 0.6),
-    0 0 3px 1px rgba(169, 169, 169, 0.4),
-    0 0 8px 3px rgba(120, 120, 120, 0.25),
-    0 0 16px 6px rgba(60, 60, 60, 0.15);
+    0 0 0 1px rgba(42, 45, 53, 0.6),
+    0 0 8px 3px rgba(0, 0, 0, 0.3);
   padding: 16px;
   width: 340px;
   max-height: calc(100vh - 170px);
@@ -787,6 +785,7 @@
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   position: relative;
   cursor: default;
+  color: #f0f0f0;
 }
 
 /* Close Button */
@@ -798,8 +797,8 @@
   height: 28px;
   border: none;
   border-radius: 50%;
-  background: #f0f0f0;
-  color: #666;
+  background: #1f2937;
+  color: #9ca3af;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -809,13 +808,13 @@
 }
 
 .wallet-panel-close-button:hover {
-  background: #e0e0e0;
-  color: #333;
+  background: #2a2d35;
+  color: #f0f0f0;
 }
 
 .wallet-panel-close-button:active {
   transform: scale(0.97);
-  background: #d0d0d0;
+  background: #2a2d35;
 }
 
 /* Balance Display - Light */
@@ -1098,8 +1097,8 @@
 
 /* Transaction form inside light wallet panel — no double-box */
 .dynamic-content-area-light .transaction-form {
-  background: #f9f9f9;
-  border: 1px solid #e0e0e0;
+  background: #111827;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
   padding: 14px;
   margin: 0;
@@ -1135,8 +1134,8 @@
 
 /* Receive Address Container - Light */
 .receive-address-container-light {
-  background: #f9f9f9;
-  border: 1px solid #e0e0e0;
+  background: #111827;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
   padding: 14px;
   text-align: center;
@@ -1152,7 +1151,7 @@
 .receive-address-container-light p {
   margin: 0 0 10px 0;
   font-size: 12px;
-  color: var(--wallet-primary);
+  color: #9ca3af;
   font-weight: 500;
 }
 
@@ -1162,13 +1161,13 @@
   justify-content: center;
   margin-bottom: 10px;
   padding: 12px;
-  background: #ffffff;
-  border: 1px solid #e0e0e0;
+  background: #111827;
+  border: 1px solid #2a2d35;
   border-radius: 8px;
 }
 
 .address-display-light {
-  background: #ffffff;
+  background: #111827;
   border: 1px solid var(--wallet-border-light);
   border-radius: 6px;
   padding: 10px;
@@ -1179,7 +1178,7 @@
 .address-display-light code {
   font-family: 'Courier New', monospace;
   font-size: 11px;
-  color: var(--wallet-primary);
+  color: #a67c00;
   line-height: 1.4;
 }
 
@@ -1221,20 +1220,20 @@
 }
 
 .close-button-light {
-  background: #f0f0f0;
+  background: #1f2937;
   color: var(--wallet-text-dark);
-  border: 1px solid #d0d0d0;
+  border: 1px solid #2a2d35;
 }
 
 .close-button-light:hover {
-  background: #e0e0e0;
+  background: #2a2d35;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .close-button-light:active {
   transform: scale(0.97);
   box-shadow: none;
-  background: #d0d0d0;
+  background: #2a2d35;
 }
 
 /* Success/Error Messages - Light */
@@ -1333,7 +1332,7 @@
 }
 
 .placeholder-text {
-  color: #888;
+  color: #6b7280;
   font-size: 13px;
 }
 
@@ -1441,12 +1440,12 @@
 /* PeerPay Notification Banner */
 .peerpay-banner-light {
   border-left: 3px solid #2e7d32;
-  background: #f1f8e9;
+  background: linear-gradient(135deg, #0a1a0a 0%, #112211 100%);
   border-radius: 0 8px 8px 0;
   padding: 10px 12px;
   margin-bottom: 12px;
   font-size: 12px;
-  color: #1b5e20;
+  color: #81c784;
   animation: fadeInLight 0.3s ease-in;
 }
 
@@ -1485,8 +1484,8 @@
 .peerpay-details-button {
   padding: 4px 12px;
   background: transparent;
-  color: #2e7d32;
-  border: 1px solid #2e7d32;
+  color: #81c784;
+  border: 1px solid #81c784;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
@@ -1495,7 +1494,7 @@
 }
 
 .peerpay-details-button:hover {
-  background: rgba(46, 125, 50, 0.1);
+  background: rgba(46, 125, 50, 0.2);
 }
 
 .peerpay-details-button:active {
@@ -1503,7 +1502,7 @@
 }
 
 .peerpay-link {
-  color: #2e7d32;
+  color: #81c784;
   font-size: 11px;
   font-weight: 600;
   text-decoration: underline;
@@ -1511,7 +1510,7 @@
 }
 
 .peerpay-link:hover {
-  color: #1b5e20;
+  color: #a5d6a7;
 }
 
 /* Advanced Button - Light */
@@ -1547,7 +1546,7 @@
 .manage-sites-link-light {
   background: none;
   border: none;
-  color: #666;
+  color: #6b7280;
   font-size: 11px;
   cursor: pointer;
   padding: 6px 0 2px;
@@ -1583,7 +1582,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--wallet-primary);
+  color: #9ca3af;
   font-weight: 500;
 }
 

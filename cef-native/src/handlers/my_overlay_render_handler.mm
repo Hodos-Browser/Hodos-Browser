@@ -121,6 +121,14 @@ MyOverlayRenderHandler::~MyOverlayRenderHandler() {
 
 #endif
 
+void MyOverlayRenderHandler::DetachView() {
+#ifdef _WIN32
+    hwnd_ = nullptr;
+#elif defined(__APPLE__)
+    nsview_ = nullptr;
+#endif
+}
+
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
     rect = CefRect(0, 0, width_, height_);
     // Note: This is called ~60fps. Only log once for diagnostics.
@@ -269,17 +277,22 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    // Update layer on main thread (CALayer is not thread-safe)
-    dispatch_async(dispatch_get_main_queue(), ^{
+    void (^updateLayer)(void) = ^{
         // CRITICAL: Disable implicit animations - prevents fade-in ghosting effect
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-
         layer.contents = (__bridge id)image;
-
         [CATransaction commit];
         CGImageRelease(image);
-    });
+    };
+
+    // Keep the layer update synchronous so DetachView() cannot race queued
+    // paint work after an overlay window starts tearing down.
+    if ([NSThread isMainThread]) {
+        updateLayer();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), updateLayer);
+    }
 
 #endif
 }
@@ -294,18 +307,20 @@ bool MyOverlayRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int v
     return true;
 
 #elif defined(__APPLE__)
+    if (!nsview_) return false;
+
     NSView* view = (__bridge NSView*)nsview_;
     NSWindow* window = [view window];
 
     if (!window) return false;
 
     NSRect windowFrame = [window frame];
+    NSScreen* screen = [window screen] ?: [NSScreen mainScreen];
+    CGFloat screenHeight = [screen frame].size.height;
 
-    // macOS screen origin is bottom-left, CEF view origin is top-left.
-    // viewY=0 is top of view → maps to top of window in screen coords
-    // Top of window in screen coords = windowFrame.origin.y + windowFrame.size.height
     screenX = (int)(windowFrame.origin.x + viewX);
-    screenY = (int)(windowFrame.origin.y + windowFrame.size.height - viewY);
+    // Convert from Cocoa bottom-left origin to CEF top-left origin
+    screenY = (int)(screenHeight - (windowFrame.origin.y + windowFrame.size.height) + viewY);
     return true;
 
 #endif
@@ -328,23 +343,29 @@ bool MyOverlayRenderHandler::GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScr
     return true;
 
 #elif defined(__APPLE__)
+    if (!nsview_) return false;
+
     NSView* view = (__bridge NSView*)nsview_;
     NSWindow* window = [view window];
 
     if (!window) return false;
 
     NSRect windowFrame = [window frame];
-    NSScreen* screen = [window screen];
+    NSScreen* screen = [window screen] ?: [NSScreen mainScreen];
 
     // Get backing scale factor (Retina display support)
     CGFloat scaleFactor = [screen backingScaleFactor];
+    CGFloat screenHeight = [screen frame].size.height;
+
+    // Convert Y from Cocoa bottom-left origin to CEF top-left origin
+    int rectY = (int)(screenHeight - (windowFrame.origin.y + windowFrame.size.height));
 
     screen_info.device_scale_factor = scaleFactor;
     screen_info.depth = 32;
     screen_info.depth_per_component = 8;
     screen_info.is_monochrome = false;
     screen_info.rect = CefRect((int)windowFrame.origin.x,
-                              (int)windowFrame.origin.y,
+                              rectY,
                               (int)windowFrame.size.width,
                               (int)windowFrame.size.height);
     screen_info.available_rect = screen_info.rect;

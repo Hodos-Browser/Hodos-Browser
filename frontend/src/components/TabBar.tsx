@@ -231,12 +231,16 @@ export const TabBar: React.FC<TabBarProps> = ({
       sx={{
         display: 'flex',
         alignItems: 'center',
-        backgroundColor: '#dee1e6',
+        backgroundColor: '#0f1117',
         paddingX: '6px',
         height: 42,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,
+        // Hide next tab's left divider when hovering a tab (first-child targets tab body, not corner elements)
+        '& > *:hover + * > *:first-child::after': {
+          opacity: '0 !important',
+        },
         // Custom scrollbar styling
         '&::-webkit-scrollbar': {
           height: 3,
@@ -245,10 +249,10 @@ export const TabBar: React.FC<TabBarProps> = ({
           backgroundColor: 'transparent',
         },
         '&::-webkit-scrollbar-thumb': {
-          backgroundColor: 'rgba(0, 0, 0, 0.2)',
+          backgroundColor: 'rgba(255, 255, 255, 0.15)',
           borderRadius: 2,
           '&:hover': {
-            backgroundColor: 'rgba(0, 0, 0, 0.3)',
+            backgroundColor: 'rgba(255, 255, 255, 0.25)',
           },
         },
       }}
@@ -256,8 +260,8 @@ export const TabBar: React.FC<TabBarProps> = ({
       {/* Loading indicator or empty state */}
       {tabs.length === 0 && (
         <Box sx={{ display: 'flex', alignItems: 'center', px: 2, height: '100%' }}>
-          {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: 'rgba(0, 0, 0, 0.5)' }} />}
-          <Typography variant="body2" sx={{ color: 'rgba(0, 0, 0, 0.6)', fontSize: 12 }}>
+          {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: '#9ca3af' }} />}
+          <Typography variant="body2" sx={{ color: '#9ca3af', fontSize: 12 }}>
             {isLoading ? 'Loading tabs...' : 'No tabs'}
           </Typography>
         </Box>
@@ -266,10 +270,10 @@ export const TabBar: React.FC<TabBarProps> = ({
       {/* Render all tabs */}
       {tabs.map((tab, index) => {
         const isActive = tab.id === activeTabId;
-        // Show divider if this tab and the next are both inactive
-        const nextTab = tabs[index + 1];
-        const nextIsActive = nextTab ? nextTab.id === activeTabId : false;
-        const showDivider = !isActive && !nextIsActive && index < tabs.length - 1;
+        // Show left divider if this tab and the previous tab are both inactive
+        const prevTab = tabs[index - 1];
+        const prevIsActive = prevTab ? prevTab.id === activeTabId : false;
+        const showDivider = !isActive && !prevIsActive && index > 0;
         const isDragged = dragIndex === index;
 
         // Drop indicator: show on the side closest to where the dragged tab is coming from
@@ -316,7 +320,7 @@ export const TabBar: React.FC<TabBarProps> = ({
             opacity: isTearingOff ? 0.85 : 0.75,
             pointerEvents: 'none',
             zIndex: 9999,
-            backgroundColor: '#ffffff',
+            backgroundColor: '#1a1d23',
             borderRadius: '7px',
             boxShadow: isTearingOff
               ? '0 8px 24px rgba(0,0,0,0.35)'
@@ -335,7 +339,7 @@ export const TabBar: React.FC<TabBarProps> = ({
             {tabs[dragIndex].favicon ? (
               <img src={tabs[dragIndex].favicon} alt="" width={14} height={14} style={{ display: 'block' }} />
             ) : (
-              <Box sx={{ width: 14, height: 14, borderRadius: '50%', bgcolor: 'rgba(0,0,0,0.1)' }} />
+              <Box sx={{ width: 14, height: 14, borderRadius: '50%', bgcolor: 'rgba(255,255,255,0.1)' }} />
             )}
           </Box>
           {/* Ghost title */}
@@ -348,7 +352,7 @@ export const TabBar: React.FC<TabBarProps> = ({
               whiteSpace: 'nowrap',
               fontSize: 12,
               fontWeight: 500,
-              color: 'rgba(0, 0, 0, 0.87)',
+              color: '#f0f0f0',
               lineHeight: 1,
             }}
           >
@@ -369,10 +373,10 @@ export const TabBar: React.FC<TabBarProps> = ({
             borderRadius: '6px',
             marginLeft: '4px',
             marginBottom: '2px',
-            color: 'rgba(0, 0, 0, 0.5)',
+            color: '#9ca3af',
             '&:hover': {
-              backgroundColor: 'rgba(0, 0, 0, 0.06)',
-              color: 'rgba(0, 0, 0, 0.87)',
+              backgroundColor: '#1f2937',
+              color: '#f0f0f0',
             },
           }}
         >

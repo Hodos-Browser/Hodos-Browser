@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -58,7 +59,7 @@ private:
     WindowManager(const WindowManager&) = delete;
     WindowManager& operator=(const WindowManager&) = delete;
 
-    std::map<int, std::unique_ptr<BrowserWindow>> windows_;
+    std::unordered_map<int, std::unique_ptr<BrowserWindow>> windows_;
     int active_window_id_ = 0;
     int next_window_id_ = 0;
     mutable std::mutex mutex_;

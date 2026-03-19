@@ -41,7 +41,38 @@ function TabPanel({ children, value, index }: TabPanelProps) {
     <Box
       role="tabpanel"
       hidden={value !== index}
-      sx={{ p: 2, height: '100%', overflow: 'auto' }}
+      sx={{
+        p: 2,
+        height: '100%',
+        overflow: 'auto',
+        backgroundColor: '#0f1117',
+        color: '#f0f0f0',
+        '& .MuiTypography-body2': { color: '#f0f0f0' },
+        '& .MuiTypography-caption': { color: '#9ca3af' },
+        '& .MuiTypography-subtitle2': { color: '#f0f0f0' },
+        '& .MuiDivider-root': { borderColor: '#2a2d35' },
+        '& .MuiSwitch-root .MuiSwitch-track': { backgroundColor: '#6b7280' },
+        '& .MuiSlider-root': { color: '#a67c00' },
+        '& .MuiSlider-markLabel': { color: '#6b7280' },
+        '& .MuiTextField-root .MuiOutlinedInput-root': {
+          color: '#f0f0f0',
+          '& fieldset': { borderColor: '#2a2d35' },
+          '&:hover fieldset': { borderColor: '#a67c00' },
+          '&.Mui-focused fieldset': { borderColor: '#a67c00' },
+        },
+        '& .MuiTextField-root .MuiInputBase-input': { color: '#f0f0f0' },
+        '& .MuiSelect-select': { color: '#f0f0f0' },
+        '& .MuiOutlinedInput-notchedOutline': { borderColor: '#2a2d35' },
+        '& .MuiSelect-icon': { color: '#9ca3af' },
+        '& .MuiCard-root': { backgroundColor: '#1a1d23', borderColor: '#2a2d35' },
+        '& .MuiCardContent-root .MuiTypography-root': { color: '#f0f0f0' },
+        '& .MuiChip-outlined': { borderColor: '#2a2d35', color: '#9ca3af' },
+        '& .MuiButton-root': { color: '#a67c00' },
+        '& .MuiButton-contained': { backgroundColor: '#a67c00', color: '#fff' },
+        '& .MuiAlert-root': { backgroundColor: '#1a1d23' },
+        '& .MuiCircularProgress-root': { color: '#a67c00' },
+        '& .MuiIconButton-root': { color: '#9ca3af' },
+      }}
     >
       {value === index && children}
     </Box>
@@ -90,7 +121,7 @@ const SettingsOverlayRoot: React.FC = () => {
     '& > .MuiTypography-root': {
       mb: 1.5,
       fontWeight: 600,
-      color: 'text.primary',
+      color: '#f0f0f0',
     },
   };
 
@@ -101,7 +132,7 @@ const SettingsOverlayRoot: React.FC = () => {
     py: 1,
     '&:not(:last-child)': {
       borderBottom: '1px solid',
-      borderColor: 'divider',
+      borderColor: '#2a2d35',
     },
   };
 
@@ -114,10 +145,10 @@ const SettingsOverlayRoot: React.FC = () => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: 'background.paper',
+          backgroundColor: '#0f1117',
         }}
       >
-        <CircularProgress size={32} />
+        <CircularProgress size={32} sx={{ color: '#a67c00' }} />
       </Box>
     );
   }
@@ -127,11 +158,11 @@ const SettingsOverlayRoot: React.FC = () => {
       sx={{
         width: '100%',
         height: '100%',
-        backgroundColor: 'background.paper',
+        backgroundColor: '#0f1117',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.1)',
+        boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.2)',
       }}
     >
       {/* Header */}
@@ -142,12 +173,12 @@ const SettingsOverlayRoot: React.FC = () => {
           justifyContent: 'space-between',
           p: 2,
           pb: 0,
-          backgroundColor: 'background.default',
+          backgroundColor: '#111827',
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <SettingsIcon fontSize="small" sx={{ color: 'text.secondary' }} />
-          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+          <SettingsIcon fontSize="small" sx={{ color: '#9ca3af' }} />
+          <Typography variant="h6" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
             Settings
           </Typography>
         </Box>
@@ -155,10 +186,10 @@ const SettingsOverlayRoot: React.FC = () => {
           onClick={handleClose}
           size="small"
           sx={{
-            color: 'text.secondary',
+            color: '#9ca3af',
             '&:hover': {
-              color: 'text.primary',
-              backgroundColor: 'action.hover',
+              color: '#f0f0f0',
+              backgroundColor: '#1f2937',
             },
           }}
         >
@@ -173,12 +204,20 @@ const SettingsOverlayRoot: React.FC = () => {
         variant="fullWidth"
         sx={{
           borderBottom: 1,
-          borderColor: 'divider',
+          borderColor: '#2a2d35',
           minHeight: 48,
+          backgroundColor: '#111827',
           '& .MuiTab-root': {
             minHeight: 48,
             textTransform: 'none',
             fontWeight: 500,
+            color: '#9ca3af',
+            '&.Mui-selected': {
+              color: '#f0f0f0',
+            },
+          },
+          '& .MuiTabs-indicator': {
+            backgroundColor: '#a67c00',
           },
         }}
       >
@@ -278,7 +317,7 @@ const SettingsOverlayRoot: React.FC = () => {
           <Box sx={settingRowStyle}>
             <Box>
               <Typography variant="body2">Block ads</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                 Block ads and trackers using privacy lists
               </Typography>
             </Box>
@@ -292,7 +331,7 @@ const SettingsOverlayRoot: React.FC = () => {
           <Box sx={settingRowStyle}>
             <Box>
               <Typography variant="body2">Block third-party cookies</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                 Prevent cross-site tracking
               </Typography>
             </Box>
@@ -312,7 +351,7 @@ const SettingsOverlayRoot: React.FC = () => {
           <Box sx={settingRowStyle}>
             <Box>
               <Typography variant="body2">Send "Do Not Track"</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                 Request sites not to track you
               </Typography>
             </Box>
@@ -332,7 +371,7 @@ const SettingsOverlayRoot: React.FC = () => {
           <Box sx={settingRowStyle}>
             <Box>
               <Typography variant="body2">Clear browsing data on exit</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                 Clear history, cookies, and cache when closing
               </Typography>
             </Box>
@@ -353,7 +392,7 @@ const SettingsOverlayRoot: React.FC = () => {
           <Box sx={settingRowStyle}>
             <Box>
               <Typography variant="body2">Enable auto-approval</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{ color: '#9ca3af' }}>
                 Automatically approve small transactions
               </Typography>
             </Box>
@@ -451,7 +490,7 @@ const SettingsOverlayRoot: React.FC = () => {
               <CircularProgress size={24} />
             </Box>
           ) : profiles.length === 0 ? (
-            <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+            <Typography variant="body2" sx={{ py: 2, color: '#9ca3af' }}>
               No browser profiles detected. Make sure Chrome, Brave, or Edge is installed.
             </Typography>
           ) : (
@@ -519,7 +558,7 @@ const SettingsOverlayRoot: React.FC = () => {
           {importing && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
               <CircularProgress size={16} />
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: '#9ca3af' }}>
                 Importing...
               </Typography>
             </Box>

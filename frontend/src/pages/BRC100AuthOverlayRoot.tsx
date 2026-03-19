@@ -6,17 +6,17 @@ const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Rob
 
 // Brand colors (matching WalletPanel.css)
 const COLORS = {
-  primary: '#000000',
-  primaryHover: '#111111',
+  primary: '#a67c00',
+  primaryHover: '#bf9000',
   gold: '#a67c00',
-  subduedGold: '#f5f5f5',
-  textDark: '#111111',
-  textLight: '#f5f5f5',
-  textMuted: '#666666',
-  borderLight: '#d0d0d0',
-  white: '#ffffff',
+  subduedGold: '#111827',
+  textDark: '#f0f0f0',
+  textLight: '#f0f0f0',
+  textMuted: '#9ca3af',
+  borderLight: '#2a2d35',
+  white: '#1a1d23',
   error: '#c62828',
-  errorBg: '#fef2f2',
+  errorBg: 'rgba(211, 47, 47, 0.1)',
 };
 
 const BRC100AuthOverlayRoot: React.FC = () => {
@@ -365,7 +365,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     padding: '11px 24px',
     fontSize: '14px',
     fontWeight: 600,
-    color: COLORS.white,
+    color: '#0f1117',
     cursor: 'pointer',
     fontFamily: FONT_FAMILY,
     transition: 'background 0.15s',
@@ -373,7 +373,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
   // ── Secondary button (outlined) ──
   const secondaryButton: React.CSSProperties = {
-    background: hoveredButton === 'secondary' ? '#f5f5f5' : 'transparent',
+    background: hoveredButton === 'secondary' ? '#1f2937' : 'transparent',
     border: `1px solid ${COLORS.borderLight}`,
     borderRadius: '8px',
     padding: '11px 24px',
@@ -535,7 +535,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   onMouseLeave={() => setHoveredButton(null)}
                   style={{
                     ...secondaryButton,
-                    background: hoveredButton === 'modify' ? '#f5f5f5' : 'transparent',
+                    background: hoveredButton === 'modify' ? '#1f2937' : 'transparent',
                   }}
                 >
                   Modify Limits
@@ -649,7 +649,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   onMouseLeave={() => setHoveredButton(null)}
                   style={{
                     ...secondaryButton,
-                    background: hoveredButton === 'modify' ? '#f5f5f5' : 'transparent',
+                    background: hoveredButton === 'modify' ? '#1f2937' : 'transparent',
                   }}
                 >
                   Modify Limits
@@ -706,7 +706,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   alignItems: 'center',
                   gap: '10px',
                   fontSize: '13px',
-                  color: '#333333',
+                  color: '#f0f0f0',
                   lineHeight: 1.5,
                   marginBottom: '8px',
                   cursor: 'pointer',
@@ -742,7 +742,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               <span style={{
                 fontFamily: 'monospace',
                 fontSize: '11px',
-                background: '#f0f0f0',
+                background: '#0f1117',
                 padding: '2px 6px',
                 borderRadius: '4px',
               }}>
@@ -938,7 +938,7 @@ const avatarStyle: React.CSSProperties = {
   width: '44px',
   height: '44px',
   borderRadius: '50%',
-  backgroundColor: '#000000',
+  backgroundColor: '#111827',
   color: '#a67c00',
   display: 'flex',
   alignItems: 'center',
@@ -954,13 +954,13 @@ const permissionItem: React.CSSProperties = {
   alignItems: 'flex-start',
   gap: '10px',
   fontSize: '13px',
-  color: '#333333',
+  color: '#f0f0f0',
   lineHeight: 1.5,
   marginBottom: '8px',
 };
 
 const checkmark: React.CSSProperties = {
-  color: '#6b8f4a',
+  color: '#2e7d32',
   fontWeight: 700,
   fontSize: '14px',
   marginTop: '1px',

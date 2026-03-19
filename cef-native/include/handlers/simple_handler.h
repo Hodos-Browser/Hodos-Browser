@@ -244,6 +244,9 @@ public:
 private:
     std::string role_;
     int window_id_ = 0;
+#ifdef _WIN32
+    bool is_windowed_browser_ = false;  // Cached at construction to avoid per-cursor-event string ops
+#endif
 
     // Static map: browser_id → handler pointer (for overlay retargeting)
     static std::map<int, SimpleHandler*> browser_handler_map_;
