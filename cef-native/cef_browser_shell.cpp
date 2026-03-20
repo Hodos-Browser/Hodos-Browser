@@ -656,7 +656,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 int wpWidth = 400;
                 int wpHeight = mainRect.bottom - hdrRect.bottom;
-                int wpX = hdrRect.right - wpWidth;
+                int wpX = mainRect.right - wpWidth;
                 int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     wpX, wpY, wpWidth, wpHeight,
@@ -876,7 +876,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 int wpWidth = 400;
                 int wpHeight = mainRect.bottom - hdrRect.bottom;
-                int wpX = hdrRect.right - wpWidth;
+                int wpX = mainRect.right - wpWidth;
                 int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     wpX, wpY, wpWidth, wpHeight,

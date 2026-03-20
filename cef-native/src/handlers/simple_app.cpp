@@ -680,7 +680,7 @@ void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOf
     GetWindowRect(g_header_hwnd, &headerRect);
     int panelWidth = 400;
     int panelHeight = mainRect.bottom - headerRect.bottom;
-    int overlayX = headerRect.right - panelWidth;
+    int overlayX = mainRect.right - panelWidth;
     int overlayY = headerRect.bottom;
 
     // DEBUG: Log the position we're using

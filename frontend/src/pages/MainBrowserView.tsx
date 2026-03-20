@@ -476,12 +476,12 @@ const MainBrowserView: React.FC = () => {
         <Box
             sx={{
                 position: 'relative',
-                width: 'calc(100% + 16px)',
-                height: 'calc(100% + 16px)',
+                width: '100%',
+                height: '100%',
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
-                margin: '-8px',
+                margin: 0,
                 padding: 0,
                 bgcolor: '#0f1117',
             }}

@@ -154,6 +154,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     setShowReceiveAddress(false);
     setAddressCopiedMessage(null);
     setTransactionResult(null);
+    setShowIdentityKey(false);
 
     // Toggle send form
     setShowSendForm(!showSendForm);
@@ -317,6 +318,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             <span className="balance-usd-light">
               {isLoading ? '...' : (balance / 100000000).toFixed(8)} BSV
             </span>
+            {bsvPrice > 0 && (
+              <span className="balance-rate-light">
+                1 BSV = ${bsvPrice.toFixed(2)} USD
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -377,56 +383,76 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       )}
 
-      {/* Identity Key Section */}
-      {identityKey && (
-        <div className="identity-key-section-light">
-          <div className="identity-key-actions-light">
+      {/* Identity Key Buttons — hidden when send form is open */}
+      {identityKey && !showSendForm && (
+        <>
+          <div className="wallet-actions-light">
             <button
-              className={`identity-key-copy-button-light ${identityKeyCopied ? 'copied' : ''}`}
+              className={`wallet-button-light identity-copy-button-light ${identityKeyCopied ? 'copied' : ''}`}
               onClick={handleCopyIdentityKey}
             >
-              {identityKeyCopied ? 'Copied!' : 'Copy Identity Key'}
+              {identityKeyCopied ? 'Copied!' : 'Copy ID Key'}
             </button>
             <button
-              className="identity-key-show-button-light"
+              className="wallet-button-light identity-show-button-light"
               onClick={() => setShowIdentityKey(!showIdentityKey)}
             >
-              {showIdentityKey ? 'Hide' : 'Show'}
+              {showIdentityKey ? 'Hide ID Key' : 'Show ID Key'}
             </button>
           </div>
           {showIdentityKey && (
             <div className="identity-key-display-light">
               <code>{identityKey}</code>
+              <div className="identity-key-qr-light">
+                <QRCodeSVG
+                  value={identityKey}
+                  size={96}
+                  level="M"
+                  bgColor="#ffffff"
+                  fgColor="#000000"
+                />
+              </div>
             </div>
           )}
-        </div>
+        </>
       )}
 
       {/* Action Buttons */}
-      <div className="wallet-actions-light">
-        <button
-          className={`wallet-button-light receive-button-light ${clickedButtons.has('receive') || isGenerating ? 'clicked' : ''}`}
-          onClick={handleReceiveClick}
-          disabled={isGenerating}
-        >
-          {isGenerating ? 'Generating...' : 'Receive'}
-        </button>
-        <button
-          className={`wallet-button-light send-button-light ${showSendForm ? 'active' : ''}`}
-          onClick={handleSendClick}
-        >
-          {showSendForm ? 'Close' : 'Send'}
-        </button>
-      </div>
+      {!showSendForm && (
+        <div className="wallet-actions-light">
+          <button
+            className={`wallet-button-light receive-button-light ${clickedButtons.has('receive') || isGenerating ? 'clicked' : ''}`}
+            onClick={handleReceiveClick}
+            disabled={isGenerating}
+          >
+            {isGenerating ? 'Generating...' : 'Receive'}
+          </button>
+          <button
+            className="wallet-button-light send-button-light"
+            onClick={handleSendClick}
+          >
+            Send
+          </button>
+        </div>
+      )}
 
       {/* Dynamic Content Area */}
       <div className="dynamic-content-area-light">
         {showSendForm && (
-          <TransactionForm
-            onTransactionCreated={handleSendSubmit}
-            balance={balance}
-            bsvPrice={bsvPrice}
-          />
+          <>
+            <TransactionForm
+              onTransactionCreated={handleSendSubmit}
+              balance={balance}
+              bsvPrice={bsvPrice}
+            />
+            <button
+              className="wallet-button-light send-button-light active"
+              onClick={handleSendClick}
+              style={{ width: '100%', marginTop: 10 }}
+            >
+              Close
+            </button>
+          </>
         )}
 
         {showReceiveAddress && (
