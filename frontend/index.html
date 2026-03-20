@@ -26,6 +26,7 @@
       }
       #splash.fade-out {
         opacity: 0;
+        pointer-events: none;
         transition: opacity 0.2s ease-out;
       }
     </style>
@@ -34,6 +35,12 @@
     <div id="splash">
       <img src="/Hodos_Gold_Icon.svg" alt="" />
     </div>
+    <script>
+      // Only show splash for main header view — overlays must be transparent
+      if (window.location.pathname !== '/' && window.location.pathname !== '') {
+        document.getElementById('splash').remove();
+      }
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
