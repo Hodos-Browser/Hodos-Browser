@@ -1,0 +1,7 @@
+// Hodos Browser Windows resource file
+// Embeds application icon for taskbar/title bar/explorer display
+#include <windows.h>
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+IDI_ICON1 ICON "hodos.ico"

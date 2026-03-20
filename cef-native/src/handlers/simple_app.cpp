@@ -176,6 +176,7 @@ void SimpleApp::OnContextInitialized() {
 
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
+    header_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
     std::string header_url = "http://127.0.0.1:5137";
     std::cout << "Loading React header at: " << header_url << std::endl;
 

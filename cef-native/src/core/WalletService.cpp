@@ -345,7 +345,12 @@ void WalletService::ensureInitialized() {
         size_t lastSlash = exeDir.find_last_of("\\/");
         if (lastSlash != std::string::npos) {
             exeDir = exeDir.substr(0, lastSlash);
-            daemonPath_ = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+            // Production: same directory as browser exe
+            daemonPath_ = exeDir + "\\hodos-wallet.exe";
+            if (GetFileAttributesA(daemonPath_.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                // Dev fallback: source tree relative path
+                daemonPath_ = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+            }
         }
 
         // Set up console control handler

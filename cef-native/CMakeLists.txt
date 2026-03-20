@@ -226,6 +226,8 @@ elseif(WIN32)
         include/core/ProfileImporter.h
         src/core/ProfileImporter.cpp
         include/core/LayoutHelpers.h
+        include/core/LocalFileResourceHandler.h
+        hodos.rc
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
 endif()

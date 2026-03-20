@@ -18,6 +18,9 @@
 #include "cef_command_line.h"
 #include "cef_life_span_handler.h"
 #include "wrapper/cef_helpers.h"
+#include "include/cef_task.h"
+#include "include/base/cef_callback.h"
+#include "include/wrapper/cef_closure_task.h"
 #include "include/cef_render_process_handler.h"
 #include "include/cef_v8.h"
 #include "include/cef_browser.h"
@@ -95,6 +98,13 @@ int g_peerpay_amount = 0;
 
 // Fullscreen state tracking
 bool g_is_fullscreen = false;
+
+// Shutdown state: set when app is shutting down, checked by OnBeforeClose
+// to call PostQuitMessage only after all browsers have fully closed.
+bool g_app_shutting_down = false;
+
+// Startup: window is hidden until header browser loads (smooth startup)
+bool g_window_shown = false;
 
 // Wallet server process management
 PROCESS_INFORMATION g_walletServerProcess = {};
@@ -421,43 +431,41 @@ void ShutdownApplication() {
     LOG_INFO("🔄 Stopping adblock engine...");
     StopAdblockServer();
 
-    // Step 1: Close all CEF browsers
-    LOG_INFO("🔄 Closing CEF browsers...");
-    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
-    CefRefPtr<CefBrowser> webview_browser = SimpleHandler::GetWebviewBrowser();
-    CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
-    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
-    CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
-    CefRefPtr<CefBrowser> brc100_auth_browser = SimpleHandler::GetBRC100AuthBrowser();
+    // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
+    // Using CloseBrowser(true) = force close, skips beforeunload handlers.
+    // All browsers must be closed before CefShutdown() or it hangs waiting
+    // for renderer processes that were never told to exit.
+    LOG_INFO("🔄 Closing all CEF browsers...");
 
-    if (header_browser) {
-        LOG_INFO("🔄 Closing header browser...");
-        header_browser->GetHost()->CloseBrowser(false);
+    // 1a: Close all tab browsers (each tab has its own CefBrowser + renderer process)
+    {
+        std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+        LOG_INFO("🔄 Closing " + std::to_string(allTabs.size()) + " tab browser(s)...");
+        for (Tab* tab : allTabs) {
+            if (tab && tab->browser) {
+                tab->browser->GetHost()->CloseBrowser(true);
+            }
+        }
     }
 
-    if (webview_browser) {
-        LOG_INFO("🔄 Closing webview browser...");
-        webview_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (settings_browser) {
-        LOG_INFO("🔄 Closing settings browser...");
-        settings_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (wallet_browser) {
-        LOG_INFO("🔄 Closing wallet browser...");
-        wallet_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (backup_browser) {
-        LOG_INFO("🔄 Closing backup browser...");
-        backup_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (brc100_auth_browser) {
-        LOG_INFO("🔄 Closing BRC-100 auth browser...");
-        brc100_auth_browser->GetHost()->CloseBrowser(false);
+    // 1b: Close all overlay and window browsers via BrowserWindow refs
+    {
+        std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
+        const std::string roles[] = {
+            "header", "webview", "wallet_panel", "overlay", "settings",
+            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
+        };
+        for (BrowserWindow* bw : allWindows) {
+            if (!bw) continue;
+            for (const auto& role : roles) {
+                CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(role);
+                if (b) {
+                    LOG_INFO("🔄 Closing browser for role: " + role + " (window " + std::to_string(bw->window_id) + ")");
+                    b->GetHost()->CloseBrowser(true);
+                }
+            }
+        }
     }
 
     // Step 2: Destroy overlay windows
@@ -554,31 +562,11 @@ void ShutdownApplication() {
         g_menu_overlay_hwnd = nullptr;
     }
 
-    // Step 3: Destroy main windows (child windows first)
-    LOG_INFO("🔄 Destroying main windows...");
-    if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-        LOG_INFO("🔄 Destroying header window...");
-        DestroyWindow(g_header_hwnd);
-        g_header_hwnd = nullptr;
-    }
-
-    if (g_webview_hwnd && IsWindow(g_webview_hwnd)) {
-        LOG_INFO("🔄 Destroying webview window...");
-        DestroyWindow(g_webview_hwnd);
-        g_webview_hwnd = nullptr;
-    }
-
-    // Step 4: Destroy main shell window last
-    if (g_hwnd && IsWindow(g_hwnd)) {
-        LOG_INFO("🔄 Destroying main shell window...");
-        DestroyWindow(g_hwnd);
-        g_hwnd = nullptr;
-    }
-
-    LOG_INFO("✅ Application shutdown complete");
-
-    // Shutdown logger
-    Logger::Shutdown();
+    // Step 3: DO NOT destroy main shell window here.
+    // The message loop must keep running so CEF can process CloseBrowser callbacks.
+    // OnBeforeClose will call PostQuitMessage when all browsers have fully closed,
+    // and post-message-loop cleanup in main() will handle final window destruction.
+    LOG_INFO("✅ ShutdownApplication complete — waiting for browsers to close...");
 }
 
 LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1009,8 +997,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (wid == 0 || WindowManager::GetInstance().GetWindowCount() <= 1) {
                 // Primary window or last window — full graceful shutdown
                 LOG_INFO("🛑 Last/primary window received WM_CLOSE - starting graceful shutdown...");
+                g_app_shutting_down = true;
+                // Hide the window immediately so it feels responsive
+                ShowWindow(hwnd, SW_HIDE);
                 ShutdownApplication();
-                PostQuitMessage(0);
+                // DO NOT PostQuitMessage here — CEF needs the message loop alive
+                // to process CloseBrowser callbacks. OnBeforeClose will call
+                // PostQuitMessage when all browsers have actually closed.
             } else {
                 // Secondary window — close only this window's tabs and clean up
                 LOG_INFO("🛑 Window " + std::to_string(wid) + " received WM_CLOSE - closing window...");
@@ -1046,10 +1039,10 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
 
         case WM_DESTROY:
-            // Only post quit if no windows remain
+            // Only quit if no windows remain
             if (WindowManager::GetInstance().GetWindowCount() == 0) {
-                LOG_INFO("🛑 Last window destroyed - posting quit message");
-                PostQuitMessage(0);
+                LOG_INFO("🛑 Last window destroyed - quitting CEF message loop");
+                CefQuitMessageLoop();
             }
             break;
     }
@@ -2285,7 +2278,12 @@ void StartWalletServer() {
     if (lastSlash != std::string::npos) {
         exeDir = exeDir.substr(0, lastSlash);
     }
-    std::string walletExe = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+    // Production: same directory as browser exe
+    std::string walletExe = exeDir + "\\hodos-wallet.exe";
+    if (GetFileAttributesA(walletExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // Dev fallback: source tree relative path
+        walletExe = exeDir + "\\..\\..\\..\\..\\rust-wallet\\target\\release\\hodos-wallet.exe";
+    }
 
     // Check if the exe exists
     if (GetFileAttributesA(walletExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -2453,7 +2451,12 @@ void StartAdblockServer() {
     if (lastSlash != std::string::npos) {
         exeDir = exeDir.substr(0, lastSlash);
     }
-    std::string adblockExe = exeDir + "\\..\\..\\..\\..\\adblock-engine\\target\\release\\hodos-adblock.exe";
+    // Production: same directory as browser exe
+    std::string adblockExe = exeDir + "\\hodos-adblock.exe";
+    if (GetFileAttributesA(adblockExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // Dev fallback: source tree relative path
+        adblockExe = exeDir + "\\..\\..\\..\\..\\adblock-engine\\target\\release\\hodos-adblock.exe";
+    }
 
     // Check if the exe exists
     if (GetFileAttributesA(adblockExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -2669,9 +2672,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
 
-    // Set CEF paths - use relative paths from the executable
-    CefString(&settings.resources_dir_path).FromWString(L"cef-binaries\\Resources");
-    CefString(&settings.locales_dir_path).FromWString(L"cef-binaries\\Resources\\locales");
+    // Set CEF resource paths — production vs dev
+    {
+        char exe_path_a[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe_path_a, MAX_PATH);
+        std::string exe_dir_str(exe_path_a);
+        size_t ls = exe_dir_str.find_last_of("\\/");
+        if (ls != std::string::npos) exe_dir_str = exe_dir_str.substr(0, ls);
+
+        std::string res_pak = exe_dir_str + "\\resources.pak";
+        if (GetFileAttributesA(res_pak.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            // Production: resources are next to the exe
+            CefString(&settings.resources_dir_path).FromString(exe_dir_str);
+            CefString(&settings.locales_dir_path).FromString(exe_dir_str + "\\locales");
+        } else {
+            // Dev: use relative path to cef-binaries
+            CefString(&settings.resources_dir_path).FromWString(L"cef-binaries\\Resources");
+            CefString(&settings.locales_dir_path).FromWString(L"cef-binaries\\Resources\\locales");
+        }
+    }
     CefString(&settings.browser_subprocess_path).FromWString(exe_path);
 
     RECT rect;
@@ -2683,14 +2702,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int webviewHeight = height - shellHeight;
 
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
-    wc.lpszClassName = L"HodosBrowserWndClass"; RegisterClass(&wc);
+    wc.lpszClassName = L"HodosBrowserWndClass";
+    wc.hbrBackground = CreateSolidBrush(RGB(26, 26, 26));
+    RegisterClass(&wc);
 
     WNDCLASS browserClass = {};
     browserClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;  // Redraw on resize, no border styles
     browserClass.lpfnWndProc = DefWindowProc;
     browserClass.hInstance = hInstance;
     browserClass.lpszClassName = L"CEFHostWindow";
-    browserClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);  // Black background
+    browserClass.hbrBackground = CreateSolidBrush(RGB(26, 26, 26));  // Dark theme background
     RegisterClass(&browserClass);
 
 
@@ -2804,7 +2825,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
 
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
@@ -2832,8 +2853,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Store BrowserWindow* in HWND user data so ShellWindowProc can find it
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(mainWin));
 
-    ShowWindow(hwnd, SW_SHOW);        UpdateWindow(hwnd);
-    ShowWindow(header_hwnd, SW_SHOW); UpdateWindow(header_hwnd);
     // Don't show webview_hwnd - it's no longer used (tabs handle content now)
     // ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
 
@@ -2912,15 +2931,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CreateMenuOverlay(g_hInstance, false, 30);
     LOG_INFO("Pre-created panel overlays (hidden) for warm startup");
 
+    // Safety timeout: force-show window after 5s if header browser hasn't loaded
+    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+        extern HWND g_hwnd;
+        extern bool g_window_shown;
+        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+            LOG_WARNING("Startup timeout - force-showing window after 5 seconds");
+            ShowWindow(g_hwnd, SW_SHOW);
+            UpdateWindow(g_hwnd);
+            g_window_shown = true;
+        }
+    }), 5000);
+
     CefRunMessageLoop();
 
-    // Stop child servers before CEF shutdown
+    // All browsers have closed (OnBeforeClose posted quit message).
+    // Now safe to clean up remaining resources and call CefShutdown().
+    LOG_INFO("Message loop exited — final cleanup...");
+
+    // Destroy any remaining HWNDs
+    if (g_header_hwnd && IsWindow(g_header_hwnd)) {
+        DestroyWindow(g_header_hwnd);
+        g_header_hwnd = nullptr;
+    }
+    if (g_webview_hwnd && IsWindow(g_webview_hwnd)) {
+        DestroyWindow(g_webview_hwnd);
+        g_webview_hwnd = nullptr;
+    }
+    if (g_hwnd && IsWindow(g_hwnd)) {
+        DestroyWindow(g_hwnd);
+        g_hwnd = nullptr;
+    }
+
+    // Stop child servers before CEF shutdown (defensive — may already be stopped)
     LOG_INFO("Stopping wallet server...");
     StopWalletServer();
     LOG_INFO("Stopping adblock engine...");
     StopAdblockServer();
 
     ReleaseProfileLock();
+
+    Logger::Shutdown();
     CefShutdown();
     return 0;
 }

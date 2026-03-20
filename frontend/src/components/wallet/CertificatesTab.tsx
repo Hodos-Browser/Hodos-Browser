@@ -2,19 +2,27 @@ import React, { useState, useEffect, useCallback } from 'react';
 
 interface Certificate {
   type: string;
+  type_name: string;
   serial_number: string;
   subject: string;
   certifier: string;
+  certifier_name: string;
   revocation_outpoint: string;
   signature: string;
   fields: Record<string, string>;
   keyring: Record<string, string>;
+  decrypted_fields: Record<string, string>;
+  created_at: number;
 }
 
 const CertificatesTab: React.FC = () => {
   const [certificates, setCertificates] = useState<Certificate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [expandedCert, setExpandedCert] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Certificate | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchCertificates = useCallback(async () => {
     try {
@@ -39,16 +47,87 @@ const CertificatesTab: React.FC = () => {
     fetchCertificates();
   }, [fetchCertificates]);
 
+  // Auto-clear success message after 5 seconds
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  const getTypeIcon = (typeName: string): string => {
+    switch (typeName) {
+      case 'X (Twitter)': return '𝕏';
+      case 'Email': return '✉';
+      case 'Discord': return '💬';
+      case 'Government ID': return '🪪';
+      case 'Registrant': return '🏢';
+      case 'CoolCert': return '✅';
+      default: return '📜';
+    }
+  };
+
+  const getPrimaryField = (cert: Certificate): string => {
+    const df = cert.decrypted_fields;
+    if (!df || Object.keys(df).length === 0) return '—';
+    if (df.userName) return `@${df.userName}`;
+    if (df.email) return df.email;
+    if (df.discordUsername) return df.discordUsername;
+    if (df.cool) return `cool: ${df.cool}`;
+    if (df.name) return df.name;
+    const firstKey = Object.keys(df)[0];
+    return df[firstKey] || '—';
+  };
+
+  const formatDate = (timestamp: number): string => {
+    if (!timestamp) return '—';
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
   const truncateHash = (hash: string): string => {
     if (!hash || hash.length <= 16) return hash;
     return `${hash.substring(0, 8)}...${hash.substring(hash.length - 8)}`;
   };
 
-  const decodeType = (typeB64: string): string => {
+  const hasRealRevocationOutpoint = (cert: Certificate): boolean => {
+    return cert.revocation_outpoint !== 'not supported.0' &&
+           cert.revocation_outpoint !== '0000000000000000000000000000000000000000000000000000000000000000.0' &&
+           cert.revocation_outpoint.length > 10;
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setError(null);
+
     try {
-      return atob(typeB64);
-    } catch {
-      return typeB64 || 'N/A';
+      const res = await fetch('http://127.0.0.1:31301/relinquishCertificate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: deleteTarget.type,
+          serial_number: deleteTarget.serial_number,
+          certifier: deleteTarget.certifier,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.is_published) {
+          throw new Error('This certificate is publicly visible on the BSV overlay. You must unpublish it before deleting. This feature is coming soon.');
+        }
+        throw new Error(data.error || `Failed to delete (${res.status})`);
+      }
+
+      setSuccess(`${deleteTarget.type_name} certificate removed from wallet.`);
+      setDeleteTarget(null);
+      setExpandedCert(null);
+      fetchCertificates();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete certificate');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -64,6 +143,111 @@ const CertificatesTab: React.FC = () => {
   return (
     <div className="wd-certificates">
       {error && <div className="wd-error-banner">{error}</div>}
+      {success && (
+        <div style={{
+          background: 'rgba(34, 197, 94, 0.1)',
+          border: '1px solid rgba(34, 197, 94, 0.3)',
+          borderRadius: '6px',
+          padding: '8px 12px',
+          marginBottom: '8px',
+          fontSize: '13px',
+          color: '#22c55e',
+        }}>
+          {success}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: '#1e1e1e',
+            border: '1px solid #333',
+            borderRadius: '8px',
+            padding: '20px',
+            maxWidth: '420px',
+            width: '90%',
+          }}>
+            <h3 style={{ margin: '0 0 12px', color: '#e5e7eb', fontSize: '16px' }}>
+              Delete Certificate?
+            </h3>
+
+            <div style={{ fontSize: '13px', lineHeight: '1.6', color: '#9ca3af', marginBottom: '16px' }}>
+              <p style={{ margin: '0 0 8px' }}>
+                This will remove the <strong style={{ color: '#e5e7eb' }}>
+                  {getTypeIcon(deleteTarget.type_name)} {deleteTarget.type_name}
+                </strong> certificate
+                {deleteTarget.decrypted_fields?.userName && (
+                  <> for <strong style={{ color: '#e5e7eb' }}>@{deleteTarget.decrypted_fields.userName}</strong></>
+                )}
+                {deleteTarget.decrypted_fields?.email && (
+                  <> for <strong style={{ color: '#e5e7eb' }}>{deleteTarget.decrypted_fields.email}</strong></>
+                )}
+                {' '}from your wallet.
+              </p>
+
+              {hasRealRevocationOutpoint(deleteTarget) && (
+                <div style={{
+                  background: 'rgba(234, 179, 8, 0.1)',
+                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                  borderRadius: '4px',
+                  padding: '8px',
+                  marginBottom: '8px',
+                  color: '#eab308',
+                  fontSize: '12px',
+                }}>
+                  ⚠ This certificate has an on-chain record. Removing it from your wallet does not revoke it on the blockchain. The certifier ({deleteTarget.certifier_name}) may still have records of this certificate.
+                </div>
+              )}
+
+              <p style={{ margin: '0', fontSize: '12px', color: '#6b7280' }}>
+                You can re-acquire this certificate later from {deleteTarget.certifier_name} if needed.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                style={{
+                  padding: '8px 16px',
+                  background: '#333',
+                  border: '1px solid #444',
+                  borderRadius: '4px',
+                  color: '#e5e7eb',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={deleting}
+                style={{
+                  padding: '8px 16px',
+                  background: deleting ? '#666' : '#dc2626',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  cursor: deleting ? 'default' : 'pointer',
+                  fontSize: '13px',
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {certificates.length === 0 ? (
         <div className="wd-empty">
@@ -71,11 +255,12 @@ const CertificatesTab: React.FC = () => {
           <span className="wd-empty-text">No certificates found</span>
           <span className="wd-empty-sub">
             Identity certificates (BRC-52) will appear here when acquired from trusted certifiers.
+            Visit <a href="#" onClick={(e) => { e.preventDefault(); (window as any).cefMessage?.send('tab_create', ['https://socialcert.net']); }}>socialcert.net</a> to get started.
           </span>
         </div>
       ) : (
         <>
-          <span style={{ fontSize: '13px', color: '#6b7280' }}>
+          <span style={{ fontSize: '13px', color: '#6b7280', marginBottom: '8px', display: 'block' }}>
             {certificates.length} certificate{certificates.length !== 1 ? 's' : ''}
           </span>
 
@@ -83,21 +268,101 @@ const CertificatesTab: React.FC = () => {
             <thead>
               <tr>
                 <th>Type</th>
+                <th>Identity</th>
                 <th>Certifier</th>
-                <th>Subject</th>
-                <th>Fields</th>
-                <th>Serial</th>
+                <th>Issued</th>
+                <th style={{ width: '60px' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {certificates.map((cert, idx) => (
-                <tr key={idx}>
-                  <td>{decodeType(cert.type)}</td>
-                  <td><span className="wd-cert-hash">{truncateHash(cert.certifier)}</span></td>
-                  <td><span className="wd-cert-hash">{truncateHash(cert.subject)}</span></td>
-                  <td>{Object.keys(cert.fields).length} field(s)</td>
-                  <td><span className="wd-cert-hash">{cert.serial_number ? truncateHash(cert.serial_number) : 'N/A'}</span></td>
-                </tr>
+                <React.Fragment key={idx}>
+                  <tr
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => setExpandedCert(expandedCert === idx ? null : idx)}
+                  >
+                    <td>
+                      <span style={{ marginRight: '6px' }}>{getTypeIcon(cert.type_name)}</span>
+                      {cert.type_name}
+                    </td>
+                    <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>
+                      {getPrimaryField(cert)}
+                    </td>
+                    <td>{cert.certifier_name}</td>
+                    <td style={{ fontSize: '12px', color: '#9ca3af' }}>{formatDate(cert.created_at)}</td>
+                    <td>
+                      <button
+                        title="Delete certificate"
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: '#ef4444',
+                          fontSize: '14px',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                        }}
+                        onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}
+                        onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                      >
+                        🗑
+                      </button>
+                    </td>
+                  </tr>
+
+                  {expandedCert === idx && (
+                    <tr>
+                      <td colSpan={5} style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)' }}>
+                        <div style={{ fontSize: '12px', lineHeight: '1.8' }}>
+                          {/* Decrypted fields */}
+                          {cert.decrypted_fields && Object.keys(cert.decrypted_fields).length > 0 && (
+                            <div style={{ marginBottom: '8px' }}>
+                              <strong style={{ color: '#d1d5db' }}>Fields:</strong>
+                              {Object.entries(cert.decrypted_fields).map(([name, value]) => (
+                                <div key={name} style={{ marginLeft: '12px', color: '#9ca3af' }}>
+                                  <span style={{ color: '#6b7280' }}>{name}:</span>{' '}
+                                  {name === 'profilePhoto' ? (
+                                    <img
+                                      src={value}
+                                      alt="avatar"
+                                      style={{ width: '24px', height: '24px', borderRadius: '50%', verticalAlign: 'middle', marginLeft: '4px' }}
+                                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                    />
+                                  ) : (
+                                    <span style={{ color: '#e5e7eb' }}>{value}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Technical details */}
+                          <div style={{ color: '#6b7280' }}>
+                            <div>
+                              <span>Certifier: </span>
+                              <span className="wd-cert-hash" title={cert.certifier}>{cert.certifier_name} ({truncateHash(cert.certifier)})</span>
+                            </div>
+                            <div>
+                              <span>Serial: </span>
+                              <span className="wd-cert-hash">{truncateHash(cert.serial_number)}</span>
+                            </div>
+                            <div>
+                              <span>Revocation: </span>
+                              <span className="wd-cert-hash">
+                                {hasRealRevocationOutpoint(cert) ? (
+                                  <span title={cert.revocation_outpoint}>{truncateHash(cert.revocation_outpoint)} (on-chain)</span>
+                                ) : (
+                                  'N/A'
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

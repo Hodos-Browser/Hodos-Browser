@@ -10,3 +10,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </BrowserRouter>
 );
+
+// Remove splash screen after React mounts
+const splash = document.getElementById('splash');
+if (splash) {
+  splash.classList.add('fade-out');
+  splash.addEventListener('transitionend', () => splash.remove());
+  // Fallback: CEF OSR overlays may not fire transitionend
+  setTimeout(() => splash.remove(), 300);
+}

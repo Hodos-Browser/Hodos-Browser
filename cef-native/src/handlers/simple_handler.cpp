@@ -7,6 +7,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LocalFileResourceHandler.h"
     #include "../../include/core/LayoutHelpers.h"
     #include <windows.h>
     #include <shobjidl.h>
@@ -45,6 +46,7 @@
 
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
+#include "include/cef_app.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/cef_task.h"
@@ -835,6 +837,26 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
+            // Show main window shortly after header load (smooth startup).
+            // Delay 150ms to give React time to mount and paint the toolbar,
+            // so the window appears with the header fully rendered.
+#ifdef _WIN32
+            {
+                extern bool g_window_shown;
+                if (!g_window_shown) {
+                    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+                        extern HWND g_hwnd;
+                        extern bool g_window_shown;
+                        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+                            ShowWindow(g_hwnd, SW_SHOW);
+                            UpdateWindow(g_hwnd);
+                            g_window_shown = true;
+                            Logger::Log("Main window shown - header browser rendered", 1, 2);
+                        }
+                    }), 150);
+                }
+            }
+#endif
             // Inject the hodosBrowser API into header browser (where React app runs)
             LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
 
@@ -1275,6 +1297,19 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     // Unregister from handler map
     browser_handler_map_.erase(browser->GetIdentifier());
+
+    // Check shutdown IMMEDIATELY after erase, before any early returns.
+    // Tab and popup branches return early, so this must come first.
+#ifdef _WIN32
+    {
+        extern bool g_app_shutting_down;
+        if (g_app_shutting_down && browser_handler_map_.empty()) {
+            LOG_INFO_BROWSER("🛑 All browsers closed during shutdown — quitting CEF message loop");
+            CefQuitMessageLoop();
+            return;  // No further cleanup needed during shutdown
+        }
+    }
+#endif
 
     std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
     std::cout << "  Role: " << role_ << std::endl;
@@ -5783,6 +5818,18 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
+
+    // Production frontend serving: if frontend/ exists next to .exe,
+    // serve files from disk instead of hitting the Vite dev server.
+    // MUST be before adblock/cookie checks — those handlers would try to
+    // network-fetch from port 5137, which has no server in production.
+    {
+        std::string frontend_dir;
+        if (url.find("127.0.0.1:5137") != std::string::npos &&
+            IsFrontendAvailable(frontend_dir)) {
+            return new LocalFileResourceRequestHandler(frontend_dir, url);
+        }
+    }
 
     // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
     // bypass ALL resource handlers — let CEF's native network stack handle them.
