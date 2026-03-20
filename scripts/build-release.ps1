@@ -2,7 +2,7 @@
 # Usage: .\scripts\build-release.ps1 [-Version "0.1.0-alpha.1"] [-SkipBuild] [-NoInstaller]
 
 param(
-    [string]$Version = "0.1.0-alpha.1",
+    [string]$Version = "0.1.1-alpha.1",
     [switch]$SkipBuild,
     [switch]$NoInstaller
 )
