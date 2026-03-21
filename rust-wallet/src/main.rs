@@ -544,6 +544,9 @@ async fn main() -> std::io::Result<()> {
             // Unified recipient resolution (identity key, paymail, BSV address)
             .route("/wallet/recipient/resolve", web::get().to(handlers::recipient_resolve))
 
+            // Recipient autocomplete suggestions (Issue #38)
+            .route("/wallet/recipient/suggest", web::get().to(handlers::recipient_suggest))
+
             // Unified activity feed (sent + received transactions)
             .route("/wallet/activity", web::get().to(handlers::wallet_activity))
 
