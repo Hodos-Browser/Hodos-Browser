@@ -4876,6 +4876,34 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // Per-site fingerprint protection toggle — get current state
+    if (message_name == "fingerprint_get_site_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        bool enabled = FingerprintProtection::GetInstance().IsSiteEnabled(domain);
+
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["enabled"] = enabled;
+
+        CefRefPtr<CefProcessMessage> responseMsg =
+            CefProcessMessage::Create("fingerprint_get_site_enabled_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
+        return true;
+    }
+
+    // Per-site fingerprint protection toggle — set state
+    if (message_name == "fingerprint_set_site_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        bool enabled = (args->GetString(1).ToString() == "true");
+        FingerprintProtection::GetInstance().SetSiteEnabled(domain, enabled);
+        return true;
+    }
+
     // Sprint 10b: Per-site scriptlet toggle
     if (message_name == "adblock_scriptlet_toggle") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -5637,11 +5665,36 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
         std::string navUrl = request->GetURL().ToString();
         if (!navUrl.empty() && navUrl.find("127.0.0.1") == std::string::npos &&
             navUrl.find("localhost") == std::string::npos) {
-            uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
-            CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
-            msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
-            msg->GetArgumentList()->SetString(1, navUrl);
-            frame->SendProcessMessage(PID_RENDERER, msg);
+
+            // Extract domain for per-site check (mirrors FingerprintProtection::ExtractDomain)
+            std::string domain;
+            {
+                size_t start = navUrl.find("://");
+                if (start != std::string::npos) {
+                    start += 3;
+                    size_t end = navUrl.find_first_of(":/", start);
+                    if (end == std::string::npos) end = navUrl.size();
+                    domain = navUrl.substr(start, end - start);
+                } else {
+                    domain = navUrl;
+                }
+            }
+
+            if (FingerprintProtection::IsAuthDomain(navUrl) ||
+                !FingerprintProtection::GetInstance().IsSiteEnabled(domain)) {
+                // Send disable signal to renderer — skip fingerprint injection for this URL
+                CefRefPtr<CefProcessMessage> msg =
+                    CefProcessMessage::Create("fingerprint_site_disabled");
+                msg->GetArgumentList()->SetString(0, navUrl);
+                frame->SendProcessMessage(PID_RENDERER, msg);
+            } else {
+                // Normal path: send seed for farbling
+                uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
+                msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
+                msg->GetArgumentList()->SetString(1, navUrl);
+                frame->SendProcessMessage(PID_RENDERER, msg);
+            }
         }
     }
 

@@ -3834,6 +3834,8 @@ int main(int argc, char* argv[]) {
 
         // Initialize fingerprint protection session token
         FingerprintProtection::GetInstance().Initialize();
+        // Load per-site fingerprint overrides from fingerprint_settings.json
+        FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
         LOG_INFO("Fingerprint protection initialized");
 
         // Initialize CookieBlockManager

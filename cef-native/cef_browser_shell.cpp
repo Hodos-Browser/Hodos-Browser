@@ -2638,6 +2638,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Sprint 12c: Initialize fingerprint protection session token
     FingerprintProtection::GetInstance().Initialize();
+    // Load per-site fingerprint overrides from fingerprint_settings.json
+    FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
     LOG_INFO("Fingerprint protection initialized");
 
     // Each profile instance needs its own root to avoid CEF SingletonLock conflicts
