@@ -18,6 +18,7 @@
 
 The build script compiles all components, assembles a staging directory, creates a portable zip, and builds the installer.
 
+### Powershell
 ```powershell
 # Full build (all components + installer)
 .\scripts\build-release.ps1
@@ -30,6 +31,21 @@ The build script compiles all components, assembles a staging directory, creates
 
 # Custom version
 .\scripts\build-release.ps1 -Version "0.2.0-alpha.1"
+```
+
+### Git Bash
+```bash
+# Full build (all components + installer)
+powershell.exe -ExecutionPolicy Bypass -File scripts/build-release.ps1
+
+# Skip compilation (use existing build artifacts)
+powershell.exe -ExecutionPolicy Bypass -File scripts/build-release.ps1 -SkipBuild
+
+# Skip installer (portable zip only)
+powershell.exe -ExecutionPolicy Bypass -File scripts/build-release.ps1 -NoInstaller
+
+# Custom version
+powershell.exe -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Version "0.2.0-alpha.1"
 ```
 
 **Output** (in `dist/`):
