@@ -5,6 +5,7 @@ import { useCookieBlocking } from './useCookieBlocking';
 declare global {
   interface Window {
     onCookieCheckSiteAllowedResponse?: (data: { domain: string; allowed: boolean }) => void;
+    onFingerprintSiteEnabledResponse?: (data: { domain: string; enabled: boolean }) => void;
   }
 }
 
@@ -15,6 +16,10 @@ export const usePrivacyShield = (domain: string) => {
   // Whether third-party cookies are allowed (i.e. cookie blocking is bypassed) for this domain
   const [cookieSiteAllowed, setCookieSiteAllowed] = useState<boolean>(false);
   const checkPendingRef = useRef(false);
+
+  // Per-site fingerprint protection state
+  const [fingerprintSiteEnabled, setFingerprintSiteEnabledState] = useState(true);
+  const [fingerprintNeedsReload, setFingerprintNeedsReload] = useState(false);
 
   // Cookie blocking is "enabled" when the site is NOT in the allow list
   const cookieBlockingEnabled = !cookieSiteAllowed;
@@ -48,6 +53,30 @@ export const usePrivacyShield = (domain: string) => {
     }
   }, [domain, checkCookieSiteAllowed, adblock.checkSiteAdblock, adblock.checkScriptlets]);
 
+  // Fetch per-site fingerprint enabled state when domain changes
+  useEffect(() => {
+    setFingerprintNeedsReload(false);
+
+    const timeout = setTimeout(() => {
+      delete window.onFingerprintSiteEnabledResponse;
+    }, 3000);
+
+    window.onFingerprintSiteEnabledResponse = (data) => {
+      clearTimeout(timeout);
+      if (data.domain === domain) {
+        setFingerprintSiteEnabledState(data.enabled);
+      }
+      delete window.onFingerprintSiteEnabledResponse;
+    };
+
+    window.cefMessage?.send('fingerprint_get_site_enabled', [domain]);
+
+    return () => {
+      clearTimeout(timeout);
+      delete window.onFingerprintSiteEnabledResponse;
+    };
+  }, [domain]);
+
   // Toggle cookie blocking for site
   const toggleCookieBlocking = useCallback(async (d: string, enable: boolean) => {
     if (enable) {
@@ -60,6 +89,13 @@ export const usePrivacyShield = (domain: string) => {
       setCookieSiteAllowed(true);
     }
   }, [cookie.allowThirdParty, cookie.removeThirdPartyAllow]);
+
+  // Toggle per-site fingerprint protection
+  const toggleFingerprintSite = useCallback((d: string, enabled: boolean) => {
+    window.cefMessage?.send('fingerprint_set_site_enabled', [d, enabled.toString()]);
+    setFingerprintSiteEnabledState(enabled);
+    setFingerprintNeedsReload(true);
+  }, []);
 
   // Master toggle: both enabled or both disabled
   const masterEnabled = adblock.adblockEnabled && cookieBlockingEnabled;
@@ -94,6 +130,11 @@ export const usePrivacyShield = (domain: string) => {
     cookieBlockingEnabled,
     cookieBlockedCount: cookie.blockedCount,
     toggleCookieBlocking,
+
+    // Fingerprint protection (per-site)
+    fingerprintSiteEnabled,
+    toggleFingerprintSite,
+    fingerprintNeedsReload,
 
     // Cookie panel data (for expandable sections)
     blockedDomains: cookie.blockedDomains,

@@ -170,4 +170,41 @@ impl<'a> ProvenTxRepository<'a> {
         )?;
         Ok(())
     }
+
+    /// Delete a proven_txs record by txid.
+    ///
+    /// Used to clean up corrupt or invalid merkle proofs (e.g., ARC returned
+    /// wrong BUMP data). Also unlinks any transactions referencing this record.
+    pub fn delete_by_txid(&self, txid: &str) -> CacheResult<usize> {
+        // Unlink any transactions first
+        self.conn.execute(
+            "UPDATE transactions SET proven_tx_id = NULL WHERE txid = ?1",
+            rusqlite::params![txid],
+        )?;
+
+        let count = self.conn.execute(
+            "DELETE FROM proven_txs WHERE txid = ?1",
+            rusqlite::params![txid],
+        )?;
+
+        Ok(count)
+    }
+
+    /// Replace an existing proven_txs record with corrected data.
+    ///
+    /// Deletes the old record and inserts the new one. Used when a previously
+    /// stored proof is found to have an invalid merkle root.
+    pub fn replace_proof(
+        &self,
+        txid: &str,
+        height: u32,
+        tx_index: u64,
+        merkle_path: &[u8],
+        raw_tx: &[u8],
+        block_hash: &str,
+        merkle_root: &str,
+    ) -> CacheResult<i64> {
+        self.delete_by_txid(txid)?;
+        self.insert_or_get(txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root)
+    }
 }

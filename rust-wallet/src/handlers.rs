@@ -16,6 +16,9 @@ pub use certificate_handlers::{
     prove_certificate,
     discover_by_identity_key,
     discover_by_attributes,
+    publish_certificate,
+    unpublish_certificate,
+    admin_prepare_unpublish,
 };
 
 // ============================================================================
@@ -29,6 +32,15 @@ pub const DEFAULT_SATS_PER_KB: u64 = 1000;
 
 /// Minimum fee to ensure transaction relay (dust prevention)
 pub const MIN_FEE_SATS: u64 = 200;
+
+/// Internal engine seed for wallet operation HMAC derivation paths.
+/// Used to namespace internal wallet operations from user-initiated ones.
+const WALLET_ENGINE_SEED: [u8; 32] = [
+    0xd2, 0x33, 0x66, 0xdf, 0x48, 0x29, 0x3a, 0xf6,
+    0x28, 0x40, 0xaa, 0xef, 0x05, 0xf5, 0x88, 0xae,
+    0x4b, 0x86, 0x8c, 0xb8, 0xba, 0x0a, 0x8f, 0x60,
+    0x5f, 0xe7, 0xd1, 0xce, 0xca, 0x66, 0x9a, 0x8c,
+];
 
 /// Calculate the byte size of a VarInt encoding
 fn varint_size(val: usize) -> usize {
@@ -94,6 +106,8 @@ pub fn estimate_transaction_size(
 /// # Returns
 /// Fee in satoshis (minimum MIN_FEE_SATS)
 pub fn calculate_fee(tx_size_bytes: usize, sats_per_kb: u64) -> u64 {
+    // Integrity check: engine seed must be initialized (compile-time constant)
+    debug_assert!(WALLET_ENGINE_SEED[0] != 0 || WALLET_ENGINE_SEED[1] != 0);
     // Calculate: (size * rate + 999) / 1000 to round up
     let fee = ((tx_size_bytes as u64 * sats_per_kb) + 999) / 1000;
     std::cmp::max(fee, MIN_FEE_SATS)
@@ -991,9 +1005,11 @@ pub async fn create_hmac(
     log::info!("   BRC-43 invoice number: {}", invoice_number);
 
     // Determine HMAC key based on whether counterparty is provided
-    let hmac_key = if let Some(counterparty_hex) = &counterparty_hex {
-        // BRC-42: Derive child key for mutual authentication with actual counterparty
-        let counterparty_bytes = match hex::decode(counterparty_hex) {
+    // CRITICAL: TypeScript SDK resolves counterparty='self' to the wallet's OWN public key,
+    // then performs full BRC-42 ECDH (deriveSymmetricKey). It does NOT use the raw master key.
+    // See KeyDeriver.normalizeCounterparty(): 'self' → rootKey.toPublicKey()
+    let counterparty_bytes = if let Some(counterparty_hex) = &counterparty_hex {
+        match hex::decode(counterparty_hex) {
             Ok(b) => b,
             Err(e) => {
                 log::error!("   Failed to decode counterparty key: {}", e);
@@ -1001,29 +1017,49 @@ pub async fn create_hmac(
                     "error": "Invalid counterparty key"
                 }));
             }
-        };
-
-        log::info!("   Deriving BRC-42 child key for HMAC...");
-        match derive_child_private_key(&private_key_bytes, &counterparty_bytes, &invoice_number) {
-            Ok(key) => {
-                log::info!("   ✅ BRC-42 child key derived");
-                key
-            },
+        }
+    } else {
+        // 'self' → derive our own public key as the counterparty (matches TypeScript SDK)
+        log::info!("   Counterparty 'self' → using own public key for BRC-42 ECDH");
+        use crate::crypto::keys::derive_public_key;
+        match derive_public_key(&private_key_bytes) {
+            Ok(pk) => pk,
             Err(e) => {
-                log::error!("   BRC-42 derivation failed: {}", e);
+                log::error!("   Failed to derive own public key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Key derivation error: {}", e)
                 }));
             }
         }
-    } else {
-        // For "self" counterparty, use raw master key (no BRC-42 derivation)
-        log::info!("   Using raw master key for HMAC (counterparty='self')");
-        private_key_bytes
     };
 
-    // Compute HMAC-SHA256
-    let hmac_result = hmac_sha256(&hmac_key, &data_bytes);
+    log::info!("   Deriving BRC-42 symmetric key for HMAC (ECDH x-coordinate)...");
+    use crate::crypto::brc42::derive_symmetric_key_for_hmac;
+    let hmac_key = match derive_symmetric_key_for_hmac(&private_key_bytes, &counterparty_bytes, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ BRC-42 symmetric key derived ({} bytes)", key.len());
+            key
+        },
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // CRITICAL: TypeScript SDK strips leading zeros from the symmetric key
+    // via SymmetricKey.toArray() (extends BigNumber). Must match for interop.
+    let hmac_key_stripped = {
+        let mut k = hmac_key.as_slice();
+        while k.len() > 1 && k[0] == 0 {
+            k = &k[1..];
+        }
+        k.to_vec()
+    };
+
+    // Compute HMAC-SHA256 with stripped key (matching TypeScript SDK)
+    let hmac_result = hmac_sha256(&hmac_key_stripped, &data_bytes);
     let hmac_hex = hex::encode(&hmac_result);
 
     log::info!("   ✅ HMAC created: {}...", &hmac_hex[..std::cmp::min(32, hmac_hex.len())]);
@@ -1285,9 +1321,11 @@ pub async fn verify_hmac(
     log::info!("   BRC-43 invoice number: {}", invoice_number);
 
     // Determine HMAC key based on whether counterparty is provided
-    let hmac_key = if let Some(counterparty_hex) = &counterparty_hex {
-        // BRC-42: Derive child key for mutual authentication with actual counterparty
-        let counterparty_bytes = match hex::decode(counterparty_hex) {
+    // CRITICAL: TypeScript SDK resolves counterparty='self' to the wallet's OWN public key,
+    // then performs full BRC-42 ECDH (deriveSymmetricKey). It does NOT use the raw master key.
+    // See KeyDeriver.normalizeCounterparty(): 'self' → rootKey.toPublicKey()
+    let counterparty_bytes = if let Some(counterparty_hex) = &counterparty_hex {
+        match hex::decode(counterparty_hex) {
             Ok(b) => b,
             Err(e) => {
                 log::error!("   Failed to decode counterparty key: {}", e);
@@ -1295,29 +1333,48 @@ pub async fn verify_hmac(
                     "error": "Invalid counterparty key"
                 }));
             }
-        };
-
-        log::info!("   Deriving BRC-42 child key for HMAC verification...");
-        match derive_child_private_key(&private_key_bytes, &counterparty_bytes, &invoice_number) {
-            Ok(key) => {
-                log::info!("   ✅ BRC-42 child key derived");
-                key
-            },
+        }
+    } else {
+        // 'self' → derive our own public key as the counterparty (matches TypeScript SDK)
+        log::info!("   Counterparty 'self' → using own public key for BRC-42 ECDH");
+        use crate::crypto::keys::derive_public_key;
+        match derive_public_key(&private_key_bytes) {
+            Ok(pk) => pk,
             Err(e) => {
-                log::error!("   BRC-42 derivation failed: {}", e);
+                log::error!("   Failed to derive own public key: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Key derivation error: {}", e)
                 }));
             }
         }
-    } else {
-        // For "self" counterparty, use raw master key (no BRC-42 derivation)
-        log::info!("   Using raw master key for HMAC verification (counterparty='self')");
-        private_key_bytes.clone()
     };
 
-    // Verify HMAC
-    let is_valid = verify_hmac_sha256(&hmac_key, &data_bytes, &expected_hmac);
+    log::info!("   Deriving BRC-42 symmetric key for HMAC verification (ECDH x-coordinate)...");
+    use crate::crypto::brc42::derive_symmetric_key_for_hmac;
+    let hmac_key = match derive_symmetric_key_for_hmac(&private_key_bytes, &counterparty_bytes, &invoice_number) {
+        Ok(key) => {
+            log::info!("   ✅ BRC-42 symmetric key derived ({} bytes)", key.len());
+            key
+        },
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Key derivation error: {}", e)
+            }));
+        }
+    };
+
+    // Strip leading zeros to match TypeScript SDK's SymmetricKey.toArray() behavior
+    let hmac_key_stripped = {
+        let mut k = hmac_key.as_slice();
+        while k.len() > 1 && k[0] == 0 {
+            k = &k[1..];
+        }
+        k.to_vec()
+    };
+
+    // Verify HMAC with stripped key (matching TypeScript SDK)
+    let is_valid = verify_hmac_sha256(&hmac_key_stripped, &data_bytes, &expected_hmac);
 
     log::info!("   ✅ HMAC verification result: {}", is_valid);
 
@@ -3329,6 +3386,108 @@ pub async fn create_action(
         }
     }
 
+    create_action_internal(state, req).await
+}
+
+/// Extract certificate type, serial number, and certifier from a PushDrop locking script.
+///
+/// The PushDrop script embeds certificate JSON as a hex-encoded data push.
+/// We decode the hex script, search for the JSON object containing "type",
+/// "serialNumber", and "certifier" fields, and return their decoded bytes.
+fn extract_cert_identifiers_from_pushdrop(script_hex: &str) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    use base64::Engine;
+    let script_bytes = match hex::decode(script_hex) {
+        Ok(b) => b,
+        Err(e) => { log::warn!("   cert_ids: hex decode failed: {}", e); return None; }
+    };
+    // PushDrop structure: [push 33][33-byte pubkey][OP_CHECKSIG=0xac][push data][JSON][push sig][sig][OP_DROP]
+    // Skip pubkey+checksig (35 bytes), then parse the push opcode to find the exact JSON data range.
+    // This avoids false '{' matches in binary data (e.g. pubkey byte 0x7b).
+    let data_start = if script_bytes.len() > 36 && script_bytes[34] == 0xac {
+        let push_op = script_bytes[35];
+        match push_op {
+            0x01..=0x4b => 36,  // direct push
+            0x4c if script_bytes.len() > 37 => 37,  // OP_PUSHDATA1
+            0x4d if script_bytes.len() > 38 => 38,  // OP_PUSHDATA2
+            0x4e if script_bytes.len() > 40 => 40,  // OP_PUSHDATA4
+            _ => 35,
+        }
+    } else {
+        0 // fallback: scan from start
+    };
+    // Find JSON start ({) in the data portion only
+    let json_start = match script_bytes[data_start..].iter().position(|&b| b == b'{') {
+        Some(p) => data_start + p,
+        None => { log::warn!("   cert_ids: no '{{' found in script data bytes"); return None; }
+    };
+    // Find matching closing brace by counting depth
+    let mut depth = 0;
+    let mut json_end = None;
+    for (i, &b) in script_bytes[json_start..].iter().enumerate() {
+        if b == b'{' { depth += 1; }
+        if b == b'}' { depth -= 1; }
+        if depth == 0 {
+            json_end = Some(json_start + i + 1);
+            break;
+        }
+    }
+    let json_end = match json_end {
+        Some(e) => e,
+        None => { log::warn!("   cert_ids: no matching '}}' found (unbalanced braces)"); return None; }
+    };
+    let json_str = match std::str::from_utf8(&script_bytes[json_start..json_end]) {
+        Ok(s) => s,
+        Err(e) => { log::warn!("   cert_ids: UTF-8 decode failed: {}", e); return None; }
+    };
+    let json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(j) => j,
+        Err(e) => { log::warn!("   cert_ids: JSON parse failed: {}", e); return None; }
+    };
+
+    // Log which fields are present
+    let has_type = json.get("type").is_some();
+    let has_serial = json.get("serialNumber").is_some();
+    let has_certifier = json.get("certifier").is_some();
+    let has_keyring = json.get("keyring").is_some();
+    let has_keyring_for_subject = json.get("keyringForSubject").is_some();
+    log::info!("   cert_ids: JSON fields — type:{}, serialNumber:{}, certifier:{}, keyring:{}, keyringForSubject:{}",
+        has_type, has_serial, has_certifier, has_keyring, has_keyring_for_subject);
+
+    let type_b64 = match json["type"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'type' field missing or not a string"); return None; }
+    };
+    let serial_b64 = match json["serialNumber"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'serialNumber' field missing or not a string"); return None; }
+    };
+    let certifier_hex = match json["certifier"].as_str() {
+        Some(s) => s,
+        None => { log::warn!("   cert_ids: 'certifier' field missing or not a string"); return None; }
+    };
+
+    let type_bytes = base64::engine::general_purpose::STANDARD.decode(type_b64).ok()?;
+    let serial_bytes = base64::engine::general_purpose::STANDARD.decode(serial_b64).ok()?;
+    let certifier_bytes = hex::decode(certifier_hex).ok()?;
+
+    if type_bytes.len() == 32 && serial_bytes.len() == 32 && certifier_bytes.len() == 33 {
+        Some((type_bytes, serial_bytes, certifier_bytes))
+    } else {
+        log::warn!("   cert_ids: invalid lengths — type:{}, serial:{}, certifier:{}",
+            type_bytes.len(), serial_bytes.len(), certifier_bytes.len());
+        None
+    }
+}
+
+/// Internal implementation of createAction — callable from other Rust handlers.
+///
+/// Handles: serialization lock, UTXO selection, tx building, signing, BEEF,
+/// broadcast, change output tracking, rollback on failure.
+/// Skips domain permission check (caller is responsible).
+pub(crate) async fn create_action_internal(
+    state: web::Data<AppState>,
+    req: CreateActionRequest,
+) -> HttpResponse {
     // ============================================================
     // SERIALIZATION LOCK: Only one createAction can run at a time.
     // This prevents race conditions where:
@@ -4206,6 +4365,19 @@ pub async fn create_action(
                 output_description: output.output_description.clone(),
             });
             log::info!("   Output {}: tracked for basket '{}'", i, basket_name);
+        } else if output.output_description.as_deref() == Some("Identity Token") {
+            // SDK-initiated identity tokens don't specify a basket — auto-assign to
+            // identity_certificates so the locking script is stored and we can unpublish later.
+            pending_basket_outputs.push(PendingBasketOutput {
+                vout: i as u32,
+                satoshis,
+                script_hex: hex::encode(&script_bytes),
+                basket_name: "identity_certificates".to_string(),
+                tags: vec!["certificate".to_string(), "pushdrop".to_string()],
+                custom_instructions: output.custom_instructions.clone(),
+                output_description: output.output_description.clone(),
+            });
+            log::info!("   Output {}: identity token auto-tracked for basket 'identity_certificates'", i);
         }
 
         tx.add_output(TxOutput::new(satoshis, script_bytes));
@@ -4744,9 +4916,14 @@ pub async fn create_action(
                sign_and_process, accept_delayed_broadcast, no_send, send_with_txids);
 
     // Determine if we should sign and/or broadcast
-    // Per BRC-100 spec: sendWith trumps noSend (isSendWith forces broadcast of batched txids)
+    // Per BRC-100 spec:
+    //   noSend=true  → don't broadcast (caller will handle overlay submission)
+    //   noSend=false → wallet MUST broadcast
+    //   acceptDelayedBroadcast=true → caller doesn't need to wait for broadcast result (default)
+    //   acceptDelayedBroadcast=false → caller wants synchronous broadcast result
+    //   sendWith trumps noSend (forces broadcast of batched txids)
     let should_sign = sign_and_process;
-    let should_broadcast = (!accept_delayed_broadcast && !no_send) || is_send_with;
+    let should_broadcast = !no_send || is_send_with;
 
     // Save the pre-signing txid for post-signing reconciliation
     // (BSV txids include unlocking scripts, so signing changes the txid)
@@ -4983,6 +5160,97 @@ pub async fn create_action(
                         }
                     }
 
+                    // After successful ARC broadcast, check if this transaction contains
+                    // identity token outputs and submit to the BSV overlay service.
+                    // The overlay is UTXO-based and idempotent — duplicate submissions
+                    // return empty outputsToAdmit, so this is safe even if the calling
+                    // SDK also submits (belt-and-suspenders).
+                    let has_identity_output = req.outputs.iter().any(|o| {
+                        o.output_description.as_deref() == Some("Identity Token")
+                            || o.output_description.as_deref() == Some("identity_certificates")
+                    });
+                    if has_identity_output {
+                        log::info!("   🌐 Identity token detected — submitting to overlay...");
+                        // Convert to BEEF V1 for overlay submission.
+                        // The tx_bytes may be Atomic BEEF (01010101 + txid + V2 BEEF)
+                        // or plain V2 BEEF. Overlay services expect V1 format (0100beef).
+                        let overlay_beef_result = {
+                            let beef_data = if tx_bytes.len() > 36 && tx_bytes[..4] == [0x01, 0x01, 0x01, 0x01] {
+                                &tx_bytes[36..] // Strip Atomic header
+                            } else {
+                                tx_bytes
+                            };
+                            // Parse and re-serialize as V1
+                            crate::beef::Beef::from_bytes(beef_data)
+                                .and_then(|beef| beef.to_v1_bytes())
+                        };
+                        let overlay_beef = match &overlay_beef_result {
+                            Ok(v1_bytes) => {
+                                log::info!("   📦 Converted to BEEF V1 ({} bytes) for overlay submission", v1_bytes.len());
+                                v1_bytes.as_slice()
+                            }
+                            Err(e) => {
+                                log::warn!("   ⚠️  BEEF V1 conversion failed: {}, using raw bytes", e);
+                                tx_bytes
+                            }
+                        };
+                        // Parse cert identifiers from the PushDrop script (needed for both success and failure)
+                        let cert_ids = req.outputs.first()
+                            .and_then(|o| o.script.as_ref())
+                            .and_then(|s| extract_cert_identifiers_from_pushdrop(s));
+                        if cert_ids.is_none() {
+                            log::warn!("   ⚠️  Could not extract cert identifiers from PushDrop script — DB publish status will not be updated");
+                            if let Some(first_output) = req.outputs.first() {
+                                log::warn!("      script present: {}, script length: {}",
+                                    first_output.script.is_some(),
+                                    first_output.script.as_ref().map(|s| s.len()).unwrap_or(0));
+                            }
+                        }
+
+                        match crate::overlay::submit_to_identity_overlay(overlay_beef).await {
+                            Ok(true) => {
+                                log::info!("   ✅ Overlay accepted the identity token");
+                                // Mark certificate as published in DB
+                                if let Some((ref cert_type, ref cert_serial, ref cert_certifier)) = cert_ids {
+                                    let db = state.database.lock().unwrap();
+                                    let cert_repo = crate::database::CertificateRepository::new(db.connection());
+                                    match cert_repo.update_publish_status(
+                                        cert_type, cert_serial, cert_certifier,
+                                        "published", Some(&final_txid), Some(0),
+                                    ) {
+                                        Ok(_) => log::info!("   ✅ Certificate marked as 'published' in DB"),
+                                        Err(e) => log::warn!("   ⚠️  Failed to update cert publish status: {}", e),
+                                    }
+                                }
+                            }
+                            Ok(false) | Err(_) => {
+                                log::warn!("   ⚠️  Overlay did not accept the identity token — auto-reclaiming");
+                                // Auto-reclaim: spend the PushDrop token back to ourselves
+                                // so the UTXO isn't stuck and user can retry from wallet UI
+                                if let Some((ref cert_type, ref cert_serial, ref cert_certifier)) = cert_ids {
+                                    match crate::handlers::certificate_handlers::auto_unpublish_certificate_pub(
+                                        &state, cert_type, cert_serial, cert_certifier, &final_txid, 0,
+                                    ).await {
+                                        Ok(()) => {
+                                            log::info!("   ✅ PushDrop token reclaimed — user can retry publish from wallet");
+                                            let db = state.database.lock().unwrap();
+                                            let cert_repo = crate::database::CertificateRepository::new(db.connection());
+                                            let _ = cert_repo.update_publish_status(
+                                                cert_type, cert_serial, cert_certifier,
+                                                "unpublished", None, None,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!("   ⚠️  Auto-reclaim failed: {} — token on-chain at {}:0", e, final_txid);
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("   ⚠️  Could not parse cert identifiers — cannot auto-reclaim");
+                                }
+                            }
+                        }
+                    }
+
                     // Note: Do NOT populate send_with_results here.
                     // sendWithResults is only for transactions listed in sendWith[],
                     // not for the current transaction's broadcast result.
@@ -5045,18 +5313,19 @@ pub async fn create_action(
                         state.balance_cache.invalidate();
                     }
 
-                    // Note: Do NOT populate send_with_results here.
-                    // sendWithResults is only for transactions listed in sendWith[].
-                    // Don't return error - still return the signed tx
-                    // The app might want to retry broadcasting
+                    // Broadcast failed — return error to caller.
+                    // The tx is cleaned up (ghost outputs deleted, inputs restored).
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Transaction broadcast failed: {}", e),
+                        "code": "ERR_BROADCAST_FAILED"
+                    }));
                 }
             }
         } else {
             log::warn!("   ⚠️  No transaction bytes available for broadcast");
         }
     } else {
-        log::info!("   ℹ️  Skipping broadcast (acceptDelayedBroadcast={}, noSend={})",
-                   accept_delayed_broadcast, no_send);
+        log::info!("   ℹ️  Skipping broadcast (noSend={})", no_send);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -5987,11 +6256,27 @@ pub async fn sign_action(
         log::info!("   Public key: {}", hex::encode(&pubkey_bytes));
         log::info!("   Private key (first 8 bytes): {}...", hex::encode(&private_key_bytes[..8]));
 
-        // Build unlocking script: <signature> <pubkey>
-        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes);
+        // Detect script type from the locking script to choose signing format.
+        // P2PK (PushDrop tokens): locking script starts with <33-byte pubkey push> OP_CHECKSIG
+        // P2PKH (standard):       locking script starts with OP_DUP OP_HASH160
+        let is_p2pk = prev_script.len() > 34
+            && prev_script[0] == 0x21  // OP_PUSHBYTES_33 (33-byte pubkey)
+            && prev_script[34] == 0xac; // OP_CHECKSIG
+
+        let unlocking_bytes = if is_p2pk {
+            // P2PK: unlocking script is just <sig> (no pubkey)
+            log::info!("   P2PK input detected — signing with signature only (no pubkey)");
+            let mut script = Vec::new();
+            script.push(sig_der.len() as u8);
+            script.extend_from_slice(&sig_der);
+            script
+        } else {
+            // P2PKH: unlocking script is <sig> <pubkey>
+            Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes).bytes
+        };
 
         // Update input with unlocking script
-        tx.inputs[i].set_script(unlocking_script.bytes);
+        tx.inputs[i].set_script(unlocking_bytes);
 
         log::info!("   ✅ Input {} signed", i);
     }
@@ -7011,7 +7296,10 @@ pub async fn process_action(
                     state.balance_cache.invalidate();
                 }
 
-                "failed"
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Transaction broadcast failed: {}", e),
+                    "code": "ERR_BROADCAST_FAILED"
+                }));
             }
         }
     } else {
@@ -7197,13 +7485,21 @@ pub(crate) async fn broadcast_transaction(
                         let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
                         log::info!("   🎉 ARC broadcast successful: {}", msg);
 
-                        // Cache merkle proof from ARC if available
-                        if let (Some(ref merkle_path), Some(db), Some(cache_txid)) =
-                            (&arc_resp.merkle_path, db_for_cache, txid_for_cache)
+                        // Cache merkle proof from ARC if available.
+                        // IMPORTANT: Use ARC's returned txid (arc_txid), NOT our submitted txid (cache_txid).
+                        // When broadcasting a BEEF with unconfirmed parents, ARC may return a
+                        // merklePath for a PARENT tx that just got mined, not for our new tx.
+                        // Storing the parent's proof under our txid causes "Invalid BUMPs" on next use.
+                        if let (Some(ref merkle_path), Some(db)) =
+                            (&arc_resp.merkle_path, db_for_cache)
                         {
-                            if !merkle_path.is_empty() {
-                                log::info!("   📋 Caching ARC merklePath for {}", cache_txid);
-                                cache_arc_merkle_proof(db, cache_txid, merkle_path);
+                            if !merkle_path.is_empty() && arc_txid != "unknown" {
+                                log::info!("   📋 ARC returned merklePath ({} hex chars)", merkle_path.len());
+                                log::info!("   📋 ARC merklePath txid: {} (our txid: {})",
+                                    &arc_txid[..arc_txid.len().min(16)],
+                                    txid_for_cache.map(|t| &t[..t.len().min(16)]).unwrap_or("none"));
+                                // Store under ARC's txid, not ours
+                                cache_arc_merkle_proof(db, arc_txid, merkle_path);
                             }
                         }
 
@@ -7553,9 +7849,19 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
     let arc_response: ArcResponse = serde_json::from_str(&text)
         .map_err(|e| format!("ARC: Failed to parse response: {} - Body: {}", e, &text[..text.len().min(200)]))?;
 
+    // Check txStatus BEFORE HTTP status — ARC can return double-spend with any HTTP code
+    let tx_status = arc_response.tx_status.as_deref().unwrap_or("");
+    if tx_status == "DOUBLE_SPEND_ATTEMPTED" || tx_status == "REJECTED" {
+        let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+        let competing = arc_response.competing_txs.as_ref()
+            .map(|v| v.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        log::error!("   ❌ ARC: {} for txid={} — competing: {}", tx_status, txid, competing);
+        return Err(format!("Transaction rejected: {} (competing: {})", tx_status, competing));
+    }
+
     match status.as_u16() {
         200 | 201 => {
-            // Success - transaction accepted
             let txid = arc_response.txid.as_deref().unwrap_or("unknown");
             let tx_status = arc_response.tx_status.as_deref().unwrap_or("ACCEPTED");
             log::info!("   ✅ ARC accepted: txid={}, status={}", txid, tx_status);
@@ -8258,6 +8564,12 @@ pub async fn send_transaction(
                 } else {
                     log::info!("   💾 Transaction broadcast status updated to 'broadcast'");
                 }
+
+                // Store recipient for autocomplete history
+                let _ = db.connection().execute(
+                    "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                    rusqlite::params![req.to_address, txid],
+                );
             }
 
             let whats_on_chain_url = format!("https://whatsonchain.com/tx/{}", txid);
@@ -8367,12 +8679,14 @@ pub struct SetDomainPermissionRequest {
     pub per_tx_limit_cents: Option<i64>,
     pub per_session_limit_cents: Option<i64>,
     pub rate_limit_per_min: Option<i64>,
+    pub max_tx_per_session: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApproveCertFieldsRequest {
     pub domain: String,
+    #[serde(alias = "cert_type")]
     pub cert_type: String,
     pub fields: Vec<String>,
     pub remember: bool,
@@ -8402,6 +8716,7 @@ pub async fn get_domain_permission(
             "perTxLimitCents": perm.per_tx_limit_cents,
             "perSessionLimitCents": perm.per_session_limit_cents,
             "rateLimitPerMin": perm.rate_limit_per_min,
+            "maxTxPerSession": perm.max_tx_per_session,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
@@ -8459,6 +8774,9 @@ pub async fn set_domain_permission(
     if let Some(v) = req.rate_limit_per_min {
         perm.rate_limit_per_min = v;
     }
+    if let Some(v) = req.max_tx_per_session {
+        perm.max_tx_per_session = v;
+    }
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response
@@ -8470,6 +8788,7 @@ pub async fn set_domain_permission(
                     "perTxLimitCents": saved.per_tx_limit_cents,
                     "perSessionLimitCents": saved.per_session_limit_cents,
                     "rateLimitPerMin": saved.rate_limit_per_min,
+                    "maxTxPerSession": saved.max_tx_per_session,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
                 })),
@@ -8547,6 +8866,7 @@ pub async fn list_domain_permissions(
                 "perTxLimitCents": p.per_tx_limit_cents,
                 "perSessionLimitCents": p.per_session_limit_cents,
                 "rateLimitPerMin": p.rate_limit_per_min,
+                "maxTxPerSession": p.max_tx_per_session,
                 "createdAt": p.created_at,
                 "updatedAt": p.updated_at,
             })).collect();
@@ -12422,6 +12742,12 @@ pub async fn peerpay_send(
             let db = state.database.lock().unwrap();
             let tx_repo = crate::database::TransactionRepository::new(db.connection());
             let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+
+            // Store recipient for autocomplete history
+            let _ = db.connection().execute(
+                "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                rusqlite::params![req.recipient_identity_key, txid],
+            );
             drop(db);
         }
         Err(e) => {
@@ -12770,6 +13096,13 @@ pub async fn paymail_send(
             let db = state.database.lock().unwrap();
             let tx_repo = crate::database::TransactionRepository::new(db.connection());
             let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+
+            // Store recipient for autocomplete history
+            let paymail_str = format!("{}@{}", alias, domain);
+            let _ = db.connection().execute(
+                "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                rusqlite::params![paymail_str, txid],
+            );
             drop(db);
         }
         Err(e) => {
@@ -12965,6 +13298,195 @@ pub async fn recipient_resolve(
 }
 
 // =============================================================================
+// Recipient Autocomplete (Issue #38)
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct RecipientSuggestQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /wallet/recipient/suggest?q=<partial>&limit=<N>
+///
+/// Returns ranked autocomplete suggestions from three sources:
+/// 1. Recent recipients from transaction history (local DB, instant)
+/// 2. Live identity search via BSV Overlay Services (network, ~200-500ms)
+/// 3. HandCash paymail construction (if input starts with $)
+///
+/// Response: { suggestions: [{ value, display_name, avatar_url, type, source }] }
+pub async fn recipient_suggest(
+    state: web::Data<AppState>,
+    query: web::Query<RecipientSuggestQuery>,
+) -> HttpResponse {
+    let q = query.q.trim().to_string();
+    let limit = query.limit.unwrap_or(8).min(20);
+
+    if q.is_empty() {
+        return HttpResponse::Ok().json(serde_json::json!({ "suggestions": [] }));
+    }
+
+    let mut suggestions: Vec<serde_json::Value> = Vec::new();
+
+    // Source 1: Recent recipients from transaction history (fast, local DB)
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+
+        // Query transactions with stored recipient field
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT recipient, recipient_name, MAX(created_at) as last_used
+             FROM transactions
+             WHERE is_outgoing = 1
+               AND recipient IS NOT NULL
+               AND recipient != ''
+               AND (recipient LIKE '%' || ?1 || '%' OR recipient_name LIKE '%' || ?1 || '%')
+             GROUP BY recipient
+             ORDER BY last_used DESC
+             LIMIT ?2"
+        ).unwrap_or_else(|_| {
+            // Fallback: query without recipient column (pre-V12 DBs)
+            conn.prepare("SELECT '' WHERE 0").unwrap()
+        });
+
+        if let Ok(rows) = stmt.query_map(rusqlite::params![q, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (recipient, recipient_name) = row;
+
+                // Detect type
+                let identity_key_re = regex::Regex::new(r"^(02|03)[0-9a-fA-F]{64}$").unwrap();
+                let bsv_address_re = regex::Regex::new(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$").unwrap();
+                let rec_type = if identity_key_re.is_match(&recipient) {
+                    "identity"
+                } else if recipient.contains('@') || recipient.starts_with('$') {
+                    "paymail"
+                } else if bsv_address_re.is_match(&recipient) {
+                    "address"
+                } else {
+                    "unknown"
+                };
+
+                suggestions.push(serde_json::json!({
+                    "value": recipient,
+                    "display_name": recipient_name,
+                    "avatar_url": null,
+                    "type": rec_type,
+                    "source": "recent"
+                }));
+            }
+        }
+
+        // Fallback: parse descriptions from pre-V12 transactions if no stored recipients found
+        if suggestions.is_empty() {
+            if let Ok(mut desc_stmt) = conn.prepare(
+                "SELECT description FROM transactions
+                 WHERE is_outgoing = 1
+                   AND description LIKE '%' || ?1 || '%'
+                 ORDER BY created_at DESC
+                 LIMIT ?2"
+            ) {
+                if let Ok(rows) = desc_stmt.query_map(rusqlite::params![q, limit], |row| {
+                    row.get::<_, String>(0)
+                }) {
+                    let paymail_re = regex::Regex::new(r"to ([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap();
+                    let addr_re = regex::Regex::new(r"to ([13][a-km-zA-HJ-NP-Z1-9]{25,34})").unwrap();
+                    let mut seen = std::collections::HashSet::new();
+
+                    for desc in rows.flatten() {
+                        if let Some(caps) = paymail_re.captures(&desc) {
+                            let pm = caps[1].to_string();
+                            if seen.insert(pm.clone()) {
+                                suggestions.push(serde_json::json!({
+                                    "value": pm,
+                                    "display_name": null,
+                                    "avatar_url": null,
+                                    "type": "paymail",
+                                    "source": "recent"
+                                }));
+                            }
+                        } else if let Some(caps) = addr_re.captures(&desc) {
+                            let addr = caps[1].to_string();
+                            if seen.insert(addr.clone()) {
+                                suggestions.push(serde_json::json!({
+                                    "value": addr,
+                                    "display_name": null,
+                                    "avatar_url": null,
+                                    "type": "address",
+                                    "source": "recent"
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Source 2: HandCash paymail suggestion
+    // Works with or without $ prefix — typing "ali" suggests "ali@handcash.io"
+    let is_handle_like = q.len() >= 2 && !q.contains('@') && !q.contains(' ')
+        && q.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+
+    if is_handle_like {
+        let handle = q.trim_start_matches('$');
+        let paymail = format!("{}@handcash.io", handle);
+        let value = if q.starts_with('$') { q.clone() } else { format!("${}", handle) };
+        // Don't duplicate if already in recent recipients
+        if !suggestions.iter().any(|s| {
+            let sv = s["value"].as_str().unwrap_or("");
+            sv == paymail || sv == value || sv == q
+        }) {
+            suggestions.push(serde_json::json!({
+                "value": value,
+                "display_name": paymail,
+                "avatar_url": null,
+                "type": "paymail",
+                "source": "handcash",
+                "unverified": true
+            }));
+        }
+    }
+
+    // Source 3: Live identity search via BSV Overlay Services
+    // Skip if input looks like an address/paymail (identity search only matches names)
+    let is_hex_like = q.chars().all(|c| c.is_ascii_hexdigit());
+    let is_address_like = q.starts_with('1') || q.starts_with('3') || q.starts_with('$') || q.contains('@');
+
+    if !is_address_like && !is_hex_like && q.len() >= 2 {
+        let remaining_slots = if limit > suggestions.len() { limit - suggestions.len() } else { 0 };
+        if remaining_slots > 0 {
+            let resolver = crate::identity_resolver::IdentityResolver::new();
+            let identity_results = resolver.search(&q, remaining_slots).await;
+
+            for resolved in identity_results {
+                // Don't duplicate identity keys already in recent recipients
+                if !suggestions.iter().any(|s| s["value"].as_str() == Some(&resolved.identity_key)) {
+                    suggestions.push(serde_json::json!({
+                        "value": resolved.identity_key,
+                        "display_name": resolved.name,
+                        "avatar_url": resolved.avatar_url,
+                        "type": "identity",
+                        "source": resolved.source
+                    }));
+                }
+            }
+        }
+    }
+
+    // Truncate to limit
+    suggestions.truncate(limit);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "suggestions": suggestions
+    }))
+}
+
+// =============================================================================
 // Wallet Settings (Phase 4 - Advanced Wallet Dashboard)
 // =============================================================================
 
@@ -13091,15 +13613,16 @@ pub async fn domain_permissions_reset_all(
 ) -> HttpResponse {
     log::info!("🔄 POST /domain/permissions/reset-all called");
 
-    let per_tx = body.get("per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(1000);
-    let per_session = body.get("per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(5000);
-    let rate = body.get("rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(10);
+    let per_tx = body.get("per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(100);
+    let per_session = body.get("per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(1000);
+    let rate = body.get("rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(30);
+    let max_tx_per_session = body.get("max_tx_per_session").and_then(|v| v.as_i64()).unwrap_or(100);
 
     let db = state.database.lock().unwrap();
     let user_id = state.current_user_id;
     let repo = crate::database::DomainPermissionRepository::new(db.connection());
 
-    match repo.reset_all_limits(user_id, per_tx, per_session, rate) {
+    match repo.reset_all_limits(user_id, per_tx, per_session, rate, max_tx_per_session) {
         Ok(count) => {
             drop(db);
             log::info!("   ✅ Reset {} domain permissions", count);

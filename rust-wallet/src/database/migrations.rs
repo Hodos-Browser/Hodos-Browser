@@ -468,9 +468,10 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
-            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
-            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 100,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 1000,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 30,
+            max_tx_per_session INTEGER NOT NULL DEFAULT 100,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -547,9 +548,10 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
-            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
-            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 100,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 1000,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 30,
+            max_tx_per_session INTEGER NOT NULL DEFAULT 100,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -764,5 +766,86 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     }
 
     info!("   ✅ V11 migration applied (price at transaction time)");
+    Ok(())
+}
+
+/// Migrate V11 → V12: Add max_tx_per_session to domain_permissions and settings;
+/// update default limit values to reflect production-ready settings.
+pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    info!("   Adding max_tx_per_session column and updating defaults...");
+
+    // domain_permissions: add max_tx_per_session column
+    let dp_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(domain_permissions)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !dp_cols.iter().any(|c| c == "max_tx_per_session") {
+        conn.execute(
+            "ALTER TABLE domain_permissions ADD COLUMN max_tx_per_session INTEGER NOT NULL DEFAULT 100",
+            [],
+        )?;
+    }
+
+    // settings: add default_max_tx_per_session column
+    let settings_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !settings_cols.iter().any(|c| c == "default_max_tx_per_session") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_max_tx_per_session INTEGER DEFAULT 100",
+            [],
+        )?;
+    }
+
+    // Update existing settings row to use the new production defaults
+    conn.execute(
+        "UPDATE settings SET default_per_tx_limit_cents = 100, default_per_session_limit_cents = 1000, default_rate_limit_per_min = 30",
+        [],
+    )?;
+
+    info!("   ✅ V12 migration applied (max_tx_per_session + updated defaults)");
+    Ok(())
+}
+
+/// Migrate V12 → V13: Add recipient and recipient_name columns to transactions
+///
+/// Stores the raw recipient value (BSV address, paymail, or identity key) and
+/// resolved display name at send time. Enables recipient autocomplete from history.
+/// Nullable — old transactions will have NULL (suggest endpoint falls back to description parsing).
+pub fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    info!("   Adding recipient and recipient_name columns to transactions...");
+
+    let tx_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(transactions)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !tx_cols.iter().any(|c| c == "recipient") {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN recipient TEXT",
+            [],
+        )?;
+    }
+
+    if !tx_cols.iter().any(|c| c == "recipient_name") {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN recipient_name TEXT",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V13 migration applied (recipient autocomplete)");
     Ok(())
 }

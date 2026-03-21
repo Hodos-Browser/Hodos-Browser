@@ -705,6 +705,20 @@ impl WalletDatabase {
             info!("   ✅ Schema V11 applied");
         }
 
+        if current_version < 12 {
+            info!("   Applying migration V12 (max_tx_per_session + updated defaults)...");
+            migrations::migrate_v11_to_v12(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (12)", [])?;
+            info!("   ✅ Schema V12 applied");
+        }
+
+        if current_version < 13 {
+            info!("   Applying migration V13 (recipient autocomplete)...");
+            migrations::migrate_v12_to_v13(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (13)", [])?;
+            info!("   ✅ Schema V13 applied");
+        }
+
         Ok(())
     }
 

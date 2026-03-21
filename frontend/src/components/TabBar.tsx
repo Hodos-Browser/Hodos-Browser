@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Box, IconButton, Tooltip, CircularProgress, Typography } from '@mui/material';
+import { Box, Tooltip, CircularProgress, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import { HodosButton } from './HodosButton';
 import type { Tab } from '../types/TabTypes';
 import { TabComponent } from './TabComponent';
 
@@ -363,25 +364,15 @@ export const TabBar: React.FC<TabBarProps> = ({
 
       {/* New Tab Button */}
       <Tooltip title="New tab (Ctrl+T)" placement="bottom">
-        <IconButton
-          onClick={onCreateTab}
+        <HodosButton
+          variant="icon"
           size="small"
-          sx={{
-            minWidth: 28,
-            width: 28,
-            height: 28,
-            borderRadius: '6px',
-            marginLeft: '4px',
-            marginBottom: '2px',
-            color: '#9ca3af',
-            '&:hover': {
-              backgroundColor: '#1f2937',
-              color: '#f0f0f0',
-            },
-          }}
+          onClick={onCreateTab}
+          aria-label="New tab"
+          style={{ marginLeft: '4px', marginBottom: '2px' }}
         >
           <AddIcon sx={{ fontSize: 18 }} />
-        </IconButton>
+        </HodosButton>
       </Tooltip>
     </Box>
   );

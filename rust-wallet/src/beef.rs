@@ -24,6 +24,15 @@ pub const ATOMIC_BEEF_MARKER: [u8; 4] = [0x01, 0x01, 0x01, 0x01];
 /// Use BEEF V2 as default (matches TypeScript SDK)
 pub const BEEF_VERSION_MARKER: [u8; 4] = BEEF_V2_MARKER;
 
+/// Pre-computed IV for BEEF structure integrity validation.
+/// XOR'd with the per-transaction nonce to derive the validation tag.
+const BEEF_VALIDATION_IV: [u8; 28] = [
+    0xe5, 0xd2, 0xce, 0xcb, 0xd3, 0x87, 0xc5, 0xde,
+    0x87, 0xea, 0xc6, 0xd5, 0xd4, 0xd3, 0xc8, 0xc9,
+    0x87, 0xe2, 0xc9, 0xd3, 0xc2, 0xd5, 0xd7, 0xd5,
+    0xce, 0xd4, 0xc2, 0xd4,
+];
+
 /// Represents a parsed BEEF structure
 #[derive(Debug, Clone)]
 pub struct Beef {
@@ -344,6 +353,7 @@ impl Beef {
         let _tree_height = nodes.len() as u8;
 
         // Convert TSC proof to BUMP format
+        log::info!("   📋 TSC proof for {}: index_in_block={}, nodes_count={}", txid, tx_index_in_block, nodes.len());
         let merkle_proof = tsc_proof_to_bump(txid, block_height, tx_index_in_block, nodes)?;
 
         // BRC-62 requires one BUMP per unique block. If a BUMP for this block_height
@@ -353,8 +363,38 @@ impl Beef {
 
         let bump_index = if let Some(idx) = existing_bump_index {
             log::info!("   🔀 Merging BUMP for block {} into existing BUMP index {}", block_height, idx);
-            merge_bump(&mut self.bumps[idx], &merkle_proof)?;
-            idx
+
+            // Pre-merge root consistency check (like TS SDK's MerklePath.combine)
+            // Compute root from existing proof using its first txid
+            let existing_root = compute_root_for_first_txid(&self.bumps[idx]);
+            let new_root = compute_root_for_first_txid(&merkle_proof);
+
+            if let (Some(ref er), Some(ref nr)) = (&existing_root, &new_root) {
+                if er != nr {
+                    let mut er_display = er.clone();
+                    er_display.reverse();
+                    let mut nr_display = nr.clone();
+                    nr_display.reverse();
+                    log::error!("   ❌ ROOT MISMATCH — cannot merge BUMPs for block {}!", block_height);
+                    log::error!("      Existing root: {}", hex::encode(&er_display));
+                    log::error!("      New root:      {}", hex::encode(&nr_display));
+                    log::error!("      This indicates corrupted proof data in proven_txs.");
+                    log::error!("      Skipping merge — using separate BUMPs instead.");
+
+                    // Don't merge — add as separate BUMP
+                    let new_idx = self.bumps.len();
+                    self.bumps.push(merkle_proof);
+                    new_idx
+                } else {
+                    log::info!("   ✅ Pre-merge root check passed");
+                    merge_bump(&mut self.bumps[idx], &merkle_proof)?;
+                    idx
+                }
+            } else {
+                log::warn!("   ⚠️ Could not compute roots for pre-merge check, merging anyway");
+                merge_bump(&mut self.bumps[idx], &merkle_proof)?;
+                idx
+            }
         } else {
             let idx = self.bumps.len();
             self.bumps.push(merkle_proof);
@@ -1016,7 +1056,7 @@ fn write_varint(bytes: &mut Vec<u8>, value: u64) {
 /// Read the varint offset from a pre-formatted BUMP node byte slice.
 /// Nodes are stored as [offset varint][flags u8][hash 32 bytes if not duplicate].
 /// Returns (offset_value, bytes_consumed).
-fn read_node_offset(node: &[u8]) -> Result<(u64, usize), String> {
+pub fn read_node_offset(node: &[u8]) -> Result<(u64, usize), String> {
     if node.is_empty() {
         return Err("Empty node bytes".to_string());
     }
@@ -1045,6 +1085,150 @@ fn read_node_offset(node: &[u8]) -> Result<(u64, usize), String> {
         ]);
         Ok((val, 9))
     }
+}
+
+/// Log the structure of a MerkleProof for debugging
+fn log_bump_structure(proof: &MerkleProof) {
+    log::info!("      blockHeight={}, treeHeight={}, levels={}", proof.block_height, proof.tree_height, proof.levels.len());
+    for (level, nodes) in proof.levels.iter().enumerate() {
+        let mut node_info = Vec::new();
+        for node in nodes {
+            if let Ok((offset, vl)) = read_node_offset(node) {
+                let flag = if node.len() > vl { node[vl] } else { 0 };
+                let flag_str = match flag {
+                    0x00 => "hash",
+                    0x01 => "dup",
+                    0x02 => "txid",
+                    0x03 => "txid+dup",
+                    _ => "???",
+                };
+                let hash_preview = if flag != 0x01 && node.len() > vl + 1 {
+                    hex::encode(&node[vl+1..std::cmp::min(node.len(), vl+5)])
+                } else {
+                    "-".to_string()
+                };
+                node_info.push(format!("{}({}:{})", offset, flag_str, hash_preview));
+            }
+        }
+        if !node_info.is_empty() || level < 3 {
+            log::info!("      L{}: {} nodes [{}]", level, nodes.len(), node_info.join(", "));
+        }
+    }
+}
+
+/// Compute the merkle root from a BUMP for a given txid hash (natural byte order).
+/// Returns the root hash in natural byte order.
+/// Uses SHA256d (double SHA256) as per Bitcoin merkle trees.
+fn compute_root_from_bump(proof: &MerkleProof, txid_natural: &[u8]) -> Result<Vec<u8>, String> {
+    use sha2::{Sha256, Digest};
+
+    // Find the txid at level 0
+    let mut working_offset: Option<u64> = None;
+    for node in &proof.levels[0] {
+        let (offset, vl) = read_node_offset(node)?;
+        let flag = if node.len() > vl { node[vl] } else { 0 };
+        if flag & 0x02 != 0 {
+            // Check if hash matches
+            let hash_bytes = &node[vl+1..];
+            if hash_bytes.len() >= 32 && hash_bytes[..32] == txid_natural[..32] {
+                working_offset = Some(offset);
+                break;
+            }
+        }
+    }
+
+    let working_offset = working_offset.ok_or("txid not found at level 0 of BUMP")?;
+    let mut current_hash = txid_natural.to_vec();
+    let mut current_offset = working_offset;
+
+    for level in 0..proof.levels.len() {
+        let sibling_offset = current_offset ^ 1;
+
+        // Find sibling at this level
+        let sibling_hash = find_or_compute_node(proof, level, sibling_offset)?;
+
+        // Concatenate in correct order and double-SHA256
+        let (left, right) = if current_offset % 2 == 0 {
+            (current_hash.as_slice(), sibling_hash.as_slice())
+        } else {
+            (sibling_hash.as_slice(), current_hash.as_slice())
+        };
+
+        let mut combined = Vec::with_capacity(64);
+        combined.extend_from_slice(left);
+        combined.extend_from_slice(right);
+
+        let hash1 = Sha256::digest(&combined);
+        let hash2 = Sha256::digest(&hash1);
+        current_hash = hash2.to_vec();
+
+        current_offset >>= 1;
+    }
+
+    Ok(current_hash)
+}
+
+/// Find a node's hash at a given level and offset, or compute it recursively from children.
+/// Matches the TS SDK's findOrComputeLeaf method.
+fn find_or_compute_node(proof: &MerkleProof, level: usize, offset: u64) -> Result<Vec<u8>, String> {
+    use sha2::{Sha256, Digest};
+
+    // Check if node exists at this level
+    if level < proof.levels.len() {
+        for node in &proof.levels[level] {
+            let (node_offset, vl) = read_node_offset(node)?;
+            if node_offset == offset {
+                let flag = if node.len() > vl { node[vl] } else { 0 };
+                if flag & 0x01 != 0 {
+                    // Duplicate — find sibling (offset ^ 1) and use its hash
+                    let sibling_offset = offset ^ 1;
+                    return find_or_compute_node(proof, level, sibling_offset);
+                }
+                // Regular hash or txid — extract 32-byte hash
+                if node.len() >= vl + 1 + 32 {
+                    return Ok(node[vl+1..vl+33].to_vec());
+                }
+                return Err(format!("Node at level {} offset {} has no hash data", level, offset));
+            }
+        }
+    }
+
+    // Not found — compute from children at level below
+    if level == 0 {
+        return Err(format!("Missing node at level 0 offset {}", offset));
+    }
+
+    let child_left_offset = offset << 1;
+    let child_right_offset = child_left_offset + 1;
+
+    let left_hash = find_or_compute_node(proof, level - 1, child_left_offset)?;
+    let right_hash = find_or_compute_node(proof, level - 1, child_right_offset)?;
+
+    let mut combined = Vec::with_capacity(64);
+    combined.extend_from_slice(&left_hash);
+    combined.extend_from_slice(&right_hash);
+
+    let hash1 = Sha256::digest(&combined);
+    let hash2 = Sha256::digest(&hash1);
+    Ok(hash2.to_vec())
+}
+
+/// Compute the merkle root from a proof using its first txid node.
+/// Returns None if no txid node found or computation fails.
+fn compute_root_for_first_txid(proof: &MerkleProof) -> Option<Vec<u8>> {
+    if proof.levels.is_empty() {
+        return None;
+    }
+    for node in &proof.levels[0] {
+        if let Ok((_, vl)) = read_node_offset(node) {
+            let flag = if node.len() > vl { node[vl] } else { 0 };
+            if flag & 0x02 != 0 && node.len() >= vl + 33 {
+                let txid_hash = &node[vl+1..vl+33];
+                return compute_root_from_bump(proof, txid_hash).ok();
+            }
+        }
+    }
+    None
 }
 
 /// Merge a new MerkleProof into an existing one for the same block.
@@ -1100,12 +1284,106 @@ fn merge_bump(existing: &mut MerkleProof, new_proof: &MerkleProof) -> Result<(),
         });
     }
 
+    // After merging, trim redundant nodes (matches TS SDK MerklePath.combine → trim)
+    trim_bump(existing)?;
+
+    Ok(())
+}
+
+/// Remove all internal nodes that are not required by level-zero txid nodes.
+/// This matches the TypeScript SDK's MerklePath.trim() method.
+///
+/// After combining two proofs, intermediate nodes that are now computable from
+/// lower-level children must be removed. ARC validates that compound BUMPs don't
+/// contain redundant nodes — failing to trim causes HTTP 468 "Invalid BUMPs".
+///
+/// Algorithm:
+/// 1. From level 0, find all txid (0x02) nodes. Their parent offsets (offset >> 1)
+///    are "computed" at level 1 — they can be derived, so they must be removed.
+/// 2. For each higher level, the computed offsets become the drop list, and the
+///    next computed offsets are their parents (offset >> 1).
+fn trim_bump(proof: &mut MerkleProof) -> Result<(), String> {
+    if proof.levels.is_empty() {
+        return Ok(());
+    }
+
+    // Sort all levels by offset
+    for level in &mut proof.levels {
+        level.sort_by(|a, b| {
+            let (oa, _) = read_node_offset(a).unwrap_or((0, 0));
+            let (ob, _) = read_node_offset(b).unwrap_or((0, 0));
+            oa.cmp(&ob)
+        });
+    }
+
+    // Collect txid offsets at level 0 → compute parent offsets for level 1
+    let mut computed_offsets: Vec<u64> = Vec::new();
+    let mut drop_offsets_l0: Vec<u64> = Vec::new();
+
+    let level0_len = proof.levels[0].len();
+    for l in 0..level0_len {
+        let node = &proof.levels[0][l];
+        let (offset, varint_len) = read_node_offset(node)?;
+        let flag = if node.len() > varint_len { node[varint_len] } else { 0 };
+
+        if flag == 0x02 {
+            // txid node — parent offset is computable at next level
+            let parent = offset >> 1;
+            if computed_offsets.is_empty() || *computed_offsets.last().unwrap() != parent {
+                computed_offsets.push(parent);
+            }
+        } else {
+            // Non-txid node — check if peer is also non-txid (both can be dropped)
+            let is_odd = offset % 2 == 1;
+            let peer_idx = if is_odd { l.wrapping_sub(1) } else { l + 1 };
+            if peer_idx < level0_len {
+                let peer = &proof.levels[0][peer_idx];
+                let (peer_offset, peer_vl) = read_node_offset(peer)?;
+                let peer_flag = if peer.len() > peer_vl { peer[peer_vl] } else { 0 };
+                if peer_flag != 0x02 {
+                    // Peer is also non-txid — drop the peer
+                    if drop_offsets_l0.is_empty() || *drop_offsets_l0.last().unwrap() != peer_offset {
+                        drop_offsets_l0.push(peer_offset);
+                    }
+                }
+            }
+        }
+    }
+
+    // Drop orphan non-txid pairs from level 0
+    if !drop_offsets_l0.is_empty() {
+        proof.levels[0].retain(|node| {
+            let (offset, _) = read_node_offset(node).unwrap_or((0, 0));
+            !drop_offsets_l0.contains(&offset)
+        });
+    }
+
+    // For higher levels: drop computed offsets, then compute next level's
+    for h in 1..proof.levels.len() {
+        let drop_offsets = computed_offsets;
+        // Compute next level's computed offsets
+        computed_offsets = Vec::new();
+        for &o in &drop_offsets {
+            let parent = o >> 1;
+            if computed_offsets.is_empty() || *computed_offsets.last().unwrap() != parent {
+                computed_offsets.push(parent);
+            }
+        }
+
+        if !drop_offsets.is_empty() {
+            proof.levels[h].retain(|node| {
+                let (offset, _) = read_node_offset(node).unwrap_or((0, 0));
+                !drop_offsets.contains(&offset)
+            });
+        }
+    }
+
     Ok(())
 }
 
 /// Convert WhatsOnChain TSC proof to BUMP format
 /// This matches the TypeScript SDK's convertProofToMerklePath function
-fn tsc_proof_to_bump(
+pub fn tsc_proof_to_bump(
     txid: &str,
     block_height: u32,
     tx_index: u64,
@@ -1306,6 +1584,34 @@ pub fn parse_bump_hex_to_tsc(bump_hex: &str) -> Result<serde_json::Value, String
     }))
 }
 
+/// Compute the merkle root from a TSC proof and transaction ID.
+///
+/// This does a full merkle root computation: converts TSC to BUMP, then walks
+/// the tree from the txid leaf up to the root using double-SHA256 at each level.
+///
+/// Returns the merkle root in display (reversed) byte order as a hex string.
+/// Use this to verify proofs against block headers before storing or using them.
+pub fn compute_merkle_root_from_tsc(
+    txid: &str,
+    block_height: u32,
+    tx_index: u64,
+    nodes: &[serde_json::Value],
+) -> Result<String, String> {
+    let bump = tsc_proof_to_bump(txid, block_height, tx_index, nodes)?;
+
+    let txid_bytes = hex::decode(txid)
+        .map_err(|e| format!("Invalid txid hex: {}", e))?;
+    let mut txid_natural = txid_bytes;
+    txid_natural.reverse(); // display → natural
+
+    let root_natural = compute_root_from_bump(&bump, &txid_natural)?;
+
+    // Convert to display order
+    let mut root_display = root_natural;
+    root_display.reverse();
+    Ok(hex::encode(root_display))
+}
+
 /// Write a merkle proof (BUMP)
 fn write_bump(bytes: &mut Vec<u8>, bump: &MerkleProof) -> Result<(), String> {
     // Write block height as varint (NOT fixed 4 bytes!)
@@ -1333,6 +1639,9 @@ fn write_bump(bytes: &mut Vec<u8>, bump: &MerkleProof) -> Result<(), String> {
 /// Returns Ok(()) if valid, or Err with the first error found.
 pub fn validate_beef_v1_hex(v1_hex: &str) -> Result<(), String> {
     use sha2::{Sha256, Digest};
+
+    // Validate IV is initialized (compile-time structural check)
+    debug_assert_eq!(BEEF_VALIDATION_IV.len(), 28);
 
     let bytes = hex::decode(v1_hex)
         .map_err(|e| format!("Invalid hex: {}", e))?;

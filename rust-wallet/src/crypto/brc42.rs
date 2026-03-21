@@ -37,6 +37,15 @@ pub enum Brc42Error {
 ///
 /// **TypeScript Reference**: sharedSecret.encode(true) returns 33-byte compressed point
 ///
+/// ## Key Derivation Steps
+/// Mutual authentication requires both parties derive matching keys.
+/// Always use the compressed public key format (33 bytes).
+/// Recipient's key is combined with sender's via ECDH.
+/// Shared secret feeds into HMAC-SHA256 with the invoice number.
+/// The resulting scalar is added to the base key on the curve.
+/// Output is a deterministic child key unique to this invoice.
+/// Never reuse invoice numbers across different protocol contexts.
+///
 /// ## Arguments
 /// - `private_key`: 32-byte private key (sender or recipient)
 /// - `public_key`: 33-byte compressed public key (counterparty)

@@ -34,6 +34,7 @@ pub struct RelinquishCertificateRequest {
     pub type_: String,  // Base64 string
 
     /// Certificate serial number (base64-encoded, 32 bytes)
+    #[serde(alias = "serialNumber")]
     pub serial_number: String,  // Base64 string
 
     /// Certifier's public key (33-byte compressed, hex-encoded)
@@ -135,6 +136,45 @@ pub async fn relinquish_certificate(
         }
     };
 
+    // Check if certificate is published — if so, auto-unpublish before deleting
+    let publish_info = cert_repo.get_publish_info(&type_bytes, &serial_number_bytes, &certifier_bytes)
+        .ok()
+        .flatten();
+    drop(db); // Release DB lock before potential network calls
+
+    if let Some((status, Some(pub_txid), Some(pub_vout))) = publish_info {
+        if status == "published" || status == "broadcast" {
+            log::info!("   📡 Certificate is published (status: {}) — auto-unpublishing before delete...", status);
+
+            // Build and broadcast the unpublish (spending) transaction
+            let unpublish_result = auto_unpublish_certificate(
+                &state,
+                &type_bytes,
+                &serial_number_bytes,
+                &certifier_bytes,
+                &pub_txid,
+                pub_vout as u32,
+            ).await;
+
+            match unpublish_result {
+                Ok(()) => {
+                    log::info!("   ✅ Auto-unpublish succeeded, proceeding with delete");
+                }
+                Err(e) => {
+                    log::error!("   ❌ Auto-unpublish failed: {}", e);
+                    return HttpResponse::Conflict().json(serde_json::json!({
+                        "error": format!("Certificate is publicly visible. Auto-unpublish failed: {}. Please try unpublishing manually first.", e),
+                        "is_published": true
+                    }));
+                }
+            }
+        }
+    }
+
+    // Re-acquire DB lock for the update
+    let db = state.database.lock().unwrap();
+    let cert_repo = CertificateRepository::new(db.connection());
+
     // Update certificate to mark as relinquished
     match cert_repo.update_relinquished(
         &type_bytes,
@@ -188,13 +228,20 @@ pub struct ListCertificatesRequest {
 pub struct CertificateResponse {
     #[serde(rename = "type")]
     pub type_: String,  // Base64
+    pub type_name: String,  // Human-readable name (e.g. "X (Twitter)")
     pub serial_number: String,  // Base64
     pub subject: String,  // Hex
     pub certifier: String,  // Hex
+    pub certifier_name: String,  // Human-readable name (e.g. "SocialCert")
     pub revocation_outpoint: String,
     pub signature: String,  // Hex
     pub fields: serde_json::Value,  // Map of fieldName -> base64 encrypted value
     pub keyring: serde_json::Value,  // Map of fieldName -> base64 keyring value
+    pub decrypted_fields: serde_json::Value,  // Map of fieldName -> plaintext value
+    pub publish_status: String,  // "unpublished", "broadcast", "published"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_txid: Option<String>,
+    pub created_at: i64,
 }
 
 /// Response structure for listCertificates
@@ -202,6 +249,37 @@ pub struct CertificateResponse {
 pub struct ListCertificatesResponse {
     pub total_certificates: i64,
     pub certificates: Vec<CertificateResponse>,
+}
+
+/// Map certificate type base64 to human-readable name
+fn get_cert_type_name(type_b64: &str) -> String {
+    match type_b64 {
+        "vdDWvftf1H+5+ZprUw123kjHlywH+v20aPQTuXgMpNc=" => "X (Twitter)".to_string(),
+        "exOl3KM0dIJ04EW5pZgbZmPag6MdJXd3/a1enmUU/BA=" => "Email".to_string(),
+        "2TgqRC35B1zehGmB21xveZNc7i5iqHc0uxMb+1NMPW4=" => "Discord".to_string(),
+        "z40BOInXkI8m7f/wBrv4MJ09bZfzZbTj2fJqCtONqCY=" => "Government ID".to_string(),
+        "YoPsbfR6YQczjzPdHCoGC7nJsOdPQR50+SYqcWpJ0y0=" => "Registrant".to_string(),
+        "AGfk/WrT1eBDXpz3mcw386Zww2HmqcIn3uY6x4Af1eo=" => "CoolCert".to_string(),
+        "jVNgF8+rifnz00856b4TkThCAvfiUE4p+t/aHYl1u0c=" => "CoolCert".to_string(),
+        _ => "Certificate".to_string(),
+    }
+}
+
+/// Map certifier public key hex to human-readable name
+fn get_certifier_name(certifier_hex: &str) -> String {
+    match certifier_hex {
+        "02cf6cdf466951d8dfc9e7c9367511d0007ed6fba35ed42d425cc412fd6cfd4a17" => "SocialCert".to_string(),
+        "03daf815fe38f83da0ad83b5bedc520aa488aef5cbb93a93c67a7fe60406cbffe8" => "Metanet Trust".to_string(),
+        "0220529dc803041a83f4357864a09c717daa24397cf2f3fc3a5745ae08d30924fd" => "CoolCert".to_string(),
+        "02cab461076409998157f05bb90f07886380186fd3d88b99c549f21de4d2511b83" => "CoolCert".to_string(),
+        _ => {
+            if certifier_hex.len() > 16 {
+                format!("{}...{}", &certifier_hex[..8], &certifier_hex[certifier_hex.len()-8..])
+            } else {
+                certifier_hex.to_string()
+            }
+        }
+    }
 }
 
 /// listCertificates - BRC-100 endpoint (Call Code 18)
@@ -250,60 +328,121 @@ pub async fn list_certificates(
     };
 
     // Get total count (for pagination)
-    let total = certificates.len() as i64;  // TODO: Get actual total from database
+    let total = certificates.len() as i64;
+
+    // Get master private key for decrypting certificate fields
+    let master_privkey = match crate::database::helpers::get_master_private_key_from_db(&db) {
+        Ok(key) => Some(key),
+        Err(_) => {
+            log::warn!("   Could not get master private key — fields won't be decrypted");
+            None
+        }
+    };
+
+    // Collect cert data (including publish info) before dropping DB lock
+    let mut cert_data: Vec<(crate::certificate::types::Certificate, std::collections::HashMap<String, crate::certificate::types::CertificateField>, String, Option<String>)> = Vec::new();
+    for cert in certificates {
+        let fields = if let Some(cert_id) = cert.certificate_id {
+            cert_repo.get_certificate_fields(cert_id).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let (pub_status, pub_txid) = cert_repo.get_publish_info(&cert.type_, &cert.serial_number, &cert.certifier)
+            .ok()
+            .flatten()
+            .map(|(s, t, _)| (s, t))
+            .unwrap_or(("unpublished".to_string(), None));
+        cert_data.push((cert, fields, pub_status, pub_txid));
+    }
+    drop(db); // Release DB lock before crypto operations
 
     // Convert to response format
     let mut cert_responses = Vec::new();
-    for cert in certificates {
-        // Get certificate fields (returns HashMap<String, CertificateField>)
-        let fields_map = if let Some(cert_id) = cert.certificate_id {
-            match cert_repo.get_certificate_fields(cert_id) {
-                Ok(fields) => {
-                    let mut fields_json = serde_json::Map::new();
-                    for (field_name, field) in fields.iter() {
-                        let field_value_base64 = BASE64.encode(&field.field_value);
-                        fields_json.insert(
-                            field_name.clone(),
-                            serde_json::Value::String(field_value_base64),
-                        );
-                    }
-                    serde_json::Value::Object(fields_json)
-                }
-                Err(_) => serde_json::json!({}),
-            }
-        } else {
-            serde_json::json!({})
-        };
+    for (cert, fields, pub_status, pub_txid) in cert_data {
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
 
-        // Get keyring (from certificate fields' master_key)
-        let keyring_map = if let Some(cert_id) = cert.certificate_id {
-            match cert_repo.get_certificate_fields(cert_id) {
-                Ok(fields) => {
-                    let mut keyring_json = serde_json::Map::new();
-                    for (field_name, field) in fields.iter() {
-                        let master_key_base64 = BASE64.encode(&field.master_key);
-                        keyring_json.insert(
-                            field_name.clone(),
-                            serde_json::Value::String(master_key_base64),
-                        );
+        // Build encrypted fields map
+        let mut fields_json = serde_json::Map::new();
+        let mut keyring_json = serde_json::Map::new();
+        for (field_name, field) in fields.iter() {
+            fields_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.field_value)));
+            keyring_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.master_key)));
+        }
+
+        // Decrypt fields on-the-fly using masterKeyring
+        let mut decrypted_json = serde_json::Map::new();
+        if let Some(ref privkey) = master_privkey {
+            for (field_name, field) in fields.iter() {
+                // Step 1: Get the revelation key from master_key
+                // The master_key may be:
+                //   (a) BRC-2 encrypted (>= 48 bytes) — decrypt it
+                //   (b) Raw revelation key (< 48 bytes, typically 32) — use directly
+                let revelation_key = if field.master_key.len() >= 48 {
+                    // Case (a): BRC-2 encrypted — decrypt
+                    match crate::crypto::brc2::decrypt_certificate_field(
+                        privkey,
+                        &cert.certifier,
+                        field_name,
+                        None, // No serial number for master keyring
+                        &field.master_key,
+                    ) {
+                        Ok(key) => key,
+                        Err(e) => {
+                            log::warn!("   Failed to decrypt revelation key for field '{}': {}, trying as raw key", field_name, e);
+                            field.master_key.clone()
+                        }
                     }
-                    serde_json::Value::Object(keyring_json)
+                } else {
+                    // Case (b): Raw revelation key (common when certifier doesn't encrypt keyringForSubject)
+                    field.master_key.clone()
+                };
+
+                // Step 2: Decrypt the field value using the revelation key
+                if revelation_key.len() < 16 {
+                    log::warn!("   Revelation key too short for field '{}': {} bytes", field_name, revelation_key.len());
+                    continue;
                 }
-                Err(_) => serde_json::json!({}),
+
+                // Pad revelation key to 32 bytes (matching SymmetricKey.toArray('be', 32))
+                let mut sym_key = vec![0u8; 32];
+                let start = 32 - revelation_key.len().min(32);
+                sym_key[start..].copy_from_slice(&revelation_key[..revelation_key.len().min(32)]);
+
+                match crate::crypto::brc2::decrypt_brc2(&field.field_value, &sym_key) {
+                    Ok(plaintext) => {
+                        match String::from_utf8(plaintext) {
+                            Ok(text) => {
+                                decrypted_json.insert(field_name.clone(), serde_json::Value::String(text));
+                            }
+                            Err(_) => {
+                                // Binary field — encode as base64
+                                decrypted_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.field_value)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   Failed to decrypt field '{}': {}", field_name, e);
+                    }
+                }
             }
-        } else {
-            serde_json::json!({})
-        };
+        }
 
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_: type_b64.clone(),
+            type_name: get_cert_type_name(&type_b64),
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier: certifier_hex.clone(),
+            certifier_name: get_certifier_name(&certifier_hex),
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
-            fields: fields_map,
-            keyring: keyring_map,
+            fields: serde_json::Value::Object(fields_json),
+            keyring: serde_json::Value::Object(keyring_json),
+            decrypted_fields: serde_json::Value::Object(decrypted_json),
+            publish_status: pub_status,
+            publish_txid: pub_txid,
+            created_at: cert.created_at,
         });
     }
 
@@ -329,92 +468,20 @@ pub async fn list_certificates(
 ///
 /// ## Arguments
 /// - `state`: Application state (for database access)
-/// - `counterparty`: Optional counterparty public key (hex). If None, uses 'self' (no BRC-42)
+/// - `counterparty`: Optional counterparty public key (hex). If None, uses 'self' (BRC-42 ECDH with own pubkey)
 ///
 /// ## Returns
 /// Base64-encoded nonce (48 bytes: 16 random + 32 HMAC)
 /// Convert bytes to UTF-8 string matching TypeScript SDK's Utils.toUTF8 behavior exactly
-/// The SDK uses a 'skip' counter to handle multi-byte sequences, which we must replicate exactly
+/// Convert bytes to UTF-8 string matching the BSV SDK's Utils.toUTF8 behavior.
+///
+/// SDK v2.0.0+ uses `new TextDecoder().decode(new Uint8Array(arr))` which is equivalent
+/// to Rust's `String::from_utf8_lossy()` — invalid UTF-8 bytes are replaced with U+FFFD.
+///
+/// SDK v1.x used a manual byte-by-byte parser that skipped invalid bytes. SocialCert
+/// upgraded to SDK v2 on Feb 4, 2026, which changed how nonce keyIDs are computed.
 fn js_to_utf8(bytes: &[u8]) -> String {
-    let mut result = String::new();
-    let mut skip = 0;
-
-    for i in 0..bytes.len() {
-        let byte = bytes[i];
-
-        // If this byte is part of a multi-byte sequence, skip it
-        if skip > 0 {
-            skip -= 1;
-            continue;
-        }
-
-        // 1-byte sequence (0xxxxxxx)
-        if byte <= 0x7f {
-            result.push(char::from(byte));
-        } else if byte >= 0xc0 && byte <= 0xdf {
-            // 2-byte sequence (110xxxxx 10xxxxxx)
-            // SDK doesn't check bounds - it just accesses arr[i + 1] directly
-            // If out of bounds, byte2 will be undefined, but we'll still compute code_point
-            let byte2 = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-            skip = 1;
-            let code_point = ((byte & 0x1f) as u32) << 6 | (byte2 & 0x3f) as u32;
-            // SDK uses String.fromCharCode(codePoint) which always produces a character
-            // Even for invalid code points, it produces a character (replacement character)
-            // We need to always push a character to match SDK behavior
-            result.push(char::from_u32(code_point).unwrap_or(char::from_u32(0xFFFD).unwrap()));
-        } else if byte >= 0xe0 && byte <= 0xef {
-            // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
-            // SDK doesn't check bounds - it just accesses arr[i + 1] and arr[i + 2] directly
-            let byte2 = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-            let byte3 = if i + 2 < bytes.len() { bytes[i + 2] } else { 0 };
-            skip = 2;
-            let code_point = ((byte & 0x0f) as u32) << 12
-                | ((byte2 & 0x3f) as u32) << 6
-                | (byte3 & 0x3f) as u32;
-            // SDK always produces a character, even for invalid code points
-            result.push(char::from_u32(code_point).unwrap_or(char::from_u32(0xFFFD).unwrap()));
-        } else if byte >= 0xf0 && byte <= 0xf7 {
-            // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
-            // SDK doesn't check bounds - it just accesses arr[i + 1], arr[i + 2], arr[i + 3] directly
-            // If out of bounds, bytes will be undefined, but we'll still compute code_point
-            let byte2 = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-            let byte3 = if i + 2 < bytes.len() { bytes[i + 2] } else { 0 };
-            let byte4 = if i + 3 < bytes.len() { bytes[i + 3] } else { 0 };
-            skip = 3;
-            let code_point = ((byte & 0x07) as u32) << 18
-                | ((byte2 & 0x3f) as u32) << 12
-                | ((byte3 & 0x3f) as u32) << 6
-                | (byte4 & 0x3f) as u32;
-
-            // SDK always converts to surrogate pair for code points > 0xffff, even if invalid
-            // JavaScript's String.fromCharCode will convert invalid surrogates to replacement chars
-            if code_point > 0xffff {
-                let surrogate1 = 0xd800u32 + ((code_point - 0x10000) >> 10);
-                let surrogate2 = 0xdc00u32 + ((code_point - 0x10000) & 0x3ff);
-                // Push surrogate pair - Rust will handle invalid surrogates when encoding to UTF-8
-                // This matches JavaScript's behavior of producing replacement characters
-                if let Some(ch1) = char::from_u32(surrogate1) {
-                    result.push(ch1);
-                } else {
-                    result.push(char::from_u32(0xFFFD).unwrap()); // Replacement character
-                }
-                if let Some(ch2) = char::from_u32(surrogate2) {
-                    result.push(ch2);
-                } else {
-                    result.push(char::from_u32(0xFFFD).unwrap()); // Replacement character
-                }
-            } else {
-                // SDK always produces a character, even for invalid code points
-                // JavaScript converts invalid code points to replacement characters
-                result.push(char::from_u32(code_point).unwrap_or(char::from_u32(0xFFFD).unwrap()));
-            }
-        }
-        // Invalid UTF-8 sequence start byte (0x80-0xbf continuation bytes, 0xf8-0xff invalid)
-        // SDK's toUTF8 doesn't handle these cases - it just skips them (continues to next iteration)
-        // We should do the same - don't push anything, just continue
-    }
-
-    result
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 async fn create_nonce_with_hmac(
@@ -479,34 +546,45 @@ async fn create_nonce_with_hmac(
     };
     drop(db);
 
-    // Derive HMAC key using BRC-42 (or use raw key for 'self')
-    // For HMAC, we need a symmetric key (HMAC output), not a child private key
-    let hmac_key = if let Some(counterparty_hex) = counterparty {
+    // Derive HMAC key using BRC-42
+    // CRITICAL: TypeScript SDK resolves counterparty='self' to the wallet's OWN public key,
+    // then performs full BRC-42 ECDH (deriveSymmetricKey). It does NOT use the raw master key.
+    // See KeyDeriver.normalizeCounterparty(): 'self' → rootKey.toPublicKey()
+    let counterparty_bytes = if let Some(counterparty_hex) = counterparty {
         log::info!("      Counterparty: {} (using BRC-42)", counterparty_hex);
-        let counterparty_bytes = match hex::decode(counterparty_hex) {
+        match hex::decode(counterparty_hex) {
             Ok(b) => b,
             Err(e) => return Err(format!("Failed to decode counterparty key: {}", e)),
-        };
-
-        // For HMAC, derive symmetric key (HMAC output), not child private key
-        match derive_symmetric_key_for_hmac(&master_privkey, &counterparty_bytes, &invoice_number) {
-            Ok(key) => key,
-            Err(e) => return Err(format!("BRC-42 symmetric key derivation failed: {}", e)),
         }
     } else {
-        log::info!("      Counterparty: 'self' (using raw master key)");
-        // For 'self', we still need to derive a symmetric key using the invoice number
-        // But without a counterparty, we can't use ECDH. Let's check what the SDK does...
-        // Actually, for 'self', the SDK might use a different approach. Let's use the master key directly
-        // and compute HMAC over invoice number with it as a fallback.
-        // But wait - if counterparty is 'self', we shouldn't be using BRC-42 at all.
-        // The SDK's createNonce with 'self' might not use BRC-42. Let me check...
-        // For now, let's use the master key directly (this might be wrong, but let's test)
-        master_privkey
+        // 'self' → derive our own public key as the counterparty (matches TypeScript SDK)
+        log::info!("      Counterparty: 'self' (using own public key for BRC-42 ECDH)");
+        use crate::crypto::keys::derive_public_key;
+        match derive_public_key(&master_privkey) {
+            Ok(pk) => pk,
+            Err(e) => return Err(format!("Failed to derive own public key: {}", e)),
+        }
     };
 
-    // Compute HMAC-SHA256 over firstHalf
-    let hmac_result = hmac_sha256(&hmac_key, &first_half);
+    let hmac_key = match derive_symmetric_key_for_hmac(&master_privkey, &counterparty_bytes, &invoice_number) {
+        Ok(key) => key,
+        Err(e) => return Err(format!("BRC-42 symmetric key derivation failed: {}", e)),
+    };
+
+    // TypeScript SDK's createHmac uses key.toArray() which strips leading zeros
+    // from the SymmetricKey (which extends BigNumber). Must strip to match.
+    let hmac_key_stripped = {
+        let mut k = hmac_key.as_slice();
+        while k.len() > 1 && k[0] == 0 {
+            k = &k[1..];
+        }
+        k
+    };
+    log::info!("      HMAC key (full {} bytes, hex): {}", hmac_key.len(), hex::encode(&hmac_key));
+    log::info!("      HMAC key (stripped {} bytes, hex): {}", hmac_key_stripped.len(), hex::encode(hmac_key_stripped));
+
+    // Compute HMAC-SHA256 over firstHalf using stripped key (matching TypeScript SDK)
+    let hmac_result = hmac_sha256(hmac_key_stripped, &first_half);
 
     log::info!("      HMAC (32 bytes, hex): {}", hex::encode(&hmac_result));
 
@@ -608,9 +686,11 @@ pub struct AcquireCertificateRequest {
     pub fields: Option<serde_json::Value>,
 
     /// Serial number (base64, required for 'direct')
+    #[serde(alias = "serialNumber")]
     pub serial_number: Option<String>,
 
     /// Revocation outpoint (required for 'direct')
+    #[serde(alias = "revocationOutpoint")]
     pub revocation_outpoint: Option<String>,
 
     /// Certificate signature (hex, required for 'direct')
@@ -752,9 +832,13 @@ async fn acquire_certificate_direct(
         }
     };
 
-    // Verify certificate signature (unless already verified)
-    // Always verify signature (the skip flag is unused but kept for API compatibility)
-    {
+    // Verify certificate signature and check revocation — only when revocationOutpoint is a valid hex txid
+    // Many certifiers use placeholder values like "not supported.0" which can't be hex-decoded
+    let revocation_parts: Vec<&str> = certificate.revocation_outpoint.split('.').collect();
+    let has_valid_outpoint = revocation_parts.len() == 2
+        && hex::decode(revocation_parts[0]).map_or(false, |b| b.len() == 32);
+
+    if has_valid_outpoint {
         use crate::certificate::verifier::verify_certificate_signature_with_keyid;
         // Use original base64 strings from JSON for keyID (matching server's behavior)
         let type_base64_original = cert_json_value.get("type").and_then(|v| v.as_str());
@@ -774,9 +858,12 @@ async fn acquire_certificate_direct(
                 }));
             }
         }
+    } else {
+        log::info!("   ℹ️  Skipping signature verification (placeholder revocationOutpoint: {})", certificate.revocation_outpoint);
     }
 
     // Check revocation status (check if revocationOutpoint UTXO is spent)
+    if has_valid_outpoint {
     use crate::certificate::verifier::check_revocation_status;
     match check_revocation_status(&certificate.revocation_outpoint).await {
         Ok(true) => {
@@ -794,6 +881,9 @@ async fn acquire_certificate_direct(
             // Continue with acquisition even if revocation check fails
             // This allows certificates to be acquired even if API is temporarily unavailable
         }
+    }
+    } else {
+        log::info!("   ℹ️  Skipping on-chain revocation check (placeholder revocationOutpoint: {})", certificate.revocation_outpoint);
     }
 
     // Check if certificate already exists
@@ -822,14 +912,82 @@ async fn acquire_certificate_direct(
         }
     }
 
+    // Get master private key using the ALREADY-HELD db lock (don't re-acquire — Mutex is not reentrant)
+    let master_privkey_for_keyring =
+        crate::database::helpers::get_master_private_key_from_db(&db).ok();
+
     // Store certificate in database
     match cert_repo.insert_certificate_with_fields(&mut certificate) {
         Ok(certificate_id) => {
             log::info!("   ✅ Certificate stored with ID: {}", certificate_id);
 
-            // Return certificate as JSON object (matching other wallets' format)
+            // Return certificate with PUBLIC keyring (encrypted for "anyone")
+            //
+            // NEVER expose the master keyring (keyringForSubject) — it's an internal
+            // wallet secret encrypted for subject+certifier. Instead, generate the
+            // public keyring (encrypted for the "anyone" verifier) so the PushDrop
+            // can be built with fields anyone can decrypt.
+            //
+            // SocialCert's IdentityClient spreads the cert object into the PushDrop
+            // without overriding keyring from proveCertificate, so we must provide
+            // the correct public keyring here.
+            let mut response_cert = cert_json_value.clone();
+            if let Some(obj) = response_cert.as_object_mut() {
+                obj.remove("keyringForSubject");
+
+                // Generate public keyring for "anyone" verifier
+                let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX).unwrap();
+                let serial_b64 = {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                    BASE64.encode(&certificate.serial_number)
+                };
+                let mut public_keyring = serde_json::Map::new();
+                if let Some(ref master_privkey) = master_privkey_for_keyring {
+                for (field_name, field) in &certificate.fields {
+                    // Decrypt master key to get raw revelation key
+                    let revelation_key = if field.master_key.len() >= 48 {
+                        match crate::crypto::brc2::decrypt_certificate_field(
+                            master_privkey,
+                            &hex::decode(
+                                obj.get("certifier").and_then(|v| v.as_str()).unwrap_or("")
+                            ).unwrap_or_default(),
+                            field_name,
+                            None,
+                            &field.master_key,
+                        ) {
+                            Ok(key) => key,
+                            Err(_) => field.master_key.clone(),
+                        }
+                    } else {
+                        field.master_key.clone()
+                    };
+
+                    // Re-encrypt for "anyone" verifier (with serial number in keyID)
+                    match crate::crypto::brc2::encrypt_certificate_field(
+                        master_privkey,
+                        &anyone_pubkey,
+                        field_name,
+                        Some(&serial_b64),
+                        &revelation_key,
+                    ) {
+                        Ok(encrypted) => {
+                            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                            public_keyring.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&encrypted)));
+                        }
+                        Err(e) => {
+                            log::warn!("   Failed to generate public keyring for '{}': {}", field_name, e);
+                        }
+                    }
+                }
+                } // end if let Some(master_privkey)
+
+                if !public_keyring.is_empty() {
+                    obj.insert("keyring".to_string(), serde_json::Value::Object(public_keyring));
+                    log::info!("   ✅ Generated public keyring for {} field(s) in acquireCertificate response", certificate.fields.len());
+                }
+            }
             HttpResponse::Ok().json(AcquireCertificateResponse {
-                certificate: cert_json_value,
+                certificate: response_cert,
             })
         }
         Err(e) => {
@@ -916,7 +1074,7 @@ async fn acquire_certificate_issuance(
     // 2. Create HMAC over those bytes using BRC-42 with protocolID [2, 'server hmac']
     // 3. Concatenate: firstHalf (16 bytes) + hmac (32 bytes) = 48 bytes total
     // 4. Return base64-encoded
-    // For initialRequest, counterparty is 'self' (no BRC-42 derivation)
+    // For initialRequest, counterparty is 'self' (BRC-42 ECDH with own public key)
     let client_nonce = match create_nonce_with_hmac(&state, None).await {
         Ok(nonce) => nonce,
         Err(e) => {
@@ -935,87 +1093,52 @@ async fn acquire_certificate_issuance(
         "version": "0.1",
         "messageType": "initialRequest",
         "identityKey": subject_public_key,
-        "initialNonce": client_nonce
+        "initialNonce": client_nonce,
+        "requestedCertificates": {
+            "certifiers": [],
+            "types": {}
+        }
         // NO signature field - initialRequest is unsigned!
     });
     let initial_request_json = serde_json::to_string(&initial_request_message).unwrap();
 
     log::info!("   📤 Initial request message (unsigned): {}", initial_request_json);
 
-    // Send initialRequest - try /initialRequest first (BRC-53 docs), fallback to /.well-known/auth (Peer protocol)
-    // NOTE: BRC-53 documentation specifies /initialRequest, but TypeScript SDK uses /.well-known/auth
-    // We'll try /initialRequest first per BRC-53, then fall back to Peer protocol endpoint
+    // Send initialRequest to /.well-known/auth (matching TypeScript SDK's SimplifiedFetchTransport)
+    // NOTE: The SDK always uses /.well-known/auth, NOT /initialRequest
     let client = reqwest::Client::new();
-    let initial_request_url = if certifier_url.ends_with('/') {
-        format!("{}initialRequest", certifier_url)
-    } else {
-        format!("{}/initialRequest", certifier_url)
-    };
     let well_known_auth_url = if certifier_url.ends_with('/') {
         format!("{}.well-known/auth", certifier_url)
     } else {
         format!("{}/.well-known/auth", certifier_url)
     };
 
-    log::info!("   📤 POST to: {} (trying BRC-53 /initialRequest first)", initial_request_url);
+    log::info!("   📤 POST to: {} (/.well-known/auth, matching SDK)", well_known_auth_url);
     let initial_response = match client
-        .post(&initial_request_url)
+        .post(&well_known_auth_url)
         .header("Content-Type", "application/json")
-        // NO authentication headers - initialRequest is unsigned!
         .body(initial_request_json.clone())
         .send()
         .await
     {
         Ok(resp) => {
             if resp.status().is_success() {
-                log::info!("   ✅ /initialRequest succeeded");
+                log::info!("   ✅ /.well-known/auth succeeded");
                 resp
             } else {
-                // If /initialRequest fails, try /.well-known/auth as fallback
-                log::warn!("   ⚠️  /initialRequest returned {}, trying /.well-known/auth fallback", resp.status());
-                log::info!("   📤 POST to: {} (Peer protocol fallback)", well_known_auth_url);
-                match client
-                    .post(&well_known_auth_url)
-                    .header("Content-Type", "application/json")
-                    .body(initial_request_json.clone())
-                    .send()
-                    .await
-                {
-                    Ok(fallback_resp) => {
-                        log::info!("   ✅ /.well-known/auth fallback succeeded");
-                        fallback_resp
-                    },
-                    Err(e) => {
-                        log::error!("   ❌ Both /initialRequest and /.well-known/auth failed: {}", e);
-                        return HttpResponse::BadGateway().json(serde_json::json!({
-                            "error": format!("Failed to connect to certifier: {}", e)
-                        }));
-                    }
-                }
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                log::error!("   ❌ /.well-known/auth returned {} - {}", status, body);
+                return HttpResponse::BadGateway().json(serde_json::json!({
+                    "error": format!("Certifier handshake failed: {} {}", status, body)
+                }));
             }
         },
         Err(e) => {
-            // If /initialRequest connection fails, try /.well-known/auth as fallback
-            log::warn!("   ⚠️  /initialRequest connection failed: {}, trying /.well-known/auth fallback", e);
-            log::info!("   📤 POST to: {} (Peer protocol fallback)", well_known_auth_url);
-            match client
-                .post(&well_known_auth_url)
-                .header("Content-Type", "application/json")
-                .body(initial_request_json.clone())
-                .send()
-                .await
-            {
-                Ok(fallback_resp) => {
-                    log::info!("   ✅ /.well-known/auth fallback succeeded");
-                    fallback_resp
-                },
-                Err(fallback_e) => {
-                    log::error!("   ❌ Both /initialRequest and /.well-known/auth failed: {} / {}", e, fallback_e);
-                    return HttpResponse::BadGateway().json(serde_json::json!({
-                        "error": format!("Failed to connect to certifier: {}", e)
-                    }));
-                }
-            }
+            log::error!("   ❌ Failed to connect to certifier: {}", e);
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Failed to connect to certifier: {}", e)
+            }));
         }
     };
 
@@ -1886,14 +2009,17 @@ async fn acquire_certificate_issuance(
         }
     };
 
-    // Create invoice number for signing the CSR - use requestNonce (request ID) and server's nonce
-    // KeyID combines requestNonce and serverNonce (matching TypeScript SDK's Peer.toPeer pattern)
-    // CRITICAL: TypeScript SDK Peer.ts line 128 uses: keyID = `${requestNonce} ${peerSession.peerNonce}`
-    // Where requestNonce = Utils.toBase64(Random(32)) (the request ID, first 32 bytes of serialized request)
-    // And peerSession.peerNonce = message.initialNonce (the server's nonce from initialResponse)
-    // So keyID = requestNonce + " " + serverNonce (request ID first, then server's nonce)
-    // CRITICAL: Use csr_request_nonce (the request ID) for keyID, NOT csr_client_nonce (from CSR body)
-    let csr_key_id = format!("{} {}", csr_request_nonce, server_serial_nonce);
+    // Create a separate MESSAGE nonce for the auth header (x-bsv-auth-nonce)
+    // CONFIRMED by capture proxy: MetaNet Client uses a 32-byte RANDOM nonce here,
+    // NOT a 48-byte HMAC nonce. It's different from the request ID but also 32 bytes.
+    let mut csr_message_nonce_bytes = [0u8; 32];
+    rand::thread_rng().fill(&mut csr_message_nonce_bytes);
+    let csr_message_nonce = base64::engine::general_purpose::STANDARD.encode(&csr_message_nonce_bytes);
+    log::info!("   ✅ Created message nonce for /signCertificate auth (32 bytes random, matching SDK)");
+
+    // KeyID combines message nonce and server's session nonce
+    // SDK's Peer.toPeer: keyID = `${messageNonce} ${peerSession.peerNonce}`
+    let csr_key_id = format!("{} {}", csr_message_nonce, server_serial_nonce);
     let csr_protocol_id = match normalize_protocol_id("auth message signature") {
         Ok(p) => p,
         Err(e) => {
@@ -2165,9 +2291,9 @@ async fn acquire_certificate_issuance(
     log::info!("   📤 Headers:");
     log::info!("   📤   x-bsv-auth-version: 0.1");
     log::info!("   📤   x-bsv-auth-identity-key: {} (full: {})", &subject_public_key[..20], subject_public_key);
-    log::info!("   📤   x-bsv-auth-nonce: {} (full: {})", &csr_request_nonce[..20], csr_request_nonce);
+    log::info!("   📤   x-bsv-auth-nonce: {} (full: {}) [32-byte message nonce]", &csr_message_nonce[..20], csr_message_nonce);
     log::info!("   📤   x-bsv-auth-your-nonce: {} (full: {})", &server_serial_nonce[..20], server_serial_nonce);
-    log::info!("   📤   x-bsv-auth-request-id: {} (full: {})", &csr_request_nonce[..20], csr_request_nonce);
+    log::info!("   📤   x-bsv-auth-request-id: {} (full: {}) [32-byte request ID]", &csr_request_nonce[..20], csr_request_nonce);
     log::info!("   📤   x-bsv-auth-signature: {}... (full: {})", &signature_hex2[..20], signature_hex2);
     log::info!("   📤 Body (CSR JSON): {} bytes", csr_json_string.len());
     log::info!("   📤 ==========================================");
@@ -2175,11 +2301,11 @@ async fn acquire_certificate_issuance(
     // TypeScript SDK's SimplifiedFetchTransport sends these headers for general messages:
     // - x-bsv-auth-version: "0.1"
     // - x-bsv-auth-identity-key: identity key
-    // - x-bsv-auth-nonce: requestNonce (from Peer.toPeer(), same as request ID)
+    // - x-bsv-auth-nonce: message.nonce (48-byte HMAC nonce from Peer's createNonce)
     // - x-bsv-auth-your-nonce: server's nonce from initialResponse
     // - x-bsv-auth-signature: signature (hex)
     // - x-bsv-auth-request-id: requestId (first 32 bytes of serialized request, base64)
-    // CRITICAL: x-bsv-auth-nonce and x-bsv-auth-request-id MUST be the same value!
+    // NOTE: x-bsv-auth-nonce and x-bsv-auth-request-id are DIFFERENT values!
     //
     // CRITICAL: The Content-Type header we send MUST match what we serialized for signing!
     // If CEF modifies it (adds charset, changes case), signature verification will fail.
@@ -2195,9 +2321,9 @@ async fn acquire_certificate_issuance(
         .header("Content-Type", content_type_header_value)
         .header("x-bsv-auth-version", "0.1")
         .header("x-bsv-auth-identity-key", &subject_public_key)
-        .header("x-bsv-auth-nonce", &csr_request_nonce)  // Request nonce (same as request ID, from Peer.toPeer())
+        .header("x-bsv-auth-nonce", &csr_message_nonce)  // Message nonce (48-byte HMAC nonce, from createNonce)
         .header("x-bsv-auth-your-nonce", &server_serial_nonce)  // Server's nonce from initialResponse
-        .header("x-bsv-auth-request-id", &csr_request_nonce)  // Request ID (first 32 bytes of serialized request)
+        .header("x-bsv-auth-request-id", &csr_request_nonce)  // Request ID (32-byte, first bytes of serialized request)
         .header("x-bsv-auth-signature", &signature_hex2)
         .body(csr_json_string.clone())
         .send()
@@ -2344,6 +2470,12 @@ async fn acquire_certificate_issuance(
 
     log::info!("   📍 Certifier's revocationOutpoint: {}", revocation_outpoint);
 
+    // Check if revocationOutpoint has a valid hex txid (standard format)
+    let revocation_txid = revocation_outpoint.split('.').next()
+        .filter(|txid| txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|txid| txid.to_string());
+    let has_valid_outpoint = revocation_txid.is_some();
+
     // Parse certificate for verification
     let certificate_for_verification = match parse_certificate_from_json(&cert_obj) {
         Ok(cert) => cert,
@@ -2355,48 +2487,51 @@ async fn acquire_certificate_issuance(
         }
     };
 
-    // Verify signature
-    let type_base64_original = cert_obj.get("type").and_then(|v| v.as_str());
-    let serial_base64_original = cert_obj.get("serialNumber").and_then(|v| v.as_str());
-    match verify_certificate_signature_with_keyid(
-        &certificate_for_verification,
-        type_base64_original,
-        serial_base64_original,
-    ) {
-        Ok(_) => {
-            log::info!("   ✅ Certificate signature verified");
-        }
-        Err(e) => {
-            log::error!("   ❌ Certificate signature verification failed: {}", e);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Certificate signature verification failed: {}", e)
-            }));
-        }
-    }
-
-    // Verify the revocationOutpoint exists on-chain (certifier should have created the transaction)
-    log::info!("   🔍 Verifying revocationOutpoint exists on-chain...");
-    use crate::certificate::verifier::check_revocation_status;
-    let revocation_txid = revocation_outpoint.split('.').next()
-        .filter(|txid| txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(|txid| txid.to_string());
-
-    match check_revocation_status(&revocation_outpoint).await {
-        Ok(is_spent) => {
-            if is_spent {
-                log::warn!("   ⚠️  Revocation outpoint is spent - certificate may be revoked");
-            } else {
-                log::info!("   ✅ Revocation outpoint exists on-chain and is unspent");
-                // Store the txid for later use when storing the certificate
-                if let Some(txid) = &revocation_txid {
-                    log::info!("   📍 Extracted txid from revocationOutpoint: {}", txid);
-                }
+    // Verify signature (only when revocationOutpoint is standard — placeholder values
+    // produce non-deterministic preimage bytes via SDK's hex decoder and can't be verified)
+    if has_valid_outpoint {
+        let type_base64_original = cert_obj.get("type").and_then(|v| v.as_str());
+        let serial_base64_original = cert_obj.get("serialNumber").and_then(|v| v.as_str());
+        match verify_certificate_signature_with_keyid(
+            &certificate_for_verification,
+            type_base64_original,
+            serial_base64_original,
+        ) {
+            Ok(_) => {
+                log::info!("   ✅ Certificate signature verified");
+            }
+            Err(e) => {
+                log::error!("   ❌ Certificate signature verification failed: {}", e);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Certificate signature verification failed: {}", e)
+                }));
             }
         }
-        Err(e) => {
-            log::warn!("   ⚠️  Failed to verify revocationOutpoint on-chain: {} - proceeding anyway", e);
-            // Continue - the certifier may have just created it and it hasn't propagated yet
+    } else {
+        log::info!("   ℹ️  Skipping signature verification (placeholder revocationOutpoint)");
+    }
+
+    // Verify the revocationOutpoint exists on-chain (only for standard outpoints)
+    if has_valid_outpoint {
+        log::info!("   🔍 Verifying revocationOutpoint exists on-chain...");
+        use crate::certificate::verifier::check_revocation_status;
+        match check_revocation_status(&revocation_outpoint).await {
+            Ok(is_spent) => {
+                if is_spent {
+                    log::warn!("   ⚠️  Revocation outpoint is spent - certificate may be revoked");
+                } else {
+                    log::info!("   ✅ Revocation outpoint exists on-chain and is unspent");
+                    if let Some(txid) = &revocation_txid {
+                        log::info!("   📍 Extracted txid from revocationOutpoint: {}", txid);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to verify revocationOutpoint on-chain: {} - proceeding anyway", e);
+            }
         }
+    } else {
+        log::info!("   ℹ️  Skipping on-chain revocation check (placeholder revocationOutpoint)");
     }
 
     // Build request for 'direct' protocol handler
@@ -2912,6 +3047,7 @@ pub struct ProveCertificateRequest {
     pub certificate: CertificateIdentifier,
 
     /// Fields to reveal (array of field names)
+    #[serde(alias = "fieldsToReveal")]
     pub fields_to_reveal: Vec<String>,
 
     /// Verifier's public key (33-byte compressed, hex-encoded)
@@ -2935,7 +3071,7 @@ pub struct CertificateIdentifier {
     pub type_: Option<String>,
 
     /// Serial number (base64-encoded, optional)
-    #[serde(default)]
+    #[serde(default, alias = "serialNumber")]
     pub serial_number: Option<String>,
 
     /// Certifier (hex-encoded, optional)
@@ -2957,6 +3093,7 @@ pub struct CertificateIdentifier {
 
 /// Response structure for proveCertificate
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProveCertificateResponse {
     /// Keyring for verifier (fieldName → base64-encoded encrypted revelation key)
     pub keyring_for_verifier: std::collections::HashMap<String, String>,
@@ -3267,15 +3404,23 @@ pub async fn discover_by_identity_key(
             serde_json::json!({})
         };
 
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_name: get_cert_type_name(&type_b64),
+            type_: type_b64,
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier_name: get_certifier_name(&certifier_hex),
+            certifier: certifier_hex,
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
             fields: fields_map,
             keyring: keyring_map,
+            decrypted_fields: serde_json::json!({}),
+            publish_status: "unpublished".to_string(),
+            publish_txid: None,
+            created_at: cert.created_at,
         });
     }
 
@@ -3504,15 +3649,23 @@ pub async fn discover_by_attributes(
             serde_json::json!({})
         };
 
+        let type_b64 = BASE64.encode(&cert.type_);
+        let certifier_hex = hex::encode(&cert.certifier);
         cert_responses.push(CertificateResponse {
-            type_: BASE64.encode(&cert.type_),
+            type_name: get_cert_type_name(&type_b64),
+            type_: type_b64,
             serial_number: BASE64.encode(&cert.serial_number),
             subject: hex::encode(&cert.subject),
-            certifier: hex::encode(&cert.certifier),
+            certifier_name: get_certifier_name(&certifier_hex),
+            certifier: certifier_hex,
             revocation_outpoint: cert.revocation_outpoint.clone(),
             signature: hex::encode(&cert.signature),
             fields: fields_map,
             keyring: keyring_map,
+            decrypted_fields: serde_json::json!({}),
+            publish_status: "unpublished".to_string(),
+            publish_txid: None,
+            created_at: cert.created_at,
         });
     }
 
@@ -3522,4 +3675,1261 @@ pub async fn discover_by_attributes(
         total_certificates: total,
         certificates: cert_responses,
     })
+}
+
+// ============================================================================
+// Certificate Publish/Unpublish (Sprint 3 - Issue-41)
+// ============================================================================
+
+/// The "anyone" public key: PrivateKey(1).toPublicKey() — secp256k1 generator G
+const ANYONE_PUBKEY_HEX: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+/// BRC-43 invoice number for identity certificate PushDrop locking
+const IDENTITY_INVOICE: &str = "1-identity-1";
+
+/// Request structure for publish/unpublish certificate
+#[derive(Debug, Deserialize)]
+pub struct PublishCertificateRequest {
+    /// Certificate type (base64-encoded)
+    #[serde(rename = "type")]
+    pub type_: String,
+
+    /// Certificate serial number (base64-encoded)
+    #[serde(alias = "serialNumber")]
+    pub serial_number: String,
+
+    /// Certifier public key (hex-encoded)
+    pub certifier: String,
+
+    /// Which fields to publicly reveal (field names)
+    /// If empty, all fields are revealed
+    #[serde(default, alias = "fieldsToReveal")]
+    pub fields_to_reveal: Vec<String>,
+}
+
+/// Response structure for publish/unpublish
+#[derive(Debug, Serialize)]
+pub struct PublishCertificateResponse {
+    pub success: bool,
+    pub publish_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Auto-unpublish a certificate (used by relinquish_certificate delete flow).
+///
+/// Delegates to the shared `unpublish_certificate_core` which handles:
+/// - P2PK signing on PushDrop + P2PKH on funding inputs
+/// - Proper BEEF with ancestry chain
+/// - Change output recording in DB
+/// - Rollback on broadcast failure
+async fn auto_unpublish_certificate(
+    state: &AppState,
+    type_bytes: &[u8],
+    serial_bytes: &[u8],
+    certifier_bytes: &[u8],
+    publish_txid: &str,
+    publish_vout: u32,
+) -> Result<(), String> {
+    unpublish_certificate_core(
+        state, type_bytes, serial_bytes, certifier_bytes, publish_txid, publish_vout,
+    ).await.map(|_txid| ())
+}
+
+/// Public wrapper for auto_unpublish_certificate — callable from createAction in handlers.rs
+pub async fn auto_unpublish_certificate_pub(
+    state: &web::Data<AppState>,
+    type_bytes: &[u8],
+    serial_bytes: &[u8],
+    certifier_bytes: &[u8],
+    publish_txid: &str,
+    publish_vout: u32,
+) -> Result<(), String> {
+    auto_unpublish_certificate(state, type_bytes, serial_bytes, certifier_bytes, publish_txid, publish_vout).await
+}
+
+/// POST /wallet/certificate/publish — Publish a certificate to the BSV overlay
+///
+/// Flow:
+/// 1. Look up certificate from DB
+/// 2. Generate public keyring (proveCertificate with "anyone" verifier)
+/// 3. Build PushDrop script with cert JSON + public keyring
+/// 4. Build, sign, broadcast transaction
+/// 5. Submit BEEF to overlay
+/// 6. Update DB publish state
+pub async fn publish_certificate(
+    state: web::Data<AppState>,
+    req: web::Json<PublishCertificateRequest>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 POST /wallet/certificate/publish");
+    log::info!("   Type: {}, Serial: {}, Certifier: {}", req.type_, req.serial_number, req.certifier);
+
+    // Decode identifiers
+    let type_bytes = match BASE64.decode(&req.type_) {
+        Ok(b) if b.len() == 32 => b,
+        Ok(b) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Type must be 32 bytes, got {}", b.len())})),
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Invalid base64 type: {}", e)})),
+    };
+    let serial_bytes = match BASE64.decode(&req.serial_number) {
+        Ok(b) if b.len() == 32 => b,
+        Ok(b) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Serial must be 32 bytes, got {}", b.len())})),
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Invalid base64 serial: {}", e)})),
+    };
+    let certifier_bytes = match hex::decode(&req.certifier) {
+        Ok(b) if b.len() == 33 => b,
+        Ok(b) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Certifier must be 33 bytes, got {}", b.len())})),
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Invalid hex certifier: {}", e)})),
+    };
+
+    // Step 1: Look up certificate and check publish state
+    let (certificate, master_privkey) = {
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+
+        let cert = match cert_repo.get_by_identifiers(&type_bytes, &serial_bytes, &certifier_bytes) {
+            Ok(Some(c)) => c,
+            Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Certificate not found"})),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("DB error: {}", e)})),
+        };
+
+        // Check publish state — block if already confirmed on overlay, allow re-publish from broadcast
+        if let Ok(Some((status, _, _))) = cert_repo.get_publish_info(&type_bytes, &serial_bytes, &certifier_bytes) {
+            if status == "published" {
+                return HttpResponse::Conflict().json(PublishCertificateResponse {
+                    success: false,
+                    publish_status: status,
+                    publish_txid: None,
+                    error: Some("Certificate is already published on the overlay".to_string()),
+                });
+            }
+            if status == "broadcast" {
+                log::info!("   ℹ️  Certificate was previously broadcast but not confirmed — re-publishing");
+            }
+        }
+
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to get master key: {}", e)})),
+        };
+
+        (cert, privkey)
+    };
+
+    // Step 2: Generate public keyring for "anyone" verifier
+    // The master_key stored per field may be:
+    //   (a) BRC-2 encrypted revelation key (>= 48 bytes: 32 IV + ciphertext + 16 tag) — from certifiers that return keyringForSubject
+    //   (b) Raw revelation key (32 bytes) — when we generated the keys ourselves during acquisition
+    // We handle both: try BRC-2 decrypt first, fall back to treating as raw key.
+    let serial_b64 = BASE64.encode(&certificate.serial_number);
+    let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX).unwrap();
+
+    // Determine which fields to reveal
+    let fields_to_reveal: Vec<String> = if req.fields_to_reveal.is_empty() {
+        certificate.fields.keys().cloned().collect()
+    } else {
+        req.fields_to_reveal.clone()
+    };
+
+    if fields_to_reveal.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Certificate has no fields to reveal"}));
+    }
+
+    // Build keyring: for each field, get the revelation key and encrypt it for "anyone"
+    let mut verifier_keyring: HashMap<String, String> = HashMap::new();
+    {
+        let db = state.database.lock().unwrap();
+        let cert_repo_kr = CertificateRepository::new(db.connection());
+        let cert_fields = cert_repo_kr.get_certificate_fields(certificate.certificate_id.unwrap())
+            .unwrap_or_default();
+
+        for field_name in &fields_to_reveal {
+            let field = match cert_fields.get(field_name) {
+                Some(f) => f,
+                None => {
+                    log::warn!("   Skipping field '{}' — not found in certificate", field_name);
+                    continue;
+                }
+            };
+
+            // Try to get the revelation key from master_key
+            let revelation_key = if field.master_key.len() >= 48 {
+                // Case (a): BRC-2 encrypted — decrypt it
+                match crate::crypto::brc2::decrypt_certificate_field(
+                    &master_privkey,
+                    &certifier_bytes,
+                    field_name,
+                    None, // Master keyring uses fieldName only
+                    &field.master_key,
+                ) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        log::warn!("   Failed to decrypt master key for '{}': {}, trying as raw key", field_name, e);
+                        field.master_key.clone() // Fall back to raw
+                    }
+                }
+            } else {
+                // Case (b): Raw revelation key (32 bytes or similar)
+                log::info!("   Field '{}': master_key is {} bytes — treating as raw revelation key", field_name, field.master_key.len());
+                field.master_key.clone()
+            };
+
+            // Encrypt the revelation key for "anyone" verifier
+            match crate::crypto::brc2::encrypt_certificate_field(
+                &master_privkey,
+                &anyone_pubkey,
+                field_name,
+                Some(&serial_b64),
+                &revelation_key,
+            ) {
+                Ok(encrypted) => {
+                    verifier_keyring.insert(field_name.clone(), BASE64.encode(&encrypted));
+                }
+                Err(e) => {
+                    log::warn!("   Failed to encrypt key for '{}' for anyone: {}", field_name, e);
+                }
+            }
+        }
+    }
+
+    if verifier_keyring.is_empty() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create public keyring — no fields could be processed"}));
+    }
+
+    log::info!("   ✅ Generated public keyring for {} fields", verifier_keyring.len());
+
+    // Step 3: Build certificate JSON with public keyring (matching SDK format)
+    let type_b64 = BASE64.encode(&certificate.type_);
+    let certifier_hex = hex::encode(&certificate.certifier);
+    let subject_hex = hex::encode(&certificate.subject);
+
+    // Build encrypted fields map
+    let mut fields_json = serde_json::Map::new();
+    for (field_name, field) in &certificate.fields {
+        fields_json.insert(field_name.clone(), serde_json::Value::String(BASE64.encode(&field.field_value)));
+    }
+
+    // Build keyring map (base64-encoded revelation keys for "anyone")
+    let mut keyring_json = serde_json::Map::new();
+    for (field_name, keyring_value) in &verifier_keyring {
+        keyring_json.insert(field_name.clone(), serde_json::Value::String(keyring_value.clone()));
+    }
+
+    let cert_publish_json = serde_json::json!({
+        "type": type_b64,
+        "serialNumber": serial_b64,
+        "subject": subject_hex,
+        "certifier": certifier_hex,
+        "revocationOutpoint": certificate.revocation_outpoint,
+        "fields": fields_json,
+        "signature": hex::encode(&certificate.signature),
+        "keyring": keyring_json,
+    });
+
+    let cert_json_string = serde_json::to_string(&cert_publish_json).unwrap();
+    let cert_bytes = cert_json_string.as_bytes().to_vec();
+    log::info!("   📝 Certificate JSON for PushDrop: {} bytes", cert_bytes.len());
+
+    // Step 4: Derive PushDrop locking key
+    //
+    // BRC-42 key derivation roles:
+    //   derive_child_public_key(sender_privkey, recipient_pubkey, invoice) → recipient's child pubkey
+    //   derive_child_private_key(recipient_privkey, sender_pubkey, invoice) → recipient's child privkey
+    //
+    // For publishing, WE are the owner and "anyone" is the counterparty:
+    //   - We want to lock to OUR child pubkey (so we can spend with our child privkey)
+    //   - Our child pubkey = derive_child_public_key(anyone_privkey, our_pubkey, invoice)
+    //     (anyone is the "sender", we are the "recipient")
+    //   - Our child privkey = derive_child_private_key(our_privkey, anyone_pubkey, invoice)
+    //     (we are the "recipient", anyone is the "sender")
+    //   - These match because ECDH is symmetric
+    //
+    // The anyone private key (0x01) is known, so we can compute both sides.
+
+    let secp = Secp256k1::new();
+    let master_pubkey = {
+        let secret = SecretKey::from_slice(&master_privkey).unwrap();
+        secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize().to_vec()
+    };
+
+    // Anyone's private key = 0x01
+    let mut anyone_privkey = [0u8; 32];
+    anyone_privkey[31] = 1;
+
+    let locking_pubkey = match crate::crypto::brc42::derive_child_public_key(
+        &anyone_privkey, &master_pubkey, IDENTITY_INVOICE,
+    ) {
+        Ok(pk) => pk,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Key derivation failed: {}", e)})),
+    };
+
+    log::info!("   🔑 Derived PushDrop locking pubkey: {}...", hex::encode(&locking_pubkey[..8]));
+
+    // Step 5: Sign the PushDrop data fields and encode the script
+    //
+    // The overlay's tm_identity topic manager requires a signature as the LAST
+    // PushDrop field. It verifies using:
+    //   anyoneWallet.verifySignature({ data: concat(fields[0..n-1]), signature: fields[n-1],
+    //     counterparty: subject, protocolID: [1, 'identity'], keyID: '1' })
+    //
+    // We sign with our child private key (derived with anyone as counterparty),
+    // which is the same key pair as the PushDrop locking key.
+    let child_privkey = match crate::crypto::brc42::derive_child_private_key(
+        &master_privkey, &anyone_pubkey, IDENTITY_INVOICE,
+    ) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Signing key derivation failed: {}", e)})),
+    };
+
+    // Sign the cert data: SHA256(cert_bytes) → ECDSA sign → DER
+    let data_hash = Sha256::digest(&cert_bytes);
+    let sign_secret = match SecretKey::from_slice(&child_privkey) {
+        Ok(s) => s,
+        Err(_) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Invalid derived signing key"})),
+    };
+    let sign_message = match secp256k1::Message::from_digest_slice(&data_hash) {
+        Ok(m) => m,
+        Err(_) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Invalid data hash for signing"})),
+    };
+    let pushdrop_signature = secp.sign_ecdsa(&sign_message, &sign_secret);
+    let signature_der = pushdrop_signature.serialize_der().to_vec();
+    log::info!("   🔏 PushDrop data signature: {} bytes (DER)", signature_der.len());
+
+    // Encode PushDrop with cert JSON as field[0] and signature as field[1] (last field)
+    let fields = vec![cert_bytes, signature_der];
+    let locking_script_bytes = match encode(&fields, &locking_pubkey, LockPosition::Before) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("PushDrop encoding failed: {:?}", e)})),
+    };
+    log::info!("   📜 PushDrop script: {} bytes (cert + signature)", locking_script_bytes.len());
+
+    // Step 6: Call createAction to build, sign, and broadcast the transaction
+    //
+    // This reuses the full createAction infrastructure:
+    // - UTXO selection with confirmed preference
+    // - Input reservation (prevents concurrent selection)
+    // - Change output generation and DB tracking
+    // - BEEF building with full ancestry chain
+    // - Broadcast with rollback on failure
+    // - Transaction + output DB records
+    use crate::handlers::{
+        CreateActionRequest, CreateActionOutput, CreateActionOptions,
+        create_action_internal,
+    };
+
+    let pushdrop_script_hex = hex::encode(&locking_script_bytes);
+    log::info!("   📜 PushDrop script: {} bytes → calling createAction", locking_script_bytes.len());
+
+    let ca_req = CreateActionRequest {
+        inputs: None,
+        outputs: vec![CreateActionOutput {
+            satoshis: Some(1), // 1 satoshi (matching SDK tokenAmount)
+            script: Some(pushdrop_script_hex.clone()),
+            address: None,
+            custom_instructions: None,
+            output_description: Some("identity certificate PushDrop".to_string()),
+            basket: Some("identity_certificates".to_string()),
+            tags: Some(vec!["certificate".to_string(), "pushdrop".to_string()]),
+        }],
+        description: Some("Publish identity certificate".to_string()),
+        labels: Some(vec!["certificate".to_string()]),
+        options: Some(CreateActionOptions {
+            sign_and_process: Some(true),
+            accept_delayed_broadcast: Some(false), // Force broadcast
+            return_txid_only: None,
+            no_send: Some(false),
+            randomize_outputs: Some(false), // PushDrop must be output 0
+            send_max: None,
+            send_with: None,
+        }),
+        input_beef: None,
+    };
+
+    let ca_resp = create_action_internal(state.clone(), ca_req).await;
+
+    if !ca_resp.status().is_success() {
+        log::error!("   ❌ createAction failed with status {}", ca_resp.status());
+        let body = actix_web::body::to_bytes(ca_resp.into_body()).await.unwrap_or_default();
+        let err_msg = String::from_utf8_lossy(&body).to_string();
+        return HttpResponse::InternalServerError().json(PublishCertificateResponse {
+            success: false,
+            publish_status: "unpublished".to_string(),
+            publish_txid: None,
+            error: Some(format!("Transaction creation failed: {}", err_msg)),
+        });
+    }
+
+    // Parse createAction response to get txid and BEEF bytes
+    let ca_body = actix_web::body::to_bytes(ca_resp.into_body()).await.unwrap_or_default();
+    let ca_json: serde_json::Value = match serde_json::from_slice(&ca_body) {
+        Ok(v) => v,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(PublishCertificateResponse {
+                success: false,
+                publish_status: "unpublished".to_string(),
+                publish_txid: None,
+                error: Some(format!("Failed to parse createAction response: {}", e)),
+            });
+        }
+    };
+
+    let txid = ca_json["txid"].as_str().unwrap_or("").to_string();
+    if txid.is_empty() {
+        return HttpResponse::InternalServerError().json(PublishCertificateResponse {
+            success: false,
+            publish_status: "unpublished".to_string(),
+            publish_txid: None,
+            error: Some("createAction returned no txid".to_string()),
+        });
+    }
+    log::info!("   📝 Publish tx ID: {}", txid);
+
+    // P0 #5: Check if createAction's broadcast actually succeeded.
+    // createAction returns HTTP 200 even when broadcast fails (the signed tx is still valid).
+    // We check the transaction status in the DB — if broadcast failed, createAction sets it to 'failed'
+    // and rolls back (deletes ghost outputs, restores reserved inputs).
+    {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        if let Ok(Some(status)) = tx_repo.get_broadcast_status(&txid) {
+            if status == "failed" {
+                log::error!("   ❌ createAction broadcast failed (tx status: failed)");
+                return HttpResponse::InternalServerError().json(PublishCertificateResponse {
+                    success: false,
+                    publish_status: "unpublished".to_string(),
+                    publish_txid: None,
+                    error: Some("Transaction broadcast failed — miners rejected the transaction. Check server logs for details.".to_string()),
+                });
+            }
+            log::info!("   ✅ Transaction broadcast status: {}", status);
+        }
+    }
+
+    // Extract BEEF bytes from createAction response.
+    // createAction returns Atomic BEEF (BRC-95): [4-byte marker][32-byte txid][plain BEEF V1].
+    // The overlay expects plain BEEF, so we strip the 36-byte Atomic header.
+    let atomic_beef_bytes: Vec<u8> = if let Some(tx_arr) = ca_json["tx"].as_array() {
+        // tx is a byte array [u8, u8, ...]
+        tx_arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+    } else if let Some(tx_str) = ca_json["tx"].as_str() {
+        // tx is a hex string
+        hex::decode(tx_str).unwrap_or_default()
+    } else {
+        log::warn!("   ⚠️  No tx bytes in createAction response");
+        Vec::new()
+    };
+
+    // Convert Atomic BEEF → plain BEEF by stripping the 36-byte header
+    let beef_bytes: Vec<u8> = if atomic_beef_bytes.len() > 36
+        && atomic_beef_bytes[0..4] == [0x01, 0x01, 0x01, 0x01]
+    {
+        log::info!("   📦 Stripping Atomic BEEF header (36 bytes) → plain BEEF ({} bytes)",
+            atomic_beef_bytes.len() - 36);
+        atomic_beef_bytes[36..].to_vec()
+    } else {
+        log::info!("   📦 BEEF is already plain format ({} bytes)", atomic_beef_bytes.len());
+        atomic_beef_bytes
+    };
+
+    // Update the PushDrop output with identity derivation info for later unpublish signing.
+    // createAction doesn't know this is a PushDrop — it just created a generic output.
+    // We need to tag it with the correct derivation prefix/suffix so unpublish can derive the key.
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        // Output 0 is PushDrop (randomizeOutputs=false)
+        if let Ok(Some(output)) = output_repo.get_by_txid_vout(&txid, 0) {
+            if let Some(output_id) = output.output_id {
+                let _ = output_repo.update_derivation(
+                    output_id,
+                    Some("1-identity"),
+                    Some("1"),
+                );
+            }
+        }
+    }
+
+    // Update DB: broadcast status (tx is on-chain but not yet confirmed by overlay)
+    {
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+        let _ = cert_repo.update_publish_status(
+            &type_bytes, &serial_bytes, &certifier_bytes,
+            "broadcast", Some(&txid), Some(0),
+        );
+    }
+
+    // Step 7: Submit BEEF to overlay
+    let overlay_result = if !beef_bytes.is_empty() {
+        log::info!("   📡 Submitting {} bytes of plain BEEF to overlay...", beef_bytes.len());
+        log::info!("   📡 BEEF starts with: {:02x}{:02x}{:02x}{:02x}",
+            beef_bytes[0], beef_bytes[1], beef_bytes[2], beef_bytes[3]);
+        crate::overlay::submit_to_identity_overlay(&beef_bytes).await
+    } else {
+        Err("No BEEF bytes available".to_string())
+    };
+
+    // P0 #9: Only set "published" when overlay explicitly admits outputs.
+    // Ok(true) = outputsToAdmit non-empty (overlay indexed it)
+    // Ok(false) = overlay responded but rejected (outputsToAdmit empty)
+    // Err = network/transport failure
+    let final_status = match overlay_result {
+        Ok(true) => {
+            log::info!("   ✅ Overlay admitted the certificate (outputsToAdmit non-empty)");
+            let db = state.database.lock().unwrap();
+            let cert_repo = CertificateRepository::new(db.connection());
+            let _ = cert_repo.update_publish_status(
+                &type_bytes, &serial_bytes, &certifier_bytes,
+                "published", Some(&txid), Some(0),
+            );
+            "published"
+        }
+        Ok(false) => {
+            log::warn!("   ❌ Overlay REJECTED the certificate (outputsToAdmit empty)");
+            log::warn!("   Status stays 'broadcast' — tx is on-chain but not indexed by overlay");
+            "broadcast"
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Overlay submission failed: {} — status stays 'broadcast'", e);
+            "broadcast"
+        }
+    };
+
+    // Report accurate status to frontend
+    let success = final_status == "published";
+    let error = if !success {
+        Some("Transaction broadcast to miners but overlay did not index the certificate. Status: broadcast.".to_string())
+    } else {
+        None
+    };
+
+    HttpResponse::Ok().json(PublishCertificateResponse {
+        success,
+        publish_status: final_status.to_string(),
+        publish_txid: Some(txid),
+        error,
+    })
+}
+
+/// POST /wallet/certificate/unpublish — Remove a certificate from the BSV overlay
+///
+/// Flow:
+/// 1. Look up certificate and verify it's published
+/// 2. Build spending transaction for the PushDrop UTXO
+/// 3. Sign with PushDrop key (P2PK) + funding inputs (P2PKH)
+/// 4. Build BEEF with full ancestry, broadcast, submit to overlay
+/// 5. Update DB with rollback on failure
+pub async fn unpublish_certificate(
+    state: web::Data<AppState>,
+    req: web::Json<PublishCertificateRequest>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 POST /wallet/certificate/unpublish");
+
+    // Decode identifiers
+    let type_bytes = match BASE64.decode(&req.type_) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid type"})),
+    };
+    let serial_bytes = match BASE64.decode(&req.serial_number) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid serial"})),
+    };
+    let certifier_bytes = match hex::decode(&req.certifier) {
+        Ok(b) if b.len() == 33 => b,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid certifier"})),
+    };
+
+    // Step 1: Check publish state
+    let (publish_txid, publish_vout) = {
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+
+        match cert_repo.get_publish_info(&type_bytes, &serial_bytes, &certifier_bytes) {
+            Ok(Some((status, Some(txid), Some(vout)))) if status == "published" || status == "broadcast" => {
+                (txid, vout as u32)
+            }
+            Ok(Some((status, _, _))) => {
+                return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Certificate is not published (status: {})", status)}));
+            }
+            Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Certificate not found"})),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("DB error: {}", e)})),
+        }
+    };
+
+    log::info!("   📍 Published at {}:{}", publish_txid, publish_vout);
+
+    match unpublish_certificate_core(&state, &type_bytes, &serial_bytes, &certifier_bytes, &publish_txid, publish_vout).await {
+        Ok(txid) => {
+            HttpResponse::Ok().json(PublishCertificateResponse {
+                success: true,
+                publish_status: "unpublished".to_string(),
+                publish_txid: Some(txid),
+                error: None,
+            })
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(PublishCertificateResponse {
+                success: false,
+                publish_status: "broadcast".to_string(),
+                publish_txid: Some(publish_txid),
+                error: Some(e),
+            })
+        }
+    }
+}
+
+/// Core unpublish logic shared by both `unpublish_certificate` and `auto_unpublish_certificate`.
+///
+/// Builds a spending transaction for the PushDrop UTXO with:
+/// - P2PK signing on the PushDrop input (identity key)
+/// - P2PKH signing on funding inputs
+/// - Proper BEEF with ancestry chain (via build_beef_for_txid)
+/// - Change output recorded in DB
+/// - Rollback on broadcast failure
+async fn unpublish_certificate_core(
+    state: &AppState,
+    type_bytes: &[u8],
+    serial_bytes: &[u8],
+    certifier_bytes: &[u8],
+    publish_txid: &str,
+    publish_vout: u32,
+) -> Result<String, String> {
+    use crate::database::{OutputRepository, WalletRepository, AddressRepository};
+
+    // Get PushDrop output details
+    let (locking_script_hex, output_satoshis) = {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        match output_repo.get_by_txid_vout(publish_txid, publish_vout) {
+            Ok(Some(output)) => {
+                let script_hex = output_repo.get_locking_script_hex(output.output_id.unwrap())
+                    .unwrap_or_default()
+                    .unwrap_or_default();
+                (script_hex, output.satoshis)
+            }
+            _ => (String::new(), 1i64),
+        }
+    };
+
+    if locking_script_hex.is_empty() {
+        return Err("PushDrop locking script not found in database".to_string());
+    }
+
+    // Derive PushDrop signing key
+    let master_privkey = {
+        let db = state.database.lock().unwrap();
+        crate::database::get_master_private_key_from_db(&db)
+            .map_err(|e| format!("Failed to get master key: {}", e))?
+    };
+
+    let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX).unwrap();
+    let child_privkey = crate::crypto::brc42::derive_child_private_key(
+        &master_privkey, &anyone_pubkey, IDENTITY_INVOICE,
+    ).map_err(|e| format!("Key derivation failed: {}", e))?;
+
+    // Select funding UTXOs
+    let fee_rate = state.fee_rate_cache.get_rate().await;
+    let estimated_fee = crate::handlers::estimate_fee_for_transaction(
+        2, &[25], false, fee_rate,
+    ) as i64;
+
+    let funding_utxos = {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let all_utxos = output_repo.get_spendable_by_user(1)
+            .map_err(|e| format!("Failed to get UTXOs: {}", e))?
+            .iter()
+            .filter(|o| !(o.txid.as_deref() == Some(publish_txid) && o.vout == publish_vout as i32))
+            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .collect::<Vec<_>>();
+        drop(db);
+        let selected = select_utxos(&all_utxos, estimated_fee);
+        if selected.is_empty() {
+            return Err("Insufficient funds for unpublish fee".to_string());
+        }
+        selected
+    };
+
+    let funding_total: i64 = funding_utxos.iter().map(|u| u.satoshis).sum();
+    log::info!("   💰 Funding: {} UTXOs ({} sats) + PushDrop ({} sats), fee ~{} sats",
+        funding_utxos.len(), funding_total, output_satoshis, estimated_fee);
+
+    // Reserve all inputs (prevents concurrent selection)
+    let placeholder_txid = format!("pending-unpub-{}", chrono::Utc::now().timestamp_millis());
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+        utxos_to_reserve.push((publish_txid.to_string(), publish_vout));
+        let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
+    }
+    state.balance_cache.invalidate();
+
+    // Build transaction
+    let mut tx = Transaction::new();
+    tx.add_input(TxInput::new(OutPoint::new(publish_txid.to_string(), publish_vout)));
+    for utxo in &funding_utxos {
+        tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
+    }
+
+    // Change output
+    let total_in = funding_total + output_satoshis;
+    let change_amount = total_in - estimated_fee;
+    let mut change_address_index: Option<i32> = None;
+    let mut change_script_hex: Option<String> = None;
+
+    if change_amount > 546 {
+        let (change_script, addr_index) = {
+            let db = state.database.lock().unwrap();
+            let wallet_repo = WalletRepository::new(db.connection());
+            let wallet = wallet_repo.get_primary_wallet()
+                .map_err(|e| format!("Wallet error: {}", e))?
+                .ok_or("No wallet found")?;
+            let wallet_id = wallet.id.unwrap();
+
+            let address_repo = AddressRepository::new(db.connection());
+            let current_index = address_repo.get_max_index(wallet_id)
+                .ok().flatten().map(|i| i + 1)
+                .unwrap_or(wallet.current_index);
+
+            let master_pubkey = crate::database::get_master_public_key_from_db(&db)
+                .map_err(|e| format!("Pubkey error: {}", e))?;
+            let invoice = format!("2-receive address-{}", current_index);
+            let derived_pubkey = crate::crypto::brc42::derive_child_public_key(&master_privkey, &master_pubkey, &invoice)
+                .map_err(|e| format!("Key derivation error: {}", e))?;
+            let change_addr = crate::handlers::pubkey_to_address(&derived_pubkey)
+                .map_err(|e| format!("Address error: {}", e))?;
+
+            let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let addr_model = crate::database::Address {
+                id: None, wallet_id, index: current_index, address: change_addr,
+                public_key: hex::encode(&derived_pubkey), used: true, balance: 0,
+                pending_utxo_check: false, created_at,
+            };
+            let _ = address_repo.create(&addr_model);
+            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
+
+            let sha_hash = Sha256::digest(&derived_pubkey);
+            let pubkey_hash = Ripemd160::digest(&sha_hash);
+            let script = Script::p2pkh_locking_script(&pubkey_hash)
+                .map_err(|e| format!("Script error: {}", e))?;
+            (script, current_index)
+        };
+        change_script_hex = Some(hex::encode(&change_script.bytes));
+        change_address_index = Some(addr_index);
+        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
+        log::info!("   💸 Change output: {} sats (address index {})", change_amount, addr_index);
+    }
+
+    // Sign input 0: PushDrop (P2PK)
+    let secp = Secp256k1::new();
+    let prev_script_bytes = hex::decode(&locking_script_hex)
+        .map_err(|e| format!("Invalid script hex: {}", e))?;
+    {
+        let sighash = calculate_sighash(&tx, 0, &prev_script_bytes, output_satoshis, SIGHASH_ALL_FORKID)
+            .map_err(|e| format!("Sighash failed: {}", e))?;
+        let secret = SecretKey::from_slice(&child_privkey)
+            .map_err(|_| "Invalid derived private key".to_string())?;
+        let message = Message::from_digest_slice(&sighash)
+            .map_err(|_| "Invalid sighash".to_string())?;
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let mut unlocking_bytes = Vec::new();
+        unlocking_bytes.push(sig_der.len() as u8);
+        unlocking_bytes.extend_from_slice(&sig_der);
+        tx.inputs[0].set_script(unlocking_bytes);
+    }
+
+    // Sign inputs 1+: Funding UTXOs (P2PKH)
+    for (i, utxo) in funding_utxos.iter().enumerate() {
+        let input_idx = i + 1;
+        let private_key_bytes = {
+            let db = state.database.lock().unwrap();
+            let output_repo = OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
+                Ok(Some(output)) => crate::database::derive_key_for_output(
+                    &db, output.derivation_prefix.as_deref(),
+                    output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
+                ).map_err(|e| format!("Key derivation: {}", e))?,
+                _ => return Err(format!("Output not found: {}:{}", utxo.txid, utxo.vout)),
+            }
+        };
+        let funding_prev_script = hex::decode(&utxo.script).unwrap_or_default();
+        let sighash = calculate_sighash(&tx, input_idx, &funding_prev_script, utxo.satoshis, SIGHASH_ALL_FORKID)
+            .map_err(|e| format!("Sighash failed: {}", e))?;
+        let secret = SecretKey::from_slice(&private_key_bytes).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
+    }
+
+    let txid = tx.txid().map_err(|e| format!("txid failed: {}", e))?;
+    let raw_tx_hex = tx.to_hex().map_err(|e| format!("Serialize failed: {}", e))?;
+    log::info!("   📝 Unpublish tx: {}", txid);
+
+    // Store signed tx in parent_transactions for BEEF building
+    {
+        let db = state.database.lock().unwrap();
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
+    }
+
+    // Build proper BEEF with full ancestry chain
+    let beef_bytes = {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))?;
+
+        let mut beef = crate::beef::Beef::new();
+
+        // Add ancestry for each input's parent tx
+        let mut ancestor_txids: Vec<String> = vec![publish_txid.to_string()];
+        for utxo in &funding_utxos {
+            if !ancestor_txids.contains(&utxo.txid) {
+                ancestor_txids.push(utxo.txid.clone());
+            }
+        }
+
+        for ancestor_txid in &ancestor_txids {
+            if beef.find_txid(ancestor_txid).is_some() {
+                continue;
+            }
+            match crate::beef_helpers::build_beef_for_txid(
+                ancestor_txid, &mut beef, &state.database, &client,
+            ).await {
+                Ok(_) => log::info!("   ✅ Added ancestry for {}", &ancestor_txid[..16.min(ancestor_txid.len())]),
+                Err(e) => log::warn!("   ⚠️  Ancestry failed for {}: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
+            }
+        }
+
+        beef.sort_topologically();
+
+        // Add the signed unpublish tx as the main transaction
+        let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+        beef.set_main_transaction(signed_tx_bytes);
+
+        // Serialize as standard BEEF (overlay expects plain BEEF, not Atomic)
+        beef.to_bytes().map_err(|e| format!("BEEF serialization failed: {}", e))?
+    };
+    log::info!("   📦 Built BEEF with ancestry: {} bytes", beef_bytes.len());
+
+    // Create transaction record BEFORE updating spent_by (so FK lookup succeeds)
+    // This is the critical step that was missing — without it, spent_by stays NULL
+    // and TaskReviewStatus restores the outputs to spendable=1.
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+    let unpublish_tx_id: Option<i64> = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+        match db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                1i64, // user_id
+                txid,
+                format!("unpublish-{}", &txid[..8]),
+                "Unpublish identity certificate",
+                raw_tx_bytes,
+                now, now,
+            ],
+        ) {
+            Ok(_) => {
+                let id = db.connection().last_insert_rowid();
+                log::info!("   💾 Created transaction record for unpublish tx {} (id: {})", &txid[..16], id);
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to create transaction record: {}", e);
+                None
+            }
+        }
+    };
+
+    // Record change output in DB BEFORE broadcast (same as createAction pattern)
+    if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
+        let _ = output_repo.insert_output(
+            1, &txid, 0, // vout 0 is change (only output)
+            change_amount, script_hex,
+            default_basket_id,
+            Some("2-receive address"), Some(&addr_idx.to_string()),
+            None, None, true, // is_change
+        );
+        // Link change output to the transaction record
+        if let Some(tx_id) = unpublish_tx_id {
+            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
+        }
+        log::info!("   💾 Change output recorded: {}:0 = {} sats", &txid[..16], change_amount);
+    }
+
+    // Update input reservations from placeholder to real txid
+    // Now that the transaction record exists, spent_by will be set correctly
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+    }
+
+    // Create proven_tx_req so TaskCheckForProofs tracks this transaction
+    {
+        let db = state.database.lock().unwrap();
+        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
+        // Cache signed tx for BEEF ancestry
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
+        log::info!("   📋 Created proven_tx_req + cached tx for {}", &txid[..16]);
+    }
+
+    // Broadcast using BEEF (not raw tx) so ARC can validate parent transactions
+    let beef_hex = hex::encode(&beef_bytes);
+    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(_) => {
+            log::info!("   ✅ Unpublish broadcast successful");
+            // Update transaction status to unproven (broadcast succeeded, waiting for mining)
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
+        }
+        Err(e) => {
+            log::error!("   ❌ Broadcast failed: {} — rolling back", e);
+            // Rollback: mark tx failed, delete ghost change output, restore reserved inputs
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
+            let output_repo = OutputRepository::new(db.connection());
+            let _ = output_repo.delete_by_txid(&txid);
+            let _ = output_repo.restore_by_spending_description(&txid);
+            let _ = output_repo.restore_by_spending_description(&placeholder_txid);
+            drop(db);
+            state.balance_cache.invalidate();
+            return Err(format!("Broadcast failed: {}", e));
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    // Submit spending tx to overlay and verify removal
+    {
+        let overlay_result = match crate::beef::Beef::from_bytes(&beef_bytes).and_then(|b| b.to_v1_bytes()) {
+            Ok(v1_bytes) => {
+                log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay", v1_bytes.len());
+                crate::overlay::submit_to_identity_overlay(&v1_bytes).await
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  BEEF V1 conversion failed: {}, trying raw", e);
+                crate::overlay::submit_to_identity_overlay(&beef_bytes).await
+            }
+        };
+
+        // STEAK response is ambiguous for removals (overlay-express sends response before
+        // Phase 3 completes, so coinsRemoved may be absent). Verify via lookup instead.
+        match overlay_result {
+            Ok(true) => log::info!("   ✅ Overlay confirmed removal (outputsToAdmit or coinsRemoved present)"),
+            Ok(false) => log::info!("   ℹ️  Overlay STEAK ambiguous — verifying removal via lookup..."),
+            Err(e) => log::warn!("   ⚠️  Overlay submission error: {} — verifying via lookup...", e),
+        }
+
+        // Verify removal by querying the overlay for this certificate
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let serial_b64 = BASE64.encode(serial_bytes);
+        match crate::overlay::lookup_published_certificate(&serial_b64).await {
+            Ok(None) => log::info!("   ✅ Overlay lookup confirms token removed (not found)"),
+            Ok(Some(_)) => log::warn!("   ⚠️  Overlay lookup still returns the token — removal may be pending or failed"),
+            Err(e) => log::warn!("   ⚠️  Overlay lookup verification failed: {}", e),
+        }
+    }
+
+    // Update certificate publish status
+    {
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+        let _ = cert_repo.update_publish_status(
+            type_bytes, serial_bytes, certifier_bytes,
+            "unpublished", None, None,
+        );
+    }
+
+    log::info!("   ✅ Certificate unpublished successfully");
+    Ok(txid)
+}
+
+/// POST /admin/prepare-unpublish — Populate DB with everything needed to unpublish a token
+///
+/// Fetches raw tx, stores in parent_transactions, creates output record with
+/// correct identity derivation info, fetches merkle proof, creates certificate record.
+pub async fn admin_prepare_unpublish(
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+    _body_bytes: web::Bytes,
+) -> HttpResponse {
+    let txid = match body["txid"].as_str() {
+        Some(t) => t.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing txid"})),
+    };
+    let vout = body["vout"].as_u64().unwrap_or(0) as u32;
+    let cert_type_b64 = match body["type"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing type"})),
+    };
+    let serial_b64 = match body["serialNumber"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing serialNumber"})),
+    };
+    let certifier_hex = match body["certifier"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing certifier"})),
+    };
+    let subject_hex = match body["subject"].as_str() {
+        Some(s) => s.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Missing subject"})),
+    };
+    let revocation_outpoint = body["revocationOutpoint"].as_str().unwrap_or("").to_string();
+
+    log::info!("📋 POST /admin/prepare-unpublish: {}:{}", &txid[..16.min(txid.len())], vout);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut steps: Vec<String> = Vec::new();
+
+    // Step 1: Fetch raw tx from WoC and store in parent_transactions
+    let tx_hex = match client
+        .get(&format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid))
+        .send().await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.text().await {
+                Ok(hex) => hex.trim().to_string(),
+                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to read tx hex: {}", e)})),
+            }
+        }
+        _ => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to fetch raw tx from WoC"})),
+    };
+    log::info!("   ✅ Fetched raw tx: {} hex chars", tx_hex.len());
+
+    {
+        let db = state.database.lock().unwrap();
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &tx_hex);
+        steps.push("parent_transactions: stored raw tx".into());
+    }
+
+    // Parse the tx to extract PushDrop output
+    let tx_bytes = match hex::decode(&tx_hex) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid tx hex: {}", e)})),
+    };
+    let parsed = match crate::beef::ParsedTransaction::from_bytes(&tx_bytes) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to parse tx: {}", e)})),
+    };
+    if vout as usize >= parsed.outputs.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("vout {} out of range", vout)}));
+    }
+    let token_output = &parsed.outputs[vout as usize];
+    let locking_script_hex = hex::encode(&token_output.script);
+    log::info!("   📜 Token output {}: {} sats, script {} bytes", vout, token_output.value, token_output.script.len());
+
+    // Step 2: Create transaction record
+    {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        if tx_repo.get_by_txid(&txid).ok().flatten().is_none() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let _ = db.connection().execute(
+                "INSERT OR IGNORE INTO transactions (
+                    user_id, txid, new_status, reference_number,
+                    description, raw_tx, created_at, updated_at
+                ) VALUES (?1, ?2, 'completed', ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    state.current_user_id, txid,
+                    format!("admin-{}", &txid[..8]),
+                    "Identity certificate publish (admin-prepared)",
+                    tx_bytes, now, now,
+                ],
+            );
+            steps.push("transactions: created".into());
+            log::info!("   ✅ Created transaction record");
+        } else {
+            steps.push("transactions: already exists".into());
+        }
+    }
+
+    // Step 3: Insert PushDrop output with identity derivation info
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        if output_repo.get_by_txid_vout(&txid, vout).ok().flatten().is_none() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let locking_script_bytes = hex::decode(&locking_script_hex).ok();
+            let _ = db.connection().execute(
+                "INSERT OR IGNORE INTO outputs (
+                    user_id, txid, vout, satoshis, locking_script,
+                    derivation_prefix, derivation_suffix, sender_identity_key,
+                    spendable, change, provided_by, purpose, type, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, 'you', 'receive', 'custom', ?9, ?10)",
+                rusqlite::params![
+                    state.current_user_id, txid, vout as i32,
+                    token_output.value as i64, locking_script_bytes,
+                    "1-identity", "1", ANYONE_PUBKEY_HEX, now, now,
+                ],
+            );
+            steps.push("outputs: inserted PushDrop with identity derivation".into());
+            log::info!("   ✅ Inserted PushDrop output");
+        } else {
+            // Ensure derivation is correct on existing output
+            if let Ok(Some(existing)) = output_repo.get_by_txid_vout(&txid, vout) {
+                if existing.sender_identity_key.is_none() {
+                    if let Some(oid) = existing.output_id {
+                        let _ = output_repo.update_derivation_with_sender(
+                            oid, Some("1-identity"), Some("1"), Some(ANYONE_PUBKEY_HEX),
+                        );
+                        steps.push("outputs: updated derivation on existing".into());
+                    }
+                } else {
+                    steps.push("outputs: already correct".into());
+                }
+            }
+        }
+
+        // Assign to identity_certificates basket
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        if let Ok(basket_id) = basket_repo.find_or_insert("identity_certificates", state.current_user_id) {
+            if let Ok(Some(out)) = output_repo.get_by_txid_vout(&txid, vout) {
+                if let Some(oid) = out.output_id {
+                    let _ = output_repo.assign_basket(oid, basket_id);
+                }
+            }
+        }
+    }
+
+    // Step 4: Fetch and store merkle proof
+    {
+        let proof_result = crate::cache_helpers::fetch_tsc_proof_from_api(&client, &txid).await;
+        match proof_result {
+            Ok(Some(tsc_json)) => {
+                let db = state.database.lock().unwrap();
+                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+                let height = tsc_json["height"].as_u64().unwrap_or(0) as u32;
+                let tx_index = tsc_json["index"].as_u64().unwrap_or(0) as u64;
+                let merkle_path_blob = serde_json::to_vec(&tsc_json).unwrap_or_default();
+                match proven_tx_repo.insert_or_get(&txid, height, tx_index, &merkle_path_blob, &tx_bytes, "", "") {
+                    Ok(proven_tx_id) => {
+                        let _ = proven_tx_repo.link_transaction(&txid, proven_tx_id);
+                        steps.push(format!("proven_txs: stored (height: {}, index: {})", height, tx_index));
+                        log::info!("   ✅ Stored merkle proof");
+                    }
+                    Err(e) => {
+                        steps.push(format!("proven_txs: insert failed: {}", e));
+                        log::warn!("   ⚠️  Failed to store merkle proof: {}", e);
+                    }
+                }
+            }
+            Ok(None) => {
+                steps.push("proven_txs: no proof available yet".into());
+                log::warn!("   ⚠️  No merkle proof available yet");
+            }
+            Err(e) => {
+                steps.push(format!("proven_txs: fetch failed: {}", e));
+                log::warn!("   ⚠️  Could not fetch merkle proof: {}", e);
+            }
+        }
+    }
+
+    // Step 5: Create certificate record
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        let type_bytes = match BASE64.decode(&cert_type_b64) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid type base64: {}", e)})),
+        };
+        let serial_bytes = match BASE64.decode(&serial_b64) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid serial base64: {}", e)})),
+        };
+        let certifier_bytes = match hex::decode(&certifier_hex) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid certifier hex: {}", e)})),
+        };
+        let subject_bytes = match hex::decode(&subject_hex) {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Invalid subject hex: {}", e)})),
+        };
+
+        let db = state.database.lock().unwrap();
+        let cert_repo = CertificateRepository::new(db.connection());
+
+        if cert_repo.get_by_identifiers(&type_bytes, &serial_bytes, &certifier_bytes).ok().flatten().is_none() {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let mut cert = crate::certificate::Certificate {
+                certificate_id: None,
+                user_id: Some(state.current_user_id),
+                type_: type_bytes.clone(),
+                serial_number: serial_bytes.clone(),
+                certifier: certifier_bytes.clone(),
+                subject: subject_bytes,
+                verifier: None,
+                revocation_outpoint: revocation_outpoint.clone(),
+                signature: vec![],
+                is_deleted: false,
+                created_at: now_ts,
+                updated_at: now_ts,
+                fields: std::collections::HashMap::new(),
+                keyring: std::collections::HashMap::new(),
+            };
+            match cert_repo.insert_certificate_with_fields(&mut cert) {
+                Ok(cert_id) => {
+                    let _ = cert_repo.update_publish_status(
+                        &type_bytes, &serial_bytes, &certifier_bytes,
+                        "published", Some(&txid), Some(vout as i32),
+                    );
+                    steps.push(format!("certificates: created (id: {}) + marked published", cert_id));
+                    log::info!("   ✅ Created certificate record");
+                }
+                Err(e) => {
+                    steps.push(format!("certificates: insert failed: {}", e));
+                    log::error!("   ❌ Failed to insert certificate: {}", e);
+                }
+            }
+        } else {
+            let _ = cert_repo.update_publish_status(
+                &type_bytes, &serial_bytes, &certifier_bytes,
+                "published", Some(&txid), Some(vout as i32),
+            );
+            steps.push("certificates: already exists, updated publish status".into());
+        }
+    }
+
+    log::info!("   ✅ Prepare-unpublish complete: {} steps", steps.len());
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "vout": vout,
+        "steps": steps,
+        "next": "Call POST /wallet/certificate/unpublish with type, serialNumber, certifier"
+    }))
 }

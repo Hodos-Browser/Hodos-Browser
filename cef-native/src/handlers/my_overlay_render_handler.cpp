@@ -155,10 +155,11 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
 #ifdef _WIN32
     // ====== Windows Implementation ======
 
-    std::cout << "🧪 OnPaint called (Windows) - type: " << type << " size: " << width << "x" << height << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🧪 OnPaint called (Windows) - type: " << type << " size: " << width << "x" << height << std::endl;
-    debugLog.close();
+    // Skip popup paints (autocomplete dropdowns, select menus) — they have
+    // different dimensions than the main view and would corrupt the DIB bitmap.
+    if (type == PET_POPUP) {
+        return;
+    }
 
     bool isMostlyTransparent = true;
     const uint8_t* alpha = reinterpret_cast<const uint8_t*>(buffer);
@@ -201,11 +202,6 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         std::memcpy(dib_data_, buffer, width * height * 4);
     }
 
-    RECT hwndRect;
-    GetWindowRect(hwnd_, &hwndRect);
-    std::cout << "→ HWND real size: " << (hwndRect.right - hwndRect.left)
-              << " x " << (hwndRect.bottom - hwndRect.top) << std::endl;
-
     POINT* ptWinPos = nullptr;  // Use HWND's current position
     SIZE sizeWin = {width_, height_};
     POINT ptSrc = {0, 0};
@@ -215,10 +211,6 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
 
-    LONG exStyle = GetWindowLong(hwnd_, GWL_EXSTYLE);
-    std::cout << "→ HWND EXSTYLE: 0x" << std::hex << exStyle << std::endl;
-    std::cout << "→ Has WS_EX_LAYERED: " << ((exStyle & WS_EX_LAYERED) != 0) << std::endl;
-
     HDC screenDC = GetDC(NULL);
     BOOL result = UpdateLayeredWindow(hwnd_, screenDC, ptWinPos, &sizeWin,
         hdc_mem_, &ptSrc, 0, &blend, ULW_ALPHA);
@@ -227,19 +219,10 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         LONG exStyle = GetWindowLong(hwnd_, GWL_EXSTYLE);
         if (exStyle & WS_EX_TRANSPARENT) {
             SetWindowLong(hwnd_, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-            std::cout << "🖱️ Removed WS_EX_TRANSPARENT for input handling" << std::endl;
         }
     }
 
     ReleaseDC(NULL, screenDC);
-
-    DWORD err = GetLastError();
-    std::cout << "→ UpdateLayeredWindow result: " << (result ? "success" : "fail")
-            << ", error: " << err << std::endl;
-    std::cout << "→ IsWindowVisible(hwnd_): " << IsWindowVisible(hwnd_) << std::endl;
-    std::cout << "🖱️ Window handle: " << hwnd_ << std::endl;
-    std::cout << "🖱️ Window enabled: " << IsWindowEnabled(hwnd_) << std::endl;
-    std::cout << "🖱️ Window visible: " << IsWindowVisible(hwnd_) << std::endl;
 
 #elif defined(__APPLE__)
     // ====== macOS Implementation ======

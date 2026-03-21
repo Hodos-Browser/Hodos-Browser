@@ -176,6 +176,7 @@ void SimpleApp::OnContextInitialized() {
 
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
+    header_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
     std::string header_url = "http://127.0.0.1:5137";
     std::cout << "Loading React header at: " << header_url << std::endl;
 
@@ -658,163 +659,274 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
 #endif // _WIN32
 
 #ifdef _WIN32
-void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset, BrowserWindow* targetWin) {
-    LOG_INFO_APP("Creating wallet overlay with iconRightOffset=" + std::to_string(iconRightOffset));
+// ========== WALLET OVERLAY — Keep-Alive Create/Show/Hide Trio ==========
 
-    // Store offset globally for repositioning
+void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset) {
+    LOG_INFO_APP("CreateWalletOverlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconRightOffset=" +
+                 std::to_string(iconRightOffset) + ")");
+
+    // Store offset globally for WM_SIZE/WM_MOVE repositioning
     extern int g_wallet_icon_right_offset;
-    g_wallet_icon_right_offset = iconRightOffset;
+    if (iconRightOffset > 0) {
+        g_wallet_icon_right_offset = iconRightOffset;
+    }
 
     // Sync to BrowserWindow 0
     BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
     if (mainWin) mainWin->wallet_icon_right_offset = g_wallet_icon_right_offset;
 
-    // Get target window dimensions for positioning (fall back to globals)
-    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
-    RECT mainRect;
-    GetWindowRect(posHwnd, &mainRect);
-
-    // Position: right-side panel, flush right, below header (matches macOS)
-    extern HWND g_header_hwnd;
-    RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
-    int panelWidth = 400;
-    int panelHeight = mainRect.bottom - headerRect.bottom;
-    int overlayX = headerRect.right - panelWidth;
-    int overlayY = headerRect.bottom;
-
-    // DEBUG: Log the position we're using
-    LOG_INFO_APP("💰 Wallet panel position: (" + std::to_string(overlayX) + ", " +
-        std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" + std::to_string(panelHeight));
-
-    // Check if overlay already exists
+    // Keep-alive check: if HWND already exists, conditionally show it
     if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
-        LOG_WARNING_APP("💰 Wallet overlay already exists! Destroying old one first.");
-        DestroyWindow(g_wallet_overlay_hwnd);
-        g_wallet_overlay_hwnd = nullptr;
+        LOG_INFO_APP("Wallet overlay already exists");
+        if (showImmediately) {
+            extern void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin);
+            ShowWalletOverlay(iconRightOffset, nullptr);
+        }
+        return;
     }
 
-    // Create new HWND for wallet overlay
-    LOG_INFO_APP("💰 Creating wallet overlay HWND at position: (" +
-        std::to_string(overlayX) + ", " + std::to_string(overlayY) + ")");
+    // Get main window dimensions for initial positioning
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
 
+    int panelWidth = 400;
+    int panelHeight = mainRect.bottom - headerRect.bottom;
+    int overlayX = mainRect.right - panelWidth;
+    int overlayY = headerRect.bottom;
+
+    LOG_INFO_APP("Wallet panel initial position: (" + std::to_string(overlayX) + ", " +
+        std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" + std::to_string(panelHeight));
+
+    // Create HWND with WS_VISIBLE — layered windows need an initial visible
+    // state for UpdateLayeredWindow to composite correctly. Hide immediately
+    // after if not showing.
     HWND wallet_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFWalletOverlayWindow",
         L"Wallet Overlay",
         WS_POPUP | WS_VISIBLE,
         overlayX, overlayY, panelWidth, panelHeight,
-        posHwnd, nullptr, hInstance, nullptr);
+        g_hwnd, nullptr, hInstance, nullptr);
 
     if (!wallet_hwnd) {
-        std::cout << "❌ Failed to create wallet overlay HWND. Error: " << GetLastError() << std::endl;
-        LOG_ERROR_APP("❌ Failed to create wallet overlay HWND. Error: " + std::to_string(GetLastError()));
+        LOG_ERROR_APP("Failed to create wallet overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
-    // Verify the created window position
-    RECT createdRect;
-    GetWindowRect(wallet_hwnd, &createdRect);
-    LOG_INFO_APP("✅ Wallet overlay HWND created at actual position: (" +
-        std::to_string(createdRect.left) + ", " + std::to_string(createdRect.top) +
-        ") size: " + std::to_string(createdRect.right - createdRect.left) + "x" +
-        std::to_string(createdRect.bottom - createdRect.top));
+    // Position and conditionally hide
+    SetWindowPos(wallet_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-    // WORKAROUND: Force position in case Windows cached the old position
-    if (createdRect.left != overlayX || createdRect.top != overlayY) {
-        LOG_WARNING_APP("🔧 Window position mismatch! Forcing correct position...");
-        LOG_WARNING_APP("🔧 Expected: (" + std::to_string(overlayX) + ", " + std::to_string(overlayY) + ")");
-        LOG_WARNING_APP("🔧 Actual: (" + std::to_string(createdRect.left) + ", " + std::to_string(createdRect.top) + ")");
-
-        SetWindowPos(wallet_hwnd, HWND_TOPMOST,
-            overlayX, overlayY, panelWidth, panelHeight,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-        // Verify again
-        GetWindowRect(wallet_hwnd, &createdRect);
-        LOG_INFO_APP("🔧 After forcing position: (" +
-            std::to_string(createdRect.left) + ", " + std::to_string(createdRect.top) + ")");
+    if (!showImmediately) {
+        ShowWindow(wallet_hwnd, SW_HIDE);
     }
 
-    // Store HWND for shutdown cleanup
+    // Store HWND globally
     g_wallet_overlay_hwnd = wallet_hwnd;
 
     // Default to prevent-close on new overlay creation. React will clear
-    // this flag (wallet_allow_close IPC) once the user reaches a safe state
-    // (e.g. live wallet view). This avoids race conditions — the flag is set
-    // synchronously here in C++ before any WM_ACTIVATEAPP can fire.
+    // this flag (wallet_allow_close IPC) once the user reaches a safe state.
     extern bool g_wallet_overlay_prevent_close;
     g_wallet_overlay_prevent_close = true;
 
     // Sync to BrowserWindow 0
-    if (mainWin) mainWin->wallet_overlay_hwnd = g_wallet_overlay_hwnd;
-
-    // Store target BrowserWindow* in HWND user data for WndProc to find the right wallet browser
-    BrowserWindow* walletOwnerWin = targetWin ? targetWin : mainWin;
-    if (walletOwnerWin) {
-        SetWindowLongPtr(wallet_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(walletOwnerWin));
+    if (mainWin) {
+        mainWin->wallet_overlay_hwnd = g_wallet_overlay_hwnd;
     }
 
-    std::ofstream debugLog3("debug_output.log", std::ios::app);
-    debugLog3 << "✅ Wallet overlay HWND created: " << wallet_hwnd << std::endl;
-    debugLog3.close();
+    // Store BrowserWindow* in HWND user data for WndProc
+    if (mainWin) {
+        SetWindowLongPtr(wallet_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(mainWin));
+    }
 
-    // Create new CEF browser with subprocess
+    LOG_INFO_APP("Wallet overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(wallet_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
+
+    // Create CEF browser subprocess
     CefWindowInfo window_info;
     window_info.windowless_rendering_enabled = true;
     window_info.SetAsPopup(wallet_hwnd, "WalletOverlay");
 
     CefBrowserSettings settings;
     settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0); // fully transparent
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0); // transparent
     settings.javascript = STATE_ENABLED;
     settings.javascript_access_clipboard = STATE_ENABLED;
     settings.javascript_dom_paste = STATE_ENABLED;
 
-    // Note: DevTools is enabled through context menu handler, not browser settings
-
-    // Create new handler for wallet overlay (with correct window_id for IPC routing)
-    int walletWinId = targetWin ? targetWin->window_id : 0;
-    CefRefPtr<SimpleHandler> wallet_handler(new SimpleHandler("wallet", walletWinId));
-
-    // Set render handler for wallet overlay (same as settings overlay)
-    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(wallet_hwnd, panelWidth, panelHeight);
+    CefRefPtr<SimpleHandler> wallet_handler(new SimpleHandler("wallet", 0));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(wallet_hwnd, panelWidth, panelHeight);
     wallet_handler->SetRenderHandler(render_handler);
 
-    // Create new browser with subprocess (pass icon offset as URL param for CSS positioning)
-    extern int g_peerpay_count;
-    extern int g_peerpay_amount;
+    // Load wallet panel URL (initial — no peerpay params needed for hidden pre-creation)
     std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
-    if (g_peerpay_count > 0) {
-        walletUrl += "&ppc=" + std::to_string(g_peerpay_count) + "&ppa=" + std::to_string(g_peerpay_amount);
+    if (showImmediately) {
+        extern int g_peerpay_count;
+        extern int g_peerpay_amount;
+        if (g_peerpay_count > 0) {
+            walletUrl += "&ppc=" + std::to_string(g_peerpay_count) + "&ppa=" + std::to_string(g_peerpay_amount);
+        }
     }
+
     bool result = CefBrowserHost::CreateBrowser(
-        window_info,
-        wallet_handler,
-        walletUrl,
-        settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
+        window_info, wallet_handler,
+        walletUrl, settings, nullptr,
+        CefRequestContext::GetGlobalContext());
 
     if (result) {
-        std::cout << "✅ Wallet overlay browser created with subprocess" << std::endl;
-        std::ofstream debugLog4("debug_output.log", std::ios::app);
-        debugLog4 << "✅ Wallet overlay browser created with subprocess" << std::endl;
-        debugLog4.close();
+        LOG_INFO_APP("Wallet overlay browser created with subprocess");
 
-        // Enable mouse input for wallet overlay
-        LONG exStyle = GetWindowLong(wallet_hwnd, GWL_EXSTYLE);
-        SetWindowLong(wallet_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-        std::ofstream debugLog6("debug_output.log", std::ios::app);
-        debugLog6 << "💰 Mouse input ENABLED for wallet overlay HWND: " << wallet_hwnd << std::endl;
-        debugLog6.close();
+        if (showImmediately) {
+            LONG exStyle = GetWindowLong(wallet_hwnd, GWL_EXSTYLE);
+            SetWindowLong(wallet_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+            // Single focus transfer
+            SetForegroundWindow(wallet_hwnd);
+        }
     } else {
-        std::cout << "❌ Failed to create wallet overlay browser" << std::endl;
-        std::ofstream debugLog5("debug_output.log", std::ios::app);
-        debugLog5 << "❌ Failed to create wallet overlay browser" << std::endl;
-        debugLog5.close();
+        LOG_ERROR_APP("Failed to create wallet overlay browser");
     }
+}
+
+void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
+    // Guard: verify HWND exists
+    if (!g_wallet_overlay_hwnd || !IsWindow(g_wallet_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show wallet overlay - HWND does not exist");
+        return;
+    }
+
+    // Update stored offset if provided
+    extern int g_wallet_icon_right_offset;
+    if (iconRightOffset > 0) {
+        g_wallet_icon_right_offset = iconRightOffset;
+    }
+
+    // Sync to BrowserWindow 0
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    if (mainWin) mainWin->wallet_icon_right_offset = g_wallet_icon_right_offset;
+
+    LOG_INFO_APP("ShowWalletOverlay with iconRightOffset=" + std::to_string(g_wallet_icon_right_offset));
+
+    // No mouse hook needed — wallet uses MA_ACTIVATE so WM_ACTIVATE(WA_INACTIVE)
+    // handles click-outside detection. Mouse hooks add system-wide latency.
+
+    // Use target window's HWNDs for positioning (fall back to globals)
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    RECT headerRect;
+    GetWindowRect(posHeader, &headerRect);
+    RECT mainRect;
+    GetWindowRect(posHwnd, &mainRect);
+
+    // Calculate position — right-side panel, full height below header
+    int panelWidth = 400;
+    int panelHeight = mainRect.bottom - headerRect.bottom;
+    int overlayX = mainRect.right - panelWidth;
+    int overlayY = headerRect.bottom;
+
+    // Retarget overlay handler's window_id so IPC routes to the requesting window
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    if (wallet_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(wallet_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+        }
+
+        // Update GWLP_USERDATA for multi-window
+        BrowserWindow* walletOwnerWin = targetWin ? targetWin : mainWin;
+        if (walletOwnerWin) {
+            SetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(walletOwnerWin));
+        }
+
+        // Compositor stays warm (we skip WasHidden(true) on hide), so just
+        // notify of any size change and the next paint is immediate.
+        wallet_browser->GetHost()->WasResized();
+    }
+
+    // Position and show with SWP_NOACTIVATE first — no focus dance yet
+    SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    // Remove WS_EX_TRANSPARENT to enable mouse input
+    LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Single focus transfer — SetForegroundWindow handles both activation and focus
+    SetForegroundWindow(g_wallet_overlay_hwnd);
+
+    if (wallet_browser) {
+        wallet_browser->GetHost()->SetFocus(true);
+        wallet_browser->GetHost()->Invalidate(PET_VIEW);
+
+        // Push refresh signal to React — tells WalletPanelPage to re-fetch status/balance
+        extern int g_peerpay_count;
+        extern int g_peerpay_amount;
+        std::string js = "window.postMessage({type:'wallet_shown',ppc:" +
+            std::to_string(g_peerpay_count) + ",ppa:" +
+            std::to_string(g_peerpay_amount) + "},'*');";
+        wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+    }
+    // The flag is only set at CREATION time (before React loads).
+
+    LOG_INFO_APP("Wallet overlay shown");
+}
+
+void HideWalletOverlay() {
+    // Guard: verify HWND exists
+    if (!g_wallet_overlay_hwnd || !IsWindow(g_wallet_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot hide wallet overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("Hiding wallet overlay");
+
+    // Record hide timestamp for toggle race detection
+    extern ULONGLONG g_wallet_last_hide_tick;
+    g_wallet_last_hide_tick = GetTickCount64();
+
+    // Tell React to reset UI state BEFORE hiding (so it's clean on next show)
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    int walletTargetWinId = 0;
+    if (wallet_browser) {
+        wallet_browser->GetMainFrame()->ExecuteJavaScript(
+            "window.postMessage({type:'wallet_hidden'},'*');", "", 0);
+
+        // Remove CEF focus but keep compositor warm — skipping WasHidden(true)
+        // means the next ShowWalletOverlay() is instant (no compositor rebuild).
+        // CPU cost is negligible since a hidden React page generates no paint events.
+        wallet_browser->GetHost()->SetFocus(false);
+
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(wallet_browser->GetIdentifier());
+        if (handler) walletTargetWinId = handler->GetWindowId();
+    }
+
+    // Hide window (keep-alive — don't destroy!)
+    ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
+
+    // Clear prevent-close flag
+    extern bool g_wallet_overlay_prevent_close;
+    g_wallet_overlay_prevent_close = false;
+
+    // Return focus to the correct window's header browser
+    BrowserWindow* walletFocusWin = WindowManager::GetInstance().GetWindow(walletTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = walletFocusWin ? walletFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO_APP("Wallet overlay hidden");
 }
 #endif // _WIN32
 
@@ -2309,19 +2421,9 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
         LOG_INFO_APP("Profile panel overlay browser created with subprocess");
 
         if (showImmediately) {
-            extern HHOOK g_profile_panel_mouse_hook;
-            extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-
-            if (!g_profile_panel_mouse_hook) {
-                g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
-                if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
-                if (g_profile_panel_mouse_hook) {
-                    LOG_INFO_APP("Profile panel mouse hook installed");
-                }
-            }
-
             LONG exStyle = GetWindowLong(profile_panel_hwnd, GWL_EXSTYLE);
             SetWindowLong(profile_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            SetForegroundWindow(profile_panel_hwnd);
         }
     } else {
         LOG_ERROR_APP("Failed to create profile panel overlay browser");
@@ -2340,19 +2442,12 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         g_profile_icon_right_offset = iconRightOffset;
     }
 
-    // Sync to BrowserWindow 0
     BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
     if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
 
     LOG_INFO_APP("Showing profile panel overlay");
 
-    // Install mouse hook
-    extern HHOOK g_profile_panel_mouse_hook;
-    extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    if (!g_profile_panel_mouse_hook) {
-        g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
-        if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
-    }
+    // No mouse hook — WM_ACTIVATE handles click-outside (MA_ACTIVATE overlay)
 
     // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
@@ -2365,29 +2460,17 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
 
-    int panelWidth = 380;   // Wider for profile management UI
-    int panelHeight = 380;  // Reduced from 500 to match actual content height
+    int panelWidth = 380;
+    int panelHeight = 380;
     int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
 
-    // Clamp to screen bounds
     if (overlayY + panelHeight > mainRect.bottom - 20) {
         panelHeight = mainRect.bottom - overlayY - 20;
         if (panelHeight < 280) panelHeight = 280;
     }
 
-    SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
-        overlayX, overlayY, panelWidth, panelHeight,
-        SWP_SHOWWINDOW);  // Removed SWP_NOACTIVATE to allow focus
-
-    LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
-    SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-
-    // CRITICAL: Set Windows focus on the overlay HWND first
-    SetForegroundWindow(g_profile_panel_overlay_hwnd);
-    SetFocus(g_profile_panel_overlay_hwnd);
-
-    // Retarget overlay handler's window_id so IPC routes to the requesting window
+    // Retarget handler before showing
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     if (profile_browser) {
         int targetWindowId = targetWin ? targetWin->window_id : 0;
@@ -2395,12 +2478,27 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         if (handler) {
             handler->SetWindowId(targetWindowId);
         }
+        // Warm compositor — just notify size change, no WasHidden cycle
+        profile_browser->GetHost()->WasResized();
+    }
 
-        // Set CEF browser focus so text inputs work
+    // Position with SWP_NOACTIVATE first, then single SetForegroundWindow
+    SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Single focus transfer
+    SetForegroundWindow(g_profile_panel_overlay_hwnd);
+
+    if (profile_browser) {
         profile_browser->GetHost()->SetFocus(true);
         profile_browser->GetHost()->Invalidate(PET_VIEW);
-        LOG_INFO_APP("Profile panel browser focus set to true");
     }
+
+    LOG_INFO_APP("Profile panel overlay shown");
 }
 
 void HideProfilePanelOverlay() {
@@ -2411,15 +2509,16 @@ void HideProfilePanelOverlay() {
 
     LOG_INFO_APP("Hiding profile panel overlay");
 
-    extern HHOOK g_profile_panel_mouse_hook;
-    if (g_profile_panel_mouse_hook) {
-        UnhookWindowsHookEx(g_profile_panel_mouse_hook);
-        g_profile_panel_mouse_hook = nullptr;
-    }
+    // Record hide timestamp for toggle race detection
+    extern ULONGLONG g_profile_last_hide_tick;
+    g_profile_last_hide_tick = GetTickCount64();
+
+    // No mouse hook to remove — WM_ACTIVATE handles click-outside
 
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     int profTargetWinId = 0;
     if (profile_browser) {
+        // Skip WasHidden(true) — keep compositor warm for instant re-show
         profile_browser->GetHost()->SetFocus(false);
         SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(profile_browser->GetIdentifier());
         if (handler) profTargetWinId = handler->GetWindowId();

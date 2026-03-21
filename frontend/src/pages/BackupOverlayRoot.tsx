@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { HodosButton } from '../components/HodosButton';
 // Removed identity types - now using unified wallet system
 
 const BackupOverlayRoot: React.FC = () => {
@@ -276,23 +277,16 @@ const BackupOverlayRoot: React.FC = () => {
               color: '#f0f0f0',
             }}
           />
-          <button
+          <HodosButton
+            variant="secondary"
             onClick={() => {
               navigator.clipboard.writeText(wallet.mnemonic);
               alert('Seed phrase copied to clipboard!');
             }}
-            style={{
-              marginTop: '8px',
-              padding: '8px 16px',
-              backgroundColor: '#a67c00',
-              color: '#f0f0f0',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
+            style={{ marginTop: '8px' }}
           >
-            📋 Copy to Clipboard
-          </button>
+            Copy to Clipboard
+          </HodosButton>
         </div>
 
         <div style={{ marginBottom: '20px' }}>
@@ -351,21 +345,13 @@ const BackupOverlayRoot: React.FC = () => {
         </div>
 
         <div style={{ textAlign: 'right' }}>
-          <button
+          <HodosButton
+            variant="primary"
             onClick={closeModal}
             disabled={!wallet.backedUp}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: wallet.backedUp ? '#4caf50' : '#ccc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: wallet.backedUp ? 'pointer' : 'not-allowed',
-              fontSize: '16px'
-            }}
           >
-            {wallet.backedUp ? '✅ Done' : '⚠️ Please backup first'}
-          </button>
+            {wallet.backedUp ? 'Done' : 'Please backup first'}
+          </HodosButton>
         </div>
       </div>
     </div>

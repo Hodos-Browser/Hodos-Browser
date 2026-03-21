@@ -297,7 +297,7 @@ export const useCookieBlocking = () => {
     fetchBlockedCount();
     pollRef.current = setInterval(() => {
       fetchBlockedCount();
-    }, 2000);
+    }, 10000);
 
     return () => {
       if (pollRef.current) {

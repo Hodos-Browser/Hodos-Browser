@@ -34,6 +34,9 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
     cookieBlockingEnabled,
     cookieBlockedCount,
     toggleCookieBlocking,
+    fingerprintSiteEnabled,
+    toggleFingerprintSite,
+    fingerprintNeedsReload,
   } = usePrivacyShield(domain);
 
   const { settings, refresh } = useSettings();
@@ -49,6 +52,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
   // Global toggles from Settings > Privacy — when OFF, per-site toggles are ineffective
   const globalAdblockOff = !settings.privacy.adBlockEnabled;
   const globalCookieOff = !settings.privacy.thirdPartyCookieBlocking;
+  const globalFingerprintEnabled = settings?.privacy?.fingerprintProtection !== false;
   const globalOverrideText = 'Disabled globally in Privacy Settings. Per-site toggle has no effect.';
 
   const handleMasterToggle = () => {
@@ -93,7 +97,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           alignItems: 'center',
           justifyContent: 'space-between',
           px: 2,
-          py: 1.5,
+          py: 1,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -122,7 +126,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -149,7 +153,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -174,7 +178,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -193,7 +197,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
         />
       </Box>
 
-      {/* Fingerprint protection row — always on, no toggle */}
+      {/* Fingerprint protection row — per-site toggle */}
       <Box
         sx={{
           display: 'flex',
@@ -201,18 +205,36 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
-        <Box sx={{ display: 'flex', alignItems: 'center' }}>
-          <Typography sx={{ fontSize: '0.85rem', color: '#f0f0f0' }}>
-            Fingerprint shield
-          </Typography>
-          <InfoTip tip="Randomizes your browser fingerprint to prevent cross-site tracking. Always on." />
+        <Box>
+          <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            <Typography sx={{ fontSize: '0.85rem', color: '#f0f0f0' }}>
+              Fingerprint shield
+            </Typography>
+            <InfoTip tip="Randomizes your browser fingerprint to prevent cross-site tracking. Disable for sites that break with fingerprinting on." />
+          </Box>
+          {!globalFingerprintEnabled ? (
+            <Typography sx={{ fontSize: '0.7rem', color: '#9ca3af', fontStyle: 'italic' }}>
+              Disabled in settings
+            </Typography>
+          ) : fingerprintNeedsReload ? (
+            <Typography sx={{ fontSize: '0.7rem', color: '#e6a200', fontStyle: 'italic' }}>
+              Reload page to apply
+            </Typography>
+          ) : null}
         </Box>
-        <Typography sx={{ fontSize: '0.75rem', color: '#9ca3af', fontStyle: 'italic' }}>
-          Always on
-        </Typography>
+        <Switch
+          size="small"
+          checked={fingerprintSiteEnabled}
+          onChange={() => toggleFingerprintSite(domain, !fingerprintSiteEnabled)}
+          disabled={!globalFingerprintEnabled}
+          sx={{
+            '& .MuiSwitch-switchBase.Mui-checked': { color: '#a67c00' },
+            '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#a67c00' },
+          }}
+        />
       </Box>
 
       <Divider sx={{ borderColor: '#2a2d35' }} />
@@ -228,7 +250,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           alignItems: 'center',
           justifyContent: 'space-between',
           px: 2,
-          py: 1.25,
+          py: 0.75,
           cursor: 'pointer',
           '&:hover': { backgroundColor: '#1f2937' },
         }}

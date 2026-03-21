@@ -7,6 +7,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LocalFileResourceHandler.h"
     #include "../../include/core/LayoutHelpers.h"
     #include <windows.h>
     #include <shobjidl.h>
@@ -18,6 +19,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LocalFileResourceHandler.h"
 #endif
 
 // Cross-platform includes (available on both platforms)
@@ -45,6 +47,7 @@
 
 #include "include/wrapper/cef_helpers.h"
 #include "include/base/cef_bind.h"
+#include "include/cef_app.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/cef_task.h"
@@ -74,7 +77,9 @@ extern std::string g_pendingModalDomain;
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
 #ifdef _WIN32
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
-    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
+    extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+    extern void HideWalletOverlay();
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
 #else
     // macOS global views
@@ -394,6 +399,7 @@ CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
 // Download handler static storage
 std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_;
 std::set<uint32_t> SimpleHandler::paused_downloads_;
+bool SimpleHandler::download_notify_pending_ = false;
 std::map<int, SimpleHandler*> SimpleHandler::browser_handler_map_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
@@ -835,6 +841,26 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
+            // Show main window shortly after header load (smooth startup).
+            // Delay 150ms to give React time to mount and paint the toolbar,
+            // so the window appears with the header fully rendered.
+#ifdef _WIN32
+            {
+                extern bool g_window_shown;
+                if (!g_window_shown) {
+                    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+                        extern HWND g_hwnd;
+                        extern bool g_window_shown;
+                        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
+                            ShowWindow(g_hwnd, SW_SHOW);
+                            UpdateWindow(g_hwnd);
+                            g_window_shown = true;
+                            Logger::Log("Main window shown - header browser rendered", 1, 2);
+                        }
+                    }), 150);
+                }
+            }
+#endif
             // Inject the hodosBrowser API into header browser (where React app runs)
             LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
 
@@ -1275,6 +1301,19 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     // Unregister from handler map
     browser_handler_map_.erase(browser->GetIdentifier());
+
+    // Check shutdown IMMEDIATELY after erase, before any early returns.
+    // Tab and popup branches return early, so this must come first.
+#ifdef _WIN32
+    {
+        extern bool g_app_shutting_down;
+        if (g_app_shutting_down && browser_handler_map_.empty()) {
+            LOG_INFO_BROWSER("🛑 All browsers closed during shutdown — quitting CEF message loop");
+            CefQuitMessageLoop();
+            return;  // No further cleanup needed during shutdown
+        }
+    }
+#endif
 
     std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
     std::cout << "  Role: " << role_ << std::endl;
@@ -2044,16 +2083,26 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+        extern void HideProfilePanelOverlay();
         extern HWND g_profile_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
+        extern ULONGLONG g_profile_last_hide_tick;
 
         if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
             CreateProfilePanelOverlay(g_hInstance, true, iconRightOffset);
+        } else if (IsWindowVisible(g_profile_panel_overlay_hwnd)) {
+            HideProfilePanelOverlay();
         } else {
-            ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
+            // Toggle race: if just hidden by WM_ACTIVATE, don't re-open
+            ULONGLONG elapsed = GetTickCount64() - g_profile_last_hide_tick;
+            if (elapsed < 200) {
+                LOG_DEBUG_BROWSER("Profile toggle suppressed — hidden " + std::to_string(elapsed) + "ms ago (race)");
+            } else {
+                ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
+            }
         }
 
-        LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_DEBUG_BROWSER("Profile panel toggle handled");
 #elif defined(__APPLE__)
         extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
         extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);
@@ -3282,8 +3331,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔔 Found notification overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         }
 
-        // Keep-alive: notification overlay hides instead of destroying
-        if (role_ == "notification") {
+        // Keep-alive: wallet overlay hides instead of destroying
+        if (role_ == "wallet") {
+            HideWalletOverlay();
+            LOG_DEBUG_BROWSER("Wallet overlay hidden (keep-alive)");
+        } else if (role_ == "notification") {
             extern HWND g_notification_overlay_hwnd;
             if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
                 ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
@@ -3454,12 +3506,26 @@ bool SimpleHandler::OnProcessMessageReceived(
 #endif
 
     if (message_name == "overlay_show_wallet") {
-        LOG_DEBUG_BROWSER("💰 overlay_show_wallet message received from role: " + role_);
-        LOG_DEBUG_BROWSER("💰 Creating wallet overlay with separate process");
+        LOG_DEBUG_BROWSER("overlay_show_wallet message received from role: " + role_);
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance, 0, GetOwnerWindow());
+        extern HWND g_wallet_overlay_hwnd;
+        extern ULONGLONG g_wallet_last_hide_tick;
+        if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
+            if (IsWindowVisible(g_wallet_overlay_hwnd)) {
+                HideWalletOverlay();
+            } else {
+                ULONGLONG elapsed = GetTickCount64() - g_wallet_last_hide_tick;
+                if (elapsed < 200) {
+                    LOG_DEBUG_BROWSER("Toggle suppressed — wallet hidden " + std::to_string(elapsed) + "ms ago (race)");
+                } else {
+                    ShowWalletOverlay(0, GetOwnerWindow());
+                }
+            }
+        } else {
+            CreateWalletOverlay(g_hInstance, true, 0);
+        }
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess();
 #endif
@@ -3802,15 +3868,18 @@ bool SimpleHandler::OnProcessMessageReceived(
                 int64_t perTxLimitCents = permData.value("perTxLimitCents", (int64_t)10);
                 int64_t perSessionLimitCents = permData.value("perSessionLimitCents", (int64_t)300);
                 int64_t rateLimitPerMin = permData.value("rateLimitPerMin", (int64_t)10);
+                int64_t maxTxPerSession = permData.value("maxTxPerSession", (int64_t)100);
 
                 LOG_DEBUG_BROWSER("🔐 Setting advanced domain permission - Domain: " + domain +
                     " tx=" + std::to_string(perTxLimitCents) +
                     " session=" + std::to_string(perSessionLimitCents) +
-                    " rate=" + std::to_string(rateLimitPerMin));
+                    " rate=" + std::to_string(rateLimitPerMin) +
+                    " maxTxPerSession=" + std::to_string(maxTxPerSession));
 
                 extern void addDomainPermissionAdvanced(const std::string& domain,
-                    int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin);
-                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin);
+                    int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin,
+                    int64_t maxTxPerSession);
+                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession);
             } catch (const std::exception& e) {
                 LOG_DEBUG_BROWSER("🔐 Error parsing advanced permission JSON: " + std::string(e.what()));
             }
@@ -4026,7 +4095,25 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance, iconRightOffset, GetOwnerWindow());
+        extern HWND g_wallet_overlay_hwnd;
+        extern ULONGLONG g_wallet_last_hide_tick;
+        if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
+            if (IsWindowVisible(g_wallet_overlay_hwnd)) {
+                HideWalletOverlay();
+            } else {
+                // Suppress toggle race: if the wallet was JUST hidden by WM_ACTIVATE
+                // (because this click stole focus from the wallet), don't re-open it.
+                // The hide and the IPC arrive within ~50ms of each other.
+                ULONGLONG elapsed = GetTickCount64() - g_wallet_last_hide_tick;
+                if (elapsed < 200) {
+                    LOG_DEBUG_BROWSER("Toggle suppressed — wallet hidden " + std::to_string(elapsed) + "ms ago (race)");
+                } else {
+                    ShowWalletOverlay(iconRightOffset, GetOwnerWindow());
+                }
+            }
+        } else {
+            CreateWalletOverlay(g_hInstance, true, iconRightOffset);
+        }
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess(iconRightOffset);
 #else
@@ -4838,6 +4925,34 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // Per-site fingerprint protection toggle — get current state
+    if (message_name == "fingerprint_get_site_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        bool enabled = FingerprintProtection::GetInstance().IsSiteEnabled(domain);
+
+        nlohmann::json response;
+        response["domain"] = domain;
+        response["enabled"] = enabled;
+
+        CefRefPtr<CefProcessMessage> responseMsg =
+            CefProcessMessage::Create("fingerprint_get_site_enabled_response");
+        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
+        }
+        return true;
+    }
+
+    // Per-site fingerprint protection toggle — set state
+    if (message_name == "fingerprint_set_site_enabled") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string domain = args->GetString(0).ToString();
+        bool enabled = (args->GetString(1).ToString() == "true");
+        FingerprintProtection::GetInstance().SetSiteEnabled(domain, enabled);
+        return true;
+    }
+
     // Sprint 10b: Per-site scriptlet toggle
     if (message_name == "adblock_scriptlet_toggle") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -5599,11 +5714,37 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
         std::string navUrl = request->GetURL().ToString();
         if (!navUrl.empty() && navUrl.find("127.0.0.1") == std::string::npos &&
             navUrl.find("localhost") == std::string::npos) {
-            uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
-            CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
-            msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
-            msg->GetArgumentList()->SetString(1, navUrl);
-            frame->SendProcessMessage(PID_RENDERER, msg);
+
+            // Extract domain for per-site check (mirrors FingerprintProtection::ExtractDomain)
+            std::string domain;
+            {
+                size_t start = navUrl.find("://");
+                if (start != std::string::npos) {
+                    start += 3;
+                    size_t end = navUrl.find_first_of(":/", start);
+                    if (end == std::string::npos) end = navUrl.size();
+                    domain = navUrl.substr(start, end - start);
+                } else {
+                    domain = navUrl;
+                }
+            }
+
+            if (!FingerprintProtection::GetInstance().IsEnabled() ||
+                FingerprintProtection::IsAuthDomain(navUrl) ||
+                !FingerprintProtection::GetInstance().IsSiteEnabled(domain)) {
+                // Send disable signal to renderer — skip fingerprint injection for this URL
+                CefRefPtr<CefProcessMessage> msg =
+                    CefProcessMessage::Create("fingerprint_site_disabled");
+                msg->GetArgumentList()->SetString(0, navUrl);
+                frame->SendProcessMessage(PID_RENDERER, msg);
+            } else {
+                // Normal path: send seed for farbling
+                uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
+                msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
+                msg->GetArgumentList()->SetString(1, navUrl);
+                frame->SendProcessMessage(PID_RENDERER, msg);
+            }
         }
     }
 
@@ -5783,6 +5924,18 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
     LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
+
+    // Production frontend serving: if frontend/ exists next to .exe,
+    // serve files from disk instead of hitting the Vite dev server.
+    // MUST be before adblock/cookie checks — those handlers would try to
+    // network-fetch from port 5137, which has no server in production.
+    {
+        std::string frontend_dir;
+        if (url.find("127.0.0.1:5137") != std::string::npos &&
+            IsFrontendAvailable(frontend_dir)) {
+            return new LocalFileResourceRequestHandler(frontend_dir, url);
+        }
+    }
 
     // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
     // bypass ALL resource handlers — let CEF's native network stack handle them.
@@ -6679,7 +6832,18 @@ void SimpleHandler::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
                       " complete=" + std::to_string(complete) +
                       " canceled=" + std::to_string(canceled));
 
-    NotifyDownloadStateChanged();
+    // Throttle progress notifications to ~2/sec (500ms debounce).
+    // Completion/cancellation notify immediately so UI updates instantly.
+    if (download_item->IsComplete() || download_item->IsCanceled()) {
+        download_notify_pending_ = false;
+        NotifyDownloadStateChanged();
+    } else if (!download_notify_pending_) {
+        download_notify_pending_ = true;
+        CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+            SimpleHandler::download_notify_pending_ = false;
+            SimpleHandler::NotifyDownloadStateChanged();
+        }), 500);
+    }
 }
 
 void SimpleHandler::NotifyDownloadStateChanged() {

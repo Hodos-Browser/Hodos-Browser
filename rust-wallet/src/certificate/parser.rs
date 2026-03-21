@@ -95,13 +95,15 @@ pub fn parse_certificate_from_json(
         return Err(CertificateError::MissingField("subject".to_string()));
     };
 
-    // Parse revocationOutpoint (format: "txid.vout")
+    // Parse revocationOutpoint (format: "txid.vout" or placeholder like "not supported.0")
+    // Many certifiers use placeholder values, so we store the raw string and only
+    // validate hex format when needed for on-chain revocation checks.
     let revocation_outpoint = json_data.get("revocationOutpoint")
         .and_then(|v| v.as_str())
         .ok_or_else(|| CertificateError::MissingField("revocationOutpoint".to_string()))?
         .to_string();
 
-    // Validate format
+    // Basic format check: must contain a dot separator
     let parts: Vec<&str> = revocation_outpoint.split('.').collect();
     if parts.len() != 2 {
         return Err(CertificateError::InvalidFormat(
@@ -109,13 +111,9 @@ pub fn parse_certificate_from_json(
         ));
     }
 
-    // Validate txid is 32 bytes hex
-    let txid_bytes = hex::decode(parts[0])
-        .map_err(|e| CertificateError::InvalidHex(format!("revocationOutpoint txid: {}", e)))?;
-    if txid_bytes.len() != 32 {
-        return Err(CertificateError::InvalidFormat(
-            format!("revocationOutpoint txid must be 32 bytes, got {}", txid_bytes.len())
-        ));
+    // Log if this is a non-standard (placeholder) outpoint
+    if hex::decode(parts[0]).map_or(true, |b| b.len() != 32) {
+        log::info!("   ℹ️  revocationOutpoint uses placeholder value: {}", revocation_outpoint);
     }
 
     // Parse signature (hex, DER-encoded ECDSA)

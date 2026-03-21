@@ -23,136 +23,210 @@ struct WhatsOnChainUTXO {
     tx_hash: String,
     tx_pos: u32,
     value: i64,
+}
+
+/// WhatsOnChain /unspent/all wrapper response
+#[derive(Debug, Deserialize)]
+struct WhatsOnChainUnspentAllResponse {
     #[serde(default)]
-    script: String,
+    result: Vec<WhatsOnChainUTXO>,
+    #[serde(default)]
+    error: String,
 }
 
 /// WhatsOnChain bulk endpoint response item
+/// New API uses `result` field; old API used `unspent`. We accept both.
 #[derive(Debug, Deserialize)]
 struct WhatsOnChainBulkItem {
     address: String,
+    #[serde(default)]
+    result: Vec<WhatsOnChainUTXO>,
     #[serde(default)]
     unspent: Vec<WhatsOnChainUTXO>,
     #[serde(default)]
     error: String,
 }
 
+impl WhatsOnChainBulkItem {
+    /// Get UTXOs from whichever field has data (new API uses `result`, old used `unspent`)
+    fn utxos(&self) -> &Vec<WhatsOnChainUTXO> {
+        if !self.result.is_empty() { &self.result } else { &self.unspent }
+    }
+}
+
+/// GorillaPool ordinals API response format
+#[derive(Debug, Deserialize)]
+struct GorillaPoolUTXO {
+    txid: String,
+    vout: u32,
+    satoshis: i64,
+    #[serde(default)]
+    owner: String,
+}
+
 /// Max addresses per bulk API request (WhatsOnChain limit)
 const BULK_BATCH_SIZE: usize = 20;
 
-/// Fetch UTXOs for a Bitcoin address from WhatsOnChain
+/// Fetch UTXOs for a Bitcoin address from blockchain APIs.
 ///
-/// API: https://api.whatsonchain.com/v1/bsv/main/address/{address}/unspent
-///
-/// Retries on 500 errors (server errors) with exponential backoff.
+/// Tries WhatsOnChain first, falls back to GorillaPool ordinals API.
+/// Returns Ok(vec) on success (empty vec = genuinely no UTXOs).
+/// Returns Err only if ALL providers failed (API down).
 pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
-    const MAX_RETRIES: u32 = 3;
-    const INITIAL_DELAY_MS: u64 = 1000; // 1 second
-
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent", address);
-
     log::info!("   Fetching UTXOs for address: {}", address);
-    log::debug!("   WhatsOnChain URL: {}", url);
 
     let client = reqwest::Client::new();
 
-    // Retry loop for server errors (500, 502, 503, 504)
-    for attempt in 0..=MAX_RETRIES {
-        let response = match client.get(&url).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                if attempt < MAX_RETRIES {
-                    let delay_ms = INITIAL_DELAY_MS * (1 << attempt); // Exponential backoff
-                    log::warn!("   Request failed (attempt {}/{}): {}. Retrying in {}ms...",
-                              attempt + 1, MAX_RETRIES + 1, e, delay_ms);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                    continue;
-                }
-                return Err(format!("WhatsOnChain API request failed after {} attempts: {}", MAX_RETRIES + 1, e));
-            }
-        };
-
-        let status = response.status();
-
-        // Check status
-        if status.is_success() {
-            // Success - parse and return
-            // Parse response
-            let api_utxos: Vec<WhatsOnChainUTXO> = match response.json().await {
-                Ok(utxos) => utxos,
-                Err(e) => {
-                    return Err(format!("Failed to parse WhatsOnChain response: {}", e));
-                }
-            };
-
-            // Convert to our UTXO format
-            // Generate P2PKH locking script from address (WhatsOnChain doesn't return it)
-            let p2pkh_script = generate_p2pkh_script_from_address(address)?;
-
-            let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
-                txid: u.tx_hash,
-                vout: u.tx_pos,
-                satoshis: u.value,
-                script: p2pkh_script.clone(), // Use generated P2PKH script
-                address_index, // Track which address owns this UTXO
-                custom_instructions: None, // HD wallet addresses don't need custom instructions
-            }).collect();
-
-            log::info!("   ✅ Fetched {} UTXOs ({} satoshis total)",
-                utxos.len(),
-                utxos.iter().map(|u| u.satoshis).sum::<i64>()
-            );
-
-            return Ok(utxos);
-        } else if status.as_u16() == 404 {
-            // Address never used or no UTXOs - not an error
-            log::info!("   No UTXOs found (address unused or spent)");
-            return Ok(Vec::new());
-        } else if status.is_server_error() && attempt < MAX_RETRIES {
-            // Server error (500, 502, 503, 504) - retry with exponential backoff
-            let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
-            log::warn!("   Server error {} (attempt {}/{}). Retrying in {}ms...",
-                      status, attempt + 1, MAX_RETRIES + 1, delay_ms);
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-            continue;
-        } else {
-            // Client error (4xx) or max retries reached - don't retry
-            return Err(format!("WhatsOnChain API returned status {}", status));
+    // Try WhatsOnChain first
+    match fetch_utxos_woc(&client, address, address_index).await {
+        Ok(utxos) => return Ok(utxos),
+        Err(e) => {
+            log::debug!("   WoC failed for {}: {}, trying GorillaPool...", address, e);
         }
     }
 
-    // Should never reach here, but just in case
-    Err(format!("WhatsOnChain API request failed after {} attempts", MAX_RETRIES + 1))
+    // Fallback: GorillaPool ordinals API (different provider)
+    match fetch_utxos_gorillapool(&client, address, address_index).await {
+        Ok(utxos) => return Ok(utxos),
+        Err(e) => {
+            log::warn!("   ⚠️  All UTXO APIs failed for {}: {}", address, e);
+        }
+    }
+
+    Err(format!("All UTXO API providers failed for address {}", address))
+}
+
+/// Fetch UTXOs from WhatsOnChain
+async fn fetch_utxos_woc(client: &reqwest::Client, address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all", address);
+
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("WoC request failed: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        // New /unspent/all endpoint returns {result: [...], error: ""}
+        // Try wrapped format first, fall back to flat array
+        let api_utxos: Vec<WhatsOnChainUTXO> = {
+            let body = response.text().await
+                .map_err(|e| format!("Failed to read WoC response: {}", e))?;
+            if let Ok(wrapped) = serde_json::from_str::<WhatsOnChainUnspentAllResponse>(&body) {
+                if !wrapped.error.is_empty() {
+                    return Err(format!("WoC error: {}", wrapped.error));
+                }
+                wrapped.result
+            } else if let Ok(flat) = serde_json::from_str::<Vec<WhatsOnChainUTXO>>(&body) {
+                flat
+            } else {
+                return Err(format!("Failed to parse WoC response: {}", &body[..body.len().min(200)]));
+            }
+        };
+
+        let p2pkh_script = generate_p2pkh_script_from_address(address)?;
+        let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
+            txid: u.tx_hash,
+            vout: u.tx_pos,
+            satoshis: u.value,
+            script: p2pkh_script.clone(),
+            address_index,
+            custom_instructions: None,
+        }).collect();
+
+        log::info!("   ✅ WoC: {} UTXOs ({} sats)", utxos.len(), utxos.iter().map(|u| u.satoshis).sum::<i64>());
+        Ok(utxos)
+    } else {
+        Err(format!("WoC returned status {}", status))
+    }
+}
+
+/// Fetch UTXOs from GorillaPool ordinals API (fallback)
+///
+/// API: https://ordinals.gorillapool.io/api/txos/address/{address}/unspent
+/// Returns: [{txid, vout, satoshis, owner, spend, ...}]
+/// Only includes UTXOs where spend is empty (unspent).
+async fn fetch_utxos_gorillapool(client: &reqwest::Client, address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
+    let url = format!("https://ordinals.gorillapool.io/api/txos/address/{}/unspent", address);
+
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("GorillaPool request failed: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        let api_utxos: Vec<GorillaPoolUTXO> = response.json().await
+            .map_err(|e| format!("Failed to parse GorillaPool response: {}", e))?;
+
+        let p2pkh_script = generate_p2pkh_script_from_address(address)?;
+        let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
+            txid: u.txid,
+            vout: u.vout,
+            satoshis: u.satoshis,
+            script: p2pkh_script.clone(),
+            address_index,
+            custom_instructions: None,
+        }).collect();
+
+        log::info!("   ✅ GorillaPool: {} UTXOs ({} sats)", utxos.len(), utxos.iter().map(|u| u.satoshis).sum::<i64>());
+        Ok(utxos)
+    } else {
+        Err(format!("GorillaPool returned status {}", status))
+    }
 }
 
 /// Check if an address has any transaction history on-chain.
 ///
-/// Uses WhatsOnChain's history endpoint which returns transactions even if
-/// the address currently has zero balance. This distinguishes "used and spent"
-/// from "never used" — critical for gap limit logic during recovery.
+/// Uses WhatsOnChain's confirmed history endpoint which returns transactions
+/// even if the address currently has zero balance. This distinguishes "used
+/// and spent" from "never used" — critical for gap limit logic during recovery.
 ///
-/// API: https://api.whatsonchain.com/v1/bsv/main/address/{address}/history
+/// API (new): https://api.whatsonchain.com/v1/bsv/main/address/{address}/confirmed/history
+/// API (old, deprecated): https://api.whatsonchain.com/v1/bsv/main/address/{address}/history
 pub async fn address_has_history(address: &str) -> Result<bool, String> {
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/history", address);
-
     let client = reqwest::Client::new();
-    let response = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(e) => return Err(format!("History API request failed: {}", e)),
-    };
 
-    let status = response.status();
-    if status.is_success() {
-        // Response is a JSON array of tx objects; non-empty means address was used
-        let body = response.text().await.unwrap_or_default();
-        // A used address returns something like [{"tx_hash":"...","height":...}, ...]
-        // An unused address returns [] (empty array)
-        let has_history = body.trim() != "[]" && !body.trim().is_empty();
-        Ok(has_history)
-    } else if status.as_u16() == 404 {
-        Ok(false)
-    } else {
-        Err(format!("History API returned status {}", status))
+    // Try new WoC endpoint first: /address/{addr}/confirmed/history
+    // Returns: {"address":"...","result":[{"tx_hash":"...","height":...}, ...],"error":""}
+    let new_url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/confirmed/history", address);
+    match client.get(&new_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            // Parse the wrapped response — history is in the "result" array
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                let result = json.get("result").and_then(|v| v.as_array());
+                return Ok(result.map(|a| !a.is_empty()).unwrap_or(false));
+            }
+            // Fallback: check if body has any tx_hash references
+            return Ok(body.contains("tx_hash"));
+        }
+        Ok(resp) if resp.status().as_u16() == 404 => {
+            // New endpoint also 404 — try legacy endpoint
+            log::debug!("   WoC confirmed/history returned 404 for {}, trying legacy", address);
+        }
+        Ok(resp) => {
+            log::warn!("   ⚠️  WoC confirmed/history returned {} for {}", resp.status(), address);
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  WoC confirmed/history request failed for {}: {}", address, e);
+        }
+    }
+
+    // Fallback: try legacy endpoint /address/{addr}/history
+    let legacy_url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/history", address);
+    match client.get(&legacy_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            let has_history = body.trim() != "[]" && !body.trim().is_empty();
+            Ok(has_history)
+        }
+        Ok(resp) if resp.status().as_u16() == 404 => {
+            // Both endpoints 404 — address genuinely has no history
+            Ok(false)
+        }
+        Ok(resp) => {
+            Err(format!("History API returned status {}", resp.status()))
+        }
+        Err(e) => {
+            Err(format!("History API request failed: {}", e))
+        }
     }
 }
 
@@ -197,17 +271,20 @@ fn generate_p2pkh_script_from_address(address: &str) -> Result<String, String> {
 
 /// Fetch UTXOs for multiple addresses using WhatsOnChain bulk endpoint.
 ///
-/// POST https://api.whatsonchain.com/v1/bsv/main/addresses/unspent
+/// POST https://api.whatsonchain.com/v1/bsv/main/addresses/confirmed/unspent
 /// Body: { "addresses": ["addr1", "addr2", ...] }  (max 20)
 ///
 /// Chunks addresses into groups of 20, retries on failure, falls back to
 /// single-address fetching if the bulk endpoint returns an error.
-async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
+/// Returns (utxos, success_count) where success_count is the number of addresses
+/// that were successfully checked (got a 200 response).
+async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<(Vec<UTXO>, usize), String> {
     const MAX_RETRIES: u32 = 3;
     const INITIAL_DELAY_MS: u64 = 1000;
 
     let client = reqwest::Client::new();
     let mut all_utxos = Vec::new();
+    let mut total_success_count: usize = 0;
 
     // Build address→index lookup
     let addr_to_index: std::collections::HashMap<&str, i32> = addresses.iter()
@@ -238,7 +315,7 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
 
         // Retry loop for bulk endpoint
         for attempt in 0..=MAX_RETRIES {
-            let response = match client.post("https://api.whatsonchain.com/v1/bsv/main/addresses/unspent")
+            let response = match client.post("https://api.whatsonchain.com/v1/bsv/main/addresses/confirmed/unspent")
                 .json(&body)
                 .send()
                 .await
@@ -266,14 +343,15 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
                                 log::warn!("   Bulk API error for {}: {}", item.address, item.error);
                                 continue;
                             }
+                            total_success_count += 1; // This address was successfully checked
                             let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
                             let script = match addr_to_script.get(item.address.as_str()) {
                                 Some(s) => s.clone(),
                                 None => continue,
                             };
-                            for u in item.unspent {
+                            for u in item.utxos() {
                                 all_utxos.push(UTXO {
-                                    txid: u.tx_hash,
+                                    txid: u.tx_hash.clone(),
                                     vout: u.tx_pos,
                                     satoshis: u.value,
                                     script: script.clone(),
@@ -301,13 +379,15 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
                 break; // Fall through to single-address fallback
             }
         }
-
         // Fallback: single-address fetch for this chunk if bulk failed
         if !bulk_ok {
             log::info!("   Falling back to single-address fetch for {} addresses", chunk.len());
             for (i, addr) in chunk.iter().enumerate() {
                 match fetch_utxos_for_address(&addr.address, addr.index).await {
-                    Ok(mut utxos) => all_utxos.append(&mut utxos),
+                    Ok(mut utxos) => {
+                        total_success_count += 1; // This address was successfully checked
+                        all_utxos.append(&mut utxos);
+                    }
                     Err(e) => log::warn!("   Failed to fetch UTXOs for {}: {}", addr.address, e),
                 }
                 if i < chunk.len() - 1 {
@@ -322,20 +402,31 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
         }
     }
 
-    Ok(all_utxos)
+    Ok((all_utxos, total_success_count))
 }
 
 /// Fetch UTXOs for all addresses in the wallet.
 ///
 /// Uses bulk API (POST /addresses/unspent, 20 addresses/request) for speed.
 /// Falls back to single-address fetch if bulk endpoint fails.
+///
+/// Returns Err if NO addresses could be successfully checked (API is down).
+/// Returns Ok with empty vec only if addresses were checked and genuinely have no UTXOs.
 pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
-    let all_utxos = fetch_utxos_bulk(addresses).await?;
+    let (all_utxos, success_count) = fetch_utxos_bulk(addresses).await?;
 
-    log::info!("📊 Total UTXOs across all addresses: {} ({} satoshis)",
+    log::info!("📊 Total UTXOs across all addresses: {} ({} satoshis), {}/{} addresses checked successfully",
         all_utxos.len(),
-        all_utxos.iter().map(|u| u.satoshis).sum::<i64>()
+        all_utxos.iter().map(|u| u.satoshis).sum::<i64>(),
+        success_count,
+        addresses.len(),
     );
+
+    // If no addresses were successfully checked, the API is likely down.
+    // Return Err so callers don't reconcile against empty results.
+    if success_count == 0 && !addresses.is_empty() {
+        return Err("UTXO API unavailable — no addresses could be checked".to_string());
+    }
 
     Ok(all_utxos)
 }

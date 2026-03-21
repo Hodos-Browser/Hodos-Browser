@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Typography,
-  IconButton,
   Divider,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
@@ -19,6 +18,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import RemoveIcon from '@mui/icons-material/Remove';
+import { HodosButton } from '../components/HodosButton';
 
 declare global {
   interface Window {
@@ -67,22 +67,22 @@ const MenuItemRow: React.FC<MenuItemRowProps> = ({ icon, label, shortcut, onClic
 const ZoomRow: React.FC<{ currentZoom: number; onAction: (a: string) => void }> = ({ currentZoom, onAction }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 0.5, height: 36 }}>
     <ZoomOutIcon sx={{ fontSize: 16, color: '#9ca3af', mr: 0.5 }} />
-    <IconButton size="small" onClick={() => onAction('zoom_out')} sx={{ color: '#f0f0f0', p: 0.5 }}>
+    <HodosButton variant="icon" size="small" onClick={() => onAction('zoom_out')} aria-label="Zoom out">
       <RemoveIcon sx={{ fontSize: 16 }} />
-    </IconButton>
+    </HodosButton>
     <Typography sx={{ mx: 1, minWidth: 40, textAlign: 'center', fontSize: '0.78rem', color: '#f0f0f0' }}>
       {currentZoom}%
     </Typography>
-    <IconButton size="small" onClick={() => onAction('zoom_in')} sx={{ color: '#f0f0f0', p: 0.5 }}>
+    <HodosButton variant="icon" size="small" onClick={() => onAction('zoom_in')} aria-label="Zoom in">
       <AddIcon sx={{ fontSize: 16 }} />
-    </IconButton>
+    </HodosButton>
     <Box sx={{ flex: 1 }} />
-    <IconButton size="small" onClick={() => onAction('zoom_reset')} title="Reset zoom" sx={{ color: '#9ca3af', p: 0.5 }}>
+    <HodosButton variant="icon" size="small" onClick={() => onAction('zoom_reset')} aria-label="Reset zoom">
       <ZoomInIcon sx={{ fontSize: 16 }} />
-    </IconButton>
-    <IconButton size="small" onClick={() => onAction('fullscreen')} title="Fullscreen" sx={{ color: '#9ca3af', p: 0.5 }}>
+    </HodosButton>
+    <HodosButton variant="icon" size="small" onClick={() => onAction('fullscreen')} aria-label="Fullscreen">
       <FullscreenIcon sx={{ fontSize: 16 }} />
-    </IconButton>
+    </HodosButton>
   </Box>
 );
 

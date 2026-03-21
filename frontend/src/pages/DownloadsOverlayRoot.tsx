@@ -1,11 +1,12 @@
 import React from 'react';
-import { Box, Typography, IconButton, LinearProgress, Link, Button } from '@mui/material';
+import { Box, Typography, LinearProgress, Link } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import PauseIcon from '@mui/icons-material/Pause';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import { useDownloads } from '../hooks/useDownloads';
 import type { DownloadItem } from '../hooks/useDownloads';
+import { HodosButton } from '../components/HodosButton';
 
 function formatBytes(bytes: number): string {
     if (bytes <= 0) return '0 B';
@@ -72,13 +73,9 @@ const DownloadsOverlayRoot: React.FC = () => {
                 <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
                     Downloads
                 </Typography>
-                <IconButton
-                    size="small"
-                    onClick={() => window.cefMessage?.send('download_panel_hide')}
-                    sx={{ p: 0.5, color: '#9ca3af' }}
-                >
+                <HodosButton variant="icon" size="small" onClick={() => window.cefMessage?.send('download_panel_hide')} aria-label="Close">
                     <CloseIcon sx={{ fontSize: 16 }} />
-                </IconButton>
+                </HodosButton>
             </Box>
 
             <Box sx={{ flex: 1, overflow: 'auto', p: 1.5, pt: 0.5 }}>
@@ -128,12 +125,12 @@ const DownloadsOverlayRoot: React.FC = () => {
                                         {dl.currentSpeed > 0 ? ` — ${formatSpeed(dl.currentSpeed)}` : ''}
                                     </Typography>
                                     <Box>
-                                        <IconButton size="small" onClick={() => pauseDownload(dl.id)} title="Pause">
+                                        <HodosButton variant="icon" size="small" onClick={() => pauseDownload(dl.id)} aria-label="Pause">
                                             <PauseIcon sx={{ fontSize: 16 }} />
-                                        </IconButton>
-                                        <IconButton size="small" onClick={() => cancelDownload(dl.id)} title="Cancel">
+                                        </HodosButton>
+                                        <HodosButton variant="icon" size="small" onClick={() => cancelDownload(dl.id)} aria-label="Cancel">
                                             <CloseIcon sx={{ fontSize: 16 }} />
-                                        </IconButton>
+                                        </HodosButton>
                                     </Box>
                                 </Box>
                             </>
@@ -154,12 +151,12 @@ const DownloadsOverlayRoot: React.FC = () => {
                                         {dl.totalBytes > 0 ? ` / ${formatBytes(dl.totalBytes)}` : ''}
                                     </Typography>
                                     <Box>
-                                        <IconButton size="small" onClick={() => resumeDownload(dl.id)} title="Resume">
+                                        <HodosButton variant="icon" size="small" onClick={() => resumeDownload(dl.id)} aria-label="Resume">
                                             <PlayArrowIcon sx={{ fontSize: 16 }} />
-                                        </IconButton>
-                                        <IconButton size="small" onClick={() => cancelDownload(dl.id)} title="Cancel">
+                                        </HodosButton>
+                                        <HodosButton variant="icon" size="small" onClick={() => cancelDownload(dl.id)} aria-label="Cancel">
                                             <CloseIcon sx={{ fontSize: 16 }} />
-                                        </IconButton>
+                                        </HodosButton>
                                     </Box>
                                 </Box>
                             </>
@@ -202,13 +199,9 @@ const DownloadsOverlayRoot: React.FC = () => {
 
                 {hasCompletedOrCanceled && (
                     <Box sx={{ mt: 1, textAlign: 'center' }}>
-                        <Button
-                            size="small"
-                            onClick={handleClearCompleted}
-                            sx={{ textTransform: 'none', fontSize: '0.75rem', color: '#9ca3af' }}
-                        >
+                        <HodosButton variant="ghost" size="small" onClick={handleClearCompleted}>
                             Clear completed
-                        </Button>
+                        </HodosButton>
                     </Box>
                 )}
             </Box>

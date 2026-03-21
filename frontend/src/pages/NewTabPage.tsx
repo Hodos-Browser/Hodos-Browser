@@ -218,7 +218,7 @@ const NewTabPage: React.FC = () => {
         }}>
             {/* Logo */}
             <div style={{ marginBottom: 32 }}>
-                <svg viewBox="0 0 167 54" xmlns="http://www.w3.org/2000/svg" style={{ height: 54, width: 'auto' }}>
+                <svg viewBox="0 0 167 54" xmlns="http://www.w3.org/2000/svg" style={{ height: 96, width: 'auto' }}>
                     <defs>
                         <linearGradient id="ntp_lg" x1="32.82" y1="13.97" x2="18.73" y2="10.74" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#fff"/><stop offset="1" stopColor="#a67c00"/></linearGradient>
                         <linearGradient id="ntp_lg1" x1="40.33" y1="21.9" x2="32.65" y2="9.65" xlinkHref="#ntp_lg"/>
@@ -318,16 +318,16 @@ const NewTabPage: React.FC = () => {
             {topSites !== null && topSites.length > 0 && (
                 <div style={{
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(4, 96px)',
-                    gap: 16,
+                    gridTemplateColumns: 'repeat(4, 84px)',
+                    gap: 14,
                 }}>
                     {topSites.map((site, index) => (
                         <div
                             key={index}
                             onClick={() => handleTileClick(site.url)}
                             style={{
-                                width: 96,
-                                height: 96,
+                                width: 84,
+                                height: 84,
                                 borderRadius: 12,
                                 backgroundColor: '#2d2d2d',
                                 display: 'flex',
@@ -350,8 +350,8 @@ const NewTabPage: React.FC = () => {
                                 src={site.faviconDataUrl || buildFaviconUrl(site.url, searchEngine)}
                                 alt=""
                                 style={{
-                                    width: 32,
-                                    height: 32,
+                                    width: 28,
+                                    height: 28,
                                     borderRadius: 4,
                                     marginBottom: 8,
                                     objectFit: 'contain',

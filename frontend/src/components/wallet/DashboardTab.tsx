@@ -293,9 +293,8 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
 
   return (
     <div className="wd-dashboard">
-      {/* Left Column */}
-      <div className="wd-dashboard-left">
-        {/* Balance Card */}
+      {/* Top-Left: Balance Card */}
+      <div className="wd-quad-tl">
         <div className="wd-balance-card">
           <div className="wd-balance-top-row">
             <div className="wd-balance-label">Total Balance</div>
@@ -337,8 +336,10 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
             </div>
           )}
         </div>
+      </div>
 
-        {/* Receive Section — split left/right */}
+      {/* Top-Right: Receive Section */}
+      <div className="wd-quad-tr">
         <div className="wd-receive-card">
           <div className="wd-receive-split">
             {/* Left: Identity Key */}
@@ -349,7 +350,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
                     <span className="wd-receive-title">Identity Key</span>
                     <InfoTooltip text="Your public identity key enables PeerPay, built on the BRC-29 direct payment standard. When someone sends you BSV, a unique one-time address is derived using elliptic curve Diffie-Hellman (ECDH) key exchange. Only your wallet holds the keys to spend those funds. Payments are delivered via end-to-end encrypted messages, keeping your balance and history private." />
                   </div>
-                  <span className="wd-receive-subtitle">(Public Key)</span>
+                  <span className="wd-receive-subtitle">(Public Key - use with BRC-100 wallets)</span>
                 </div>
               </div>
               {identityKey ? (
@@ -395,7 +396,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
                     <span className="wd-receive-title">Receive Address</span>
                     <InfoTooltip text="Hodos derives a unique address for every transaction using elliptic curve cryptography (secp256k1). Each address has its own key pair, all secured by your recovery phrase. Generate a new address each time you share it — this prevents anyone from linking your transactions or viewing your total balance on-chain." />
                   </div>
-                  <span className="wd-receive-subtitle">(Legacy Address)</span>
+                  <span className="wd-receive-subtitle">(P2PKH Address - use with Handcash, RockWallet, etc.)</span>
                 </div>
                 <button
                   className="wd-receive-generate"
@@ -442,8 +443,57 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
             </div>
           </div>
         </div>
+      </div>
 
-        {/* Recent Activity */}
+      {/* Bottom-Left: Send Form */}
+      <div className="wd-quad-bl">
+        <div className="wd-send-card">
+          {txResult && (
+            <div className={`wd-tx-result ${txResult.type}`}>
+              <button className="wd-tx-result-dismiss" onClick={() => { setTxResult(null); setTxidCopied(false); }} title="Dismiss">
+                &times;
+              </button>
+              {txResult.type === 'success' ? (
+                <>
+                  <div className="wd-tx-result-header">Transaction Sent!</div>
+                  {txResult.txid && (
+                    <div className="wd-tx-result-txid">
+                      TxID: {txResult.txid.substring(0, 16)}...
+                    </div>
+                  )}
+                  <div className="wd-tx-result-actions">
+                    {txResult.whatsOnChainUrl && (
+                      <button
+                        className="wd-tx-result-link"
+                        onClick={() => handleViewOnChain(txResult.whatsOnChainUrl!)}
+                      >
+                        View on WhatsOnChain
+                      </button>
+                    )}
+                    {txResult.txid && (
+                      <button
+                        className={`wd-tx-copy-btn${txidCopied ? ' copied' : ''}`}
+                        onClick={handleCopyTxid}
+                      >
+                        {txidCopied ? 'Copied!' : 'Copy TxID'}
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="wd-tx-result-header">Transaction Failed</div>
+                  <div className="wd-tx-result-txid">{txResult.message}</div>
+                </>
+              )}
+            </div>
+          )}
+          {memoizedTransactionForm}
+        </div>
+      </div>
+
+      {/* Bottom-Right: Recent Activity */}
+      <div className="wd-quad-br">
         <div className="wd-recent-card">
           <div className="wd-recent-header">
             <span className="wd-recent-title">Recent Activity</span>
@@ -528,53 +578,6 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               })}
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Right Column - Send Form */}
-      <div className="wd-dashboard-right">
-        <div className="wd-send-card">
-          {txResult && (
-            <div className={`wd-tx-result ${txResult.type}`}>
-              <button className="wd-tx-result-dismiss" onClick={() => { setTxResult(null); setTxidCopied(false); }} title="Dismiss">
-                &times;
-              </button>
-              {txResult.type === 'success' ? (
-                <>
-                  <div className="wd-tx-result-header">Transaction Sent!</div>
-                  {txResult.txid && (
-                    <div className="wd-tx-result-txid">
-                      TxID: {txResult.txid.substring(0, 16)}...
-                    </div>
-                  )}
-                  <div className="wd-tx-result-actions">
-                    {txResult.whatsOnChainUrl && (
-                      <button
-                        className="wd-tx-result-link"
-                        onClick={() => handleViewOnChain(txResult.whatsOnChainUrl!)}
-                      >
-                        View on WhatsOnChain
-                      </button>
-                    )}
-                    {txResult.txid && (
-                      <button
-                        className={`wd-tx-copy-btn${txidCopied ? ' copied' : ''}`}
-                        onClick={handleCopyTxid}
-                      >
-                        {txidCopied ? 'Copied!' : 'Copy TxID'}
-                      </button>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="wd-tx-result-header">Transaction Failed</div>
-                  <div className="wd-tx-result-txid">{txResult.message}</div>
-                </>
-              )}
-            </div>
-          )}
-          {memoizedTransactionForm}
         </div>
       </div>
     </div>

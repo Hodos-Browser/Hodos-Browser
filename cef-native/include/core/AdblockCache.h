@@ -133,9 +133,12 @@ public:
         // Cache miss — call backend
         bool blocked = fetchFromBackend(url, sourceUrl, resourceType);
 
-        // Store result
+        // Store result (evict if over size limit)
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (cache_.size() >= MAX_CACHE_SIZE) {
+                cache_.clear();
+            }
             cache_[url] = blocked;
         }
 
@@ -382,6 +385,8 @@ private:
 
     std::atomic<bool> global_enabled_{true};  // Master switch — no mutex needed
     std::atomic<int> totalSessionBlocked_{0};  // Cumulative blocks since browser launch
+
+    static constexpr size_t MAX_CACHE_SIZE = 10000;
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, bool> cache_;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Box, IconButton, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
+import { HodosButton } from './HodosButton';
 import PublicIcon from '@mui/icons-material/Public';
 import CircularProgress from '@mui/material/CircularProgress';
 import type { Tab } from '../types/TabTypes';
@@ -174,26 +175,23 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           {tab.title || 'New Tab'}
         </Typography>
 
-        {/* Close Button */}
-        <IconButton
-          className="tab-close-btn"
-          onClick={onClose}
+        {/* Close Button — opacity controlled via CSS class, not inline style,
+             so parent's sx hover rule ('& .tab-close-btn': { opacity: 1 }) can override it */}
+        <HodosButton
+          className={`tab-close-btn ${isActive ? 'tab-close-active' : 'tab-close-inactive'}`}
+          variant="icon"
           size="small"
-          sx={{
+          onClick={onClose}
+          aria-label="Close tab"
+          style={{
             width: 16,
             height: 16,
             padding: 0,
-            opacity: isActive ? 0.4 : 0,
-            transition: 'opacity 0.15s ease, background-color 0.15s ease',
             flexShrink: 0,
-            '&:hover': {
-              backgroundColor: 'rgba(255, 255, 255, 0.15)',
-              opacity: 1,
-            },
           }}
         >
           <CloseIcon sx={{ fontSize: 12, color: '#9ca3af' }} />
-        </IconButton>
+        </HodosButton>
       </Box>
 
       {/* Inverted corner - left */}

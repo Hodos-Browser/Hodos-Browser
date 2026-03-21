@@ -110,9 +110,9 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 
                         if let Some(ref merkle_path_hex) = arc_resp.merkle_path {
                             match create_proven_tx_from_arc(
-                                state, txid, merkle_path_hex, block_height,
+                                state, client, txid, merkle_path_hex, block_height,
                                 arc_resp.block_hash.as_deref().unwrap_or(""),
-                            ) {
+                            ).await {
                                 Ok(proven_tx_id) => {
                                     info!("   ✅ Created proven_txs {} for {}", proven_tx_id, txid);
                                 }
@@ -142,11 +142,10 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                         // Orphan mempool = ARC's node doesn't have the parent tx.
                         // The tx may still be valid on other nodes/miners.
                         //
-                        // Strategy (matches wallet-toolbox): fail immediately with cleanup,
-                        // then let TaskUnFail recover if the tx actually gets mined.
-                        // This is safe because TaskUnFail re-marks inputs as spent
-                        // and /wallet/sync reconciles the UTXO set.
-                        warn!("   ⚠️ {} in orphan mempool ({}m old)", &txid[..txid.len().min(16)], tx_info.age_secs / 60);
+                        // Don't fail immediately — orphan txs often mine within minutes.
+                        // Wait at least 30 minutes before marking failed.
+                        let age_mins = tx_info.age_secs / 60;
+                        warn!("   ⚠️ {} in orphan mempool ({}m old)", &txid[..txid.len().min(16)], age_mins);
 
                         // Quick check: is it already confirmed despite ARC's orphan status?
                         match try_whatsonchain_confirmation(state, client, txid).await {
@@ -155,11 +154,16 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                                 confirmed_count += count;
                             }
                             None => {
-                                // Not confirmed yet — fail with cleanup.
-                                // TaskUnFail will recover if it gets mined later.
-                                warn!("   ⏰ {} SEEN_IN_ORPHAN_MEMPOOL, not confirmed — marking FAILED with cleanup",
-                                      &txid[..txid.len().min(16)]);
-                                mark_failed(state, txid);
+                                if age_mins >= 30 {
+                                    // Been orphan for 30+ minutes — likely a real problem
+                                    warn!("   ⏰ {} SEEN_IN_ORPHAN_MEMPOOL for {}m — marking FAILED with cleanup",
+                                          &txid[..txid.len().min(16)], age_mins);
+                                    mark_failed(state, txid);
+                                } else {
+                                    // Still fresh — give it time to propagate and mine
+                                    info!("   ⏳ {} in orphan mempool for {}m — waiting (will fail after 30m)",
+                                          &txid[..txid.len().min(16)], age_mins);
+                                }
                             }
                         }
                     }
@@ -342,9 +346,13 @@ fn reconcile_proven_tx(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
     }
 }
 
-/// Create a proven_txs record from ARC's MINED response
-fn create_proven_tx_from_arc(
+/// Create a proven_txs record from ARC's MINED response.
+///
+/// Verifies the merkle root before storing to prevent corrupt proofs from
+/// ARC's occasionally wrong BUMP data.
+async fn create_proven_tx_from_arc(
     state: &web::Data<AppState>,
+    client: &reqwest::Client,
     txid: &str,
     merkle_path_hex: &str,
     block_height: u64,
@@ -354,6 +362,20 @@ fn create_proven_tx_from_arc(
 
     let height = tsc_json["height"].as_u64().unwrap_or(block_height) as u32;
     let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
+
+    // Verify merkle root against actual block header before storing
+    match crate::verify_tsc_proof_against_block(client, txid, &tsc_json).await {
+        Ok(true) => {
+            // Proof verified — safe to store
+        }
+        Ok(false) => {
+            return Err(format!("ARC BUMP has wrong merkle root for {} at height {} — proof rejected", txid, height));
+        }
+        Err(e) => {
+            // Can't verify — log warning but still store (better than no proof)
+            warn!("   ⚠️ Could not verify ARC proof against block header: {} — storing anyway", e);
+        }
+    }
 
     let merkle_path_bytes = serde_json::to_vec(&tsc_json)
         .map_err(|e| format!("Failed to serialize TSC: {}", e))?;
@@ -385,7 +407,7 @@ fn create_proven_tx_from_arc(
         let _ = req_repo.add_history_note(
             req.proven_tx_req_id,
             "completed",
-            &format!("Proof acquired from ARC at height {}", height),
+            &format!("Proof acquired from ARC at height {} (merkle root verified)", height),
         );
     }
 
@@ -423,7 +445,9 @@ async fn check_whatsonchain_confirmation(
     Ok(Some((confirmations, block_height)))
 }
 
-/// Fetch merkle proof from WhatsOnChain and store as proven_txs record
+/// Fetch merkle proof from WhatsOnChain and store as proven_txs record.
+///
+/// Verifies the merkle root before storing to prevent corrupt proofs.
 async fn fetch_and_store_woc_proof(
     state: &web::Data<AppState>,
     client: &reqwest::Client,
@@ -446,11 +470,46 @@ async fn fetch_and_store_woc_proof(
         .await
         .map_err(|e| format!("JSON parse: {}", e))?;
 
+    // Normalize array format
+    let tsc_json = if tsc_json.is_array() {
+        match tsc_json.as_array().and_then(|a| a.first()).cloned() {
+            Some(first) => first,
+            None => tsc_json,
+        }
+    } else {
+        tsc_json
+    };
+
+    if tsc_json.is_null() {
+        return Err("WoC returned null proof".to_string());
+    }
+
     let height = tsc_json["height"].as_u64()
         .or_else(|| block_height.map(|h| h as u64))
         .ok_or("Missing height in TSC proof")? as u32;
     let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
-    let block_hash = tsc_json["target"].as_str().unwrap_or("");
+    let block_hash = tsc_json["target"].as_str().unwrap_or("").to_string();
+
+    // Inject height into TSC if missing (WoC often omits it)
+    let mut tsc_json = tsc_json;
+    if tsc_json.get("height").and_then(|h| h.as_u64()).is_none() {
+        if let Some(obj) = tsc_json.as_object_mut() {
+            obj.insert("height".to_string(), serde_json::json!(height as u64));
+        }
+    }
+
+    // Verify merkle root against actual block header before storing
+    match crate::verify_tsc_proof_against_block(client, txid, &tsc_json).await {
+        Ok(true) => {
+            // Proof verified — safe to store
+        }
+        Ok(false) => {
+            return Err(format!("WoC proof has wrong merkle root for {} at height {} — rejected", txid, height));
+        }
+        Err(e) => {
+            warn!("   ⚠️ Could not verify WoC proof against block header: {} — storing anyway", e);
+        }
+    }
 
     let merkle_path_bytes = serde_json::to_vec(&tsc_json)
         .map_err(|e| format!("Serialize TSC: {}", e))?;
@@ -470,7 +529,7 @@ async fn fetch_and_store_woc_proof(
     let proven_tx_id = proven_tx_repo.insert_or_get(
         txid, height, tx_index,
         &merkle_path_bytes, &raw_tx_bytes,
-        block_hash, "",
+        &block_hash, "",
     ).map_err(|e| format!("Insert proven_tx: {}", e))?;
 
     let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
@@ -482,7 +541,7 @@ async fn fetch_and_store_woc_proof(
         let _ = req_repo.add_history_note(
             req.proven_tx_req_id,
             "completed",
-            &format!("Proof acquired from WhatsOnChain at height {}", height),
+            &format!("Proof acquired from WhatsOnChain at height {} (merkle root verified)", height),
         );
     }
 

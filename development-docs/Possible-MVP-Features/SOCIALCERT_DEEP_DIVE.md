@@ -500,4 +500,8 @@ Stored in Hodos wallet database (BRC-52 format):
 
 ---
 
-*Last updated: 2026-03-04*
+**Related docs:**
+- `development-docs/CERTIFICATE_UI_AND_LIFECYCLE.md` — Active implementation plan for certificate UI, lifecycle, and overlay integration
+- `Possible-MVP-Features/CONTENT_SIGNING_AND_TIPPING.md` — Content signing feature that depends on certificates
+
+*Last updated: 2026-03-16*

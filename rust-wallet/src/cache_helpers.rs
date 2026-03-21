@@ -40,7 +40,11 @@ pub async fn fetch_tsc_proof_from_api(
     match fetch_tsc_proof_from_arc(client, txid).await {
         Ok(Some(tsc)) => {
             log::info!("   ✅ Got merkle proof from ARC for {}", txid);
-            return Ok(Some(tsc));
+            // Verify roundtrip: TSC → BUMP → check txid matches
+            if verify_tsc_proof_roundtrip(txid, &tsc) {
+                return Ok(Some(tsc));
+            }
+            log::warn!("   ⚠️  ARC proof failed roundtrip verification for {}, trying WhatsOnChain...", txid);
         }
         Ok(None) => {
             log::info!("   ℹ️  ARC has no merkle proof for {} (not yet mined), trying WhatsOnChain...", txid);
@@ -51,7 +55,24 @@ pub async fn fetch_tsc_proof_from_api(
     }
 
     // Fall back to WhatsOnChain
-    fetch_tsc_proof_from_whatsonchain(client, txid).await
+    match fetch_tsc_proof_from_whatsonchain(client, txid).await {
+        Ok(Some(tsc)) => {
+            // Verify roundtrip for WoC proof too
+            if verify_tsc_proof_roundtrip(txid, &tsc) {
+                return Ok(Some(tsc));
+            }
+            // If WoC proof fails with normal byte order, try WITHOUT reversing
+            // (WoC may return natural byte order instead of display)
+            log::warn!("   ⚠️  WoC proof failed roundtrip - attempting byte order fix for {}", txid);
+            if let Some(fixed_tsc) = fix_tsc_byte_order(txid, &tsc) {
+                log::info!("   ✅ Fixed WoC proof byte order for {}", txid);
+                return Ok(Some(fixed_tsc));
+            }
+            log::error!("   ❌ Could not fix WoC proof byte order for {}", txid);
+            Ok(Some(tsc)) // Return as-is, let caller handle
+        }
+        other => other,
+    }
 }
 
 /// Fetch merkle proof from ARC and convert BUMP to TSC format
@@ -140,6 +161,162 @@ async fn fetch_tsc_proof_from_whatsonchain(
     };
 
     Ok(Some(tsc_obj))
+}
+
+/// Verify a TSC proof by doing a roundtrip: TSC → BUMP → check that the txid
+/// appears at the expected position in level 0 of the BUMP.
+///
+/// This catches byte ordering mismatches between different proof sources
+/// (ARC BUMP vs WhatsOnChain TSC) before they're stored in proven_txs.
+fn verify_tsc_proof_roundtrip(txid: &str, tsc: &Value) -> bool {
+    use crate::beef::{tsc_proof_to_bump, read_node_offset};
+
+    let block_height = tsc["height"].as_u64().unwrap_or(0) as u32;
+    let tx_index = tsc["index"].as_u64().unwrap_or(0);
+    let nodes = match tsc["nodes"].as_array() {
+        Some(n) => n,
+        None => return false,
+    };
+
+    // Convert TSC to BUMP
+    let bump = match tsc_proof_to_bump(txid, block_height, tx_index, nodes) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    // Check that the txid appears at level 0 with flag 0x02
+    if bump.levels.is_empty() {
+        return false;
+    }
+
+    let txid_bytes = match hex::decode(txid) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let mut txid_natural = txid_bytes;
+    txid_natural.reverse(); // display → natural
+
+    for node in &bump.levels[0] {
+        if let Ok((_, vl)) = read_node_offset(node) {
+            let flag = if node.len() > vl { node[vl] } else { 0 };
+            if flag & 0x02 != 0 && node.len() >= vl + 33 {
+                let hash = &node[vl + 1..vl + 33];
+                if hash == txid_natural.as_slice() {
+                    return true; // TXID found at correct position with correct hash
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Attempt to fix TSC proof byte ordering by reversing all node hashes.
+///
+/// If a proof source returns hashes in natural byte order instead of display,
+/// we reverse them so that tsc_proof_to_bump (which expects display format)
+/// produces the correct BUMP.
+fn fix_tsc_byte_order(txid: &str, tsc: &Value) -> Option<Value> {
+    let nodes = tsc["nodes"].as_array()?;
+    let mut fixed_nodes = Vec::with_capacity(nodes.len());
+
+    for node in nodes {
+        let node_str = node.as_str()?;
+        if node_str == "*" {
+            fixed_nodes.push(serde_json::json!("*"));
+            continue;
+        }
+        // Reverse the hex bytes
+        let bytes = hex::decode(node_str).ok()?;
+        let mut reversed = bytes;
+        reversed.reverse();
+        fixed_nodes.push(serde_json::json!(hex::encode(reversed)));
+    }
+
+    let mut fixed_tsc = tsc.clone();
+    fixed_tsc["nodes"] = serde_json::json!(fixed_nodes);
+
+    // Verify the fixed version works
+    if verify_tsc_proof_roundtrip(txid, &fixed_tsc) {
+        Some(fixed_tsc)
+    } else {
+        None
+    }
+}
+
+/// Verify a TSC proof's merkle root against the actual block header.
+///
+/// Returns Ok(true) if the proof's computed root matches the block's merkle root,
+/// Ok(false) if they don't match, or Err if the block header can't be fetched.
+pub async fn verify_tsc_proof_against_block(
+    client: &Client,
+    txid: &str,
+    tsc: &Value,
+) -> CacheResult<bool> {
+    let block_height = match tsc["height"].as_u64() {
+        Some(h) if h > 0 => h as u32,
+        _ => {
+            // WoC TSC proofs often lack height — try target (block hash) to look it up
+            if let Some(target) = tsc["target"].as_str().filter(|t| !t.is_empty()) {
+                let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
+                let resp = client.get(&header_url).send().await
+                    .map_err(|e| CacheError::Api(format!("Failed to fetch block header for target {}: {}", target, e)))?;
+                if !resp.status().is_success() {
+                    return Err(CacheError::Api(format!("Block header API returned {} for target {}", resp.status(), target)));
+                }
+                let header_json: Value = resp.json().await
+                    .map_err(|e| CacheError::Api(format!("Failed to parse block header JSON: {}", e)))?;
+                match header_json["height"].as_u64() {
+                    Some(h) if h > 0 => h as u32,
+                    _ => return Err(CacheError::InvalidData("Could not resolve height from target block hash".to_string())),
+                }
+            } else {
+                return Err(CacheError::InvalidData("No height or target in TSC proof".to_string()));
+            }
+        }
+    };
+
+    let tx_index = tsc["index"].as_u64().unwrap_or(0);
+    let nodes = match tsc["nodes"].as_array() {
+        Some(n) => n,
+        None => return Ok(false),
+    };
+
+    // Compute merkle root from the proof
+    let computed_root = match crate::beef::compute_merkle_root_from_tsc(txid, block_height, tx_index, nodes) {
+        Ok(root) => root,
+        Err(e) => {
+            log::warn!("   Failed to compute merkle root for {}: {}", txid, e);
+            return Ok(false);
+        }
+    };
+
+    // Fetch the actual block header from WoC
+    let block_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", block_height);
+    let response = client.get(&block_url).send().await
+        .map_err(|e| CacheError::Api(format!("Failed to fetch block {}: {}", block_height, e)))?;
+
+    if !response.status().is_success() {
+        return Err(CacheError::Api(format!(
+            "Block API returned status {} for height {}", response.status(), block_height
+        )));
+    }
+
+    let block_json: Value = response.json().await
+        .map_err(|e| CacheError::Api(format!("Failed to parse block JSON: {}", e)))?;
+
+    let actual_root = block_json["merkleroot"].as_str()
+        .ok_or_else(|| CacheError::InvalidData("Missing merkleroot in block header".to_string()))?;
+
+    if computed_root == actual_root {
+        log::info!("   Merkle root verified for {} at height {}", txid, block_height);
+        Ok(true)
+    } else {
+        log::error!("   Merkle root MISMATCH for {} at height {}!", txid, block_height);
+        log::error!("      Computed: {}", computed_root);
+        log::error!("      Actual:   {}", actual_root);
+        Ok(false)
+    }
 }
 
 /// Enhance TSC proof with block height (fetch from cache or API)

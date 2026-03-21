@@ -164,25 +164,61 @@
 
 /* ---- Dashboard Tab ---- */
 .wd-dashboard {
-  display: flex;
-  gap: 24px;
+  display: grid;
+  grid-template-columns: minmax(320px, 5fr) minmax(390px, 9fr);
+  grid-template-rows: auto 1fr;
+  gap: 16px;
   min-height: 0;
   height: 100%;
   box-sizing: border-box;
 }
 
-.wd-dashboard-left {
-  flex: 5;
+.wd-quad-tl {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  min-width: 0;
 }
 
-.wd-dashboard-right {
-  flex: 4;
-  min-width: 300px;
-  max-width: 480px;
+.wd-quad-tr {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.wd-quad-bl {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wd-quad-br {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Make cards fill their quadrant */
+.wd-quad-tl .wd-balance-card {
+  flex: 1;
+}
+
+.wd-quad-bl .wd-send-card {
+  flex: 1;
+}
+
+.wd-quad-tr .wd-receive-card {
+  flex: 1;
+}
+
+.wd-quad-br .wd-recent-card {
+  flex: 1;
+  overflow-y: auto;
 }
 
 /* Balance Card */
@@ -190,10 +226,9 @@
   background: linear-gradient(135deg, #000000 0%, #1a1a2e 100%);
   border: 1px solid var(--wd-gold);
   border-radius: 16px;
-  padding: 24px;
+  padding: 16px 24px 24px 24px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
 }
 
 /* Gold gradient top accent is handled by the border on .wd-balance-card */
@@ -202,15 +237,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--wd-divider);
 }
 
 .wd-balance-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--wd-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 1px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #f0f0f0;
 }
 
 .wd-balance-usd-primary {
@@ -218,6 +253,7 @@
   font-weight: 800;
   color: var(--wd-gold);
   line-height: 1.1;
+  margin-top: 32px;
   margin-bottom: 8px;
 }
 
@@ -265,7 +301,7 @@
 /* Receive Section */
 .wd-receive-card {
   background: var(--wd-card-bg);
-  border: 1px solid var(--wd-card-border);
+  border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
 }
@@ -291,7 +327,9 @@
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  padding-bottom: 12px;
   margin-bottom: 16px;
+  border-bottom: 1px solid var(--wd-divider);
 }
 
 .wd-receive-title-group {
@@ -307,15 +345,15 @@
 }
 
 .wd-receive-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--wd-text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  color: #f0f0f0;
 }
 
 .wd-receive-subtitle {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--wd-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--wd-text-secondary);
 }
 
 /* Info tooltip */
@@ -479,7 +517,7 @@
 /* Recent Activity */
 .wd-recent-card {
   background: var(--wd-card-bg);
-  border: 1px solid var(--wd-card-border);
+  border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
 }
@@ -488,13 +526,15 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding-bottom: 12px;
   margin-bottom: 16px;
+  border-bottom: 1px solid var(--wd-divider);
 }
 
 .wd-recent-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--wd-text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  color: #f0f0f0;
 }
 
 .wd-recent-view-all {
@@ -672,11 +712,9 @@
 /* Send Form Card (right column) */
 .wd-send-card {
   background: var(--wd-card-bg);
-  border: 1px solid var(--wd-card-border);
+  border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
-  position: sticky;
-  top: 0;
 }
 
 /* Override TransactionForm styles in dashboard context */
@@ -1315,48 +1353,6 @@
   gap: 8px;
 }
 
-.wd-btn-primary {
-  background: var(--wd-gold);
-  border: none;
-  color: #000;
-  padding: 8px 18px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-primary:hover {
-  opacity: 0.9;
-}
-
-.wd-btn-primary:active {
-  transform: scale(0.97);
-}
-
-.wd-btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.wd-btn-secondary {
-  background: none;
-  border: 1px solid var(--wd-card-border);
-  color: var(--wd-text-secondary);
-  padding: 8px 18px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-secondary:hover {
-  border-color: var(--wd-text-muted);
-  color: var(--wd-text-primary);
-}
-
 /* ---- Settings Tab ---- */
 .wd-settings {
   display: flex;
@@ -1483,31 +1479,6 @@
   font-weight: 600;
   color: var(--wd-text-primary);
   font-family: 'Courier New', monospace;
-}
-
-.wd-btn-danger {
-  background: var(--wd-error);
-  border: none;
-  color: #fff;
-  padding: 10px 20px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-danger:hover {
-  opacity: 0.9;
-}
-
-.wd-btn-danger:active {
-  transform: scale(0.97);
-}
-
-.wd-btn-danger:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* ---- Shared States ---- */
@@ -1901,13 +1872,14 @@
 /* ---- Responsive ---- */
 @media (max-width: 900px) {
   .wd-dashboard {
-    flex-direction: column;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
   }
 
-  .wd-dashboard-right {
-    max-width: none;
-    min-width: 0;
-  }
+  .wd-quad-tl { grid-column: 1; grid-row: 1; }
+  .wd-quad-tr { grid-column: 1; grid-row: 2; }
+  .wd-quad-bl { grid-column: 1; grid-row: 3; }
+  .wd-quad-br { grid-column: 1; grid-row: 4; }
 
   .wd-receive-split {
     flex-direction: column;

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Box, IconButton, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import PrivacyShieldPanel from '../components/PrivacyShieldPanel';
+import { HodosButton } from '../components/HodosButton';
 
 declare global {
   interface Window {
@@ -75,19 +76,9 @@ const PrivacyShieldOverlayRoot: React.FC = () => {
         <Typography variant="subtitle1" sx={{ fontWeight: 600, fontSize: '0.95rem', color: '#f0f0f0' }}>
           Privacy Shield
         </Typography>
-        <IconButton
-          onClick={handleClose}
-          size="small"
-          sx={{
-            color: '#9ca3af',
-            '&:hover': {
-              color: '#f0f0f0',
-              backgroundColor: '#1f2937',
-            },
-          }}
-        >
-          <CloseIcon fontSize="small" />
-        </IconButton>
+        <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
+          <CloseIcon sx={{ fontSize: 16 }} />
+        </HodosButton>
       </Box>
 
       {/* Panel content */}

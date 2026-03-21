@@ -56,6 +56,7 @@ public:
     HHOOK profile_panel_mouse_hook = nullptr;
     HHOOK settings_mouse_hook = nullptr;
     HHOOK menu_mouse_hook = nullptr;
+    HHOOK wallet_mouse_hook = nullptr;
 
     // Icon offsets for right-side panel positioning (physical pixel distance
     // from icon's right edge to header's right edge)
