@@ -893,12 +893,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 // ── Shared styles ──
 
 const overlayBackdrop: React.CSSProperties = {
-  width: '100vw',
-  height: '100vh',
+  position: 'fixed',
+  inset: 0,
   backgroundColor: 'rgba(0, 0, 0, 0.45)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
+  overflow: 'hidden',
 };
 
 const avatarStyle: React.CSSProperties = {

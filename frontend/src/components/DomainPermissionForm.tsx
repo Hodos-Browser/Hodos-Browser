@@ -5,13 +5,14 @@ const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Rob
 
 const COLORS = {
   gold: '#a67c00',
-  textDark: '#111111',
-  textMuted: '#666666',
-  borderLight: '#d0d0d0',
-  white: '#ffffff',
-  warningBg: '#fef9e7',
-  warningBorder: '#e6a200',
-  warningText: '#8a6d3b',
+  textDark: '#f0f0f0',
+  textMuted: '#9ca3af',
+  borderLight: '#2a2d35',
+  white: '#1a1d23',
+  inputBg: '#111827',
+  warningBg: 'rgba(166, 124, 0, 0.1)',
+  warningBorder: '#a67c00',
+  warningText: '#e6a200',
 };
 
 export interface DomainPermissionSettings {
@@ -87,7 +88,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
     fontFamily: FONT_FAMILY,
     textAlign: 'right',
     outline: 'none',
-    background: isAlwaysNotify ? '#f5f5f5' : COLORS.white,
+    background: isAlwaysNotify ? '#0f1117' : COLORS.inputBg,
     color: isAlwaysNotify ? COLORS.textMuted : COLORS.textDark,
   };
 
@@ -140,8 +141,8 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           width: '16px',
           height: '16px',
           borderRadius: '3px',
-          border: `1.5px solid ${isAlwaysNotify ? '#000000' : COLORS.borderLight}`,
-          background: isAlwaysNotify ? '#000000' : COLORS.white,
+          border: `1.5px solid ${isAlwaysNotify ? COLORS.gold : COLORS.borderLight}`,
+          background: isAlwaysNotify ? COLORS.gold : 'transparent',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -149,7 +150,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           transition: 'all 0.15s',
         }}>
           {isAlwaysNotify && (
-            <span style={{ color: COLORS.white, fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+            <span style={{ color: '#0f1117', fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
           )}
         </div>
         <div>
