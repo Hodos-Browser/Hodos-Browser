@@ -28,6 +28,7 @@ interface DomainPermissionRecord {
   perTxLimitCents: number;
   perSessionLimitCents: number;
   rateLimitPerMin: number;
+  maxTxPerSession: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -75,6 +76,7 @@ const DomainPermissionsTab: React.FC = () => {
           perTxLimitCents: settings.perTxLimitCents,
           perSessionLimitCents: settings.perSessionLimitCents,
           rateLimitPerMin: settings.rateLimitPerMin,
+          max_tx_per_session: settings.maxTxPerSession,
         }),
       });
       if (!res.ok) throw new Error(`Failed to update: ${res.statusText}`);
@@ -148,6 +150,7 @@ const DomainPermissionsTab: React.FC = () => {
                   <TableCell>Per-Tx Limit</TableCell>
                   <TableCell>Per-Session Limit</TableCell>
                   <TableCell>Rate Limit</TableCell>
+                  <TableCell>Tx/Session</TableCell>
                   <TableCell>Approved</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
@@ -163,6 +166,7 @@ const DomainPermissionsTab: React.FC = () => {
                     <TableCell>{formatCentsAsUsd(perm.perTxLimitCents)}</TableCell>
                     <TableCell>{formatCentsAsUsd(perm.perSessionLimitCents)}</TableCell>
                     <TableCell>{perm.rateLimitPerMin}/min</TableCell>
+                    <TableCell>{perm.maxTxPerSession}</TableCell>
                     <TableCell>{formatDate(perm.createdAt)}</TableCell>
                     <TableCell align="right">
                       <HodosButton
@@ -209,6 +213,7 @@ const DomainPermissionsTab: React.FC = () => {
                   perTxLimitCents: editingDomain.perTxLimitCents,
                   perSessionLimitCents: editingDomain.perSessionLimitCents,
                   rateLimitPerMin: editingDomain.rateLimitPerMin,
+                  maxTxPerSession: editingDomain.maxTxPerSession,
                 }}
                 onSave={handleEditSave}
                 onCancel={() => setEditingDomain(null)}
