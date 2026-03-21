@@ -3,12 +3,12 @@ import {
     Avatar,
     Box,
     Toolbar,
-    IconButton,
     Badge,
     Snackbar,
     Alert,
     CircularProgress,
 } from '@mui/material';
+import { HodosButton } from '../components/HodosButton';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -513,52 +513,37 @@ const MainBrowserView: React.FC = () => {
                 overflow: 'hidden', // Prevent scrolling
             }}>
                 {/* Back Button */}
-                <IconButton
-                    onClick={goBack}
+                <HodosButton
+                    variant="icon"
                     size="small"
-                    sx={{
-                        flexShrink: 0,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    onClick={goBack}
+                    aria-label="Back"
+                    style={{ flexShrink: 0 }}
                 >
                     <ArrowBackIcon fontSize="small" />
-                </IconButton>
+                </HodosButton>
 
                 {/* Forward Button */}
-                <IconButton
-                    onClick={goForward}
+                <HodosButton
+                    variant="icon"
                     size="small"
-                    sx={{
-                        flexShrink: 0,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    onClick={goForward}
+                    aria-label="Forward"
+                    style={{ flexShrink: 0 }}
                 >
                     <ArrowForwardIcon fontSize="small" />
-                </IconButton>
+                </HodosButton>
 
                 {/* Refresh Button */}
-                <IconButton
-                    onClick={reload}
+                <HodosButton
+                    variant="icon"
                     size="small"
-                    sx={{
-                        flexShrink: 0,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    onClick={reload}
+                    aria-label="Refresh"
+                    style={{ flexShrink: 0 }}
                 >
                     <RefreshIcon fontSize="small" />
-                </IconButton>
+                </HodosButton>
 
                 {/* Spacer to help center address bar */}
                 <Box sx={{ flex: 1 }} />
@@ -758,7 +743,9 @@ const MainBrowserView: React.FC = () => {
                             height: 20,
                             bgcolor: 'rgba(255,255,255,0.15)',
                         }} />
-                        <IconButton
+                        <HodosButton
+                            variant="icon"
+                            size="small"
                             onClick={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect();
                                 const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
@@ -766,9 +753,9 @@ const MainBrowserView: React.FC = () => {
                                     window.cefMessage.send('cookie_panel_show', [iconRightOffset.toString(), currentDomain]);
                                 }
                             }}
-                            size="small"
+                            aria-label="Privacy Shield"
                             title="Privacy Shield"
-                            sx={{ p: 0.25, color: adblockEnabled ? '#a67c00' : '#6b7280' }}
+                            style={{ color: adblockEnabled ? '#a67c00' : '#6b7280' }}
                         >
                             <Badge
                                 variant="dot"
@@ -784,7 +771,7 @@ const MainBrowserView: React.FC = () => {
                             >
                                 <SecurityIcon sx={{ fontSize: 20 }} />
                             </Badge>
-                        </IconButton>
+                        </HodosButton>
                     </Box>
                 </Box>
 
@@ -792,46 +779,46 @@ const MainBrowserView: React.FC = () => {
                 <Box sx={{ flex: 1 }} />
 
                 {/* Download Button */}
-                <IconButton
-                        onClick={(e) => {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
-                            window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
-                        }}
-                        size="small"
-                        title="Downloads"
-                        sx={{
-                            flexShrink: 0,
-                            position: 'relative',
-                            color: allComplete ? '#188038' : hasActiveDownloads ? 'primary.main' : '#9ca3af',
-                            '&:hover': {
-                                backgroundColor: '#1f2937',
-                                color: allComplete ? '#188038' : '#f0f0f0',
-                            }
-                        }}
-                    >
-                        <DownloadIcon fontSize="small" />
-                        {/* Circular progress ring around icon when downloading */}
-                        {hasActiveDownloads && (
-                            <CircularProgress
-                                size={28}
-                                thickness={3}
-                                variant={downloadProgress !== null && downloadProgress >= 0 ? 'determinate' : 'indeterminate'}
-                                value={downloadProgress !== null && downloadProgress >= 0 ? downloadProgress : undefined}
-                                sx={{
-                                    position: 'absolute',
-                                    top: '50%',
-                                    left: '50%',
-                                    marginTop: '-14px',
-                                    marginLeft: '-14px',
-                                    color: 'primary.main',
-                                }}
-                            />
-                        )}
-                    </IconButton>
+                <HodosButton
+                    variant="icon"
+                    size="small"
+                    onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
+                        window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
+                    }}
+                    aria-label="Downloads"
+                    title="Downloads"
+                    style={{
+                        flexShrink: 0,
+                        position: 'relative',
+                        color: allComplete ? '#188038' : hasActiveDownloads ? undefined : '#9ca3af',
+                    }}
+                >
+                    <DownloadIcon fontSize="small" />
+                    {/* Circular progress ring around icon when downloading */}
+                    {hasActiveDownloads && (
+                        <CircularProgress
+                            size={28}
+                            thickness={3}
+                            variant={downloadProgress !== null && downloadProgress >= 0 ? 'determinate' : 'indeterminate'}
+                            value={downloadProgress !== null && downloadProgress >= 0 ? downloadProgress : undefined}
+                            sx={{
+                                position: 'absolute',
+                                top: '50%',
+                                left: '50%',
+                                marginTop: '-14px',
+                                marginLeft: '-14px',
+                                color: 'primary.main',
+                            }}
+                        />
+                    )}
+                </HodosButton>
 
                 {/* Wallet Button */}
-                <IconButton
+                <HodosButton
+                    variant="icon"
+                    size="small"
                     onClick={(e) => {
                         console.log('Wallet panel toggle clicked');
                         const rect = e.currentTarget.getBoundingClientRect();
@@ -842,15 +829,8 @@ const MainBrowserView: React.FC = () => {
                             unreadPaymentAmount.toString()
                         ].join(','));
                     }}
-                    size="small"
-                    sx={{
-                        flexShrink: 0,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    aria-label="Wallet"
+                    style={{ flexShrink: 0 }}
                 >
                     <Badge
                         variant="dot"
@@ -866,26 +846,20 @@ const MainBrowserView: React.FC = () => {
                     >
                         <AccountBalanceWalletIcon fontSize="small" />
                     </Badge>
-                </IconButton>
+                </HodosButton>
 
                 {/* Profile Button - shows current profile avatar, triggers overlay */}
-                <IconButton
+                <HodosButton
+                    variant="icon"
+                    size="small"
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('profile_panel_show', [iconRightOffset.toString()]);
                     }}
-                    size="small"
-                    sx={{
-                        flexShrink: 0,
-                        p: 0.25,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    aria-label={currentProfile ? `Profile: ${currentProfile.name}` : 'Profile'}
                     title={currentProfile ? `Profile: ${currentProfile.name}` : 'Profile'}
+                    style={{ flexShrink: 0 }}
                 >
                     {currentProfile ? (
                         <Avatar
@@ -902,28 +876,23 @@ const MainBrowserView: React.FC = () => {
                     ) : (
                         <AccountCircleIcon fontSize="small" />
                     )}
-                </IconButton>
+                </HodosButton>
 
                 {/* Three-dot Menu Button — triggers CEF overlay */}
-                <IconButton
+                <HodosButton
+                    variant="icon"
+                    size="small"
                     onClick={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
                         window.cefMessage?.send('menu_show', [iconRightOffset.toString()]);
                     }}
-                    size="small"
-                    sx={{
-                        flexShrink: 0,
-                        color: '#9ca3af',
-                        '&:hover': {
-                            backgroundColor: '#1f2937',
-                            color: '#f0f0f0',
-                        }
-                    }}
+                    aria-label="Menu"
                     title="Menu"
+                    style={{ flexShrink: 0 }}
                 >
                     <MoreVertIcon fontSize="small" />
-                </IconButton>
+                </HodosButton>
 
                 {/* Find Bar - inline in toolbar */}
                 {findBarVisible && (
