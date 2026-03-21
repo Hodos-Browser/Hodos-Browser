@@ -25,6 +25,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [notificationDomain, setNotificationDomain] = useState<string>('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showModifyLimits, setShowModifyLimits] = useState(false);
+  const [faviconError, setFaviconError] = useState(false);
 
   // Payment/rate-limit params
   const [paymentSatoshis, setPaymentSatoshis] = useState<number>(0);
@@ -124,6 +125,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     };
   }, []);
 
+  // Reset favicon error state whenever the domain changes
+  useEffect(() => {
+    setFaviconError(false);
+  }, [notificationDomain]);
+
   const formatDomain = (domain: string) => {
     return domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
   };
@@ -186,6 +192,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             perTxLimitCents: settings.perTxLimitCents,
             perSessionLimitCents: settings.perSessionLimitCents,
             rateLimitPerMin: settings.rateLimitPerMin,
+            maxTxPerSession: settings.maxTxPerSession,
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
@@ -251,6 +258,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             perTxLimitCents: settings.perTxLimitCents,
             perSessionLimitCents: settings.perSessionLimitCents,
             rateLimitPerMin: settings.rateLimitPerMin,
+            maxTxPerSession: settings.maxTxPerSession,
           }),
         ]);
         // Approve this request
@@ -363,7 +371,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -414,7 +433,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -506,7 +536,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -602,7 +643,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -725,7 +777,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
