@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import WalletPanel from '../components/WalletPanel';
 
 // Reusable 4-digit PIN input (4 boxes, password-masked, numeric-only)
@@ -87,13 +87,8 @@ export default function WalletPanelPage() {
   }, []);
 
   // Read icon position from URL param (physical pixels, passed from toolbar click)
-  const paddingRightPx = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    const iro = parseInt(params.get('iro') || '0', 10);
-    if (iro <= 0) return 0;
-    const dpr = window.devicePixelRatio || 1;
-    return Math.round(iro / dpr);
-  }, []);
+  // Keep-alive: padding is now handled by C++ positioning, not CSS
+  // const paddingRightPx = useMemo(() => { ... }, []);
 
   // Cache-first init: check exists from localStorage
   const cachedExists = localStorage.getItem('hodos_wallet_exists') === 'true';
@@ -222,6 +217,47 @@ export default function WalletPanelPage() {
       });
   }, []);
 
+  // Keep-alive: reset UI state on hide (so next open is clean)
+  useEffect(() => {
+    const handleHidden = (e: MessageEvent) => {
+      if (e.data?.type === 'wallet_hidden') {
+        console.log('[WalletPanel] wallet_hidden — resetting UI state');
+        setShowRecoveryInput(false);
+        setShowImportForm(false);
+        setShowCentbeeRecovery(false);
+        setMnemonic(null);
+        setPinStep(null);
+        setPendingAction(null);
+        setRecoveryError(null);
+        setRecoveryResult(null);
+      }
+    };
+    // Keep-alive: re-fetch wallet status when overlay is shown again
+    const handleShown = (e: MessageEvent) => {
+      if (e.data?.type === 'wallet_shown') {
+        console.log('[WalletPanel] wallet_shown — refreshing status');
+        fetch('http://127.0.0.1:31301/wallet/status')
+          .then(r => r.json())
+          .then(data => {
+            if (data.exists && data.locked) {
+              setWalletStatus('locked');
+            } else if (data.exists) {
+              setWalletStatus('exists');
+            } else {
+              setWalletStatus('no-wallet');
+            }
+          })
+          .catch(() => {});
+      }
+    };
+    window.addEventListener('message', handleHidden);
+    window.addEventListener('message', handleShown);
+    return () => {
+      window.removeEventListener('message', handleHidden);
+      window.removeEventListener('message', handleShown);
+    };
+  }, []);
+
   const handleClose = () => {
     if (window.hodosBrowser?.overlay?.close) {
       window.hodosBrowser.overlay.close();
@@ -230,12 +266,8 @@ export default function WalletPanelPage() {
     }
   };
 
-  const handleBackgroundClick = (e: React.MouseEvent) => {
-    console.log('[WalletPanel] Background click detected, target===currentTarget:', e.target === e.currentTarget, 'preventClose:', preventClose);
-    if (e.target === e.currentTarget && !preventClose) {
-      handleClose();
-    }
-  };
+  // Keep-alive: click-outside is now handled by C++ mouse hook + WM_ACTIVATE
+  // const handleBackgroundClick = (e: React.MouseEvent) => { ... };
 
   // --- PIN Flow (used during create, recover, import) ---
 

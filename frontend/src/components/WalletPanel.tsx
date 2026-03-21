@@ -42,6 +42,35 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [showIdentityKey, setShowIdentityKey] = useState(false);
   const [identityKeyCopied, setIdentityKeyCopied] = useState(false);
 
+  // Keep-alive: reset to balance view on hide (so next open is clean)
+  useEffect(() => {
+    const handleHidden = (e: MessageEvent) => {
+      if (e.data?.type === 'wallet_hidden') {
+        setShowSendForm(false);
+        setShowReceiveAddress(false);
+        setTransactionResult(null);
+        setAddressCopiedMessage(null);
+        setShowIdentityKey(false);
+        setIdentityKeyCopied(false);
+      }
+    };
+    // Keep-alive: refresh balance and PeerPay on re-show
+    const handleShown = (e: MessageEvent) => {
+      if (e.data?.type === 'wallet_shown') {
+        const ppc = e.data.ppc || 0;
+        const ppa = e.data.ppa || 0;
+        setPeerpayNotification(ppc > 0 ? { count: ppc, amount: ppa } : null);
+        refreshBalance();
+      }
+    };
+    window.addEventListener('message', handleHidden);
+    window.addEventListener('message', handleShown);
+    return () => {
+      window.removeEventListener('message', handleHidden);
+      window.removeEventListener('message', handleShown);
+    };
+  }, [refreshBalance]);
+
   // PeerPay notification state (auto-accept only)
   // Read from URL params for instant display (passed by header via C++)
   const [peerpayNotification, setPeerpayNotification] = useState<{

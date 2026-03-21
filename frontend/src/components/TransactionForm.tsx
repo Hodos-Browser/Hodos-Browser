@@ -289,6 +289,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             placeholder="BSV address, identity key, or paymail"
             className={errors.recipient ? 'error' : ''}
             disabled={isSubmitting || isLoading}
+            autoComplete="off"
           />
           <span className="field-hint">
             {isPaymail
@@ -327,6 +328,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   placeholder="0.00"
                   className={errors.amount ? 'error' : ''}
                   disabled={isSubmitting || isLoading || bsvPrice <= 0}
+                  autoComplete="off"
                 />
                 <button
                   type="button"
@@ -359,6 +361,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                 placeholder="0.00000000"
                 className={errors.amount ? 'error' : ''}
                 disabled={isSubmitting || isLoading}
+                autoComplete="off"
               />
             </div>
           </div>
@@ -374,6 +377,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             onChange={(e) => handleInputChange('memo', e.target.value)}
             placeholder="Add a note to this transaction"
             disabled={isSubmitting || isLoading}
+            autoComplete="off"
           />
         </div>
 

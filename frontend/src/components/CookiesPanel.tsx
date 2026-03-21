@@ -265,6 +265,7 @@ export function CookiesPanel() {
     [selectedCookie]
   );
 
+  // @ts-expect-error — Will be used when cookie detail panel is re-added
   const handleDeleteSelected = useCallback(async () => {
     if (!selectedCookie) return;
     const cookieKey = `${selectedCookie.domain}:${selectedCookie.name}`;

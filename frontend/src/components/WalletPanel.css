@@ -1110,6 +1110,17 @@
 .dynamic-content-area-light .form-group input {
   padding: 10px 12px;
   font-size: 14px;
+  background: #1f2937;
+  color: #f0f0f0;
+  border-color: #374151;
+}
+
+.dynamic-content-area-light .form-group input:focus {
+  background: #1f2937;
+  border-color: #a67c00;
+  color: #f0f0f0;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(166, 124, 0, 0.2);
 }
 
 .dynamic-content-area-light .submit-button {

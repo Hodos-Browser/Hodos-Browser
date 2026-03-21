@@ -40,6 +40,8 @@
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <windows.h>
+#include <imm.h>      // For IME message handling (ISC_SHOWUICOMPOSITIONWINDOW)
+#pragma comment(lib, "imm32.lib")
 #include <algorithm>  // For std::max
 #include <windowsx.h>
 #include <filesystem>
@@ -81,6 +83,7 @@ HHOOK g_download_panel_mouse_hook = nullptr;
 HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 HHOOK g_menu_mouse_hook = nullptr;
+HHOOK g_wallet_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -104,6 +107,9 @@ HANDLE g_walletJobObject = nullptr;  // Job object: auto-kills child when parent
 // Forward declarations for wallet server management
 void StartWalletServer();
 void StopWalletServer();
+
+// Forward declaration for wallet overlay keep-alive (defined in simple_app.cpp)
+void HideWalletOverlay();
 
 // Adblock server process management
 PROCESS_INFORMATION g_adblockServerProcess = {};
@@ -473,8 +479,13 @@ void ShutdownApplication() {
         g_settings_overlay_hwnd = nullptr;
     }
 
+    if (g_wallet_mouse_hook) {
+        UnhookWindowsHookEx(g_wallet_mouse_hook);
+        g_wallet_mouse_hook = nullptr;
+        LOG_INFO("Wallet mouse hook removed during shutdown");
+    }
     if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
-        LOG_INFO("🔄 Destroying wallet overlay window...");
+        LOG_INFO("Destroying wallet overlay window...");
         DestroyWindow(g_wallet_overlay_hwnd);
         g_wallet_overlay_hwnd = nullptr;
     }
@@ -965,24 +976,14 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
-                // Close wallet overlay on focus loss UNLESS prevent-close flag is active.
-                // Flag is set synchronously at overlay creation (C++ side) and cleared
-                // by React IPC (wallet_allow_close) when user reaches a safe state.
-                // This avoids race conditions — flag defaults to TRUE on fresh overlay.
-                LOG_DEBUG("📱 App losing focus - checking wallet overlay");
+                // Hide wallet overlay on focus loss UNLESS prevent-close flag is active.
+                // Keep-alive: hide instead of destroy.
+                LOG_DEBUG("App losing focus - checking wallet overlay");
                 if (g_wallet_overlay_prevent_close) {
-                    LOG_INFO("💰 Wallet overlay prevent-close active - keeping overlay open on focus loss");
+                    LOG_INFO("Wallet overlay prevent-close active - keeping overlay open on focus loss");
                 } else if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
-                    LOG_INFO("💰 Closing wallet overlay due to app focus loss");
-                    ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
-                    BrowserWindow* walletBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA));
-                    CefRefPtr<CefBrowser> wallet_browser = (walletBw && walletBw->wallet_browser)
-                        ? walletBw->wallet_browser : SimpleHandler::GetWalletBrowser();
-                    if (wallet_browser) {
-                        wallet_browser->GetHost()->CloseBrowser(false);
-                    }
-                    DestroyWindow(g_wallet_overlay_hwnd);
-                    g_wallet_overlay_hwnd = nullptr;
+                    LOG_INFO("Hiding wallet overlay due to app focus loss");
+                    HideWalletOverlay();
                 }
 
                 // Dismiss omnibox overlay on focus loss (as per CONTEXT.md decision)
@@ -1142,6 +1143,26 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+LRESULT CALLBACK WalletMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
+                if (g_wallet_overlay_prevent_close || g_file_dialog_active) {
+                    return CallNextHookEx(g_wallet_mouse_hook, nCode, wParam, lParam);
+                }
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                RECT overlayRect;
+                GetWindowRect(g_wallet_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, mouseInfo->pt)) {
+                    LOG_DEBUG("Click detected outside wallet overlay bounds - dismissing");
+                    HideWalletOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_wallet_mouse_hook, nCode, wParam, lParam);
+}
+
 LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Get the wallet browser from the BrowserWindow* stored in GWLP_USERDATA.
     // This correctly routes to the window that opened the wallet (not always window 0).
@@ -1153,12 +1174,21 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
     switch (msg) {
         case WM_MOUSEACTIVATE:
-            LOG_DEBUG("👆 Wallet Overlay HWND received WM_MOUSEACTIVATE");
-            // Allow normal activation without forcing z-order
             return MA_ACTIVATE;
 
+        case WM_SETFOCUS: {
+            // Disable IME to prevent composition window overlay
+            ImmAssociateContext(hwnd, nullptr);
+            
+            // Set CEF browser focus — required for text input to work
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
+            if (wallet_browser) {
+                wallet_browser->GetHost()->SetFocus(true);
+            }
+            return 0;
+        }
+
         case WM_LBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Wallet Overlay received WM_LBUTTONDOWN");
             SetFocus(hwnd);
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -1171,13 +1201,11 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (wallet_browser) {
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-                LOG_DEBUG("🧠 Left-click sent to wallet overlay browser");
             }
             return 0;
         }
 
         case WM_RBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Wallet Overlay received WM_RBUTTONDOWN");
             SetFocus(hwnd);
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -1196,9 +1224,6 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
 
         case WM_KEYDOWN: {
-            LOG_DEBUG("⌨️ Wallet Overlay received WM_KEYDOWN - key: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
                 CefKeyEvent key_event;
@@ -1215,18 +1240,11 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 key_event.modifiers = modifiers;
 
                 wallet_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Key down sent to wallet overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_DEBUG("⚠️ No wallet overlay browser to send key down");
             }
-
             return 0;
         }
 
         case WM_KEYUP: {
-            LOG_DEBUG("⌨️ Wallet Overlay received WM_KEYUP - key: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
                 CefKeyEvent key_event;
@@ -1243,24 +1261,19 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 key_event.modifiers = modifiers;
 
                 wallet_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Key up sent to wallet overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_DEBUG("⚠️ No wallet overlay browser to send key up");
             }
-
             return 0;
         }
 
         case WM_CHAR: {
-            LOG_DEBUG("⌨️ Wallet Overlay received WM_CHAR - char: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
                 CefKeyEvent key_event;
                 key_event.type = KEYEVENT_CHAR;
-                key_event.windows_key_code = wParam;
-                key_event.native_key_code = lParam;
+                key_event.windows_key_code = static_cast<int>(wParam);
+                key_event.native_key_code = static_cast<int>(lParam);
+                key_event.character = static_cast<char16_t>(wParam);
+                key_event.unmodified_character = static_cast<char16_t>(wParam);
                 key_event.is_system_key = false;
 
                 int modifiers = 0;
@@ -1271,9 +1284,6 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 key_event.modifiers = modifiers;
 
                 wallet_browser->GetHost()->SendKeyEvent(key_event);
-                LOG_DEBUG("⌨️ Char sent to wallet overlay browser (modifiers: " + std::to_string(modifiers) + ")");
-            } else {
-                LOG_DEBUG("⚠️ No wallet overlay browser to send char");
             }
 
             return 0;
@@ -1293,38 +1303,74 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
 
+        case WM_MOUSEWHEEL: {
+            // WM_MOUSEWHEEL provides SCREEN coords — must convert to client coords
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT clientPt = screenPt;
+            ScreenToClient(hwnd, &clientPt);
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = clientPt.x;
+            mouse_event.y = clientPt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
+            if (wallet_browser) {
+                wallet_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
         case WM_CLOSE:
-            LOG_DEBUG("❌ Wallet Overlay received WM_CLOSE - destroying window");
-            DestroyWindow(hwnd);
+            // Keep-alive: hide instead of destroy
+            LOG_DEBUG("Wallet Overlay received WM_CLOSE - hiding (keep-alive)");
+            ShowWindow(hwnd, SW_HIDE);
             return 0;
 
         case WM_DESTROY:
-            LOG_DEBUG("❌ Wallet Overlay received WM_DESTROY - cleaning up");
+            LOG_DEBUG("Wallet Overlay received WM_DESTROY - cleaning up");
             return 0;
 
         case WM_ACTIVATE:
-            LOG_DEBUG("⚡ Wallet HWND activated with state: " + std::to_string(LOWORD(wParam)));
-            if (LOWORD(wParam) == WA_INACTIVE) {
+            LOG_DEBUG("Wallet HWND activated with state: " + std::to_string(LOWORD(wParam)));
+            if (LOWORD(wParam) != WA_INACTIVE) {
+                // Wallet becoming active — disable IME to prevent composition overlay
+                ImmAssociateContext(hwnd, nullptr);
+            } else {
                 // Check prevent-close flag (set at creation, cleared by React when safe)
                 if (g_wallet_overlay_prevent_close || g_file_dialog_active) {
-                    LOG_INFO("💰 Wallet overlay lost activation but prevent-close active - keeping open");
+                    LOG_INFO("Wallet overlay lost activation but prevent-close active - keeping open");
                     return 0;
                 }
-                // Wallet lost focus — close it (cross-window click-outside)
-                LOG_INFO("💰 Closing wallet overlay — lost activation (click-outside)");
-                ShowWindow(hwnd, SW_HIDE);
-                CefRefPtr<CefBrowser> wallet_close_browser = getWalletBrowser();
-                if (wallet_close_browser) {
-                    wallet_close_browser->GetHost()->CloseBrowser(false);
-                }
-                DestroyWindow(hwnd);
-                g_wallet_overlay_hwnd = nullptr;
+                // Wallet lost focus — hide it (keep-alive)
+                LOG_INFO("Hiding wallet overlay — lost activation (click-outside)");
+                HideWalletOverlay();
                 return 0;
             }
             break;
 
         case WM_WINDOWPOSCHANGING:
             break;
+
+        // ========== IME SUPPRESSION ==========
+        // Suppress Windows IME composition window that overlays text input
+        // This white overlay appears when typing in windowless CEF browsers
+        case WM_IME_SETCONTEXT:
+            // Fully suppress — do NOT pass to DefWindowProc which can still
+            // render IME candidate/guide windows as white rectangles on layered HWNDs
+            return 0;
+
+        case WM_IME_STARTCOMPOSITION:
+            LOG_DEBUG("⌨️ Wallet Overlay WM_IME_STARTCOMPOSITION - suppressing");
+            return 0;  // Suppress default IME composition window
+
+        case WM_IME_COMPOSITION:
+            LOG_DEBUG("⌨️ Wallet Overlay WM_IME_COMPOSITION - suppressing");
+            return 0;  // Suppress default IME composition rendering
+
+        case WM_IME_ENDCOMPOSITION:
+            LOG_DEBUG("⌨️ Wallet Overlay WM_IME_ENDCOMPOSITION - suppressing");
+            return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -2906,10 +2952,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     CreateCookiePanelOverlay(g_hInstance, false, 100);
     CreateDownloadPanelOverlay(g_hInstance, false, 100);
     CreateProfilePanelOverlay(g_hInstance, false, 50);
     CreateMenuOverlay(g_hInstance, false, 30);
+    CreateWalletOverlay(g_hInstance, false, 50);
     LOG_INFO("Pre-created panel overlays (hidden) for warm startup");
 
     CefRunMessageLoop();

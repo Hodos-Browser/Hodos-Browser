@@ -74,7 +74,9 @@ extern std::string g_pendingModalDomain;
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
 #ifdef _WIN32
     extern void CreateTestOverlayWithSeparateProcess(HINSTANCE hInstance);
-    extern void CreateWalletOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
+    extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+    extern void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+    extern void HideWalletOverlay();
     extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
 #else
     // macOS global views
@@ -3282,8 +3284,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔔 Found notification overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         }
 
-        // Keep-alive: notification overlay hides instead of destroying
-        if (role_ == "notification") {
+        // Keep-alive: wallet overlay hides instead of destroying
+        if (role_ == "wallet") {
+            HideWalletOverlay();
+            LOG_DEBUG_BROWSER("Wallet overlay hidden (keep-alive)");
+        } else if (role_ == "notification") {
             extern HWND g_notification_overlay_hwnd;
             if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
                 ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
@@ -3454,12 +3459,20 @@ bool SimpleHandler::OnProcessMessageReceived(
 #endif
 
     if (message_name == "overlay_show_wallet") {
-        LOG_DEBUG_BROWSER("💰 overlay_show_wallet message received from role: " + role_);
-        LOG_DEBUG_BROWSER("💰 Creating wallet overlay with separate process");
+        LOG_DEBUG_BROWSER("overlay_show_wallet message received from role: " + role_);
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance, 0, GetOwnerWindow());
+        extern HWND g_wallet_overlay_hwnd;
+        if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
+            if (IsWindowVisible(g_wallet_overlay_hwnd)) {
+                HideWalletOverlay();
+            } else {
+                ShowWalletOverlay(0, GetOwnerWindow());
+            }
+        } else {
+            CreateWalletOverlay(g_hInstance, true, 0);
+        }
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess();
 #endif
@@ -4026,7 +4039,16 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateWalletOverlayWithSeparateProcess(g_hInstance, iconRightOffset, GetOwnerWindow());
+        extern HWND g_wallet_overlay_hwnd;
+        if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
+            if (IsWindowVisible(g_wallet_overlay_hwnd)) {
+                HideWalletOverlay();
+            } else {
+                ShowWalletOverlay(iconRightOffset, GetOwnerWindow());
+            }
+        } else {
+            CreateWalletOverlay(g_hInstance, true, iconRightOffset);
+        }
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess(iconRightOffset);
 #else
