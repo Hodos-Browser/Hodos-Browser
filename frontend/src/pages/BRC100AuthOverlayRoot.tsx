@@ -35,6 +35,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [perSessionLimit, setPerSessionLimit] = useState<number>(300);
   const [sessionSpent, setSessionSpent] = useState<number>(0);
   const [rateLimit, setRateLimit] = useState<number>(10);
+  const [maxTxPerSession, setMaxTxPerSession] = useState<number>(100);
 
   // Certificate disclosure params
   const [certFields, setCertFields] = useState<string[]>([]);
@@ -61,6 +62,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     setPerSessionLimit(300);
     setSessionSpent(0);
     setRateLimit(10);
+    setMaxTxPerSession(100);
 
     // Apply params
     setNotificationType(type);
@@ -85,6 +87,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
     const rateLimitParam = params.get('rateLimit');
     if (rateLimitParam) setRateLimit(parseInt(rateLimitParam));
+
+    const maxTxParam = params.get('maxTxPerSession');
+    if (maxTxParam) setMaxTxPerSession(parseInt(maxTxParam));
 
     // Certificate disclosure params
     const fieldsParam = params.get('fields');
@@ -503,6 +508,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   perTxLimitCents: perTxLimit,
                   perSessionLimitCents: perSessionLimit,
                   rateLimitPerMin: rateLimit,
+                  maxTxPerSession: maxTxPerSession,
                 }}
                 onSave={(settings) => handleModifyLimitsAndApprove(settings)}
                 onCancel={() => setShowModifyLimits(false)}
@@ -610,6 +616,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   perTxLimitCents: perTxLimit,
                   perSessionLimitCents: perSessionLimit,
                   rateLimitPerMin: rateLimit,
+                  maxTxPerSession: maxTxPerSession,
                 }}
                 onSave={(settings) => handleModifyLimitsAndApprove(settings)}
                 onCancel={() => setShowModifyLimits(false)}
