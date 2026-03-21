@@ -1315,48 +1315,6 @@
   gap: 8px;
 }
 
-.wd-btn-primary {
-  background: var(--wd-gold);
-  border: none;
-  color: #000;
-  padding: 8px 18px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-primary:hover {
-  opacity: 0.9;
-}
-
-.wd-btn-primary:active {
-  transform: scale(0.97);
-}
-
-.wd-btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.wd-btn-secondary {
-  background: none;
-  border: 1px solid var(--wd-card-border);
-  color: var(--wd-text-secondary);
-  padding: 8px 18px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-secondary:hover {
-  border-color: var(--wd-text-muted);
-  color: var(--wd-text-primary);
-}
-
 /* ---- Settings Tab ---- */
 .wd-settings {
   display: flex;
@@ -1483,31 +1441,6 @@
   font-weight: 600;
   color: var(--wd-text-primary);
   font-family: 'Courier New', monospace;
-}
-
-.wd-btn-danger {
-  background: var(--wd-error);
-  border: none;
-  color: #fff;
-  padding: 10px 20px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wd-btn-danger:hover {
-  opacity: 0.9;
-}
-
-.wd-btn-danger:active {
-  transform: scale(0.97);
-}
-
-.wd-btn-danger:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* ---- Shared States ---- */
