@@ -8301,6 +8301,12 @@ pub async fn send_transaction(
                 } else {
                     log::info!("   💾 Transaction broadcast status updated to 'broadcast'");
                 }
+
+                // Store recipient for autocomplete history
+                let _ = db.connection().execute(
+                    "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                    rusqlite::params![req.to_address, txid],
+                );
             }
 
             let whats_on_chain_url = format!("https://whatsonchain.com/tx/{}", txid);
@@ -12472,6 +12478,12 @@ pub async fn peerpay_send(
             let db = state.database.lock().unwrap();
             let tx_repo = crate::database::TransactionRepository::new(db.connection());
             let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+
+            // Store recipient for autocomplete history
+            let _ = db.connection().execute(
+                "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                rusqlite::params![req.recipient_identity_key, txid],
+            );
             drop(db);
         }
         Err(e) => {
@@ -12820,6 +12832,13 @@ pub async fn paymail_send(
             let db = state.database.lock().unwrap();
             let tx_repo = crate::database::TransactionRepository::new(db.connection());
             let _ = tx_repo.update_broadcast_status(&txid, "broadcast");
+
+            // Store recipient for autocomplete history
+            let paymail_str = format!("{}@{}", alias, domain);
+            let _ = db.connection().execute(
+                "UPDATE transactions SET recipient = ?1 WHERE txid = ?2",
+                rusqlite::params![paymail_str, txid],
+            );
             drop(db);
         }
         Err(e) => {
@@ -13012,6 +13031,195 @@ pub async fn recipient_resolve(
             "has_p2p": false,
         }))
     }
+}
+
+// =============================================================================
+// Recipient Autocomplete (Issue #38)
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct RecipientSuggestQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /wallet/recipient/suggest?q=<partial>&limit=<N>
+///
+/// Returns ranked autocomplete suggestions from three sources:
+/// 1. Recent recipients from transaction history (local DB, instant)
+/// 2. Live identity search via BSV Overlay Services (network, ~200-500ms)
+/// 3. HandCash paymail construction (if input starts with $)
+///
+/// Response: { suggestions: [{ value, display_name, avatar_url, type, source }] }
+pub async fn recipient_suggest(
+    state: web::Data<AppState>,
+    query: web::Query<RecipientSuggestQuery>,
+) -> HttpResponse {
+    let q = query.q.trim().to_string();
+    let limit = query.limit.unwrap_or(8).min(20);
+
+    if q.is_empty() {
+        return HttpResponse::Ok().json(serde_json::json!({ "suggestions": [] }));
+    }
+
+    let mut suggestions: Vec<serde_json::Value> = Vec::new();
+
+    // Source 1: Recent recipients from transaction history (fast, local DB)
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+
+        // Query transactions with stored recipient field
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT recipient, recipient_name, MAX(created_at) as last_used
+             FROM transactions
+             WHERE is_outgoing = 1
+               AND recipient IS NOT NULL
+               AND recipient != ''
+               AND (recipient LIKE '%' || ?1 || '%' OR recipient_name LIKE '%' || ?1 || '%')
+             GROUP BY recipient
+             ORDER BY last_used DESC
+             LIMIT ?2"
+        ).unwrap_or_else(|_| {
+            // Fallback: query without recipient column (pre-V12 DBs)
+            conn.prepare("SELECT '' WHERE 0").unwrap()
+        });
+
+        if let Ok(rows) = stmt.query_map(rusqlite::params![q, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (recipient, recipient_name) = row;
+
+                // Detect type
+                let identity_key_re = regex::Regex::new(r"^(02|03)[0-9a-fA-F]{64}$").unwrap();
+                let bsv_address_re = regex::Regex::new(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$").unwrap();
+                let rec_type = if identity_key_re.is_match(&recipient) {
+                    "identity"
+                } else if recipient.contains('@') || recipient.starts_with('$') {
+                    "paymail"
+                } else if bsv_address_re.is_match(&recipient) {
+                    "address"
+                } else {
+                    "unknown"
+                };
+
+                suggestions.push(serde_json::json!({
+                    "value": recipient,
+                    "display_name": recipient_name,
+                    "avatar_url": null,
+                    "type": rec_type,
+                    "source": "recent"
+                }));
+            }
+        }
+
+        // Fallback: parse descriptions from pre-V12 transactions if no stored recipients found
+        if suggestions.is_empty() {
+            if let Ok(mut desc_stmt) = conn.prepare(
+                "SELECT description FROM transactions
+                 WHERE is_outgoing = 1
+                   AND description LIKE '%' || ?1 || '%'
+                 ORDER BY created_at DESC
+                 LIMIT ?2"
+            ) {
+                if let Ok(rows) = desc_stmt.query_map(rusqlite::params![q, limit], |row| {
+                    row.get::<_, String>(0)
+                }) {
+                    let paymail_re = regex::Regex::new(r"to ([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap();
+                    let addr_re = regex::Regex::new(r"to ([13][a-km-zA-HJ-NP-Z1-9]{25,34})").unwrap();
+                    let mut seen = std::collections::HashSet::new();
+
+                    for desc in rows.flatten() {
+                        if let Some(caps) = paymail_re.captures(&desc) {
+                            let pm = caps[1].to_string();
+                            if seen.insert(pm.clone()) {
+                                suggestions.push(serde_json::json!({
+                                    "value": pm,
+                                    "display_name": null,
+                                    "avatar_url": null,
+                                    "type": "paymail",
+                                    "source": "recent"
+                                }));
+                            }
+                        } else if let Some(caps) = addr_re.captures(&desc) {
+                            let addr = caps[1].to_string();
+                            if seen.insert(addr.clone()) {
+                                suggestions.push(serde_json::json!({
+                                    "value": addr,
+                                    "display_name": null,
+                                    "avatar_url": null,
+                                    "type": "address",
+                                    "source": "recent"
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Source 2: HandCash paymail suggestion
+    // Works with or without $ prefix — typing "ali" suggests "ali@handcash.io"
+    let is_handle_like = q.len() >= 2 && !q.contains('@') && !q.contains(' ')
+        && q.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+
+    if is_handle_like {
+        let handle = q.trim_start_matches('$');
+        let paymail = format!("{}@handcash.io", handle);
+        let value = if q.starts_with('$') { q.clone() } else { format!("${}", handle) };
+        // Don't duplicate if already in recent recipients
+        if !suggestions.iter().any(|s| {
+            let sv = s["value"].as_str().unwrap_or("");
+            sv == paymail || sv == value || sv == q
+        }) {
+            suggestions.push(serde_json::json!({
+                "value": value,
+                "display_name": paymail,
+                "avatar_url": null,
+                "type": "paymail",
+                "source": "handcash",
+                "unverified": true
+            }));
+        }
+    }
+
+    // Source 3: Live identity search via BSV Overlay Services
+    // Skip if input looks like an address/paymail (identity search only matches names)
+    let is_hex_like = q.chars().all(|c| c.is_ascii_hexdigit());
+    let is_address_like = q.starts_with('1') || q.starts_with('3') || q.starts_with('$') || q.contains('@');
+
+    if !is_address_like && !is_hex_like && q.len() >= 2 {
+        let remaining_slots = if limit > suggestions.len() { limit - suggestions.len() } else { 0 };
+        if remaining_slots > 0 {
+            let resolver = crate::identity_resolver::IdentityResolver::new();
+            let identity_results = resolver.search(&q, remaining_slots).await;
+
+            for resolved in identity_results {
+                // Don't duplicate identity keys already in recent recipients
+                if !suggestions.iter().any(|s| s["value"].as_str() == Some(&resolved.identity_key)) {
+                    suggestions.push(serde_json::json!({
+                        "value": resolved.identity_key,
+                        "display_name": resolved.name,
+                        "avatar_url": resolved.avatar_url,
+                        "type": "identity",
+                        "source": resolved.source
+                    }));
+                }
+            }
+        }
+    }
+
+    // Truncate to limit
+    suggestions.truncate(limit);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "suggestions": suggestions
+    }))
 }
 
 // =============================================================================
