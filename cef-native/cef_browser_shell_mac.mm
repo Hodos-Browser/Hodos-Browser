@@ -3836,7 +3836,11 @@ int main(int argc, char* argv[]) {
         FingerprintProtection::GetInstance().Initialize();
         // Load per-site fingerprint overrides from fingerprint_settings.json
         FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
-        LOG_INFO("Fingerprint protection initialized");
+        // Sync global toggle from persisted settings
+        FingerprintProtection::GetInstance().SetEnabled(
+            SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);
+        LOG_INFO("Fingerprint protection initialized (enabled=" +
+            std::string(SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection ? "true" : "false") + ")");
 
         // Initialize CookieBlockManager
         if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {

@@ -19,6 +19,7 @@
     #include "../../include/core/WalletService.h"
     #include "../../include/core/HttpRequestInterceptor.h"
     #include "../../include/core/AdblockCache.h"
+    #include "../../include/core/LocalFileResourceHandler.h"
 #endif
 
 // Cross-platform includes (available on both platforms)
@@ -5681,7 +5682,8 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                 }
             }
 
-            if (FingerprintProtection::IsAuthDomain(navUrl) ||
+            if (!FingerprintProtection::GetInstance().IsEnabled() ||
+                FingerprintProtection::IsAuthDomain(navUrl) ||
                 !FingerprintProtection::GetInstance().IsSiteEnabled(domain)) {
                 // Send disable signal to renderer — skip fingerprint injection for this URL
                 CefRefPtr<CefProcessMessage> msg =
