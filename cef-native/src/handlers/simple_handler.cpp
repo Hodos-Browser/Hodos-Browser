@@ -396,6 +396,7 @@ CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
 // Download handler static storage
 std::map<uint32_t, SimpleHandler::DownloadInfo> SimpleHandler::active_downloads_;
 std::set<uint32_t> SimpleHandler::paused_downloads_;
+bool SimpleHandler::download_notify_pending_ = false;
 std::map<int, SimpleHandler*> SimpleHandler::browser_handler_map_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
@@ -6782,7 +6783,18 @@ void SimpleHandler::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
                       " complete=" + std::to_string(complete) +
                       " canceled=" + std::to_string(canceled));
 
-    NotifyDownloadStateChanged();
+    // Throttle progress notifications to ~2/sec (500ms debounce).
+    // Completion/cancellation notify immediately so UI updates instantly.
+    if (download_item->IsComplete() || download_item->IsCanceled()) {
+        download_notify_pending_ = false;
+        NotifyDownloadStateChanged();
+    } else if (!download_notify_pending_) {
+        download_notify_pending_ = true;
+        CefPostDelayedTask(TID_UI, base::BindOnce([]() {
+            SimpleHandler::download_notify_pending_ = false;
+            SimpleHandler::NotifyDownloadStateChanged();
+        }), 500);
+    }
 }
 
 void SimpleHandler::NotifyDownloadStateChanged() {

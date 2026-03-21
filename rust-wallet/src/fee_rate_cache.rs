@@ -29,12 +29,17 @@ struct CachedFeeRate {
 /// Falls back to DEFAULT_SATS_PER_KB (1000 sat/KB = 1 sat/byte) on error.
 pub struct FeeRateCache {
     cache: RwLock<Option<CachedFeeRate>>,
+    client: reqwest::Client,
 }
 
 impl FeeRateCache {
     pub fn new() -> Self {
         Self {
             cache: RwLock::new(None),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -50,7 +55,7 @@ impl FeeRateCache {
         }
 
         // Cache miss or expired - fetch from ARC
-        match fetch_arc_fee_rate().await {
+        match fetch_arc_fee_rate(&self.client).await {
             Ok(rate) => {
                 info!("   💰 ARC fee rate: {} sat/KB ({:.1} sat/byte)", rate, rate as f64 / 1000.0);
                 self.set(rate);
@@ -121,12 +126,7 @@ impl Default for FeeRateCache {
 ///   "miningFee": { "satoshis": 1, "bytes": 1000 }
 /// }
 /// ```
-async fn fetch_arc_fee_rate() -> Result<u64, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
+async fn fetch_arc_fee_rate(client: &reqwest::Client) -> Result<u64, String> {
     let response = client.get(ARC_POLICY_URL)
         .send()
         .await

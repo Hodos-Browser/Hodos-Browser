@@ -29,12 +29,17 @@ struct CachedPrice {
 /// Returns 0.0 if both APIs fail and no cached value exists.
 pub struct PriceCache {
     cache: RwLock<Option<CachedPrice>>,
+    client: reqwest::Client,
 }
 
 impl PriceCache {
     pub fn new() -> Self {
         Self {
             cache: RwLock::new(None),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -50,7 +55,7 @@ impl PriceCache {
         }
 
         // Cache miss or expired — fetch from APIs
-        match fetch_bsv_price().await {
+        match fetch_bsv_price(&self.client).await {
             Ok(price) => {
                 info!("   💲 BSV/USD price: ${:.2}", price);
                 self.set(price);
@@ -115,9 +120,9 @@ impl Default for PriceCache {
 /// Fetch BSV/USD price from external APIs
 ///
 /// Tries CryptoCompare first, falls back to CoinGecko.
-async fn fetch_bsv_price() -> Result<f64, String> {
+async fn fetch_bsv_price(client: &reqwest::Client) -> Result<f64, String> {
     // Primary: CryptoCompare
-    match fetch_cryptocompare().await {
+    match fetch_cryptocompare(client).await {
         Ok(price) => return Ok(price),
         Err(e) => {
             warn!("   CryptoCompare failed: {}, trying CoinGecko...", e);
@@ -125,16 +130,11 @@ async fn fetch_bsv_price() -> Result<f64, String> {
     }
 
     // Fallback: CoinGecko
-    fetch_coingecko().await
+    fetch_coingecko(client).await
 }
 
 /// Fetch from CryptoCompare: { "USD": 52.34 }
-async fn fetch_cryptocompare() -> Result<f64, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
+async fn fetch_cryptocompare(client: &reqwest::Client) -> Result<f64, String> {
     let response = client.get(CRYPTOCOMPARE_URL)
         .header("Accept", "application/json")
         .send()
@@ -157,12 +157,7 @@ async fn fetch_cryptocompare() -> Result<f64, String> {
 }
 
 /// Fetch from CoinGecko: { "bitcoin-sv": { "usd": 52.34 } }
-async fn fetch_coingecko() -> Result<f64, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
+async fn fetch_coingecko(client: &reqwest::Client) -> Result<f64, String> {
     let response = client.get(COINGECKO_URL)
         .header("Accept", "application/json")
         .send()

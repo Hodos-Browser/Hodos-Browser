@@ -157,7 +157,7 @@ export const useTabManager = () => {
 
     // Safety-net polling — C++ now pushes updates on create/close/title change,
     // so this only catches edge cases (favicon, loading state). F13 perf fix.
-    const interval = setInterval(refreshTabList, 5000);
+    const interval = setInterval(refreshTabList, 30000);
 
     return () => {
       window.removeEventListener('message', handleTabListResponse);

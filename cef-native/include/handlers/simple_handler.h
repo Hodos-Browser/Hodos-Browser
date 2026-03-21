@@ -228,6 +228,8 @@ public:
     static std::map<uint32_t, DownloadInfo> active_downloads_;
     static std::set<uint32_t> paused_downloads_;
     static void NotifyDownloadStateChanged();
+    // Download notification throttle (500ms debounce)
+    static bool download_notify_pending_;
 
     // Get the BrowserWindow that owns this handler
     BrowserWindow* GetOwnerWindow() const;

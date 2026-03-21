@@ -368,7 +368,7 @@ const MainBrowserView: React.FC = () => {
         const interval = setInterval(() => {
             fetchBlockedCount();
             if (currentDomain) checkSiteAdblock(currentDomain);
-        }, 3000);
+        }, 10000);
         return () => clearInterval(interval);
     }, [fetchBlockedCount, checkSiteAdblock, currentDomain]);
 
