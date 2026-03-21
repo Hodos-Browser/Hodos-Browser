@@ -97,7 +97,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           alignItems: 'center',
           justifyContent: 'space-between',
           px: 2,
-          py: 1.5,
+          py: 1,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -126,7 +126,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -153,7 +153,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -178,7 +178,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -205,7 +205,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           justifyContent: 'space-between',
           pl: 3.5,
           pr: 2,
-          py: 1.25,
+          py: 0.75,
         }}
       >
         <Box>
@@ -250,7 +250,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
           alignItems: 'center',
           justifyContent: 'space-between',
           px: 2,
-          py: 1.25,
+          py: 0.75,
           cursor: 'pointer',
           '&:hover': { backgroundColor: '#1f2937' },
         }}
