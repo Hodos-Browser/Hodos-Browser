@@ -1395,9 +1395,11 @@ private:
 class AdvancedDomainPermissionTask : public CefTask {
 public:
     AdvancedDomainPermissionTask(const std::string& domain, int64_t perTxLimitCents,
-                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin)
+                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin,
+                                  int64_t maxTxPerSession)
         : domain_(domain), perTxLimitCents_(perTxLimitCents),
-          perSessionLimitCents_(perSessionLimitCents), rateLimitPerMin_(rateLimitPerMin) {}
+          perSessionLimitCents_(perSessionLimitCents), rateLimitPerMin_(rateLimitPerMin),
+          maxTxPerSession_(maxTxPerSession) {}
 
     void Execute() override {
         LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
@@ -1413,6 +1415,7 @@ public:
         body["perTxLimitCents"] = perTxLimitCents_;
         body["perSessionLimitCents"] = perSessionLimitCents_;
         body["rateLimitPerMin"] = rateLimitPerMin_;
+        body["maxTxPerSession"] = maxTxPerSession_;
         std::string jsonBody = body.dump();
 
         CefRefPtr<CefPostData> postData = CefPostData::Create();
@@ -1434,16 +1437,18 @@ private:
     int64_t perTxLimitCents_;
     int64_t perSessionLimitCents_;
     int64_t rateLimitPerMin_;
+    int64_t maxTxPerSession_;
     IMPLEMENT_REFCOUNTING(AdvancedDomainPermissionTask);
     DISALLOW_COPY_AND_ASSIGN(AdvancedDomainPermissionTask);
 };
 
 // Function to add domain permission with advanced settings
 void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCents,
-                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin) {
+                                  int64_t perSessionLimitCents, int64_t rateLimitPerMin,
+                                  int64_t maxTxPerSession) {
     LOG_DEBUG_HTTP("🔐 Adding advanced domain permission: " + domain +
         " (tx=" + std::to_string(perTxLimitCents) + ", session=" + std::to_string(perSessionLimitCents) +
-        ", rate=" + std::to_string(rateLimitPerMin) + ")");
+        ", rate=" + std::to_string(rateLimitPerMin) + ", maxTxPerSession=" + std::to_string(maxTxPerSession) + ")");
 
     // Set cache immediately with full settings
     DomainPermissionCache::Permission perm;
@@ -1451,10 +1456,11 @@ void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCe
     perm.perTxLimitCents = perTxLimitCents;
     perm.perSessionLimitCents = perSessionLimitCents;
     perm.rateLimitPerMin = rateLimitPerMin;
+    perm.maxTxPerSession = maxTxPerSession;
     DomainPermissionCache::GetInstance().set(domain, perm);
 
     // Post async DB write
-    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin));
+    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession));
 }
 
 // Function to add domain permission (sets "approved" trust level)
