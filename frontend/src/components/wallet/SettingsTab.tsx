@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { HodosButton } from '../HodosButton';
 
 const SettingsTab: React.FC = () => {
   // Display name
@@ -282,13 +283,15 @@ const SettingsTab: React.FC = () => {
                 placeholder="Anonymous"
               />
             </div>
-            <button
-              className="wd-btn-primary"
+            <HodosButton
+              variant="primary"
               onClick={handleSaveDisplayName}
-              disabled={nameSaving || displayName === savedDisplayName}
+              disabled={displayName === savedDisplayName}
+              loading={nameSaving}
+              loadingText="Saving..."
             >
-              {nameSaving ? 'Saving...' : 'Save'}
-            </button>
+              Save
+            </HodosButton>
           </>
         )}
       </div>
@@ -301,20 +304,20 @@ const SettingsTab: React.FC = () => {
         {/* Identity Key (public, no PIN needed) */}
         <div style={{ marginBottom: '16px' }}>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
-            <button
-              className="wd-btn-secondary"
+            <HodosButton
+              variant="secondary"
               onClick={() => setShowIdentityKey(!showIdentityKey)}
             >
               {showIdentityKey ? 'Hide Identity Key' : 'View Identity Key'}
-            </button>
+            </HodosButton>
             {showIdentityKey && identityKey && (
-              <button
-                className={`wd-btn-secondary${identityKeyCopied ? '' : ''}`}
+              <HodosButton
+                variant="secondary"
                 onClick={handleCopyIdentityKey}
                 style={identityKeyCopied ? { borderColor: '#2e7d32', color: '#4caf50' } : {}}
               >
                 {identityKeyCopied ? 'Copied!' : 'Copy'}
-              </button>
+              </HodosButton>
             )}
           </div>
           {showIdentityKey && identityKey && (
@@ -327,12 +330,12 @@ const SettingsTab: React.FC = () => {
         {/* Mnemonic (PIN-gated) */}
         <div>
           {!showMnemonicForm && !mnemonic && (
-            <button
-              className="wd-btn-secondary"
+            <HodosButton
+              variant="secondary"
               onClick={() => setShowMnemonicForm(true)}
             >
               View Recovery Phrase
-            </button>
+            </HodosButton>
           )}
 
           {showMnemonicForm && !mnemonic && (
@@ -351,19 +354,21 @@ const SettingsTab: React.FC = () => {
                 <div className="wd-alert error" style={{ marginBottom: '8px' }}>{mnemonicError}</div>
               )}
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  className="wd-btn-primary"
+                <HodosButton
+                  variant="primary"
                   onClick={handleRevealMnemonic}
-                  disabled={revealingMnemonic || !mnemonicPin}
+                  disabled={!mnemonicPin}
+                  loading={revealingMnemonic}
+                  loadingText="Verifying..."
                 >
-                  {revealingMnemonic ? 'Verifying...' : 'Reveal'}
-                </button>
-                <button
-                  className="wd-btn-secondary"
+                  Reveal
+                </HodosButton>
+                <HodosButton
+                  variant="secondary"
                   onClick={() => { setShowMnemonicForm(false); setMnemonicPin(''); setMnemonicError(null); }}
                 >
                   Cancel
-                </button>
+                </HodosButton>
               </div>
             </div>
           )}
@@ -379,13 +384,13 @@ const SettingsTab: React.FC = () => {
                   ))}
                 </div>
               </div>
-              <button
-                className="wd-btn-secondary"
+              <HodosButton
+                variant="secondary"
                 onClick={() => { setMnemonic(null); setShowMnemonicForm(false); }}
                 style={{ marginTop: '12px' }}
               >
                 Hide Recovery Phrase
-              </button>
+              </HodosButton>
             </div>
           )}
         </div>
@@ -426,18 +431,14 @@ const SettingsTab: React.FC = () => {
           </div>
         )}
 
-        <button
-          className="wd-btn-secondary"
+        <HodosButton
+          variant="secondary"
           onClick={handleRescan}
-          disabled={rescanning}
+          loading={rescanning}
+          loadingText="Scanning..."
         >
-          {rescanning ? (
-            <>
-              <span className="wd-spinner" style={{ width: 14, height: 14, borderWidth: 2, display: 'inline-block', verticalAlign: 'middle', marginRight: 8 }} />
-              Scanning...
-            </>
-          ) : 'Rescan Wallet'}
-        </button>
+          Rescan Wallet
+        </HodosButton>
       </div>
 
       {/* Export Backup */}
@@ -448,9 +449,9 @@ const SettingsTab: React.FC = () => {
         {exportSuccess ? (
           <div className="wd-alert success">Backup downloaded successfully!</div>
         ) : !showExportForm ? (
-          <button className="wd-btn-secondary" onClick={() => setShowExportForm(true)}>
+          <HodosButton variant="secondary" onClick={() => setShowExportForm(true)}>
             Export Wallet Backup
-          </button>
+          </HodosButton>
         ) : (
           <div className="wd-export-form">
             <input
@@ -469,20 +470,22 @@ const SettingsTab: React.FC = () => {
             />
             {exportError && <div className="wd-alert error">{exportError}</div>}
             <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                className="wd-btn-primary"
+              <HodosButton
+                variant="primary"
                 onClick={handleExportBackup}
-                disabled={exporting || exportPassword.length < 8}
+                disabled={exportPassword.length < 8}
+                loading={exporting}
+                loadingText="Encrypting..."
               >
-                {exporting ? 'Encrypting...' : 'Download Backup'}
-              </button>
-              <button
-                className="wd-btn-secondary"
+                Download Backup
+              </HodosButton>
+              <HodosButton
+                variant="secondary"
                 onClick={() => { setShowExportForm(false); setExportPassword(''); setExportConfirm(''); setExportError(null); }}
                 disabled={exporting}
               >
                 Cancel
-              </button>
+              </HodosButton>
             </div>
           </div>
         )}
@@ -500,9 +503,9 @@ const SettingsTab: React.FC = () => {
         )}
 
         {!showDeleteConfirm ? (
-          <button className="wd-btn-danger" onClick={() => { setShowDeleteConfirm(true); setDeleteStep(1); setDeleteInput(''); setDeletePin(''); setDeleteError(null); }}>
+          <HodosButton variant="danger" onClick={() => { setShowDeleteConfirm(true); setDeleteStep(1); setDeleteInput(''); setDeletePin(''); setDeleteError(null); }}>
             Delete Wallet
-          </button>
+          </HodosButton>
         ) : (
           <div className="wd-delete-confirm">
             {deleteError && <div className="wd-alert error">{deleteError}</div>}
@@ -519,16 +522,16 @@ const SettingsTab: React.FC = () => {
                   placeholder="Type DELETE"
                 />
                 <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                  <button
-                    className="wd-btn-danger"
+                  <HodosButton
+                    variant="danger"
                     disabled={deleteInput !== 'DELETE'}
                     onClick={() => setDeleteStep(2)}
                   >
                     Continue
-                  </button>
-                  <button className="wd-btn-secondary" onClick={() => setShowDeleteConfirm(false)}>
+                  </HodosButton>
+                  <HodosButton variant="secondary" onClick={() => setShowDeleteConfirm(false)}>
                     Cancel
-                  </button>
+                  </HodosButton>
                 </div>
               </>
             )}
@@ -546,16 +549,18 @@ const SettingsTab: React.FC = () => {
                   maxLength={10}
                 />
                 <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                  <button
-                    className="wd-btn-danger"
-                    disabled={deleting || !deletePin}
+                  <HodosButton
+                    variant="danger"
+                    disabled={!deletePin}
+                    loading={deleting}
+                    loadingText="Deleting..."
                     onClick={handleDeleteWallet}
                   >
-                    {deleting ? 'Deleting...' : 'Delete Wallet Permanently'}
-                  </button>
-                  <button className="wd-btn-secondary" onClick={() => setShowDeleteConfirm(false)}>
+                    Delete Wallet Permanently
+                  </HodosButton>
+                  <HodosButton variant="secondary" onClick={() => setShowDeleteConfirm(false)}>
                     Cancel
-                  </button>
+                  </HodosButton>
                 </div>
               </>
             )}

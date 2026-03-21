@@ -4,6 +4,7 @@ import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
 import type { TransactionResponse } from '../types/transaction';
+import { HodosButton } from './HodosButton';
 import './TransactionComponents.css';
 import './WalletPanel.css';
 
@@ -297,14 +298,16 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               </g>
             </svg>
           </div>
-          <button
+          <HodosButton
+            variant="ghost"
+            size="small"
             className="refresh-button-light"
             onClick={refreshBalance}
             disabled={isRefreshing}
             title="Refresh balance"
           >
             {isRefreshing ? 'Refreshing...' : 'Refresh'}
-          </button>
+          </HodosButton>
         </div>
         <div className="balance-content-light">
           <div className="balance-primary-light">
@@ -341,9 +344,9 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         <div className="sync-banner-light sync-error">
           <strong>Sync completed with error</strong>
           <p className="sync-banner-detail">{syncStatus.error}</p>
-          <button className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
+          <HodosButton variant="secondary" size="small" className="sync-dismiss-button" onClick={handleDismissSyncSummary}>
             Dismiss
-          </button>
+          </HodosButton>
         </div>
       )}
 
@@ -358,7 +361,9 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             </span>
           </div>
           <div className="peerpay-banner-actions">
-            <button
+            <HodosButton
+              variant="secondary"
+              size="small"
               className="peerpay-details-button"
               onClick={() => {
                 handleDismissPeerpay();
@@ -369,10 +374,10 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               }}
             >
               Details
-            </button>
-            <button className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
+            </HodosButton>
+            <HodosButton variant="ghost" size="small" className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
               Dismiss
-            </button>
+            </HodosButton>
           </div>
         </div>
       )}
@@ -381,18 +386,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       {identityKey && (
         <div className="identity-key-section-light">
           <div className="identity-key-actions-light">
-            <button
+            <HodosButton
+              variant="secondary"
+              size="small"
               className={`identity-key-copy-button-light ${identityKeyCopied ? 'copied' : ''}`}
               onClick={handleCopyIdentityKey}
             >
               {identityKeyCopied ? 'Copied!' : 'Copy Identity Key'}
-            </button>
-            <button
+            </HodosButton>
+            <HodosButton
+              variant="ghost"
+              size="small"
               className="identity-key-show-button-light"
               onClick={() => setShowIdentityKey(!showIdentityKey)}
             >
               {showIdentityKey ? 'Hide' : 'Show'}
-            </button>
+            </HodosButton>
           </div>
           {showIdentityKey && (
             <div className="identity-key-display-light">
@@ -404,19 +413,21 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
 
       {/* Action Buttons */}
       <div className="wallet-actions-light">
-        <button
+        <HodosButton
+          variant="secondary"
           className={`wallet-button-light receive-button-light ${clickedButtons.has('receive') || isGenerating ? 'clicked' : ''}`}
           onClick={handleReceiveClick}
           disabled={isGenerating}
         >
           {isGenerating ? 'Generating...' : 'Receive'}
-        </button>
-        <button
+        </HodosButton>
+        <HodosButton
+          variant="primary"
           className={`wallet-button-light send-button-light ${showSendForm ? 'active' : ''}`}
           onClick={handleSendClick}
         >
           {showSendForm ? 'Close' : 'Send'}
-        </button>
+        </HodosButton>
       </div>
 
       {/* Dynamic Content Area */}
@@ -447,18 +458,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               <code>{currentAddress || 'Generating...'}</code>
             </div>
             <div className="address-buttons-light">
-              <button
+              <HodosButton
+                variant="secondary"
+                size="small"
                 className={`copy-button-light ${copyAgainClicked ? 'clicked' : ''}`}
                 onClick={handleCopyAgain}
               >
                 {copyAgainClicked ? 'Copied!' : 'Copy Again'}
-              </button>
-              <button
+              </HodosButton>
+              <HodosButton
+                variant="ghost"
+                size="small"
                 className="close-button-light"
                 onClick={() => setShowReceiveAddress(false)}
               >
                 Close
-              </button>
+              </HodosButton>
             </div>
           </div>
         )}
@@ -475,9 +490,9 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                     <p><strong>TxID:</strong> {transactionResult.txid}</p>
                   )}
                 </div>
-                <button onClick={() => setTransactionResult(null)} className="close-button-light">
+                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => setTransactionResult(null)}>
                   Close
-                </button>
+                </HodosButton>
               </>
             ) : (
               <>
@@ -501,17 +516,19 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                     >
                       View on WhatsOnChain
                     </a>
-                    <button
-                      onClick={handleCopyLink}
+                    <HodosButton
+                      variant="secondary"
+                      size="small"
                       className={`copy-link-button-light ${copyLinkClicked ? 'clicked' : ''}`}
+                      onClick={handleCopyLink}
                     >
                       {copyLinkClicked ? 'Copied!' : 'Copy Link'}
-                    </button>
+                    </HodosButton>
                   </div>
                 )}
-                <button onClick={() => setTransactionResult(null)} className="close-button-light">
+                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => setTransactionResult(null)}>
                   Close
-                </button>
+                </HodosButton>
               </>
             )}
           </div>
@@ -531,18 +548,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       </div>
 
       {/* Advanced Button */}
-      <button
-        onClick={handleAdvanced}
+      <HodosButton
+        variant="ghost"
+        size="small"
         className="advanced-button-light"
+        onClick={handleAdvanced}
       >
         Advanced
-      </button>
-      <button
-        onClick={handleManageSites}
+      </HodosButton>
+      <HodosButton
+        variant="ghost"
+        size="small"
         className="manage-sites-link-light"
+        onClick={handleManageSites}
       >
         Manage approved sites
-      </button>
+      </HodosButton>
     </div>
   );
 }

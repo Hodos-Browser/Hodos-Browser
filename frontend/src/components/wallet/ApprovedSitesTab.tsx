@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import DomainPermissionsTab from '../DomainPermissionsTab';
+import { HodosButton } from '../HodosButton';
 
 interface DefaultLimits {
   defaultPerTxLimitCents: number;
@@ -143,19 +144,21 @@ const ApprovedSitesTab: React.FC = () => {
             </div>
 
             <div className="wd-defaults-actions">
-              <button
-                className="wd-btn-primary"
+              <HodosButton
+                variant="primary"
                 onClick={handleSaveDefaults}
-                disabled={saving || !hasChanges}
+                disabled={!hasChanges}
+                loading={saving}
+                loadingText="Saving..."
               >
-                {saving ? 'Saving...' : 'Save Defaults'}
-              </button>
-              <button
-                className="wd-btn-secondary"
+                Save Defaults
+              </HodosButton>
+              <HodosButton
+                variant="secondary"
                 onClick={() => setShowResetConfirm(true)}
               >
                 Reset All Sites to Defaults
-              </button>
+              </HodosButton>
             </div>
           </>
         )}
@@ -177,16 +180,17 @@ const ApprovedSitesTab: React.FC = () => {
               Rate: {defaults.defaultRateLimitPerMin}/min
             </div>
             <div className="wd-modal-actions">
-              <button className="wd-btn-secondary" onClick={() => setShowResetConfirm(false)}>
+              <HodosButton variant="secondary" onClick={() => setShowResetConfirm(false)}>
                 Cancel
-              </button>
-              <button
-                className="wd-btn-primary"
+              </HodosButton>
+              <HodosButton
+                variant="primary"
                 onClick={handleResetAll}
-                disabled={resetting}
+                loading={resetting}
+                loadingText="Resetting..."
               >
-                {resetting ? 'Resetting...' : 'Reset All Sites'}
-              </button>
+                Reset All Sites
+              </HodosButton>
             </div>
           </div>
         </div>

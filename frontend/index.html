@@ -39,6 +39,7 @@
       // Only show splash for main header view — overlays must be transparent
       if (window.location.pathname !== '/' && window.location.pathname !== '') {
         document.getElementById('splash').remove();
+        document.body.style.background = 'transparent';
       }
     </script>
     <div id="root"></div>

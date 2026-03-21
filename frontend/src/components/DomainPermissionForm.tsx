@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { HodosButton } from './HodosButton';
 
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
@@ -228,38 +229,20 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
 
       {/* Action buttons */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
-        <button
+        <HodosButton
+          variant="secondary"
+          size="small"
           onClick={onCancel}
-          style={{
-            background: 'transparent',
-            border: `1px solid ${COLORS.borderLight}`,
-            borderRadius: '6px',
-            padding: '7px 16px',
-            fontSize: '13px',
-            fontWeight: 500,
-            color: COLORS.textMuted,
-            cursor: 'pointer',
-            fontFamily: FONT_FAMILY,
-          }}
         >
           Cancel
-        </button>
-        <button
+        </HodosButton>
+        <HodosButton
+          variant="primary"
+          size="small"
           onClick={handleSave}
-          style={{
-            background: '#000000',
-            border: 'none',
-            borderRadius: '6px',
-            padding: '7px 16px',
-            fontSize: '13px',
-            fontWeight: 600,
-            color: COLORS.white,
-            cursor: 'pointer',
-            fontFamily: FONT_FAMILY,
-          }}
         >
           Save
-        </button>
+        </HodosButton>
       </div>
     </div>
   );
