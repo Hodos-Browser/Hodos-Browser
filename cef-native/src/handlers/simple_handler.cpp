@@ -2082,16 +2082,26 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+        extern void HideProfilePanelOverlay();
         extern HWND g_profile_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
+        extern ULONGLONG g_profile_last_hide_tick;
 
         if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
             CreateProfilePanelOverlay(g_hInstance, true, iconRightOffset);
+        } else if (IsWindowVisible(g_profile_panel_overlay_hwnd)) {
+            HideProfilePanelOverlay();
         } else {
-            ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
+            // Toggle race: if just hidden by WM_ACTIVATE, don't re-open
+            ULONGLONG elapsed = GetTickCount64() - g_profile_last_hide_tick;
+            if (elapsed < 200) {
+                LOG_DEBUG_BROWSER("Profile toggle suppressed — hidden " + std::to_string(elapsed) + "ms ago (race)");
+            } else {
+                ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
+            }
         }
 
-        LOG_DEBUG_BROWSER("👤 Profile panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_DEBUG_BROWSER("Profile panel toggle handled");
 #elif defined(__APPLE__)
         extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
         extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);

@@ -79,9 +79,10 @@ bool g_file_dialog_active = false;
 // Wallet close prevention — prevents overlay close during mnemonic display / PIN creation
 bool g_wallet_overlay_prevent_close = false;
 
-// Timestamp of last wallet hide — used to suppress toggle race condition
-// (WM_ACTIVATE hides wallet before toggle IPC arrives, causing re-open)
+// Timestamps of last hide — used to suppress toggle race condition
+// (WM_ACTIVATE hides overlay before toggle IPC arrives, causing re-open)
 ULONGLONG g_wallet_last_hide_tick = 0;
+ULONGLONG g_profile_last_hide_tick = 0;
 
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
@@ -2004,11 +2005,16 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_MOUSEACTIVATE:
-            LOG_DEBUG("👆 Profile Panel HWND received WM_MOUSEACTIVATE");
-            // Allow normal activation (same as wallet) - CRITICAL for keyboard focus
             return MA_ACTIVATE;
 
-        // WM_SETCURSOR: not handled — OnCursorChange sets cursor from CSS
+        case WM_SETFOCUS: {
+            ImmAssociateContext(hwnd, nullptr);
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SetFocus(true);
+            }
+            return 0;
+        }
 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -2024,9 +2030,20 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         }
 
         case WM_LBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Profile Panel received WM_LBUTTONDOWN");
-            SetFocus(hwnd);  // CRITICAL: Set Windows focus on click
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+            }
+            return 0;
+        }
 
+        case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
@@ -2034,17 +2051,26 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
-                profile_browser->GetHost()->SetFocus(true);  // Also set CEF focus
-                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
                 profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
             }
             return 0;
         }
 
         case WM_RBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Profile Panel received WM_RBUTTONDOWN");
             SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = EVENTFLAG_RIGHT_MOUSE_BUTTON;
+            CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
+            if (profile_browser) {
+                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+            }
+            return 0;
+        }
 
+        case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
@@ -2052,16 +2078,12 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
-                profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
                 profile_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
             }
             return 0;
         }
 
         case WM_KEYDOWN: {
-            LOG_DEBUG("⌨️ Profile Panel received WM_KEYDOWN - key: " + std::to_string(wParam));
-            SetFocus(hwnd);
-
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
                 CefKeyEvent key_event;
@@ -2069,14 +2091,11 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 key_event.windows_key_code = wParam;
                 key_event.native_key_code = lParam;
                 key_event.is_system_key = false;
-
-                // Check for modifier keys
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
                 if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
                 key_event.modifiers = modifiers;
-
                 profile_browser->GetHost()->SendKeyEvent(key_event);
             }
             return 0;
@@ -2090,47 +2109,44 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 key_event.windows_key_code = wParam;
                 key_event.native_key_code = lParam;
                 key_event.is_system_key = false;
-
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
                 if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
                 key_event.modifiers = modifiers;
-
                 profile_browser->GetHost()->SendKeyEvent(key_event);
             }
             return 0;
         }
 
         case WM_CHAR: {
-            LOG_DEBUG("⌨️ Profile Panel received WM_CHAR - char: " + std::to_string(wParam));
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
                 CefKeyEvent key_event;
                 key_event.type = KEYEVENT_CHAR;
-                key_event.windows_key_code = wParam;
-                key_event.character = wParam;
-                key_event.unmodified_character = wParam;
-                key_event.native_key_code = lParam;
+                key_event.windows_key_code = static_cast<int>(wParam);
+                key_event.native_key_code = static_cast<int>(lParam);
+                key_event.character = static_cast<char16_t>(wParam);
+                key_event.unmodified_character = static_cast<char16_t>(wParam);
                 key_event.is_system_key = false;
-
                 int modifiers = 0;
                 if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
                 if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
                 if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
                 key_event.modifiers = modifiers;
-
                 profile_browser->GetHost()->SendKeyEvent(key_event);
             }
             return 0;
         }
 
         case WM_MOUSEWHEEL: {
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT clientPt = screenPt;
+            ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            mouse_event.x = clientPt.x;
+            mouse_event.y = clientPt.y;
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -2146,8 +2162,31 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_DESTROY:
             return 0;
 
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) != WA_INACTIVE) {
+                ImmAssociateContext(hwnd, nullptr);
+            } else {
+                if (g_file_dialog_active) return 0;
+                extern ULONGLONG g_profile_last_hide_tick;
+                LOG_INFO("Hiding profile panel — lost activation (click-outside)");
+                extern void HideProfilePanelOverlay();
+                HideProfilePanelOverlay();
+                return 0;
+            }
+            break;
+
         case WM_WINDOWPOSCHANGING:
             break;
+
+        // IME suppression (same as wallet)
+        case WM_IME_SETCONTEXT:
+            return 0;
+        case WM_IME_STARTCOMPOSITION:
+            return 0;
+        case WM_IME_COMPOSITION:
+            return 0;
+        case WM_IME_ENDCOMPOSITION:
+            return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }

@@ -2421,19 +2421,9 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
         LOG_INFO_APP("Profile panel overlay browser created with subprocess");
 
         if (showImmediately) {
-            extern HHOOK g_profile_panel_mouse_hook;
-            extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-
-            if (!g_profile_panel_mouse_hook) {
-                g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
-                if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
-                if (g_profile_panel_mouse_hook) {
-                    LOG_INFO_APP("Profile panel mouse hook installed");
-                }
-            }
-
             LONG exStyle = GetWindowLong(profile_panel_hwnd, GWL_EXSTYLE);
             SetWindowLong(profile_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            SetForegroundWindow(profile_panel_hwnd);
         }
     } else {
         LOG_ERROR_APP("Failed to create profile panel overlay browser");
@@ -2452,19 +2442,12 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         g_profile_icon_right_offset = iconRightOffset;
     }
 
-    // Sync to BrowserWindow 0
     BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
     if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
 
     LOG_INFO_APP("Showing profile panel overlay");
 
-    // Install mouse hook
-    extern HHOOK g_profile_panel_mouse_hook;
-    extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    if (!g_profile_panel_mouse_hook) {
-        g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
-        if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
-    }
+    // No mouse hook — WM_ACTIVATE handles click-outside (MA_ACTIVATE overlay)
 
     // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
@@ -2477,29 +2460,17 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
 
-    int panelWidth = 380;   // Wider for profile management UI
-    int panelHeight = 380;  // Reduced from 500 to match actual content height
+    int panelWidth = 380;
+    int panelHeight = 380;
     int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + 104;
 
-    // Clamp to screen bounds
     if (overlayY + panelHeight > mainRect.bottom - 20) {
         panelHeight = mainRect.bottom - overlayY - 20;
         if (panelHeight < 280) panelHeight = 280;
     }
 
-    SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
-        overlayX, overlayY, panelWidth, panelHeight,
-        SWP_SHOWWINDOW);  // Removed SWP_NOACTIVATE to allow focus
-
-    LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
-    SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-
-    // CRITICAL: Set Windows focus on the overlay HWND first
-    SetForegroundWindow(g_profile_panel_overlay_hwnd);
-    SetFocus(g_profile_panel_overlay_hwnd);
-
-    // Retarget overlay handler's window_id so IPC routes to the requesting window
+    // Retarget handler before showing
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     if (profile_browser) {
         int targetWindowId = targetWin ? targetWin->window_id : 0;
@@ -2507,12 +2478,27 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         if (handler) {
             handler->SetWindowId(targetWindowId);
         }
+        // Warm compositor — just notify size change, no WasHidden cycle
+        profile_browser->GetHost()->WasResized();
+    }
 
-        // Set CEF browser focus so text inputs work
+    // Position with SWP_NOACTIVATE first, then single SetForegroundWindow
+    SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Single focus transfer
+    SetForegroundWindow(g_profile_panel_overlay_hwnd);
+
+    if (profile_browser) {
         profile_browser->GetHost()->SetFocus(true);
         profile_browser->GetHost()->Invalidate(PET_VIEW);
-        LOG_INFO_APP("Profile panel browser focus set to true");
     }
+
+    LOG_INFO_APP("Profile panel overlay shown");
 }
 
 void HideProfilePanelOverlay() {
@@ -2523,15 +2509,16 @@ void HideProfilePanelOverlay() {
 
     LOG_INFO_APP("Hiding profile panel overlay");
 
-    extern HHOOK g_profile_panel_mouse_hook;
-    if (g_profile_panel_mouse_hook) {
-        UnhookWindowsHookEx(g_profile_panel_mouse_hook);
-        g_profile_panel_mouse_hook = nullptr;
-    }
+    // Record hide timestamp for toggle race detection
+    extern ULONGLONG g_profile_last_hide_tick;
+    g_profile_last_hide_tick = GetTickCount64();
+
+    // No mouse hook to remove — WM_ACTIVATE handles click-outside
 
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     int profTargetWinId = 0;
     if (profile_browser) {
+        // Skip WasHidden(true) — keep compositor warm for instant re-show
         profile_browser->GetHost()->SetFocus(false);
         SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(profile_browser->GetIdentifier());
         if (handler) profTargetWinId = handler->GetWindowId();
