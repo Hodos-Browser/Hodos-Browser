@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Box, IconButton, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import { HodosButton } from './HodosButton';
 
 interface FindBarProps {
   onClose: () => void;
@@ -114,15 +115,15 @@ const FindBar: React.FC<FindBarProps> = ({ onClose, findResult }) => {
           {matchText}
         </Typography>
       )}
-      <IconButton size="small" onClick={handlePrev} disabled={!query || !findResult || findResult.count === 0} sx={{ p: 0.25 }}>
+      <HodosButton variant="icon" size="small" onClick={handlePrev} disabled={!query || !findResult || findResult.count === 0} aria-label="Previous match">
         <KeyboardArrowUpIcon sx={{ fontSize: 18 }} />
-      </IconButton>
-      <IconButton size="small" onClick={handleNext} disabled={!query || !findResult || findResult.count === 0} sx={{ p: 0.25 }}>
+      </HodosButton>
+      <HodosButton variant="icon" size="small" onClick={handleNext} disabled={!query || !findResult || findResult.count === 0} aria-label="Next match">
         <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
-      </IconButton>
-      <IconButton size="small" onClick={handleClose} sx={{ p: 0.25 }}>
+      </HodosButton>
+      <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close find bar">
         <CloseIcon sx={{ fontSize: 16 }} />
-      </IconButton>
+      </HodosButton>
     </Box>
   );
 };
