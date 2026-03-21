@@ -815,3 +815,37 @@ pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
     info!("   ✅ V12 migration applied (max_tx_per_session + updated defaults)");
     Ok(())
 }
+
+/// Migrate V12 → V13: Add recipient and recipient_name columns to transactions
+///
+/// Stores the raw recipient value (BSV address, paymail, or identity key) and
+/// resolved display name at send time. Enables recipient autocomplete from history.
+/// Nullable — old transactions will have NULL (suggest endpoint falls back to description parsing).
+pub fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    info!("   Adding recipient and recipient_name columns to transactions...");
+
+    let tx_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(transactions)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !tx_cols.iter().any(|c| c == "recipient") {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN recipient TEXT",
+            [],
+        )?;
+    }
+
+    if !tx_cols.iter().any(|c| c == "recipient_name") {
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN recipient_name TEXT",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V13 migration applied (recipient autocomplete)");
+    Ok(())
+}

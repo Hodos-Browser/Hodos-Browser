@@ -712,6 +712,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V12 applied");
         }
 
+        if current_version < 13 {
+            info!("   Applying migration V13 (recipient autocomplete)...");
+            migrations::migrate_v12_to_v13(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (13)", [])?;
+            info!("   ✅ Schema V13 applied");
+        }
+
         Ok(())
     }
 

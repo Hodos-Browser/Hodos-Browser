@@ -113,6 +113,137 @@ impl IdentityResolver {
         result
     }
 
+    /// Search for identities by name/attribute via BSV Overlay Services.
+    /// Uses the `attributes: { any: query }` search which does fuzzy text matching
+    /// across all publicly-revealed certificate fields (userName, email, name, etc.)
+    ///
+    /// Returns multiple results (up to `limit`). Best-effort — returns empty vec on failure.
+    pub async fn search(&self, query: &str, limit: usize) -> Vec<ResolvedIdentity> {
+        if query.len() < 2 {
+            return Vec::new();
+        }
+
+        // Try US overlay, fall back to EU
+        let results = match self.search_overlay(OVERLAY_US, query, limit).await {
+            r if !r.is_empty() => r,
+            _ => {
+                debug!("IdentityResolver: US overlay search returned empty, trying EU fallback");
+                self.search_overlay(OVERLAY_EU, query, limit).await
+            }
+        };
+
+        results
+    }
+
+    /// Query a single overlay endpoint for identity certificates matching a search term
+    async fn search_overlay(&self, endpoint: &str, query: &str, limit: usize) -> Vec<ResolvedIdentity> {
+        let body = serde_json::json!({
+            "service": "ls_identity",
+            "query": {
+                "attributes": { "any": query },
+                "certifiers": [CERTIFIER_METANET, CERTIFIER_SOCIALCERT],
+                "limit": limit
+            }
+        });
+
+        debug!("IdentityResolver: search POST {} for query \"{}\"", endpoint, query);
+
+        let response = match self.http_client
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("IdentityResolver: overlay search request failed: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let status = response.status().as_u16();
+        if status != 200 {
+            warn!("IdentityResolver: overlay search returned HTTP {}", status);
+            return Vec::new();
+        }
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        let outputs = match json.get("outputs").and_then(|v| v.as_array()) {
+            Some(o) => o,
+            None => return Vec::new(),
+        };
+
+        if outputs.is_empty() {
+            debug!("IdentityResolver: search returned no outputs for \"{}\"", query);
+            return Vec::new();
+        }
+
+        info!("IdentityResolver: search returned {} output(s) for \"{}\"", outputs.len(), query);
+
+        let mut results = Vec::new();
+        for output_entry in outputs {
+            if let Some(resolved) = self.process_search_output(output_entry) {
+                // Deduplicate by identity key
+                if !results.iter().any(|r: &ResolvedIdentity| r.identity_key == resolved.identity_key) {
+                    results.push(resolved);
+                }
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Process a search output — same as process_output but extracts identity key from certificate subject.
+    /// Handles BEEF as either base64 string or JSON byte array (overlay returns byte arrays for attribute searches).
+    fn process_search_output(&self, output_entry: &serde_json::Value) -> Option<ResolvedIdentity> {
+        let output_index = output_entry.get("outputIndex").and_then(|v| v.as_u64())? as usize;
+
+        // BEEF can be base64 string OR byte array depending on overlay response format
+        let beef_bytes: Vec<u8> = if let Some(b64) = output_entry.get("beef").and_then(|v| v.as_str()) {
+            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+            BASE64.decode(b64).ok()?
+        } else if let Some(arr) = output_entry.get("beef").and_then(|v| v.as_array()) {
+            arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+        } else {
+            return None;
+        };
+
+        let beef = Beef::from_bytes(&beef_bytes)
+            .map_err(|e| {
+                debug!("IdentityResolver: search BEEF parse failed: {}", e);
+                e
+            })
+            .ok()?;
+        let main_tx_bytes = beef.main_transaction()?;
+        let parsed_tx = ParsedTransaction::from_bytes(main_tx_bytes).ok()?;
+
+        if output_index >= parsed_tx.outputs.len() {
+            return None;
+        }
+
+        let output_script = &parsed_tx.outputs[output_index].script;
+        let decoded = pushdrop::decode(output_script).ok()?;
+
+        if decoded.fields.is_empty() {
+            return None;
+        }
+
+        let cert_json_str = String::from_utf8(decoded.fields[0].clone()).ok()?;
+        let cert: serde_json::Value = serde_json::from_str(&cert_json_str).ok()?;
+
+        // Extract the subject (identity key) from the certificate
+        let subject = cert.get("subject").and_then(|v| v.as_str())?;
+        self.extract_identity_from_certificate(&cert, subject)
+    }
+
     /// Query a single overlay endpoint for identity certificates
     async fn query_overlay(&self, endpoint: &str, identity_key: &str) -> Option<ResolvedIdentity> {
         let body = serde_json::json!({
@@ -302,16 +433,20 @@ impl IdentityResolver {
             return None;
         }
 
+        // Get keyring — needed for two-stage decryption (BRC-52)
+        let keyring = cert.get("keyring").and_then(|v| v.as_object());
+
         // Try to decrypt and read name fields
         let mut name_parts: Vec<String> = Vec::new();
         for field_name in &name_fields {
-            if let Some(encrypted_value) = fields.get(*field_name).and_then(|v| v.as_str()) {
-                if let Some(decrypted) = self.decrypt_field(
+            if let Some(encrypted_field_b64) = fields.get(*field_name).and_then(|v| v.as_str()) {
+                if let Some(decrypted) = self.decrypt_certificate_field_two_stage(
                     &anyone_private_key,
                     &subject_pubkey,
                     field_name,
                     serial_number,
-                    encrypted_value,
+                    encrypted_field_b64,
+                    keyring,
                 ) {
                     if !decrypted.is_empty() {
                         name_parts.push(decrypted);
@@ -330,13 +465,14 @@ impl IdentityResolver {
         // Try to decrypt avatar field
         let mut avatar_url: Option<String> = None;
         for field_name in &avatar_fields {
-            if let Some(encrypted_value) = fields.get(*field_name).and_then(|v| v.as_str()) {
-                if let Some(decrypted) = self.decrypt_field(
+            if let Some(encrypted_field_b64) = fields.get(*field_name).and_then(|v| v.as_str()) {
+                if let Some(decrypted) = self.decrypt_certificate_field_two_stage(
                     &anyone_private_key,
                     &subject_pubkey,
                     field_name,
                     serial_number,
-                    encrypted_value,
+                    encrypted_field_b64,
+                    keyring,
                 ) {
                     if !decrypted.is_empty() && (decrypted.starts_with("http://") || decrypted.starts_with("https://")) {
                         avatar_url = Some(decrypted);
@@ -356,7 +492,99 @@ impl IdentityResolver {
         })
     }
 
-    /// Decrypt a single certificate field using the anyone key
+    /// Two-stage BRC-52 certificate field decryption:
+    /// 1. BRC-2 decrypt keyring[fieldName] → revelation key (symmetric AES key)
+    /// 2. AES-256-GCM decrypt fields[fieldName] using the revelation key
+    ///
+    /// This matches the ts-sdk VerifiableCertificate.decryptFields() behavior.
+    /// The keyring is encrypted FROM the subject TO the verifier (anyone).
+    fn decrypt_certificate_field_two_stage(
+        &self,
+        anyone_private_key: &[u8; 32],
+        subject_pubkey: &[u8],
+        field_name: &str,
+        serial_number: Option<&str>,
+        encrypted_field_b64: &str,
+        keyring: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Option<String> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        // Get keyring entry for this field
+        let keyring_entry_b64 = keyring
+            .and_then(|kr| kr.get(field_name))
+            .and_then(|v| v.as_str());
+
+        let keyring_entry_b64 = match keyring_entry_b64 {
+            Some(v) => v,
+            None => {
+                debug!("IdentityResolver: no keyring entry for field {}, trying direct decrypt", field_name);
+                // Fallback: try direct decrypt (old behavior, for certs without keyring)
+                return self.decrypt_field(
+                    anyone_private_key,
+                    subject_pubkey,
+                    field_name,
+                    serial_number,
+                    encrypted_field_b64,
+                );
+            }
+        };
+
+        // Stage 1: BRC-2 decrypt the keyring entry to get the revelation key (raw bytes)
+        // The keyring was encrypted FROM subject TO anyone (verifier)
+        // So to decrypt: anyone_privkey + subject_pubkey as counterparty
+        let keyring_ciphertext = BASE64.decode(keyring_entry_b64)
+            .map_err(|e| {
+                debug!("IdentityResolver: keyring base64 decode failed for {}: {}", field_name, e);
+                e
+            })
+            .ok()?;
+
+        let revelation_key_bytes = decrypt_certificate_field(
+            anyone_private_key,
+            subject_pubkey,
+            field_name,
+            serial_number,
+            &keyring_ciphertext,
+        )
+        .map_err(|e| {
+            debug!("IdentityResolver: keyring BRC-2 decrypt failed for {}: {}", field_name, e);
+            e
+        })
+        .ok()?;
+
+        debug!("IdentityResolver: decrypted revelation key for {}: {} bytes", field_name, revelation_key_bytes.len());
+
+        // Stage 2: Symmetric AES-256-GCM decrypt the field value using the revelation key
+        let field_ciphertext = BASE64.decode(encrypted_field_b64)
+            .map_err(|e| {
+                debug!("IdentityResolver: field base64 decode failed for {}: {}", field_name, e);
+                e
+            })
+            .ok()?;
+
+        // Pad revelation key to 32 bytes with leading zeros (ts-sdk behavior)
+        let mut padded_key = [0u8; 32];
+        let key_len = revelation_key_bytes.len().min(32);
+        let offset = 32 - key_len;
+        padded_key[offset..].copy_from_slice(&revelation_key_bytes[..key_len]);
+
+        // Decrypt using same AES-256-GCM format: [32-byte IV][ciphertext][16-byte tag]
+        let plaintext = crate::crypto::brc2::decrypt_brc2(&field_ciphertext, &padded_key)
+            .map_err(|e| {
+                debug!("IdentityResolver: field symmetric decrypt failed for {}: {}", field_name, e);
+                e
+            })
+            .ok()?;
+
+        String::from_utf8(plaintext)
+            .map_err(|e| {
+                debug!("IdentityResolver: decrypted field {} not UTF-8: {}", field_name, e);
+                e
+            })
+            .ok()
+    }
+
+    /// Decrypt a single certificate field using the anyone key (legacy direct method)
     fn decrypt_field(
         &self,
         anyone_private_key: &[u8; 32],
