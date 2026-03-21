@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { HodosButton } from '../HodosButton';
 
 interface Certificate {
   type: string;
@@ -214,36 +215,21 @@ const CertificatesTab: React.FC = () => {
             </div>
 
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button
+              <HodosButton
+                variant="secondary"
                 onClick={() => setDeleteTarget(null)}
                 disabled={deleting}
-                style={{
-                  padding: '8px 16px',
-                  background: '#333',
-                  border: '1px solid #444',
-                  borderRadius: '4px',
-                  color: '#e5e7eb',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                }}
               >
                 Cancel
-              </button>
-              <button
+              </HodosButton>
+              <HodosButton
+                variant="danger"
                 onClick={handleDeleteConfirm}
-                disabled={deleting}
-                style={{
-                  padding: '8px 16px',
-                  background: deleting ? '#666' : '#dc2626',
-                  border: 'none',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  cursor: deleting ? 'default' : 'pointer',
-                  fontSize: '13px',
-                }}
+                loading={deleting}
+                loadingText="Deleting..."
               >
-                {deleting ? 'Deleting...' : 'Delete'}
-              </button>
+                Delete
+              </HodosButton>
             </div>
           </div>
         </div>
@@ -291,23 +277,15 @@ const CertificatesTab: React.FC = () => {
                     <td>{cert.certifier_name}</td>
                     <td style={{ fontSize: '12px', color: '#9ca3af' }}>{formatDate(cert.created_at)}</td>
                     <td>
-                      <button
+                      <HodosButton
+                        variant="icon"
+                        size="small"
                         title="Delete certificate"
                         onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          cursor: 'pointer',
-                          color: '#ef4444',
-                          fontSize: '14px',
-                          padding: '4px 8px',
-                          borderRadius: '4px',
-                        }}
-                        onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}
-                        onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                        style={{ color: '#ef4444' }}
                       >
                         🗑
-                      </button>
+                      </HodosButton>
                     </td>
                   </tr>
 
