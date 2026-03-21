@@ -3,9 +3,13 @@
 #include <string>
 #include <cstdint>
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <random>
+#include <fstream>
+
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +117,75 @@ public:
         enabled_ = enabled;
     }
 
+    /// Returns true if fingerprint protection is enabled for the given domain.
+    /// Returns false only if the domain has an explicit per-site override set to false.
+    /// Falls back to true (enabled) for unknown domains.
+    bool IsSiteEnabled(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(siteMutex_);
+        auto it = siteOverrides_.find(domain);
+        if (it != siteOverrides_.end()) {
+            return it->second;
+        }
+        return true;
+    }
+
+    /// Set per-site fingerprint protection override.
+    /// If enabled=true, removes any existing override (reverts to default).
+    /// If enabled=false, stores an explicit disable override and persists to disk.
+    void SetSiteEnabled(const std::string& domain, bool enabled) {
+        {
+            std::lock_guard<std::mutex> lock(siteMutex_);
+            if (enabled) {
+                siteOverrides_.erase(domain);
+            } else {
+                siteOverrides_[domain] = false;
+            }
+        }
+        SaveSiteSettings();
+    }
+
+    /// Load per-site overrides from fingerprint_settings.json in profileDir.
+    /// Called once at startup after Initialize().
+    void LoadSiteSettings(const std::string& profileDir) {
+#ifdef _WIN32
+        settingsFilePath_ = profileDir + "\\fingerprint_settings.json";
+#else
+        settingsFilePath_ = profileDir + "/fingerprint_settings.json";
+#endif
+        try {
+            std::ifstream file(settingsFilePath_);
+            if (!file.is_open()) return;
+            nlohmann::json j = nlohmann::json::parse(file);
+            if (j.contains("siteSettings") && j["siteSettings"].is_object()) {
+                std::lock_guard<std::mutex> lock(siteMutex_);
+                for (auto& [domain, settings] : j["siteSettings"].items()) {
+                    if (settings.contains("enabled") && settings["enabled"].is_boolean()) {
+                        siteOverrides_[domain] = settings["enabled"].get<bool>();
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+
+    /// Persist current per-site overrides to fingerprint_settings.json.
+    void SaveSiteSettings() {
+        if (settingsFilePath_.empty()) return;
+        try {
+            nlohmann::json j;
+            {
+                std::lock_guard<std::mutex> lock(siteMutex_);
+                for (auto& [domain, enabled] : siteOverrides_) {
+                    j["siteSettings"][domain]["enabled"] = enabled;
+                }
+            }
+            if (!j.contains("siteSettings")) j["siteSettings"] = nlohmann::json::object();
+            std::ofstream file(settingsFilePath_);
+            if (file.is_open()) {
+                file << j.dump(2);
+            }
+        } catch (...) {}
+    }
+
     /// Returns true if the URL is for an auth domain that should NOT get
     /// fingerprint farbling (it breaks bot detection / anti-fraud checks).
     static bool IsAuthDomain(const std::string& url) {
@@ -165,5 +238,9 @@ private:
     std::array<uint8_t, 32> sessionToken_{};
     std::unordered_map<std::string, uint32_t> seedCache_;
     bool initialized_ = false;
-    bool enabled_ = true;
+    std::atomic<bool> enabled_{true};
+
+    std::unordered_map<std::string, bool> siteOverrides_;
+    std::mutex siteMutex_;
+    std::string settingsFilePath_;
 };

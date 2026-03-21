@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
   Box,
-  IconButton,
   Typography,
   Tabs,
   Tab,
@@ -29,6 +28,7 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { useSettings } from '../hooks/useSettings';
 import { useImport } from '../hooks/useImport';
+import { HodosButton } from '../components/HodosButton';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -182,19 +182,9 @@ const SettingsOverlayRoot: React.FC = () => {
             Settings
           </Typography>
         </Box>
-        <IconButton
-          onClick={handleClose}
-          size="small"
-          sx={{
-            color: '#9ca3af',
-            '&:hover': {
-              color: '#f0f0f0',
-              backgroundColor: '#1f2937',
-            },
-          }}
-        >
-          <CloseIcon fontSize="small" />
-        </IconButton>
+        <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
+          <CloseIcon sx={{ fontSize: 16 }} />
+        </HodosButton>
       </Box>
 
       {/* Tabs */}
@@ -476,13 +466,9 @@ const SettingsOverlayRoot: React.FC = () => {
         <Box sx={sectionStyle}>
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
             <Typography variant="subtitle2">Import from Another Browser</Typography>
-            <IconButton 
-              size="small" 
-              onClick={refreshProfiles}
-              disabled={importLoading}
-            >
-              <RefreshIcon fontSize="small" />
-            </IconButton>
+            <HodosButton variant="icon" size="small" onClick={refreshProfiles} disabled={importLoading} aria-label="Refresh profiles">
+              <RefreshIcon sx={{ fontSize: 16 }} />
+            </HodosButton>
           </Box>
 
           {importLoading ? (

@@ -8673,6 +8673,7 @@ pub struct SetDomainPermissionRequest {
     pub per_tx_limit_cents: Option<i64>,
     pub per_session_limit_cents: Option<i64>,
     pub rate_limit_per_min: Option<i64>,
+    pub max_tx_per_session: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8709,6 +8710,7 @@ pub async fn get_domain_permission(
             "perTxLimitCents": perm.per_tx_limit_cents,
             "perSessionLimitCents": perm.per_session_limit_cents,
             "rateLimitPerMin": perm.rate_limit_per_min,
+            "maxTxPerSession": perm.max_tx_per_session,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
@@ -8766,6 +8768,9 @@ pub async fn set_domain_permission(
     if let Some(v) = req.rate_limit_per_min {
         perm.rate_limit_per_min = v;
     }
+    if let Some(v) = req.max_tx_per_session {
+        perm.max_tx_per_session = v;
+    }
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response
@@ -8777,6 +8782,7 @@ pub async fn set_domain_permission(
                     "perTxLimitCents": saved.per_tx_limit_cents,
                     "perSessionLimitCents": saved.per_session_limit_cents,
                     "rateLimitPerMin": saved.rate_limit_per_min,
+                    "maxTxPerSession": saved.max_tx_per_session,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
                 })),
@@ -8854,6 +8860,7 @@ pub async fn list_domain_permissions(
                 "perTxLimitCents": p.per_tx_limit_cents,
                 "perSessionLimitCents": p.per_session_limit_cents,
                 "rateLimitPerMin": p.rate_limit_per_min,
+                "maxTxPerSession": p.max_tx_per_session,
                 "createdAt": p.created_at,
                 "updatedAt": p.updated_at,
             })).collect();
@@ -13398,15 +13405,16 @@ pub async fn domain_permissions_reset_all(
 ) -> HttpResponse {
     log::info!("🔄 POST /domain/permissions/reset-all called");
 
-    let per_tx = body.get("per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(1000);
-    let per_session = body.get("per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(5000);
-    let rate = body.get("rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(10);
+    let per_tx = body.get("per_tx_limit_cents").and_then(|v| v.as_i64()).unwrap_or(100);
+    let per_session = body.get("per_session_limit_cents").and_then(|v| v.as_i64()).unwrap_or(1000);
+    let rate = body.get("rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(30);
+    let max_tx_per_session = body.get("max_tx_per_session").and_then(|v| v.as_i64()).unwrap_or(100);
 
     let db = state.database.lock().unwrap();
     let user_id = state.current_user_id;
     let repo = crate::database::DomainPermissionRepository::new(db.connection());
 
-    match repo.reset_all_limits(user_id, per_tx, per_session, rate) {
+    match repo.reset_all_limits(user_id, per_tx, per_session, rate, max_tx_per_session) {
         Ok(count) => {
             drop(db);
             log::info!("   ✅ Reset {} domain permissions", count);

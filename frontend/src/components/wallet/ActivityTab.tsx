@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { HodosButton } from '../HodosButton';
 
 const InfoTooltip: React.FC<{ text: string; align?: 'left' | 'right' }> = ({ text, align }) => {
   const [open, setOpen] = useState(false);
@@ -164,13 +165,15 @@ const ActivityTab: React.FC = () => {
       {/* Filter buttons + count */}
       <div className="wd-activity-filters">
         {(['all', 'sent', 'received'] as DirectionFilter[]).map((f) => (
-          <button
+          <HodosButton
             key={f}
+            variant="ghost"
+            size="small"
             className={`wd-filter-btn${filter === f ? ' active' : ''}`}
             onClick={() => handleFilterChange(f)}
           >
             {f === 'all' ? 'All' : f === 'sent' ? 'Sent' : 'Received'}
-          </button>
+          </HodosButton>
         ))}
         {total > 0 && (
           <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#6b7280' }}>
@@ -216,20 +219,24 @@ const ActivityTab: React.FC = () => {
                 <div className="wd-activity-center">
                   {item.txid && (
                     <>
-                      <button
+                      <HodosButton
+                        variant="ghost"
+                        size="small"
                         className="wd-txid-pill"
                         onClick={(e) => { e.stopPropagation(); handleCopyTxid(item.txid); }}
                         title={copiedTxid === item.txid ? 'Copied!' : truncateTxid(item.txid)}
                       >
                         {copiedTxid === item.txid ? 'Copied' : 'txid'}
-                      </button>
-                      <button
+                      </HodosButton>
+                      <HodosButton
+                        variant="icon"
+                        size="small"
                         className="wd-woc-btn"
                         onClick={(e) => { e.stopPropagation(); handleOpenWoC(item.txid); }}
                         title="View on WhatsOnChain"
                       >
                         <img src="/whatsonchain.png" alt="WoC" width="20" height="20" />
-                      </button>
+                      </HodosButton>
                     </>
                   )}
                   <span className="wd-activity-info-col">
@@ -262,52 +269,62 @@ const ActivityTab: React.FC = () => {
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="wd-pagination">
-          <button
+          <HodosButton
+            variant="ghost"
+            size="small"
             className="wd-page-btn"
             onClick={() => setPage(1)}
             disabled={page <= 1 || loading}
             title="First page"
           >
             &laquo;
-          </button>
-          <button
+          </HodosButton>
+          <HodosButton
+            variant="ghost"
+            size="small"
             className="wd-page-btn"
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1 || loading}
             title="Previous page"
           >
             &lt;
-          </button>
+          </HodosButton>
           {getPageNumbers().map((p, idx) =>
             p === '...' ? (
               <span key={`e${idx}`} className="wd-page-ellipsis">...</span>
             ) : (
-              <button
+              <HodosButton
                 key={p}
+                variant="ghost"
+                size="small"
                 className={`wd-page-btn${page === p ? ' active' : ''}`}
                 onClick={() => setPage(p)}
                 disabled={loading}
               >
                 {p}
-              </button>
+              </HodosButton>
             )
           )}
-          <button
+          <HodosButton
+            variant="ghost"
+            size="small"
             className="wd-page-btn"
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages || loading}
             title="Next page"
           >
             &gt;
-          </button>
-          <button
+          </HodosButton>
+          <HodosButton
+            variant="ghost"
+            size="small"
             className="wd-page-btn"
             onClick={() => setPage(totalPages)}
             disabled={page >= totalPages || loading}
             title="Last page"
           >
             &raquo;
-          </button>
+          </HodosButton>
           {totalPages > 7 && (
             <div className="wd-page-jump">
               <span>Go to</span>

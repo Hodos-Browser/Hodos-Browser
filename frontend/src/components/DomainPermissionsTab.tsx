@@ -9,18 +9,17 @@ import {
   TableHead,
   TableRow,
   Paper,
-  Button,
   CircularProgress,
   Alert,
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
-  IconButton,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import DomainPermissionForm, { type DomainPermissionSettings } from './DomainPermissionForm';
+import { HodosButton } from './HodosButton';
 
 interface DomainPermissionRecord {
   id: number;
@@ -29,6 +28,7 @@ interface DomainPermissionRecord {
   perTxLimitCents: number;
   perSessionLimitCents: number;
   rateLimitPerMin: number;
+  maxTxPerSession: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -76,6 +76,7 @@ const DomainPermissionsTab: React.FC = () => {
           perTxLimitCents: settings.perTxLimitCents,
           perSessionLimitCents: settings.perSessionLimitCents,
           rateLimitPerMin: settings.rateLimitPerMin,
+          max_tx_per_session: settings.maxTxPerSession,
         }),
       });
       if (!res.ok) throw new Error(`Failed to update: ${res.statusText}`);
@@ -149,6 +150,7 @@ const DomainPermissionsTab: React.FC = () => {
                   <TableCell>Per-Tx Limit</TableCell>
                   <TableCell>Per-Session Limit</TableCell>
                   <TableCell>Rate Limit</TableCell>
+                  <TableCell>Tx/Session</TableCell>
                   <TableCell>Approved</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
@@ -164,23 +166,27 @@ const DomainPermissionsTab: React.FC = () => {
                     <TableCell>{formatCentsAsUsd(perm.perTxLimitCents)}</TableCell>
                     <TableCell>{formatCentsAsUsd(perm.perSessionLimitCents)}</TableCell>
                     <TableCell>{perm.rateLimitPerMin}/min</TableCell>
+                    <TableCell>{perm.maxTxPerSession}</TableCell>
                     <TableCell>{formatDate(perm.createdAt)}</TableCell>
                     <TableCell align="right">
-                      <IconButton
+                      <HodosButton
+                        variant="icon"
                         size="small"
                         onClick={() => setEditingDomain(perm)}
+                        aria-label="Edit limits"
                         title="Edit limits"
                       >
                         <EditIcon fontSize="small" />
-                      </IconButton>
-                      <IconButton
+                      </HodosButton>
+                      <HodosButton
+                        variant="icon"
                         size="small"
                         onClick={() => setRevokeTarget(perm)}
+                        aria-label="Revoke access"
                         title="Revoke access"
-                        color="error"
                       >
                         <DeleteIcon fontSize="small" />
-                      </IconButton>
+                      </HodosButton>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -207,6 +213,7 @@ const DomainPermissionsTab: React.FC = () => {
                   perTxLimitCents: editingDomain.perTxLimitCents,
                   perSessionLimitCents: editingDomain.perSessionLimitCents,
                   rateLimitPerMin: editingDomain.rateLimitPerMin,
+                  maxTxPerSession: editingDomain.maxTxPerSession,
                 }}
                 onSave={handleEditSave}
                 onCancel={() => setEditingDomain(null)}
@@ -231,12 +238,18 @@ const DomainPermissionsTab: React.FC = () => {
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setRevokeTarget(null)} disabled={revoking}>
+          <HodosButton variant="secondary" size="small" onClick={() => setRevokeTarget(null)} disabled={revoking}>
             Cancel
-          </Button>
-          <Button onClick={handleRevoke} color="error" disabled={revoking}>
-            {revoking ? 'Revoking...' : 'Revoke'}
-          </Button>
+          </HodosButton>
+          <HodosButton
+            variant="danger"
+            size="small"
+            onClick={handleRevoke}
+            loading={revoking}
+            loadingText="Revoking..."
+          >
+            Revoke
+          </HodosButton>
         </DialogActions>
       </Dialog>
     </>

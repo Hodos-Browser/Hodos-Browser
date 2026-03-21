@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTransaction } from '../hooks/useTransaction';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
+import { HodosButton } from './HodosButton';
 
 // Identity key: 66-char hex starting with 02 or 03 (compressed public key)
 const IDENTITY_KEY_REGEX = /^(02|03)[0-9a-fA-F]{64}$/;
@@ -330,8 +331,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   disabled={isSubmitting || isLoading || bsvPrice <= 0}
                   autoComplete="off"
                 />
-                <button
+                <HodosButton
                   type="button"
+                  variant="secondary"
+                  size="small"
                   className="max-button"
                   onClick={() => {
                     const bsvMax = formatBalance(balance);
@@ -346,7 +349,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   disabled={isSubmitting || isLoading}
                 >
                   MAX
-                </button>
+                </HodosButton>
               </div>
             </div>
             <div className="dual-amount-field">
@@ -381,13 +384,16 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
           />
         </div>
 
-        <button
+        <HodosButton
           type="submit"
+          variant="primary"
           className={`submit-button${isSubmitting ? ' submitting' : ''}`}
-          disabled={isSubmitting || isLoading || Object.keys(errors).length > 0}
+          loading={isSubmitting}
+          loadingText="Sending..."
+          disabled={isLoading || Object.keys(errors).length > 0}
         >
-          {isSubmitting ? 'Sending...' : (isPaymail ? 'Send to Paymail' : isPeerPay ? 'Send via PeerPay' : 'Send Transaction')}
-        </button>
+          {isPaymail ? 'Send to Paymail' : isPeerPay ? 'Send via PeerPay' : 'Send Transaction'}
+        </HodosButton>
       </form>
     </div>
   );

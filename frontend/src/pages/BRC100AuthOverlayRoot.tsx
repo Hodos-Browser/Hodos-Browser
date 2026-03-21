@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import DomainPermissionForm from '../components/DomainPermissionForm';
 import type { DomainPermissionSettings } from '../components/DomainPermissionForm';
+import { HodosButton } from '../components/HodosButton';
 
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
@@ -22,9 +23,9 @@ const COLORS = {
 const BRC100AuthOverlayRoot: React.FC = () => {
   const [notificationType, setNotificationType] = useState<string>('');
   const [notificationDomain, setNotificationDomain] = useState<string>('');
-  const [hoveredButton, setHoveredButton] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showModifyLimits, setShowModifyLimits] = useState(false);
+  const [faviconError, setFaviconError] = useState(false);
 
   // Payment/rate-limit params
   const [paymentSatoshis, setPaymentSatoshis] = useState<number>(0);
@@ -34,6 +35,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [perSessionLimit, setPerSessionLimit] = useState<number>(300);
   const [sessionSpent, setSessionSpent] = useState<number>(0);
   const [rateLimit, setRateLimit] = useState<number>(10);
+  const [maxTxPerSession, setMaxTxPerSession] = useState<number>(100);
 
   // Certificate disclosure params
   const [certFields, setCertFields] = useState<string[]>([]);
@@ -51,7 +53,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // Reset UI state for fresh notification
     setShowAdvanced(false);
     setShowModifyLimits(false);
-    setHoveredButton(null);
 
     // Reset payment defaults
     setPaymentSatoshis(0);
@@ -61,6 +62,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     setPerSessionLimit(300);
     setSessionSpent(0);
     setRateLimit(10);
+    setMaxTxPerSession(100);
 
     // Apply params
     setNotificationType(type);
@@ -85,6 +87,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
     const rateLimitParam = params.get('rateLimit');
     if (rateLimitParam) setRateLimit(parseInt(rateLimitParam));
+
+    const maxTxParam = params.get('maxTxPerSession');
+    if (maxTxParam) setMaxTxPerSession(parseInt(maxTxParam));
 
     // Certificate disclosure params
     const fieldsParam = params.get('fields');
@@ -124,6 +129,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       delete (window as any).hideNotification;
     };
   }, []);
+
+  // Reset favicon error state whenever the domain changes
+  useEffect(() => {
+    setFaviconError(false);
+  }, [notificationDomain]);
 
   const formatDomain = (domain: string) => {
     return domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
@@ -187,6 +197,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             perTxLimitCents: settings.perTxLimitCents,
             perSessionLimitCents: settings.perSessionLimitCents,
             rateLimitPerMin: settings.rateLimitPerMin,
+            maxTxPerSession: settings.maxTxPerSession,
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
@@ -252,6 +263,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             perTxLimitCents: settings.perTxLimitCents,
             perSessionLimitCents: settings.perSessionLimitCents,
             rateLimitPerMin: settings.rateLimitPerMin,
+            maxTxPerSession: settings.maxTxPerSession,
           }),
         ]);
         // Approve this request
@@ -357,34 +369,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     fontFamily: FONT_FAMILY,
   };
 
-  // ── Primary button (black) ──
-  const primaryButton: React.CSSProperties = {
-    background: hoveredButton === 'primary' ? COLORS.primaryHover : COLORS.primary,
-    border: 'none',
-    borderRadius: '8px',
-    padding: '11px 24px',
-    fontSize: '14px',
-    fontWeight: 600,
-    color: '#0f1117',
-    cursor: 'pointer',
-    fontFamily: FONT_FAMILY,
-    transition: 'background 0.15s',
-  };
-
-  // ── Secondary button (outlined) ──
-  const secondaryButton: React.CSSProperties = {
-    background: hoveredButton === 'secondary' ? '#1f2937' : 'transparent',
-    border: `1px solid ${COLORS.borderLight}`,
-    borderRadius: '8px',
-    padding: '11px 24px',
-    fontSize: '14px',
-    fontWeight: 600,
-    color: COLORS.textMuted,
-    cursor: 'pointer',
-    fontFamily: FONT_FAMILY,
-    transition: 'background 0.15s',
-  };
-
   // ── No wallet notification ──
   if (notificationType === 'no_wallet') {
     return (
@@ -392,7 +376,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -424,22 +419,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
           {/* Buttons */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-            <button
-              onClick={handleNoWalletDismiss}
-              onMouseEnter={() => setHoveredButton('secondary')}
-              onMouseLeave={() => setHoveredButton(null)}
-              style={secondaryButton}
-            >
+            <HodosButton variant="secondary" onClick={handleNoWalletDismiss}>
               Not now
-            </button>
-            <button
-              onClick={handleNoWalletSetup}
-              onMouseEnter={() => setHoveredButton('primary')}
-              onMouseLeave={() => setHoveredButton(null)}
-              style={primaryButton}
-            >
+            </HodosButton>
+            <HodosButton variant="primary" onClick={handleNoWalletSetup}>
               Set up wallet
-            </button>
+            </HodosButton>
           </div>
         </div>
       </div>
@@ -453,7 +438,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -512,6 +508,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   perTxLimitCents: perTxLimit,
                   perSessionLimitCents: perSessionLimit,
                   rateLimitPerMin: rateLimit,
+                  maxTxPerSession: maxTxPerSession,
                 }}
                 onSave={(settings) => handleModifyLimitsAndApprove(settings)}
                 onCancel={() => setShowModifyLimits(false)}
@@ -521,33 +518,15 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             <>
               {/* Buttons */}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-                <button
-                  onClick={handlePaymentDeny}
-                  onMouseEnter={() => setHoveredButton('secondary')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={secondaryButton}
-                >
+                <HodosButton variant="secondary" onClick={handlePaymentDeny}>
                   Deny
-                </button>
-                <button
-                  onClick={() => setShowModifyLimits(true)}
-                  onMouseEnter={() => setHoveredButton('modify')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={{
-                    ...secondaryButton,
-                    background: hoveredButton === 'modify' ? '#1f2937' : 'transparent',
-                  }}
-                >
+                </HodosButton>
+                <HodosButton variant="secondary" onClick={() => setShowModifyLimits(true)}>
                   Modify Limits
-                </button>
-                <button
-                  onClick={handlePaymentApprove}
-                  onMouseEnter={() => setHoveredButton('primary')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={primaryButton}
-                >
+                </HodosButton>
+                <HodosButton variant="primary" onClick={handlePaymentApprove}>
                   Approve
-                </button>
+                </HodosButton>
               </div>
             </>
           )}
@@ -563,7 +542,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -626,6 +616,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   perTxLimitCents: perTxLimit,
                   perSessionLimitCents: perSessionLimit,
                   rateLimitPerMin: rateLimit,
+                  maxTxPerSession: maxTxPerSession,
                 }}
                 onSave={(settings) => handleModifyLimitsAndApprove(settings)}
                 onCancel={() => setShowModifyLimits(false)}
@@ -635,33 +626,15 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             <>
               {/* Buttons */}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-                <button
-                  onClick={handlePaymentDeny}
-                  onMouseEnter={() => setHoveredButton('secondary')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={secondaryButton}
-                >
+                <HodosButton variant="secondary" onClick={handlePaymentDeny}>
                   Deny
-                </button>
-                <button
-                  onClick={() => setShowModifyLimits(true)}
-                  onMouseEnter={() => setHoveredButton('modify')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={{
-                    ...secondaryButton,
-                    background: hoveredButton === 'modify' ? '#1f2937' : 'transparent',
-                  }}
-                >
+                </HodosButton>
+                <HodosButton variant="secondary" onClick={() => setShowModifyLimits(true)}>
                   Modify Limits
-                </button>
-                <button
-                  onClick={handlePaymentApprove}
-                  onMouseEnter={() => setHoveredButton('primary')}
-                  onMouseLeave={() => setHoveredButton(null)}
-                  style={primaryButton}
-                >
+                </HodosButton>
+                <HodosButton variant="primary" onClick={handlePaymentApprove}>
                   Approve
-                </button>
+                </HodosButton>
               </div>
             </>
           )}
@@ -677,7 +650,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -773,31 +757,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
           {/* Buttons */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-            <button
-              onClick={handleCertDeny}
-              onMouseEnter={() => setHoveredButton('secondary')}
-              onMouseLeave={() => setHoveredButton(null)}
-              style={secondaryButton}
-            >
+            <HodosButton variant="secondary" onClick={handleCertDeny}>
               Deny
-            </button>
-            <button
+            </HodosButton>
+            <HodosButton
+              variant="primary"
               onClick={handleCertApprove}
               disabled={selectedFields.length === 0}
-              onMouseEnter={() => setHoveredButton('primary')}
-              onMouseLeave={() => setHoveredButton(null)}
-              style={{
-                ...primaryButton,
-                opacity: selectedFields.length === 0 ? 0.4 : 1,
-                cursor: selectedFields.length === 0 ? 'not-allowed' : 'pointer',
-              }}
             >
               {selectedFields.length === certFields.length
                 ? 'Share All'
                 : selectedFields.length > 0
                   ? `Share ${selectedFields.length} of ${certFields.length}`
                   : 'Share'}
-            </button>
+            </HodosButton>
           </div>
         </div>
       </div>
@@ -811,7 +784,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
             <div>
               <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
                 {cleanDomain}
@@ -896,22 +880,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           {/* Buttons (hidden when advanced form is showing — it has its own save/cancel) */}
           {!showAdvanced && (
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-              <button
-                onClick={handleBlock}
-                onMouseEnter={() => setHoveredButton('secondary')}
-                onMouseLeave={() => setHoveredButton(null)}
-                style={secondaryButton}
-              >
+              <HodosButton variant="secondary" onClick={handleBlock}>
                 Block
-              </button>
-              <button
-                onClick={handleAllow}
-                onMouseEnter={() => setHoveredButton('primary')}
-                onMouseLeave={() => setHoveredButton(null)}
-                style={primaryButton}
-              >
+              </HodosButton>
+              <HodosButton variant="primary" onClick={handleAllow}>
                 Allow
-              </button>
+              </HodosButton>
             </div>
           )}
         </div>
@@ -926,12 +900,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 // ── Shared styles ──
 
 const overlayBackdrop: React.CSSProperties = {
-  width: '100vw',
-  height: '100vh',
+  position: 'fixed',
+  inset: 0,
   backgroundColor: 'rgba(0, 0, 0, 0.45)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
+  overflow: 'hidden',
 };
 
 const avatarStyle: React.CSSProperties = {

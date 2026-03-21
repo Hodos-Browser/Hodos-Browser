@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
     Box,
     Typography,
-    IconButton,
     Avatar,
     Divider,
 } from '@mui/material';
@@ -10,6 +9,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import AddIcon from '@mui/icons-material/Add';
 import CheckIcon from '@mui/icons-material/Check';
 import { useProfiles } from '../hooks/useProfiles';
+import { HodosButton } from '../components/HodosButton';
 
 // Predefined color palette for new profiles
 const PROFILE_COLORS = [
@@ -103,7 +103,6 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             height: '100%',
             bgcolor: '#1a1d23',
             borderRadius: '8px',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
             overflow: 'hidden',
             display: 'flex',
             flexDirection: 'column',
@@ -119,13 +118,9 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                 <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
                     Profiles
                 </Typography>
-                <IconButton
-                    size="small"
-                    onClick={handleClose}
-                    sx={{ p: 0.5, color: '#9ca3af' }}
-                >
+                <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
                     <CloseIcon sx={{ fontSize: 16 }} />
-                </IconButton>
+                </HodosButton>
             </Box>
 
             {/* Profile List */}
@@ -307,35 +302,12 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                         </Box>
 
                         <Box sx={{ display: 'flex', gap: 1 }}>
-                            <button
-                                onClick={handleCancelCreate}
-                                style={{
-                                    padding: '6px 16px',
-                                    fontSize: '13px',
-                                    border: '1px solid #2a2d35',
-                                    borderRadius: '4px',
-                                    background: '#111827',
-                                    color: '#f0f0f0',
-                                    cursor: 'pointer',
-                                }}
-                            >
+                            <HodosButton variant="secondary" onClick={handleCancelCreate}>
                                 Cancel
-                            </button>
-                            <button
-                                onClick={handleCreateProfile}
-                                disabled={!newProfileName.trim()}
-                                style={{
-                                    padding: '6px 16px',
-                                    fontSize: '13px',
-                                    border: 'none',
-                                    borderRadius: '4px',
-                                    background: newProfileName.trim() ? '#a67c00' : '#ccc',
-                                    color: 'white',
-                                    cursor: newProfileName.trim() ? 'pointer' : 'not-allowed',
-                                }}
-                            >
+                            </HodosButton>
+                            <HodosButton variant="primary" onClick={handleCreateProfile} disabled={!newProfileName.trim()}>
                                 Create
-                            </button>
+                            </HodosButton>
                         </Box>
                     </Box>
                 )}

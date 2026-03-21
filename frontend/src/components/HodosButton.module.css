@@ -1,0 +1,162 @@
+/* HodosButton.module.css */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-weight: 600;
+  line-height: 1;
+  gap: 6px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s, transform 0.1s;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:focus-visible {
+  outline: 2px solid #a67c00;
+  outline-offset: 2px;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Sizes */
+.default {
+  padding: 10px 22px;
+  font-size: 14px;
+  border-radius: 8px;
+}
+
+.small {
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+/* Primary */
+.primary {
+  background: #a67c00;
+  color: #0f1117;
+}
+
+.primary:hover:not(:disabled) {
+  background: #bf9000;
+}
+
+.primary:active:not(:disabled) {
+  background: #8a6800;
+}
+
+/* Secondary */
+.secondary {
+  background: transparent;
+  color: #e5e7eb;
+  border: 1px solid #2a2d35;
+}
+
+.secondary:hover:not(:disabled) {
+  background: #1f2937;
+  border-color: #3a3f4b;
+}
+
+.secondary:active:not(:disabled) {
+  background: #161b26;
+  border-color: #2a2d35;
+}
+
+/* Danger */
+.danger {
+  background: #dc2626;
+  color: #fff;
+}
+
+.danger:hover:not(:disabled) {
+  background: #ef4444;
+}
+
+.danger:active:not(:disabled) {
+  background: #b91c1c;
+}
+
+/* Ghost */
+.ghost {
+  background: transparent;
+  color: #9ca3af;
+}
+
+.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e5e7eb;
+}
+
+.ghost:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.03);
+  color: #e5e7eb;
+}
+
+/* Icon */
+.icon {
+  background: transparent;
+  color: #9ca3af;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.icon.default {
+  width: 32px;
+  height: 32px;
+  font-size: 18px;
+}
+
+.icon.small {
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+  padding: 0;
+}
+
+.icon:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e5e7eb;
+}
+
+.icon:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e5e7eb;
+}
+
+/* Loading */
+.loading {
+  opacity: 0.8;
+  cursor: not-allowed;
+}
+
+/* Spinner */
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  flex-shrink: 0;
+}
+
+.small .spinner {
+  width: 10px;
+  height: 10px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

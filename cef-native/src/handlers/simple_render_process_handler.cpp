@@ -21,6 +21,7 @@
 #include "../../include/core/FingerprintProtection.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 // Static cache for pre-loaded cosmetic scriptlets (8e-2).
@@ -32,6 +33,11 @@ static std::unordered_map<std::string, std::string> s_scriptCache; // URL → sc
 // Sprint 12c: Static cache for fingerprint seeds (URL → seed)
 static std::mutex s_seedMutex;
 static std::unordered_map<std::string, uint32_t> s_domainSeeds;
+
+// Per-site fingerprint disable tracking: URLs for which the browser process
+// has signalled that fingerprint protection should be skipped.
+static std::mutex s_fpDisabledMutex;
+static std::unordered_set<std::string> s_fingerprintDisabledUrls;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_RENDER(msg) Logger::Log(msg, 0, 1)
@@ -576,10 +582,26 @@ void SimpleRenderProcessHandler::OnContextCreated(
     }
 
     // Sprint 12d: Inject fingerprint protection script for external pages
-    // Skip auth domains — fingerprint farbling breaks Google/Microsoft bot detection
+    // Skip auth domains and per-site disabled URLs.
     if (!url.empty() && url.find("127.0.0.1") == std::string::npos &&
         url.find("localhost") == std::string::npos &&
         !FingerprintProtection::IsAuthDomain(url)) {
+
+        // Check if the browser process sent a disable signal for this URL
+        bool fpDisabled = false;
+        {
+            std::lock_guard<std::mutex> lock(s_fpDisabledMutex);
+            auto disabledIt = s_fingerprintDisabledUrls.find(url);
+            if (disabledIt != s_fingerprintDisabledUrls.end()) {
+                fpDisabled = true;
+                if (frame->IsMain()) {
+                    s_fingerprintDisabledUrls.erase(disabledIt); // One-shot for main frame
+                }
+                LOG_DEBUG_RENDER("🛡️ Fingerprint injection skipped (site disabled) for " + url);
+            }
+        }
+
+        if (!fpDisabled) {
         uint32_t seed = 0;
         {
             std::lock_guard<std::mutex> lock(s_seedMutex);
@@ -604,6 +626,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
             LOG_DEBUG_RENDER("🛡️ Injecting fingerprint protection (seed=" + seedStr + ") for " + url);
             frame->ExecuteJavaScript(script, url, 0);
         }
+        } // end !fpDisabled
     }
 
     // Check if this is an overlay browser (any browser that's not the main root browser)
@@ -992,6 +1015,19 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                 std::lock_guard<std::mutex> lock(s_seedMutex);
                 s_domainSeeds[url] = seed;
                 LOG_DEBUG_RENDER("🛡️ Cached fingerprint seed " + std::to_string(seed) + " for " + url);
+            }
+            return true;
+        }
+
+        // Per-site fingerprint disable: browser process signals this URL should
+        // skip fingerprint injection (auth domain or user-disabled site).
+        if (message_name == "fingerprint_site_disabled") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string url = args->GetString(0).ToString();
+            if (!url.empty()) {
+                std::lock_guard<std::mutex> lock(s_fpDisabledMutex);
+                s_fingerprintDisabledUrls.insert(url);
+                LOG_DEBUG_RENDER("🛡️ Fingerprint disabled for URL: " + url);
             }
             return true;
         }
@@ -1925,6 +1961,15 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0).ToString();
         std::string escaped = escapeJsonForJs(responseJson);
         std::string js = "if (window.onAdblockCheckSiteEnabledResponse) { window.onAdblockCheckSiteEnabledResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
+    if (message_name == "fingerprint_get_site_enabled_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onFingerprintSiteEnabledResponse) { window.onFingerprintSiteEnabledResponse(JSON.parse('" + escaped + "')); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
         return true;
     }

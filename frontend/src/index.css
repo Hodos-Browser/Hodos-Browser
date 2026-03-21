@@ -58,7 +58,7 @@ button:focus-visible {
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;
-    background-color: #ffffff;
+    background-color: #1a1a1a;
   }
   a:hover {
     color: #747bff;
@@ -66,6 +66,17 @@ button:focus-visible {
   button {
     background-color: #f9f9f9;
   }
+}
+
+/* Tab close button opacity — using CSS classes instead of inline style
+   so the parent's MUI sx hover rule can override */
+.tab-close-active {
+  opacity: 0.4;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+.tab-close-inactive {
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
 }
 
 /* CEF browser-level cursor fix for omnibox overlay */
@@ -84,9 +95,11 @@ body[data-overlay="omnibox"] .MuiListItemButton-root {
   cursor: pointer !important;
 }
 
-/* Transparent background for overlay subprocesses */
-body[data-overlay="menu"],
-body[data-overlay="menu"] #root {
+/* Transparent background for overlay subprocesses.
+   The inline script in index.html sets body.style.background = 'transparent'
+   for all non-root routes. This CSS catch-all covers data-overlay cases too. */
+body[data-overlay],
+body[data-overlay] #root {
   background: transparent !important;
   background-color: transparent !important;
 }

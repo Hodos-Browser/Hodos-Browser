@@ -327,6 +327,14 @@ void SettingsManager::SetDefaultRateLimitPerMin(int rate) {
     Save();
 }
 
+void SettingsManager::SetDefaultMaxTxPerSession(int maxTx) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wallet_.defaultMaxTxPerSession = maxTx;
+    }
+    Save();
+}
+
 void SettingsManager::SetPeerpayAutoAccept(bool enabled) {
     {
         std::lock_guard<std::mutex> lock(mutex_);

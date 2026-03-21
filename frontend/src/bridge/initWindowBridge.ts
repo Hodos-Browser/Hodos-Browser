@@ -123,8 +123,15 @@ console.log("🔍 initWindowBridge: Forcing override of address.generate functio
 window.hodosBrowser.address.generate = () => {
   console.log("🔑 JS: Sending address_generate to native");
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      delete window.onAddressGenerated;
+      delete window.onAddressError;
+      reject(new Error('address_generate timed out'));
+    }, 10000);
+
     // Set up response handlers
     window.onAddressGenerated = (data: any) => {
+      clearTimeout(timeout);
       console.log("✅ Address generated:", data);
       resolve(data);
       delete window.onAddressGenerated;
@@ -132,6 +139,7 @@ window.hodosBrowser.address.generate = () => {
     };
 
     window.onAddressError = (error: string) => {
+      clearTimeout(timeout);
       console.error("❌ Address generation error:", error);
       reject(new Error(error));
       delete window.onAddressGenerated;
@@ -150,7 +158,14 @@ if (!window.hodosBrowser.wallet) {
     getStatus: () => {
       console.log("🔍 JS: Sending wallet_status_check to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onWalletStatusResponse;
+          delete window.onWalletStatusError;
+          reject(new Error('wallet_status_check timed out'));
+        }, 10000);
+
         window.onWalletStatusResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Wallet status retrieved:", data);
           resolve(data);
           delete window.onWalletStatusResponse;
@@ -158,6 +173,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onWalletStatusError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Wallet status error:", error);
           reject(new Error(error));
           delete window.onWalletStatusResponse;
@@ -171,7 +187,14 @@ if (!window.hodosBrowser.wallet) {
     create: () => {
       console.log("🆕 JS: Sending create_wallet to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onCreateWalletResponse;
+          delete window.onCreateWalletError;
+          reject(new Error('create_wallet timed out'));
+        }, 10000);
+
         window.onCreateWalletResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Wallet created:", data);
           resolve(data);
           delete window.onCreateWalletResponse;
@@ -179,6 +202,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onCreateWalletError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Wallet creation error:", error);
           reject(new Error(error));
           delete window.onCreateWalletResponse;
@@ -192,7 +216,14 @@ if (!window.hodosBrowser.wallet) {
     load: () => {
       console.log("📂 JS: Sending load_wallet to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onLoadWalletResponse;
+          delete window.onLoadWalletError;
+          reject(new Error('load_wallet timed out'));
+        }, 10000);
+
         window.onLoadWalletResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Wallet loaded:", data);
           resolve(data);
           delete window.onLoadWalletResponse;
@@ -200,6 +231,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onLoadWalletError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Wallet load error:", error);
           reject(new Error(error));
           delete window.onLoadWalletResponse;
@@ -213,7 +245,14 @@ if (!window.hodosBrowser.wallet) {
     getInfo: () => {
       console.log("🔍 JS: Sending get_wallet_info to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetWalletInfoResponse;
+          delete window.onGetWalletInfoError;
+          reject(new Error('get_wallet_info timed out'));
+        }, 10000);
+
         window.onGetWalletInfoResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Wallet info retrieved:", data);
           resolve(data);
           delete window.onGetWalletInfoResponse;
@@ -221,6 +260,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onGetWalletInfoError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Wallet info error:", error);
           reject(new Error(error));
           delete window.onGetWalletInfoResponse;
@@ -234,7 +274,14 @@ if (!window.hodosBrowser.wallet) {
     generateAddress: () => {
       console.log("📍 JS: Sending wallet address generation to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onAddressGenerated;
+          delete window.onAddressError;
+          reject(new Error('address_generate timed out'));
+        }, 10000);
+
         window.onAddressGenerated = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Address generated:", data);
           resolve(data);
           delete window.onAddressGenerated;
@@ -242,6 +289,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onAddressError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Address generation error:", error);
           reject(new Error(error));
           delete window.onAddressGenerated;
@@ -255,7 +303,14 @@ if (!window.hodosBrowser.wallet) {
     getCurrentAddress: () => {
       console.log("📍 JS: Sending get_current_address to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetCurrentAddressResponse;
+          delete window.onGetCurrentAddressError;
+          reject(new Error('get_current_address timed out'));
+        }, 10000);
+
         window.onGetCurrentAddressResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Current address retrieved:", data);
           resolve(data);
           delete window.onGetCurrentAddressResponse;
@@ -263,6 +318,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onGetCurrentAddressError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Current address error:", error);
           reject(new Error(error));
           delete window.onGetCurrentAddressResponse;
@@ -276,7 +332,14 @@ if (!window.hodosBrowser.wallet) {
     getAddresses: () => {
       console.log("📍 JS: Sending get_addresses to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetAddressesResponse;
+          delete window.onGetAddressesError;
+          reject(new Error('get_addresses timed out'));
+        }, 10000);
+
         window.onGetAddressesResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ All addresses retrieved:", data);
           if (data.success) {
             resolve(data.addresses);
@@ -288,6 +351,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onGetAddressesError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Get addresses error:", error);
           reject(new Error(error));
           delete window.onGetAddressesResponse;
@@ -301,7 +365,14 @@ if (!window.hodosBrowser.wallet) {
     markBackedUp: () => {
       console.log("✅ JS: Sending mark_wallet_backed_up to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onMarkWalletBackedUpResponse;
+          delete window.onMarkWalletBackedUpError;
+          reject(new Error('mark_wallet_backed_up timed out'));
+        }, 10000);
+
         window.onMarkWalletBackedUpResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Wallet marked as backed up:", data);
           resolve(data);
           delete window.onMarkWalletBackedUpResponse;
@@ -309,6 +380,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onMarkWalletBackedUpError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Mark backed up error:", error);
           reject(new Error(error));
           delete window.onMarkWalletBackedUpResponse;
@@ -322,7 +394,13 @@ if (!window.hodosBrowser.wallet) {
     getBackupModalState: () => {
       console.log("🔍 JS: Getting backup modal state");
       return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetBackupModalStateResponse;
+          resolve(null);
+        }, 10000);
+
         window.onGetBackupModalStateResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Backup modal state retrieved:", data);
           resolve(data);
           delete window.onGetBackupModalStateResponse;
@@ -335,7 +413,13 @@ if (!window.hodosBrowser.wallet) {
     setBackupModalState: (shown: boolean) => {
       console.log("🔍 JS: Setting backup modal state to:", shown);
       return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          delete window.onSetBackupModalStateResponse;
+          resolve(null);
+        }, 10000);
+
         window.onSetBackupModalStateResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Backup modal state set:", data);
           resolve(data);
           delete window.onSetBackupModalStateResponse;
@@ -348,7 +432,14 @@ if (!window.hodosBrowser.wallet) {
     getBalance: () => {
       console.log("💳 JS: Sending get_balance to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetBalanceResponse;
+          delete window.onGetBalanceError;
+          reject(new Error('get_balance timed out'));
+        }, 10000);
+
         window.onGetBalanceResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Balance retrieved:", data);
           resolve(data);
           delete window.onGetBalanceResponse;
@@ -356,6 +447,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onGetBalanceError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Balance retrieval error:", error);
           reject(new Error(error));
           delete window.onGetBalanceResponse;
@@ -369,7 +461,14 @@ if (!window.hodosBrowser.wallet) {
     sendTransaction: (data: any) => {
       console.log("🚀 JS: Sending send_transaction to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onSendTransactionResponse;
+          delete window.onSendTransactionError;
+          reject(new Error('send_transaction timed out'));
+        }, 10000);
+
         window.onSendTransactionResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Transaction sent:", data);
           resolve(data);
           delete window.onSendTransactionResponse;
@@ -377,6 +476,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onSendTransactionError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Transaction error:", error);
           reject(new Error(error));
           delete window.onSendTransactionResponse;
@@ -390,7 +490,14 @@ if (!window.hodosBrowser.wallet) {
     getTransactionHistory: () => {
       console.log("📜 JS: Sending get_transaction_history to native");
       return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          delete window.onGetTransactionHistoryResponse;
+          delete window.onGetTransactionHistoryError;
+          reject(new Error('get_transaction_history timed out'));
+        }, 10000);
+
         window.onGetTransactionHistoryResponse = (data: any) => {
+          clearTimeout(timeout);
           console.log("✅ Transaction history retrieved:", data);
           resolve(data);
           delete window.onGetTransactionHistoryResponse;
@@ -398,6 +505,7 @@ if (!window.hodosBrowser.wallet) {
         };
 
         window.onGetTransactionHistoryError = (error: string) => {
+          clearTimeout(timeout);
           console.error("❌ Transaction history error:", error);
           reject(new Error(error));
           delete window.onGetTransactionHistoryResponse;

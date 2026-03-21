@@ -468,9 +468,10 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
-            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
-            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 100,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 1000,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 30,
+            max_tx_per_session INTEGER NOT NULL DEFAULT 100,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -547,9 +548,10 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             user_id INTEGER NOT NULL,
             domain TEXT NOT NULL,
             trust_level TEXT NOT NULL DEFAULT 'unknown',
-            per_tx_limit_cents INTEGER NOT NULL DEFAULT 10,
-            per_session_limit_cents INTEGER NOT NULL DEFAULT 300,
-            rate_limit_per_min INTEGER NOT NULL DEFAULT 10,
+            per_tx_limit_cents INTEGER NOT NULL DEFAULT 100,
+            per_session_limit_cents INTEGER NOT NULL DEFAULT 1000,
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 30,
+            max_tx_per_session INTEGER NOT NULL DEFAULT 100,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -767,44 +769,49 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// V12: Add certificate publish tracking columns
-///
-/// Adds columns to track whether a certificate has been published to the BSV overlay:
-/// - `publish_status`: 'unpublished' (default), 'broadcast' (tx on-chain), 'published' (overlay confirmed)
-/// - `publish_txid`: Transaction ID of the PushDrop publishing transaction
-/// - `publish_vout`: Output index of the PushDrop output (typically 0)
+/// Migrate V11 → V12: Add max_tx_per_session to domain_permissions and settings;
+/// update default limit values to reflect production-ready settings.
 pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
-    info!("   Adding certificate publish tracking columns...");
+    info!("   Adding max_tx_per_session column and updating defaults...");
 
-    let cols: Vec<String> = {
-        let mut stmt = conn.prepare("PRAGMA table_info(certificates)")?;
+    // domain_permissions: add max_tx_per_session column
+    let dp_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(domain_permissions)")?;
         let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
             .collect();
         result
     };
 
-    if !cols.iter().any(|c| c == "publish_status") {
+    if !dp_cols.iter().any(|c| c == "max_tx_per_session") {
         conn.execute(
-            "ALTER TABLE certificates ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'unpublished'",
+            "ALTER TABLE domain_permissions ADD COLUMN max_tx_per_session INTEGER NOT NULL DEFAULT 100",
             [],
         )?;
     }
 
-    if !cols.iter().any(|c| c == "publish_txid") {
+    // settings: add default_max_tx_per_session column
+    let settings_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !settings_cols.iter().any(|c| c == "default_max_tx_per_session") {
         conn.execute(
-            "ALTER TABLE certificates ADD COLUMN publish_txid TEXT",
+            "ALTER TABLE settings ADD COLUMN default_max_tx_per_session INTEGER DEFAULT 100",
             [],
         )?;
     }
 
-    if !cols.iter().any(|c| c == "publish_vout") {
-        conn.execute(
-            "ALTER TABLE certificates ADD COLUMN publish_vout INTEGER DEFAULT 0",
-            [],
-        )?;
-    }
+    // Update existing settings row to use the new production defaults
+    conn.execute(
+        "UPDATE settings SET default_per_tx_limit_cents = 100, default_per_session_limit_cents = 1000, default_rate_limit_per_min = 30",
+        [],
+    )?;
 
-    info!("   ✅ V12 migration applied (certificate publish tracking)");
+    info!("   ✅ V12 migration applied (max_tx_per_session + updated defaults)");
     Ok(())
 }

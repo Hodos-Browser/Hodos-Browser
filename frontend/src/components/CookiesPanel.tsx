@@ -100,7 +100,6 @@ export function CookiesPanel() {
     loading,
     error,
     fetchAllCookies,
-    deleteCookie,
     deleteDomainCookies,
   } = useCookies();
 
@@ -264,34 +263,6 @@ export function CookiesPanel() {
     },
     [selectedCookie]
   );
-
-  // @ts-expect-error — Will be used when cookie detail panel is re-added
-  const handleDeleteSelected = useCallback(async () => {
-    if (!selectedCookie) return;
-    const cookieKey = `${selectedCookie.domain}:${selectedCookie.name}`;
-    setDeletingItems((prev) => new Set(prev).add(cookieKey));
-
-    try {
-      await deleteCookie(selectedCookie.url, selectedCookie.name);
-      setTimeout(() => {
-        setDeletingItems((prev) => {
-          const next = new Set(prev);
-          next.delete(cookieKey);
-          return next;
-        });
-      }, 300);
-      showToast(`Cookie deleted: ${selectedCookie.name}`);
-      setSelectedCookie(null);
-      setExpandedCookie(null);
-    } catch (err) {
-      setDeletingItems((prev) => {
-        const next = new Set(prev);
-        next.delete(cookieKey);
-        return next;
-      });
-      showToast('Failed to delete cookie');
-    }
-  }, [selectedCookie, deleteCookie, showToast]);
 
   const handleDomainDelete = useCallback(
     (e: React.MouseEvent, domain: string) => {

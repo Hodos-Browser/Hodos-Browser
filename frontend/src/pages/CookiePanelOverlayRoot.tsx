@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
-import { Box, IconButton, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import { CookiePanelOverlay } from '../components/CookiePanelOverlay';
+import { HodosButton } from '../components/HodosButton';
 
 /**
  * CookiePanelOverlayRoot - Right-side panel overlay for cookie management.
@@ -51,19 +52,9 @@ const CookiePanelOverlayRoot: React.FC = () => {
         <Typography variant="h6" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
           Cookie Management
         </Typography>
-        <IconButton
-          onClick={handleClose}
-          size="small"
-          sx={{
-            color: '#9ca3af',
-            '&:hover': {
-              color: '#f0f0f0',
-              backgroundColor: '#1f2937',
-            },
-          }}
-        >
-          <CloseIcon fontSize="small" />
-        </IconButton>
+        <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
+          <CloseIcon sx={{ fontSize: 16 }} />
+        </HodosButton>
       </Box>
 
       {/* Cookie panel content (compact, optimized for overlay) */}

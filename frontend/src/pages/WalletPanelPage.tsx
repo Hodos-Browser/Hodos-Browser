@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import WalletPanel from '../components/WalletPanel';
+import { HodosButton } from '../components/HodosButton';
 
 // Reusable 4-digit PIN input (4 boxes, password-masked, numeric-only)
 function PinInput({
@@ -715,28 +716,18 @@ export default function WalletPanelPage() {
         Your wallet will unlock automatically when you start the browser. The PIN is used to encrypt your keys and for sensitive operations.
       </p>
 
-      <button
+      <HodosButton
+        variant="secondary"
         onClick={() => {
           setPinStep(null);
           setPendingAction(null);
           setPinDigits(['', '', '', '']);
           setPinError(null);
         }}
-        style={{
-          background: 'transparent',
-          color: '#a67c00',
-          border: '2px solid #a67c00',
-          borderRadius: '8px',
-          padding: '8px 16px',
-          fontSize: '13px',
-          fontWeight: 600,
-          cursor: 'pointer',
-          width: '100%',
-          marginTop: '20px',
-        }}
+        style={{ width: '100%', marginTop: '20px' }}
       >
         Back
-      </button>
+      </HodosButton>
     </>
   );
 
@@ -756,7 +747,8 @@ export default function WalletPanelPage() {
         </p>
       )}
 
-      <button
+      <HodosButton
+        variant="secondary"
         onClick={() => {
           setPinStep('create');
           setPinDigits(['', '', '', '']);
@@ -764,21 +756,10 @@ export default function WalletPanelPage() {
           setPendingPin(null);
           setPinError(null);
         }}
-        style={{
-          background: 'transparent',
-          color: '#a67c00',
-          border: '2px solid #a67c00',
-          borderRadius: '8px',
-          padding: '8px 16px',
-          fontSize: '13px',
-          fontWeight: 600,
-          cursor: 'pointer',
-          width: '100%',
-          marginTop: '20px',
-        }}
+        style={{ width: '100%', marginTop: '20px' }}
       >
         Back
-      </button>
+      </HodosButton>
     </>
   );
 
@@ -791,7 +772,6 @@ export default function WalletPanelPage() {
       width: '380px',
       maxHeight: '80vh',
       overflow: 'auto',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.15)',
       border: '2px solid #a67c00',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -845,22 +825,13 @@ export default function WalletPanelPage() {
               </div>
             </div>
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleRecoveryComplete}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Continue to Wallet
-            </button>
+            </HodosButton>
           </>
         ) : showRecoveryInput ? (
           /* Recovery input form */
@@ -951,47 +922,29 @@ export default function WalletPanelPage() {
               </div>
             )}
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleStartRecover}
               disabled={recovering || recoveryWords.every(w => w.trim() === '')}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: recovering ? 'not-allowed' : 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-                opacity: (recovering || recoveryWords.every(w => w.trim() === '')) ? 0.7 : 1,
-              }}
+              loading={recovering}
+              loadingText="Recovering..."
+              style={{ width: '100%', marginBottom: '12px' }}
             >
-              {recovering ? 'Recovering...' : 'Recover Wallet'}
-            </button>
+              Recover Wallet
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => {
                 setShowRecoveryInput(false);
                 setRecoveryWords(Array(12).fill(''));
                 setRecoveryError(null);
               }}
               disabled={recovering}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: recovering ? 'not-allowed' : 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Back
-            </button>
+            </HodosButton>
           </>
         ) : importResult ? (
           /* Import success */
@@ -1024,22 +977,13 @@ export default function WalletPanelPage() {
               </div>
             </div>
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleImportComplete}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Continue to Wallet
-            </button>
+            </HodosButton>
           </>
         ) : showImportForm ? (
           /* Import from backup form */
@@ -1125,27 +1069,19 @@ export default function WalletPanelPage() {
               </div>
             )}
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleStartImport}
               disabled={importing || !importFile}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: importing ? 'not-allowed' : 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-                opacity: (importing || !importFile) ? 0.7 : 1,
-              }}
+              loading={importing}
+              loadingText="Importing..."
+              style={{ width: '100%', marginBottom: '12px' }}
             >
-              {importing ? 'Importing...' : 'Import Wallet'}
-            </button>
+              Import Wallet
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => {
                 setShowImportForm(false);
                 setImportPassword('');
@@ -1154,20 +1090,10 @@ export default function WalletPanelPage() {
                 setImportError(null);
               }}
               disabled={importing}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: importing ? 'not-allowed' : 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Back
-            </button>
+            </HodosButton>
           </>
         ) : centbeeResult ? (
           /* Centbee migration success */
@@ -1223,22 +1149,13 @@ export default function WalletPanelPage() {
               </p>
             </div>
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleCentbeeComplete}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Continue to Wallet
-            </button>
+            </HodosButton>
           </>
         ) : showCentbeeRecovery ? (
           /* Centbee recovery form */
@@ -1337,27 +1254,19 @@ export default function WalletPanelPage() {
               </div>
             )}
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleCentbeeRecover}
               disabled={centbeeRecovering || centbeeWords.every(w => w.trim() === '')}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: centbeeRecovering ? 'not-allowed' : 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-                opacity: (centbeeRecovering || centbeeWords.every(w => w.trim() === '')) ? 0.7 : 1,
-              }}
+              loading={centbeeRecovering}
+              loadingText="Recovering..."
+              style={{ width: '100%', marginBottom: '12px' }}
             >
-              {centbeeRecovering ? 'Recovering...' : 'Recover from Centbee'}
-            </button>
+              Recover from Centbee
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => {
                 setShowCentbeeRecovery(false);
                 setCentbeeWords(Array(12).fill(''));
@@ -1365,20 +1274,10 @@ export default function WalletPanelPage() {
                 setCentbeeError(null);
               }}
               disabled={centbeeRecovering}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: centbeeRecovering ? 'not-allowed' : 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Back
-            </button>
+            </HodosButton>
           </>
         ) : !mnemonic ? (
           /* Default: Create + Recover + Import + Centbee buttons */
@@ -1389,80 +1288,42 @@ export default function WalletPanelPage() {
               Create a new wallet to get started with Bitcoin SV.
             </p>
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleStartCreate}
               onMouseDown={() => console.log('[WalletPanel] Create button onMouseDown fired')}
               onMouseEnter={() => console.log('[WalletPanel] Create button onMouseEnter fired')}
               disabled={creating}
-              style={{
-                background: '#a67c00',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: creating ? 'not-allowed' : 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-                opacity: creating ? 0.7 : 1,
-              }}
+              loading={creating}
+              loadingText="Creating..."
+              style={{ width: '100%', marginBottom: '12px' }}
             >
-              {creating ? 'Creating...' : 'Create New Wallet'}
-            </button>
+              Create New Wallet
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => setShowRecoveryInput(true)}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-              }}
+              style={{ width: '100%', marginBottom: '12px' }}
             >
               Recover Existing Wallet
-            </button>
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => setShowImportForm(true)}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-                marginBottom: '12px',
-              }}
+              style={{ width: '100%', marginBottom: '12px' }}
             >
               Import from Backup
-            </button>
+            </HodosButton>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={() => setShowCentbeeRecovery(true)}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Recover from Centbee
-            </button>
+            </HodosButton>
           </>
         ) : (
           /* Mnemonic backup (after create) */
@@ -1513,23 +1374,13 @@ export default function WalletPanelPage() {
               ))}
             </div>
 
-            <button
+            <HodosButton
+              variant="secondary"
               onClick={handleCopyMnemonic}
-              style={{
-                background: 'transparent',
-                color: '#a67c00',
-                border: '2px solid #a67c00',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                marginBottom: '16px',
-                width: '100%',
-              }}
+              style={{ width: '100%', marginBottom: '16px' }}
             >
               {copied ? 'Copied!' : 'Copy to Clipboard'}
-            </button>
+            </HodosButton>
 
             <label style={{
               display: 'flex',
@@ -1550,26 +1401,18 @@ export default function WalletPanelPage() {
               I have backed up my mnemonic
             </label>
 
-            <button
+            <HodosButton
+              variant="primary"
               onClick={handleConfirmBackup}
               disabled={!backedUp}
-              style={{
-                background: backedUp ? '#a67c00' : '#2a2d35',
-                color: '#f5f5f5',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '12px 24px',
-                fontSize: '15px',
-                fontWeight: 600,
-                cursor: backedUp ? 'pointer' : 'not-allowed',
-                width: '100%',
-              }}
+              style={{ width: '100%' }}
             >
               Continue to Wallet
-            </button>
+            </HodosButton>
 
             {/* Cancel — safe here because wallet was just created, no funds possible */}
-            <button
+            <HodosButton
+              variant="ghost"
               onClick={() => {
                 if (cancelling) return;
                 setCancelling(true);
@@ -1585,24 +1428,13 @@ export default function WalletPanelPage() {
                   handleClose();
                 }, 150);
               }}
-              style={{
-                background: 'transparent',
-                color: '#6b7280',
-                border: '1px solid #2a2d35',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: cancelling ? 'default' : 'pointer',
-                marginTop: '12px',
-                width: '100%',
-                opacity: cancelling ? 0.5 : 1,
-                pointerEvents: cancelling ? 'none' as const : 'auto' as const,
-                transition: 'opacity 0.15s',
-              }}
+              disabled={cancelling}
+              loading={cancelling}
+              loadingText="Cancelling..."
+              style={{ width: '100%', marginTop: '12px' }}
             >
-              {cancelling ? 'Cancelling...' : 'Cancel'}
-            </button>
+              Cancel
+            </HodosButton>
           </>
         )}
       </div>
@@ -1650,7 +1482,6 @@ export default function WalletPanelPage() {
       width: '380px',
       padding: '32px 24px',
       textAlign: 'center',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>
@@ -1676,7 +1507,6 @@ export default function WalletPanelPage() {
       width: '380px',
       padding: '48px 24px',
       textAlign: 'center',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.15)',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>

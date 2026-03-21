@@ -5,8 +5,43 @@
     <link rel="icon" type="image/svg+xml" href="/Hodos_Gold_Icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hodos Browser</title>
+    <style>
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        background: #1a1a1a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #splash img {
+        width: 64px;
+        height: 64px;
+        animation: spin 2.2s linear infinite;
+      }
+      @keyframes spin {
+        from { transform: rotate(360deg); }
+        to { transform: rotate(0deg); }
+      }
+      #splash.fade-out {
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease-out;
+      }
+    </style>
   </head>
-  <body style="margin:0;background:#0f1117">
+  <body style="background:#1a1a1a">
+    <div id="splash">
+      <img src="/Hodos_Gold_Icon.svg" alt="" />
+    </div>
+    <script>
+      // Only show splash for main header view — overlays must be transparent
+      if (window.location.pathname !== '/' && window.location.pathname !== '') {
+        document.getElementById('splash').remove();
+        document.body.style.background = 'transparent';
+      }
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
