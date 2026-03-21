@@ -84,9 +84,11 @@ body[data-overlay="omnibox"] .MuiListItemButton-root {
   cursor: pointer !important;
 }
 
-/* Transparent background for overlay subprocesses */
-body[data-overlay="menu"],
-body[data-overlay="menu"] #root {
+/* Transparent background for overlay subprocesses.
+   The inline script in index.html sets body.style.background = 'transparent'
+   for all non-root routes. This CSS catch-all covers data-overlay cases too. */
+body[data-overlay],
+body[data-overlay] #root {
   background: transparent !important;
   background-color: transparent !important;
 }

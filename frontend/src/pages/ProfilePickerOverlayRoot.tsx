@@ -103,7 +103,6 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             height: '100%',
             bgcolor: '#1a1d23',
             borderRadius: '8px',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
             overflow: 'hidden',
             display: 'flex',
             flexDirection: 'column',

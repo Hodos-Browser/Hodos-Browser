@@ -724,7 +724,6 @@ export default function WalletPanelPage() {
       width: '380px',
       maxHeight: '80vh',
       overflow: 'auto',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.15)',
       border: '2px solid #a67c00',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -1435,7 +1434,6 @@ export default function WalletPanelPage() {
       width: '380px',
       padding: '32px 24px',
       textAlign: 'center',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>
@@ -1461,7 +1459,6 @@ export default function WalletPanelPage() {
       width: '380px',
       padding: '48px 24px',
       textAlign: 'center',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.15)',
       cursor: 'default',
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>
