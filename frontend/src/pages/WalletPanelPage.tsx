@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import WalletPanel from '../components/WalletPanel';
 import { HodosButton } from '../components/HodosButton';
 
@@ -85,15 +85,6 @@ export default function WalletPanelPage() {
     document.body.style.overflow = 'hidden';
     document.body.style.background = 'transparent';
     document.documentElement.style.background = 'transparent';
-  }, []);
-
-  // Read icon position from URL param (physical pixels, passed from toolbar click)
-  const paddingRightPx = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    const iro = parseInt(params.get('iro') || '0', 10);
-    if (iro <= 0) return 0;
-    const dpr = window.devicePixelRatio || 1;
-    return Math.round(iro / dpr);
   }, []);
 
   // Cache-first init: check exists from localStorage
@@ -228,13 +219,6 @@ export default function WalletPanelPage() {
       window.hodosBrowser.overlay.close();
     } else if (window.cefMessage?.send) {
       window.cefMessage.send('overlay_close', []);
-    }
-  };
-
-  const handleBackgroundClick = (e: React.MouseEvent) => {
-    console.log('[WalletPanel] Background click detected, target===currentTarget:', e.target === e.currentTarget, 'preventClose:', preventClose);
-    if (e.target === e.currentTarget && !preventClose) {
-      handleClose();
     }
   };
 
