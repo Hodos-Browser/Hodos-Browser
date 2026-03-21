@@ -475,9 +475,9 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               bsvPrice={bsvPrice}
             />
             <button
-              className="wallet-button-light send-button-light active"
+              className="submit-button"
               onClick={handleSendClick}
-              style={{ width: '100%', marginTop: 10 }}
+              style={{ margin: '10px 14px 14px', width: 'calc(100% - 28px)' }}
             >
               Close
             </button>

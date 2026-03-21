@@ -76,6 +76,10 @@ bool g_file_dialog_active = false;
 // Wallet close prevention — prevents overlay close during mnemonic display / PIN creation
 bool g_wallet_overlay_prevent_close = false;
 
+// Timestamp of last wallet hide — used to suppress toggle race condition
+// (WM_ACTIVATE hides wallet before toggle IPC arrives, causing re-open)
+ULONGLONG g_wallet_last_hide_tick = 0;
+
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
 HHOOK g_cookie_panel_mouse_hook = nullptr;
@@ -83,7 +87,6 @@ HHOOK g_download_panel_mouse_hook = nullptr;
 HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 HHOOK g_menu_mouse_hook = nullptr;
-HHOOK g_wallet_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -479,11 +482,6 @@ void ShutdownApplication() {
         g_settings_overlay_hwnd = nullptr;
     }
 
-    if (g_wallet_mouse_hook) {
-        UnhookWindowsHookEx(g_wallet_mouse_hook);
-        g_wallet_mouse_hook = nullptr;
-        LOG_INFO("Wallet mouse hook removed during shutdown");
-    }
     if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
         LOG_INFO("Destroying wallet overlay window...");
         DestroyWindow(g_wallet_overlay_hwnd);
@@ -1143,25 +1141,9 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-LRESULT CALLBACK WalletMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION) {
-        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
-            if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
-                if (g_wallet_overlay_prevent_close || g_file_dialog_active) {
-                    return CallNextHookEx(g_wallet_mouse_hook, nCode, wParam, lParam);
-                }
-                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
-                RECT overlayRect;
-                GetWindowRect(g_wallet_overlay_hwnd, &overlayRect);
-                if (!PtInRect(&overlayRect, mouseInfo->pt)) {
-                    LOG_DEBUG("Click detected outside wallet overlay bounds - dismissing");
-                    HideWalletOverlay();
-                }
-            }
-        }
-    }
-    return CallNextHookEx(g_wallet_mouse_hook, nCode, wParam, lParam);
-}
+// No mouse hook for wallet overlay — WM_ACTIVATE(WA_INACTIVE) handles click-outside
+// because wallet uses MA_ACTIVATE (takes focus). Mouse hooks add latency to all
+// mouse events system-wide and are only needed for MA_NOACTIVATE overlays.
 
 LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Get the wallet browser from the BrowserWindow* stored in GWLP_USERDATA.
@@ -1195,11 +1177,24 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
-            mouse_event.modifiers = 0;
+            mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
+            if (wallet_browser) {
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
             }
             return 0;
@@ -1212,13 +1207,25 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             CefMouseEvent mouse_event;
             mouse_event.x = pt.x;
             mouse_event.y = pt.y;
-            mouse_event.modifiers = 0;
+            mouse_event.modifiers = EVENTFLAG_RIGHT_MOUSE_BUTTON;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
+            }
+            return 0;
+        }
+
+        case WM_RBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+
+            CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
+            if (wallet_browser) {
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
-                LOG_DEBUG("🧠 Right-click sent to wallet overlay browser");
             }
             return 0;
         }

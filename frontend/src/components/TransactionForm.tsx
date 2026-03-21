@@ -383,7 +383,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 
         <button
           type="submit"
-          className="submit-button"
+          className={`submit-button${isSubmitting ? ' submitting' : ''}`}
           disabled={isSubmitting || isLoading || Object.keys(errors).length > 0}
         >
           {isSubmitting ? 'Sending...' : (isPaymail ? 'Send to Paymail' : isPeerPay ? 'Send via PeerPay' : 'Send Transaction')}

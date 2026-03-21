@@ -3464,11 +3464,17 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         extern HWND g_wallet_overlay_hwnd;
+        extern ULONGLONG g_wallet_last_hide_tick;
         if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
             if (IsWindowVisible(g_wallet_overlay_hwnd)) {
                 HideWalletOverlay();
             } else {
-                ShowWalletOverlay(0, GetOwnerWindow());
+                ULONGLONG elapsed = GetTickCount64() - g_wallet_last_hide_tick;
+                if (elapsed < 200) {
+                    LOG_DEBUG_BROWSER("Toggle suppressed — wallet hidden " + std::to_string(elapsed) + "ms ago (race)");
+                } else {
+                    ShowWalletOverlay(0, GetOwnerWindow());
+                }
             }
         } else {
             CreateWalletOverlay(g_hInstance, true, 0);
@@ -4040,11 +4046,20 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         extern HWND g_wallet_overlay_hwnd;
+        extern ULONGLONG g_wallet_last_hide_tick;
         if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd)) {
             if (IsWindowVisible(g_wallet_overlay_hwnd)) {
                 HideWalletOverlay();
             } else {
-                ShowWalletOverlay(iconRightOffset, GetOwnerWindow());
+                // Suppress toggle race: if the wallet was JUST hidden by WM_ACTIVATE
+                // (because this click stole focus from the wallet), don't re-open it.
+                // The hide and the IPC arrive within ~50ms of each other.
+                ULONGLONG elapsed = GetTickCount64() - g_wallet_last_hide_tick;
+                if (elapsed < 200) {
+                    LOG_DEBUG_BROWSER("Toggle suppressed — wallet hidden " + std::to_string(elapsed) + "ms ago (race)");
+                } else {
+                    ShowWalletOverlay(iconRightOffset, GetOwnerWindow());
+                }
             }
         } else {
             CreateWalletOverlay(g_hInstance, true, iconRightOffset);

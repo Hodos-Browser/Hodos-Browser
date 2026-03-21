@@ -412,6 +412,15 @@
   box-shadow: none;
 }
 
+.submit-button.submitting,
+.submit-button.submitting:disabled {
+  background: var(--wallet-gold-accent);
+  border-color: var(--wallet-gold-accent);
+  color: var(--wallet-primary);
+  cursor: wait;
+  box-shadow: 0 2px 8px var(--wallet-shadow);
+}
+
 /* Fee Presets */
 .fee-presets {
   display: flex;

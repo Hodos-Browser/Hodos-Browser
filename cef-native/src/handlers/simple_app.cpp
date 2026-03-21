@@ -783,23 +783,11 @@ void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRigh
         LOG_INFO_APP("Wallet overlay browser created with subprocess");
 
         if (showImmediately) {
-            // Install mouse hook and enable mouse input
-            extern HHOOK g_wallet_mouse_hook;
-            extern LRESULT CALLBACK WalletMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-            if (!g_wallet_mouse_hook) {
-                g_wallet_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, WalletMouseHookProc, nullptr, 0);
-                if (mainWin) mainWin->wallet_mouse_hook = g_wallet_mouse_hook;
-                if (g_wallet_mouse_hook) {
-                    LOG_INFO_APP("Wallet mouse hook installed");
-                }
-            }
-
             LONG exStyle = GetWindowLong(wallet_hwnd, GWL_EXSTYLE);
             SetWindowLong(wallet_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
-            // Wallet needs keyboard — activate and focus
+            // Single focus transfer
             SetForegroundWindow(wallet_hwnd);
-            SetFocus(wallet_hwnd);
         }
     } else {
         LOG_ERROR_APP("Failed to create wallet overlay browser");
@@ -825,18 +813,8 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
 
     LOG_INFO_APP("ShowWalletOverlay with iconRightOffset=" + std::to_string(g_wallet_icon_right_offset));
 
-    // Install global mouse hook for click-outside detection
-    extern HHOOK g_wallet_mouse_hook;
-    extern LRESULT CALLBACK WalletMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    if (!g_wallet_mouse_hook) {
-        g_wallet_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, WalletMouseHookProc, nullptr, 0);
-        if (mainWin) mainWin->wallet_mouse_hook = g_wallet_mouse_hook;
-        if (g_wallet_mouse_hook) {
-            LOG_INFO_APP("Wallet mouse hook installed");
-        } else {
-            LOG_WARNING_APP("Failed to install wallet mouse hook. Error: " + std::to_string(GetLastError()));
-        }
-    }
+    // No mouse hook needed — wallet uses MA_ACTIVATE so WM_ACTIVATE(WA_INACTIVE)
+    // handles click-outside detection. Mouse hooks add system-wide latency.
 
     // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
@@ -855,15 +833,6 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     int overlayX = mainRect.right - panelWidth;
     int overlayY = headerRect.bottom;
 
-    // Show and position — wallet needs activation for keyboard input
-    SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
-        overlayX, overlayY, panelWidth, panelHeight,
-        SWP_SHOWWINDOW);
-
-    // Remove WS_EX_TRANSPARENT to enable mouse input
-    LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
-    SetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-
     // Retarget overlay handler's window_id so IPC routes to the requesting window
     CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
     if (wallet_browser) {
@@ -879,17 +848,25 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
             SetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(walletOwnerWin));
         }
 
-        // Tell CEF the browser is visible again — this resets the compositor
-        // and triggers a full repaint. Must be called before SetFocus.
-        wallet_browser->GetHost()->WasHidden(false);
-
-        // Wallet needs keyboard — activate HWND and give CEF focus
-        SetForegroundWindow(g_wallet_overlay_hwnd);
-        SetFocus(g_wallet_overlay_hwnd);
-        wallet_browser->GetHost()->SetFocus(true);
-
-        // Trigger render update
+        // Compositor stays warm (we skip WasHidden(true) on hide), so just
+        // notify of any size change and the next paint is immediate.
         wallet_browser->GetHost()->WasResized();
+    }
+
+    // Position and show with SWP_NOACTIVATE first — no focus dance yet
+    SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    // Remove WS_EX_TRANSPARENT to enable mouse input
+    LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Single focus transfer — SetForegroundWindow handles both activation and focus
+    SetForegroundWindow(g_wallet_overlay_hwnd);
+
+    if (wallet_browser) {
+        wallet_browser->GetHost()->SetFocus(true);
         wallet_browser->GetHost()->Invalidate(PET_VIEW);
 
         // Push refresh signal to React — tells WalletPanelPage to re-fetch status/balance
@@ -900,11 +877,6 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
             std::to_string(g_peerpay_amount) + "},'*');";
         wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
     }
-
-    // NOTE: Do NOT set g_wallet_overlay_prevent_close = true here.
-    // On re-show, React is already loaded and has sent wallet_allow_close.
-    // Setting it true here would block click-outside permanently because
-    // React's useEffect won't re-fire (preventClose didn't change).
     // The flag is only set at CREATION time (before React loads).
 
     LOG_INFO_APP("Wallet overlay shown");
@@ -919,13 +891,9 @@ void HideWalletOverlay() {
 
     LOG_INFO_APP("Hiding wallet overlay");
 
-    // Remove global mouse hook
-    extern HHOOK g_wallet_mouse_hook;
-    if (g_wallet_mouse_hook) {
-        UnhookWindowsHookEx(g_wallet_mouse_hook);
-        g_wallet_mouse_hook = nullptr;
-        LOG_INFO_APP("Wallet mouse hook removed");
-    }
+    // Record hide timestamp for toggle race detection
+    extern ULONGLONG g_wallet_last_hide_tick;
+    g_wallet_last_hide_tick = GetTickCount64();
 
     // Tell React to reset UI state BEFORE hiding (so it's clean on next show)
     CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
@@ -934,9 +902,10 @@ void HideWalletOverlay() {
         wallet_browser->GetMainFrame()->ExecuteJavaScript(
             "window.postMessage({type:'wallet_hidden'},'*');", "", 0);
 
-        // Tell CEF the browser is hidden — stops compositor, saves resources
+        // Remove CEF focus but keep compositor warm — skipping WasHidden(true)
+        // means the next ShowWalletOverlay() is instant (no compositor rebuild).
+        // CPU cost is negligible since a hidden React page generates no paint events.
         wallet_browser->GetHost()->SetFocus(false);
-        wallet_browser->GetHost()->WasHidden(true);
 
         SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(wallet_browser->GetIdentifier());
         if (handler) walletTargetWinId = handler->GetWindowId();
