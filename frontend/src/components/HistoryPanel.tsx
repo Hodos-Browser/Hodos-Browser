@@ -7,10 +7,8 @@ import {
   ListItemText,
   ListItemButton,
   TextField,
-  IconButton,
   Typography,
   CircularProgress,
-  Button,
   Paper,
   Chip,
   Divider,
@@ -26,6 +24,7 @@ import {
   Pagination as MuiPagination
 } from '@mui/material';
 import { Delete, Clear, Search as SearchIcon } from '@mui/icons-material';
+import { HodosButton } from './HodosButton';
 
 type TimeRange = 'hour' | 'day' | 'week' | 'all';
 
@@ -195,15 +194,14 @@ export function HistoryPanel() {
               <MenuItem value="all">All time</MenuItem>
             </Select>
           </FormControl>
-          <Button
-            variant="outlined"
-            color="error"
-            startIcon={<Clear />}
-            onClick={handleClearClick}
+          <HodosButton
+            variant="danger"
             size="small"
+            onClick={handleClearClick}
           >
+            <Clear fontSize="small" style={{ marginRight: 4 }} />
             Clear {timeRange !== 'all' ? getTimeRangeLabel() : 'All'}
-          </Button>
+          </HodosButton>
         </Box>
       </Box>
 
@@ -278,15 +276,15 @@ export function HistoryPanel() {
                     '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
                   }}
                   secondaryAction={
-                    <IconButton
-                      edge="end"
-                      onClick={() => handleDelete(entry.url)}
+                    <HodosButton
+                      variant="icon"
                       size="small"
+                      onClick={() => handleDelete(entry.url)}
+                      aria-label="Delete this entry"
                       title="Delete this entry"
-                      sx={{ color: '#666', '&:hover': { color: '#e57373' } }}
                     >
                       <Delete fontSize="small" />
-                    </IconButton>
+                    </HodosButton>
                   }
                 >
                   <ListItemButton
@@ -374,14 +372,10 @@ export function HistoryPanel() {
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setConfirmClearOpen(false)}>Cancel</Button>
-          <Button
-            onClick={handleClearConfirm}
-            color="error"
-            variant="contained"
-          >
+          <HodosButton variant="secondary" size="small" onClick={() => setConfirmClearOpen(false)}>Cancel</HodosButton>
+          <HodosButton variant="danger" size="small" onClick={handleClearConfirm}>
             Clear History
-          </Button>
+          </HodosButton>
         </DialogActions>
       </Dialog>
     </Box>
