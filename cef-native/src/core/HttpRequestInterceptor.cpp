@@ -52,9 +52,10 @@ class DomainPermissionCache {
 public:
     struct Permission {
         std::string trustLevel;         // "blocked"|"unknown"|"approved"
-        int64_t perTxLimitCents = 10;
-        int64_t perSessionLimitCents = 300;
-        int64_t rateLimitPerMin = 10;
+        int64_t perTxLimitCents = 100;       // $1.00
+        int64_t perSessionLimitCents = 1000; // $10.00
+        int64_t rateLimitPerMin = 30;
+        int64_t maxTxPerSession = 100;       // max transactions per session
         bool adblockEnabled = true;     // Per-site ad blocking toggle (Sprint 8c)
     };
 
@@ -168,9 +169,10 @@ private:
         try {
             auto json = nlohmann::json::parse(responseBody);
             result.trustLevel = json.value("trustLevel", "unknown");
-            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)10);
-            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)300);
-            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)10);
+            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)100);
+            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)1000);
+            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)30);
+            result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("🔒 Failed to parse domain permission response: " + std::string(e.what()));
@@ -190,9 +192,10 @@ private:
         try {
             auto json = nlohmann::json::parse(resp.body);
             result.trustLevel = json.value("trustLevel", "unknown");
-            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)10);
-            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)300);
-            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)10);
+            result.perTxLimitCents = json.value("perTxLimitCents", (int64_t)100);
+            result.perSessionLimitCents = json.value("perSessionLimitCents", (int64_t)1000);
+            result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)30);
+            result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("Failed to parse domain permission response: " + std::string(e.what()));
@@ -1173,6 +1176,31 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 return true;
             }
 
+            // Session transaction count check — require confirmation if max tx count reached
+            int txCount = SessionManager::GetInstance().getPaymentCount(browserId, requestDomain_);
+            if (txCount >= perm.maxTxPerSession) {
+                LOG_DEBUG_HTTP("🔒 Session transaction count exceeded for " + requestDomain_ + " (" + std::to_string(txCount) + " >= " + std::to_string(perm.maxTxPerSession) + "), showing notification");
+                preCalculatedCents_ = cents;
+
+                std::string requestId = PendingRequestManager::GetInstance().addRequest(
+                    requestDomain_, method_, endpoint_, body_, this, "rate_limit_exceeded");
+
+                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                        + "&cents=" + std::to_string(cents)
+                                        + "&bsvPrice=" + std::to_string(bsvPrice)
+                                        + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                        + "&exceededLimit=session_tx_count"
+                                        + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
+                                        + "&txCount=" + std::to_string(txCount);
+
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", requestDomain_, extraParams));
+                postAuthTimeout(60000, "{\"error\":\"Session transaction count approval timeout\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
+            }
+
             // Check per-tx limit
             bool withinTxLimit = (cents <= perm.perTxLimitCents);
 
@@ -1183,13 +1211,16 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             LOG_DEBUG_HTTP("💰 Payment: " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
                 + " | tx_limit=" + std::to_string(perm.perTxLimitCents)
                 + " session_spent=" + std::to_string(sessionSpent)
-                + " session_limit=" + std::to_string(perm.perSessionLimitCents));
+                + " session_limit=" + std::to_string(perm.perSessionLimitCents)
+                + " tx_count=" + std::to_string(txCount)
+                + " max_tx_per_session=" + std::to_string(perm.maxTxPerSession));
 
             if (withinTxLimit && withinSessionLimit) {
                 // Auto-approve: within both limits
                 LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
                 preCalculatedCents_ = cents;
                 SessionManager::GetInstance().incrementRateCounter(browserId);
+                SessionManager::GetInstance().incrementPaymentCount(browserId);
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
                 return true;

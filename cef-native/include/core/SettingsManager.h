@@ -27,10 +27,11 @@ struct PrivacySettings {
 // Wallet settings (auto-approve, spending limits, PeerPay)
 struct WalletSettings {
     bool autoApproveEnabled = true;
-    int defaultPerTxLimitCents = 10;       // $0.10 per transaction
-    int defaultPerSessionLimitCents = 300;  // $3.00 per session
-    int defaultRateLimitPerMin = 10;
-    bool peerpayAutoAccept = true;         // Auto-accept incoming PeerPay payments
+    int defaultPerTxLimitCents = 100;        // $1.00 per transaction
+    int defaultPerSessionLimitCents = 1000;  // $10.00 per session
+    int defaultRateLimitPerMin = 30;
+    int defaultMaxTxPerSession = 100;        // max transactions per session
+    bool peerpayAutoAccept = true;           // Auto-accept incoming PeerPay payments
 };
 
 // JSON serialization
@@ -45,7 +46,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(WalletSettings,
     autoApproveEnabled, defaultPerTxLimitCents,
     defaultPerSessionLimitCents, defaultRateLimitPerMin,
-    peerpayAutoAccept)
+    defaultMaxTxPerSession, peerpayAutoAccept)
 
 class SettingsManager {
 public:
@@ -88,6 +89,7 @@ public:
     void SetDefaultPerTxLimitCents(int cents);
     void SetDefaultPerSessionLimitCents(int cents);
     void SetDefaultRateLimitPerMin(int rate);
+    void SetDefaultMaxTxPerSession(int maxTx);
     void SetPeerpayAutoAccept(bool enabled);
 
     // Bulk update from JSON (for IPC from frontend)
