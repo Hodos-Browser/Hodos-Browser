@@ -248,6 +248,7 @@ pub struct DomainPermission {
     pub per_tx_limit_cents: i64,        // USD cents per transaction
     pub per_session_limit_cents: i64,   // USD cents per browser session
     pub rate_limit_per_min: i64,
+    pub max_tx_per_session: i64,        // Maximum number of transactions per session
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -264,9 +265,10 @@ impl DomainPermission {
             user_id,
             domain: domain.to_string(),
             trust_level: "unknown".to_string(),
-            per_tx_limit_cents: 10,
-            per_session_limit_cents: 300,
-            rate_limit_per_min: 10,
+            per_tx_limit_cents: 100,
+            per_session_limit_cents: 1000,
+            rate_limit_per_min: 30,
+            max_tx_per_session: 100,
             created_at: now,
             updated_at: now,
         }

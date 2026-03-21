@@ -3837,15 +3837,18 @@ bool SimpleHandler::OnProcessMessageReceived(
                 int64_t perTxLimitCents = permData.value("perTxLimitCents", (int64_t)10);
                 int64_t perSessionLimitCents = permData.value("perSessionLimitCents", (int64_t)300);
                 int64_t rateLimitPerMin = permData.value("rateLimitPerMin", (int64_t)10);
+                int64_t maxTxPerSession = permData.value("maxTxPerSession", (int64_t)100);
 
                 LOG_DEBUG_BROWSER("🔐 Setting advanced domain permission - Domain: " + domain +
                     " tx=" + std::to_string(perTxLimitCents) +
                     " session=" + std::to_string(perSessionLimitCents) +
-                    " rate=" + std::to_string(rateLimitPerMin));
+                    " rate=" + std::to_string(rateLimitPerMin) +
+                    " maxTxPerSession=" + std::to_string(maxTxPerSession));
 
                 extern void addDomainPermissionAdvanced(const std::string& domain,
-                    int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin);
-                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin);
+                    int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin,
+                    int64_t maxTxPerSession);
+                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession);
             } catch (const std::exception& e) {
                 LOG_DEBUG_BROWSER("🔐 Error parsing advanced permission JSON: " + std::string(e.what()));
             }

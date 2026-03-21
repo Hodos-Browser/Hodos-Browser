@@ -68,6 +68,17 @@ button:focus-visible {
   }
 }
 
+/* Tab close button opacity — using CSS classes instead of inline style
+   so the parent's MUI sx hover rule can override */
+.tab-close-active {
+  opacity: 0.4;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+.tab-close-inactive {
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
 /* CEF browser-level cursor fix for omnibox overlay */
 body[data-overlay="omnibox"] * {
   cursor: default !important;

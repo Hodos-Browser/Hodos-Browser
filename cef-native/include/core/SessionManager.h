@@ -13,6 +13,7 @@ struct BrowserSession {
     std::string domain;
     int64_t spentCents = 0;              // USD cents spent this session
     int paymentRequestsThisMinute = 0;   // rate limit counter
+    int paymentCountThisSession = 0;     // total transaction count this session
     std::chrono::steady_clock::time_point minuteWindowStart;
 };
 
@@ -40,6 +41,25 @@ public:
 
     // Get current spent cents for a browser session
     int64_t getSpentCents(int browserId, const std::string& domain);
+
+    // Get total payment transaction count for a browser session
+    int getPaymentCount(int browserId, const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sessions_.find(browserId);
+        if (it != sessions_.end() && it->second.domain == domain) {
+            return it->second.paymentCountThisSession;
+        }
+        return 0;
+    }
+
+    // Increment total payment transaction count (call alongside incrementRateCounter)
+    void incrementPaymentCount(int browserId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sessions_.find(browserId);
+        if (it != sessions_.end()) {
+            it->second.paymentCountThisSession++;
+        }
+    }
 
 private:
     SessionManager() = default;

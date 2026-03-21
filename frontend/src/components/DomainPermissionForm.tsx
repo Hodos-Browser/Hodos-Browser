@@ -5,19 +5,21 @@ const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Rob
 
 const COLORS = {
   gold: '#a67c00',
-  textDark: '#111111',
-  textMuted: '#666666',
-  borderLight: '#d0d0d0',
-  white: '#ffffff',
-  warningBg: '#fef9e7',
-  warningBorder: '#e6a200',
-  warningText: '#8a6d3b',
+  textDark: '#f0f0f0',
+  textMuted: '#9ca3af',
+  borderLight: '#2a2d35',
+  white: '#1a1d23',
+  inputBg: '#111827',
+  warningBg: 'rgba(166, 124, 0, 0.1)',
+  warningBorder: '#a67c00',
+  warningText: '#e6a200',
 };
 
 export interface DomainPermissionSettings {
   perTxLimitCents: number;
   perSessionLimitCents: number;
   rateLimitPerMin: number;
+  maxTxPerSession: number;
 }
 
 interface DomainPermissionFormProps {
@@ -34,13 +36,16 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   onCancel,
 }) => {
   const [perTxUsd, setPerTxUsd] = useState(
-    currentSettings ? (currentSettings.perTxLimitCents / 100).toFixed(2) : '0.10'
+    currentSettings ? (currentSettings.perTxLimitCents / 100).toFixed(2) : '1.00'
   );
   const [perSessionUsd, setPerSessionUsd] = useState(
-    currentSettings ? (currentSettings.perSessionLimitCents / 100).toFixed(2) : '3.00'
+    currentSettings ? (currentSettings.perSessionLimitCents / 100).toFixed(2) : '10.00'
   );
   const [rateLimitPerMin, setRateLimitPerMin] = useState(
-    String(currentSettings?.rateLimitPerMin ?? 10)
+    String(currentSettings?.rateLimitPerMin ?? 30)
+  );
+  const [maxTxPerSession, setMaxTxPerSession] = useState(
+    String(currentSettings?.maxTxPerSession ?? 100)
   );
 
   const isAlwaysNotify = perTxUsd === '0' && perSessionUsd === '0';
@@ -54,12 +59,14 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   const handleAlwaysNotifyToggle = () => {
     if (isAlwaysNotify) {
       // Restore defaults
-      setPerTxUsd('0.10');
-      setPerSessionUsd('3.00');
+      setPerTxUsd('1.00');
+      setPerSessionUsd('10.00');
+      setMaxTxPerSession('100');
     } else {
       // Set everything to 0
       setPerTxUsd('0');
       setPerSessionUsd('0');
+      setMaxTxPerSession('0');
     }
   };
 
@@ -68,6 +75,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
       perTxLimitCents: perTxCents,
       perSessionLimitCents: perSessionCents,
       rateLimitPerMin: rateLimitNum,
+      maxTxPerSession: parseInt(maxTxPerSession) || 0,
     });
   };
 
@@ -80,7 +88,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
     fontFamily: FONT_FAMILY,
     textAlign: 'right',
     outline: 'none',
-    background: isAlwaysNotify ? '#f5f5f5' : COLORS.white,
+    background: isAlwaysNotify ? '#0f1117' : COLORS.inputBg,
     color: isAlwaysNotify ? COLORS.textMuted : COLORS.textDark,
   };
 
@@ -96,10 +104,16 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
     marginTop: '2px',
   };
 
+  const helpTextStyle: React.CSSProperties = {
+    color: '#6b7280',
+    fontSize: '12px',
+    marginTop: '4px',
+  };
+
   const rowStyle: React.CSSProperties = {
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     marginBottom: '14px',
   };
 
@@ -127,8 +141,8 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           width: '16px',
           height: '16px',
           borderRadius: '3px',
-          border: `1.5px solid ${isAlwaysNotify ? '#000000' : COLORS.borderLight}`,
-          background: isAlwaysNotify ? '#000000' : COLORS.white,
+          border: `1.5px solid ${isAlwaysNotify ? COLORS.gold : COLORS.borderLight}`,
+          background: isAlwaysNotify ? COLORS.gold : 'transparent',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -136,7 +150,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           transition: 'all 0.15s',
         }}>
           {isAlwaysNotify && (
-            <span style={{ color: COLORS.white, fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+            <span style={{ color: '#0f1117', fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
           )}
         </div>
         <div>
@@ -155,19 +169,22 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           <div style={labelStyle}>Per-transaction limit</div>
           <div style={descStyle}>Payments under this are auto-approved</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <span style={{ fontSize: '13px', color: COLORS.textMuted }}>$</span>
-          <input
-            type="text"
-            inputMode="decimal"
-            value={perTxUsd}
-            onChange={e => {
-              const v = e.target.value;
-              if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) setPerTxUsd(v);
-            }}
-            disabled={isAlwaysNotify}
-            style={inputStyle}
-          />
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={perTxUsd}
+              onChange={e => {
+                const v = e.target.value;
+                if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) setPerTxUsd(v);
+              }}
+              disabled={isAlwaysNotify}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+          </div>
+          <div style={helpTextStyle}>Max auto-approved for a single payment</div>
         </div>
       </div>
 
@@ -177,19 +194,22 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           <div style={labelStyle}>Per-session limit</div>
           <div style={descStyle}>Total spending before requiring approval</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <span style={{ fontSize: '13px', color: COLORS.textMuted }}>$</span>
-          <input
-            type="text"
-            inputMode="decimal"
-            value={perSessionUsd}
-            onChange={e => {
-              const v = e.target.value;
-              if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) setPerSessionUsd(v);
-            }}
-            disabled={isAlwaysNotify}
-            style={inputStyle}
-          />
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={perSessionUsd}
+              onChange={e => {
+                const v = e.target.value;
+                if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) setPerSessionUsd(v);
+              }}
+              disabled={isAlwaysNotify}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+          </div>
+          <div style={helpTextStyle}>Total spending allowed before prompting again</div>
         </div>
       </div>
 
@@ -199,16 +219,41 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           <div style={labelStyle}>Rate limit</div>
           <div style={descStyle}>Max payment requests per minute</div>
         </div>
-        <input
-          type="text"
-          inputMode="numeric"
-          value={rateLimitPerMin}
-          onChange={e => {
-            const v = e.target.value;
-            if (v === '' || /^\d+$/.test(v)) setRateLimitPerMin(v);
-          }}
-          style={{ ...inputStyle, width: '60px' }}
-        />
+        <div>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={rateLimitPerMin}
+            onChange={e => {
+              const v = e.target.value;
+              if (v === '' || /^\d+$/.test(v)) setRateLimitPerMin(v);
+            }}
+            style={{ ...inputStyle, width: '60px' }}
+          />
+          <div style={helpTextStyle}>Max payment requests per minute (safety limit)</div>
+        </div>
+      </div>
+
+      {/* Max transactions per session */}
+      <div style={rowStyle}>
+        <div>
+          <div style={labelStyle}>Max transactions per session</div>
+          <div style={descStyle}>Total payments allowed per session before prompting</div>
+        </div>
+        <div>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={maxTxPerSession}
+            onChange={e => {
+              const v = e.target.value;
+              if (v === '' || /^\d+$/.test(v)) setMaxTxPerSession(v);
+            }}
+            disabled={isAlwaysNotify}
+            style={{ ...inputStyle, width: '60px' }}
+          />
+          <div style={helpTextStyle}>Total payments allowed per session before prompting</div>
+        </div>
       </div>
 
       {/* Warning banner */}

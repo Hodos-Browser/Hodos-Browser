@@ -175,9 +175,10 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           {tab.title || 'New Tab'}
         </Typography>
 
-        {/* Close Button */}
+        {/* Close Button — opacity controlled via CSS class, not inline style,
+             so parent's sx hover rule ('& .tab-close-btn': { opacity: 1 }) can override it */}
         <HodosButton
-          className="tab-close-btn"
+          className={`tab-close-btn ${isActive ? 'tab-close-active' : 'tab-close-inactive'}`}
           variant="icon"
           size="small"
           onClick={onClose}
@@ -186,8 +187,6 @@ export const TabComponent: React.FC<TabComponentProps> = ({
             width: 16,
             height: 16,
             padding: 0,
-            opacity: isActive ? 0.4 : 0,
-            transition: 'opacity 0.15s ease, background-color 0.15s ease',
             flexShrink: 0,
           }}
         >
