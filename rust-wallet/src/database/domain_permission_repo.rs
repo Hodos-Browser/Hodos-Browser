@@ -34,7 +34,7 @@ impl<'a> DomainPermissionRepository<'a> {
     pub fn get_by_domain(&self, user_id: i64, domain: &str) -> Result<Option<DomainPermission>> {
         match self.conn.query_row(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                    rate_limit_per_min, created_at, updated_at
+                    rate_limit_per_min, max_tx_per_session, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 AND domain = ?2",
             params![user_id, domain],
             |row| Ok(DomainPermission {
@@ -45,8 +45,9 @@ impl<'a> DomainPermissionRepository<'a> {
                 per_tx_limit_cents: row.get(4)?,
                 per_session_limit_cents: row.get(5)?,
                 rate_limit_per_min: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                max_tx_per_session: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             }),
         ) {
             Ok(perm) => Ok(Some(perm)),
@@ -78,13 +79,15 @@ impl<'a> DomainPermissionRepository<'a> {
                     per_tx_limit_cents = ?2,
                     per_session_limit_cents = ?3,
                     rate_limit_per_min = ?4,
-                    updated_at = ?5
-                 WHERE id = ?6",
+                    max_tx_per_session = ?5,
+                    updated_at = ?6
+                 WHERE id = ?7",
                 params![
                     perm.trust_level,
                     perm.per_tx_limit_cents,
                     perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
+                    perm.max_tx_per_session,
                     now,
                     id,
                 ],
@@ -94,8 +97,8 @@ impl<'a> DomainPermissionRepository<'a> {
             self.conn.execute(
                 "INSERT INTO domain_permissions
                  (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                  rate_limit_per_min, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  rate_limit_per_min, max_tx_per_session, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     perm.user_id,
                     perm.domain,
@@ -103,6 +106,7 @@ impl<'a> DomainPermissionRepository<'a> {
                     perm.per_tx_limit_cents,
                     perm.per_session_limit_cents,
                     perm.rate_limit_per_min,
+                    perm.max_tx_per_session,
                     now,
                     now,
                 ],
@@ -125,7 +129,7 @@ impl<'a> DomainPermissionRepository<'a> {
     pub fn list_all(&self, user_id: i64) -> Result<Vec<DomainPermission>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
-                    rate_limit_per_min, created_at, updated_at
+                    rate_limit_per_min, max_tx_per_session, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 ORDER BY domain"
         )?;
         let rows = stmt.query_map(params![user_id], |row| Ok(DomainPermission {
@@ -136,8 +140,9 @@ impl<'a> DomainPermissionRepository<'a> {
             per_tx_limit_cents: row.get(4)?,
             per_session_limit_cents: row.get(5)?,
             rate_limit_per_min: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            max_tx_per_session: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         }))?.collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -149,12 +154,12 @@ impl<'a> DomainPermissionRepository<'a> {
     }
 
     /// Reset all domain permissions to the given limits
-    pub fn reset_all_limits(&self, user_id: i64, per_tx: i64, per_session: i64, rate: i64) -> Result<usize> {
+    pub fn reset_all_limits(&self, user_id: i64, per_tx: i64, per_session: i64, rate: i64, max_tx_per_session: i64) -> Result<usize> {
         let now = unix_now();
         let count = self.conn.execute(
             "UPDATE domain_permissions SET per_tx_limit_cents = ?1, per_session_limit_cents = ?2,
-             rate_limit_per_min = ?3, updated_at = ?4 WHERE user_id = ?5",
-            params![per_tx, per_session, rate, now, user_id],
+             rate_limit_per_min = ?3, max_tx_per_session = ?4, updated_at = ?5 WHERE user_id = ?6",
+            params![per_tx, per_session, rate, max_tx_per_session, now, user_id],
         )?;
         Ok(count)
     }
