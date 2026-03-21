@@ -6,13 +6,11 @@ import {
   List,
   ListItem,
   ListItemText,
-  IconButton,
   Chip,
   Divider,
   InputAdornment,
   Tabs,
   Tab,
-  Button,
   Snackbar,
   Alert,
 } from '@mui/material';
@@ -22,6 +20,7 @@ import {
   CheckCircle as CheckCircleIcon,
   DeleteSweep,
 } from '@mui/icons-material';
+import { HodosButton } from './HodosButton';
 import { useCookies } from '../hooks/useCookies';
 import { useCookieBlocking } from '../hooks/useCookieBlocking';
 
@@ -166,21 +165,24 @@ export function CookiePanelOverlay() {
                       }}
                       secondaryAction={
                         <Box>
-                          <IconButton
+                          <HodosButton
+                            variant="icon"
                             size="small"
                             onClick={() => isBlocked ? handleUnblockDomain(group.domain) : handleBlockDomain(group.domain)}
-                            color={isBlocked ? 'success' : 'error'}
+                            aria-label={isBlocked ? 'Unblock domain' : 'Block domain'}
                             title={isBlocked ? 'Unblock domain' : 'Block domain'}
                           >
                             {isBlocked ? <CheckCircleIcon fontSize="small" /> : <BlockIcon fontSize="small" />}
-                          </IconButton>
-                          <IconButton
+                          </HodosButton>
+                          <HodosButton
+                            variant="icon"
                             size="small"
                             onClick={() => handleDeleteDomain(group.domain)}
+                            aria-label="Delete all cookies from domain"
                             title="Delete all cookies from domain"
                           >
                             <DeleteSweep fontSize="small" />
-                          </IconButton>
+                          </HodosButton>
                         </Box>
                       }
                     >
@@ -223,14 +225,15 @@ export function CookiePanelOverlay() {
                 <Box key={blocked.domain}>
                   <ListItem
                     secondaryAction={
-                      <IconButton
+                      <HodosButton
+                        variant="icon"
                         size="small"
                         onClick={() => handleUnblockDomain(blocked.domain)}
-                        color="success"
+                        aria-label="Unblock domain"
                         title="Unblock domain"
                       >
                         <CheckCircleIcon fontSize="small" />
-                      </IconButton>
+                      </HodosButton>
                     }
                   >
                     <ListItemText
@@ -262,14 +265,15 @@ export function CookiePanelOverlay() {
       {activeTab === 2 && (
         <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
           <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', flexShrink: 0 }}>
-            <Button
+            <HodosButton
+              variant="secondary"
               size="small"
-              startIcon={<DeleteSweep />}
               onClick={handleClearBlockLog}
               disabled={blockLog.length === 0}
             >
+              <DeleteSweep fontSize="small" style={{ marginRight: 4 }} />
               Clear Log
-            </Button>
+            </HodosButton>
           </Box>
 
           <List sx={{ flex: 1, overflow: 'auto', py: 0 }}>
