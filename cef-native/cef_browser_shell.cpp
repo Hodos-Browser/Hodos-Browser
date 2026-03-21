@@ -2732,7 +2732,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     FingerprintProtection::GetInstance().Initialize();
     // Load per-site fingerprint overrides from fingerprint_settings.json
     FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
-    LOG_INFO("Fingerprint protection initialized");
+    // Sync global toggle from persisted settings
+    FingerprintProtection::GetInstance().SetEnabled(
+        SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);
+    LOG_INFO("Fingerprint protection initialized (enabled=" +
+        std::string(SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection ? "true" : "false") + ")");
 
     // Each profile instance needs its own root to avoid CEF SingletonLock conflicts
     // root_cache_path = profile dir, cache_path = profile dir + /cache (must be child of root)
