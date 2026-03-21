@@ -56,7 +56,7 @@ temp/
 temp/cef-binaries
 cef-native/win_build_run.sh
 docs/
-
+.superpowers/
 # Release packaging artifacts
 /staging/
 /installer/Output/
