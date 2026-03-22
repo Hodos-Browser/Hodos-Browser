@@ -719,6 +719,64 @@ impl WalletDatabase {
             info!("   ✅ Schema V13 applied");
         }
 
+        // Startup repair: V12 migration may have recorded version but failed to add columns
+        // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
+        // Re-run the column checks unconditionally to patch any inconsistent DBs.
+        let has_max_tx = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(domain_permissions)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "max_tx_per_session")
+        };
+        if !has_max_tx {
+            info!("   Repair: adding missing max_tx_per_session to domain_permissions");
+            self.conn.execute(
+                "ALTER TABLE domain_permissions ADD COLUMN max_tx_per_session INTEGER NOT NULL DEFAULT 100", [])?;
+        }
+        let has_default_max_tx = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(settings)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "default_max_tx_per_session")
+        };
+        if !has_default_max_tx {
+            info!("   Repair: adding missing default_max_tx_per_session to settings");
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN default_max_tx_per_session INTEGER DEFAULT 100", [])?;
+        }
+
+        // Repair: certificate publish columns (our old V12) lost during staging merge
+        let has_publish_status = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(certificates)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "publish_status")
+        };
+        if !has_publish_status {
+            info!("   Repair: adding missing publish columns to certificates");
+            self.conn.execute(
+                "ALTER TABLE certificates ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'unpublished'", [])?;
+            self.conn.execute(
+                "ALTER TABLE certificates ADD COLUMN publish_txid TEXT", [])?;
+            self.conn.execute(
+                "ALTER TABLE certificates ADD COLUMN publish_vout INTEGER", [])?;
+        }
+
+        // Repair: V13 recipient columns on transactions
+        let has_recipient = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(transactions)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "recipient")
+        };
+        if !has_recipient {
+            info!("   Repair: adding missing recipient columns to transactions");
+            self.conn.execute(
+                "ALTER TABLE transactions ADD COLUMN recipient TEXT", [])?;
+            self.conn.execute(
+                "ALTER TABLE transactions ADD COLUMN recipient_name TEXT", [])?;
+        }
+
         Ok(())
     }
 

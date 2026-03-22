@@ -4535,24 +4535,30 @@ async fn unpublish_certificate_core(
         match db.connection().execute(
             "INSERT OR IGNORE INTO transactions (
                 user_id, txid, status, reference_number,
-                description, raw_tx, created_at, updated_at
-            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, ?6, ?7)",
+                description, raw_tx, is_outgoing, satoshis,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
             rusqlite::params![
                 1i64, // user_id
                 txid,
                 format!("unpublish-{}", &txid[..8]),
                 "Unpublish identity certificate",
                 raw_tx_bytes,
+                total_in as i64, // satoshis (total input value)
                 now, now,
             ],
         ) {
-            Ok(_) => {
+            Ok(rows) if rows > 0 => {
                 let id = db.connection().last_insert_rowid();
                 log::info!("   💾 Created transaction record for unpublish tx {} (id: {})", &txid[..16], id);
                 Some(id)
             }
+            Ok(_) => {
+                log::error!("   ❌ INSERT OR IGNORE inserted 0 rows for unpublish tx {} — possible duplicate or constraint violation", &txid[..16]);
+                None
+            }
             Err(e) => {
-                log::warn!("   ⚠️  Failed to create transaction record: {}", e);
+                log::error!("   ❌ Failed to create transaction record: {}", e);
                 None
             }
         }
@@ -4758,14 +4764,15 @@ pub async fn admin_prepare_unpublish(
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
             let _ = db.connection().execute(
                 "INSERT OR IGNORE INTO transactions (
-                    user_id, txid, new_status, reference_number,
-                    description, raw_tx, created_at, updated_at
-                ) VALUES (?1, ?2, 'completed', ?3, ?4, ?5, ?6, ?7)",
+                    user_id, txid, status, reference_number,
+                    description, raw_tx, is_outgoing, satoshis,
+                    created_at, updated_at
+                ) VALUES (?1, ?2, 'completed', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
                 rusqlite::params![
                     state.current_user_id, txid,
                     format!("admin-{}", &txid[..8]),
                     "Identity certificate publish (admin-prepared)",
-                    tx_bytes, now, now,
+                    tx_bytes, token_output.value as i64, now, now,
                 ],
             );
             steps.push("transactions: created".into());
