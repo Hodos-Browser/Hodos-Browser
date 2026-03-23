@@ -15,7 +15,7 @@ adblock = { version = "=0.10.3", default-features = false, features = [
     "full-regex-handling",
     "resource-assembler",
 ] }
-rmp = "=0.8.14"  # Pin for rmp-serde 0.15 compat (required by adblock 0.10.x)
+rmp = "=0.8.15"  # Pin for rmp-serde 0.15 compat (required by adblock 0.10.x)
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
