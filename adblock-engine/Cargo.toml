@@ -10,7 +10,7 @@ actix-web = "=4.11.0"
 # Ad & tracker blocking engine (Brave's adblock-rust)
 # Pinned to 0.10.3: last version compatible with stable Rust 1.85 (0.10.4+ needs unstable unsigned_is_multiple_of)
 # default-features = false disables "unsync-regex-caching" — enables Send+Sync for RwLock<Engine>
-adblock = { version = "=0.10.3", default-features = false, features = [
+adblock = { version = "=0.12.1", default-features = false, features = [
     "embedded-domain-resolver",
     "full-regex-handling",
     "resource-assembler",
