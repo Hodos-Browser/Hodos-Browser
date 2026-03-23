@@ -59,27 +59,23 @@ jobs:
       
       # Download CEF binaries from the cef-binaries release
       - name: Download CEF binaries
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Write-Host "Downloading CEF binaries..."
-          $cefUrl = "https://github.com/${{ github.repository }}/releases/download/cef-binaries/cef-binaries-windows.zip"
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
-          Invoke-WebRequest -Uri $cefUrl -OutFile cef-binaries.zip -Headers $headers
-          
-          Write-Host "Extracting CEF binaries..."
-          Expand-Archive -Path cef-binaries.zip -DestinationPath . -Force
-          Remove-Item cef-binaries.zip
-          
-          # Verify extraction
+          gh release download cef-binaries --pattern "cef-binaries-windows.zip" --repo ${{ github.repository }}
+
+          echo "Extracting CEF binaries..."
+          7z x cef-binaries-windows.zip -y
+          del cef-binaries-windows.zip
+
           if (Test-Path "cef-binaries") {
-            Write-Host "CEF binaries extracted successfully"
-            Get-ChildItem cef-binaries | Select-Object Name
+            echo "CEF binaries extracted successfully"
+            dir cef-binaries
           } else {
-            Write-Host "ERROR: cef-binaries folder not found after extraction"
+            echo "ERROR: cef-binaries folder not found after extraction"
             exit 1
           }
+        shell: pwsh
       
       # Set up build tools
       - name: Set up MSVC
