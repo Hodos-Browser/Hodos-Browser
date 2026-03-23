@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # HTTP server (pinned to 4.11 — 4.13+ requires Rust 1.88)
-actix-web = "=4.11.0"
+actix-web = "=4.13.0"
 
 # Ad & tracker blocking engine (Brave's adblock-rust)
 # Pinned to 0.10.3: last version compatible with stable Rust 1.85 (0.10.4+ needs unstable unsigned_is_multiple_of)
