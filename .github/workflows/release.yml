@@ -102,12 +102,18 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
       
+      # Install C++ dependencies via vcpkg
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          vcpkg install nlohmann-json:x64-windows-static sqlite3:x64-windows-static
+
       # Configure CMake (needed before build script)
       - name: Configure CMake
         shell: pwsh
         run: |
           cd cef-native
-          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
       
       # Run the existing build script (created by your dev)
       - name: Build with release script
