@@ -278,26 +278,34 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
 
-          # Check where helpers ended up
           cd build/bin
-          echo "=== Build output structure ==="
-          find . -maxdepth 5 -name "HodosBrowser Helper*" -type d 2>/dev/null | head -20
 
-          # Copy helpers into app Frameworks if they're not already there
-          if [ ! -d "HodosBrowserShell.app/Contents/Frameworks/HodosBrowser Helper.app" ]; then
-            echo "Copying helpers into Frameworks..."
-            mkdir -p "HodosBrowserShell.app/Contents/Frameworks/"
-            for helper in "HodosBrowser Helper"*.app; do
-              if [ -d "$helper" ] && [[ "$helper" != *"HodosBrowserShell.app"* ]]; then
-                cp -r "$helper" "HodosBrowserShell.app/Contents/Frameworks/"
-              fi
-            done
-          else
-            echo "Helpers already in Frameworks"
+          echo "=== Full app bundle structure ==="
+          find HodosBrowserShell.app -type d | head -40
+
+          # Fix double-nested Contents/Contents issue from CMake
+          if [ -d "HodosBrowserShell.app/Contents/Contents" ]; then
+            echo "Found double-nested Contents — fixing..."
+            # Move everything from Contents/Contents/Frameworks to Contents/Frameworks
+            if [ -d "HodosBrowserShell.app/Contents/Contents/Frameworks" ]; then
+              mkdir -p "HodosBrowserShell.app/Contents/Frameworks"
+              cp -r HodosBrowserShell.app/Contents/Contents/Frameworks/* "HodosBrowserShell.app/Contents/Frameworks/" 2>/dev/null || true
+              rm -rf "HodosBrowserShell.app/Contents/Contents"
+            fi
           fi
 
-          echo "=== Final Frameworks contents ==="
+          # Also copy standalone helpers from build/bin into Frameworks
+          for helper in "HodosBrowser Helper"*.app; do
+            if [ -d "$helper" ] && [[ "$helper" != *"HodosBrowserShell.app"* ]]; then
+              echo "Copying standalone helper: $helper"
+              cp -r "$helper" "HodosBrowserShell.app/Contents/Frameworks/"
+            fi
+          done
+
+          echo "=== Fixed Frameworks contents ==="
           ls -la "HodosBrowserShell.app/Contents/Frameworks/" 2>/dev/null || echo "No Frameworks dir"
+          echo "=== Verify no double Contents ==="
+          find HodosBrowserShell.app -path "*/Contents/Contents*" -type d | head -5 || echo "Clean — no double nesting"
 
       # Copy Rust binaries and frontend into app bundle
       - name: Assemble app bundle
