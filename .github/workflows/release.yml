@@ -278,9 +278,26 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
 
-          # Copy helper bundles into app
+          # Check where helpers ended up
           cd build/bin
-          cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/Frameworks/ 2>/dev/null || true
+          echo "=== Build output structure ==="
+          find . -maxdepth 5 -name "HodosBrowser Helper*" -type d 2>/dev/null | head -20
+
+          # Copy helpers into app Frameworks if they're not already there
+          if [ ! -d "HodosBrowserShell.app/Contents/Frameworks/HodosBrowser Helper.app" ]; then
+            echo "Copying helpers into Frameworks..."
+            mkdir -p "HodosBrowserShell.app/Contents/Frameworks/"
+            for helper in "HodosBrowser Helper"*.app; do
+              if [ -d "$helper" ] && [[ "$helper" != *"HodosBrowserShell.app"* ]]; then
+                cp -r "$helper" "HodosBrowserShell.app/Contents/Frameworks/"
+              fi
+            done
+          else
+            echo "Helpers already in Frameworks"
+          fi
+
+          echo "=== Final Frameworks contents ==="
+          ls -la "HodosBrowserShell.app/Contents/Frameworks/" 2>/dev/null || echo "No Frameworks dir"
 
       # Copy Rust binaries and frontend into app bundle
       - name: Assemble app bundle
@@ -294,6 +311,10 @@ jobs:
           # Copy frontend into Resources/frontend/
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
+
+          # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
+          echo "App bundle structure:"
+          find "cef-native/build/bin/HodosBrowserShell.app" -maxdepth 4 -type d | head -30
 
       # Import signing certificate
       - name: Import code signing certificate
@@ -324,29 +345,42 @@ jobs:
           APP="cef-native/build/bin/HodosBrowserShell.app"
           ENTITLEMENTS="cef-native/mac/entitlements.plist"
           IDENTITY="Developer ID Application: Matthew Archbold"
+          CODESIGN="codesign --force --timestamp --options runtime --sign"
 
-          # Sign frameworks and helpers first (inside out)
-          codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" \
-            "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" || true
+          # 1. Sign all dylibs inside CEF framework individually
+          find "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" -name "*.dylib" -type f | while read dylib; do
+            echo "Signing dylib: $dylib"
+            $CODESIGN "$IDENTITY" "$dylib"
+          done
 
-          # Sign each helper with entitlements
+          # 2. Sign the CEF framework itself
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" \
+            "$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
+
+          # 3. Sign each helper — executable first, then bundle
           for helper in "$APP/Contents/Frameworks/HodosBrowser Helper"*.app; do
             if [ -d "$helper" ]; then
-              codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$helper"
+              helper_exec="$helper/Contents/MacOS/$(basename "$helper" .app)"
+              if [ -f "$helper_exec" ]; then
+                echo "Signing helper exec: $helper_exec"
+                $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$helper_exec"
+              fi
+              echo "Signing helper bundle: $helper"
+              $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$helper"
             fi
           done
 
-          # Sign Rust binaries
-          codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
-          codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
+          # 4. Sign Rust binaries
+          $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
+          $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # Sign main executable with entitlements
-          codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP/Contents/MacOS/HodosBrowserShell"
+          # 5. Sign main executable
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
-          # Sign the whole bundle
-          codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+          # 6. Sign the whole bundle (no --deep, we already signed everything)
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
-          # Verify
+          # 7. Verify
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       # Notarize
