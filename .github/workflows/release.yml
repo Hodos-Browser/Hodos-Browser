@@ -412,7 +412,7 @@ jobs:
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 600 2>&1) || true
+            --wait --timeout 1800 2>&1) || true
 
           echo "$SUBMIT_OUTPUT"
 
