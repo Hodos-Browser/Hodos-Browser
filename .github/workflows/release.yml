@@ -322,27 +322,29 @@ jobs:
       - name: Sign app bundle
         run: |
           APP="cef-native/build/bin/HodosBrowserShell.app"
+          ENTITLEMENTS="cef-native/mac/entitlements.plist"
+          IDENTITY="Developer ID Application: Matthew Archbold"
 
           # Sign frameworks and helpers first (inside out)
-          codesign --force --options runtime --sign "Developer ID Application: Matthew Archbold" \
+          codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" \
             "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" || true
 
-          # Sign each helper
+          # Sign each helper with entitlements
           for helper in "$APP/Contents/Frameworks/HodosBrowser Helper"*.app; do
             if [ -d "$helper" ]; then
-              codesign --force --options runtime --sign "Developer ID Application: Matthew Archbold" "$helper"
+              codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$helper"
             fi
           done
 
           # Sign Rust binaries
-          codesign --force --options runtime --sign "Developer ID Application: Matthew Archbold" "$APP/Contents/MacOS/hodos-wallet"
-          codesign --force --options runtime --sign "Developer ID Application: Matthew Archbold" "$APP/Contents/MacOS/hodos-adblock"
+          codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
+          codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # Sign main executable
-          codesign --force --options runtime --sign "Developer ID Application: Matthew Archbold" "$APP/Contents/MacOS/HodosBrowserShell"
+          # Sign main executable with entitlements
+          codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP/Contents/MacOS/HodosBrowserShell"
 
           # Sign the whole bundle
-          codesign --force --deep --options runtime --sign "Developer ID Application: Matthew Archbold" "$APP"
+          codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 
           # Verify
           codesign --verify --deep --strict --verbose=2 "$APP"
@@ -363,12 +365,30 @@ jobs:
           # Create zip for notarization
           ditto -c -k --keepParent "$APP" HodosBrowser-notarize.zip
 
-          # Submit for notarization
-          xcrun notarytool submit HodosBrowser-notarize.zip \
+          # Submit for notarization and capture output
+          SUBMIT_OUTPUT=$(xcrun notarytool submit HodosBrowser-notarize.zip \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 600
+            --wait --timeout 600 2>&1) || true
+
+          echo "$SUBMIT_OUTPUT"
+
+          # Extract submission ID
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+
+          # Check if it succeeded
+          if echo "$SUBMIT_OUTPUT" | grep -q "status: Accepted"; then
+            echo "Notarization accepted!"
+          else
+            echo "Notarization failed. Fetching detailed log..."
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" developer_log.json 2>/dev/null || true
+            cat developer_log.json 2>/dev/null || true
+            exit 1
+          fi
 
           # Staple the ticket
           xcrun stapler staple "$APP"
