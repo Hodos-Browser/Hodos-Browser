@@ -412,7 +412,7 @@ jobs:
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 900 2>&1 || echo "Notarization timed out or failed — continuing with signed-only build"
+            --wait --timeout 3600 2>&1 || echo "Notarization timed out or failed — continuing with signed-only build"
 
           # Try to staple (works if notarization completed, no-op if not)
           xcrun stapler staple "$APP" 2>/dev/null || echo "Stapling skipped — notarization may still be processing"
