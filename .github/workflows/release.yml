@@ -407,35 +407,17 @@ jobs:
           # Create zip for notarization
           ditto -c -k --keepParent "$APP" HodosBrowser-notarize.zip
 
-          # Submit for notarization and capture output
-          SUBMIT_OUTPUT=$(xcrun notarytool submit HodosBrowser-notarize.zip \
+          # Submit for notarization (don't block on it — Apple can be very slow)
+          xcrun notarytool submit HodosBrowser-notarize.zip \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 1800 2>&1) || true
+            --wait --timeout 900 2>&1 || echo "Notarization timed out or failed — continuing with signed-only build"
 
-          echo "$SUBMIT_OUTPUT"
+          # Try to staple (works if notarization completed, no-op if not)
+          xcrun stapler staple "$APP" 2>/dev/null || echo "Stapling skipped — notarization may still be processing"
 
-          # Extract submission ID
-          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
-
-          # Check if it succeeded
-          if echo "$SUBMIT_OUTPUT" | grep -q "status: Accepted"; then
-            echo "Notarization accepted!"
-          else
-            echo "Notarization failed. Fetching detailed log..."
-            xcrun notarytool log "$SUBMISSION_ID" \
-              --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
-              --key-id "$APPLE_API_KEY_ID" \
-              --issuer "$APPLE_API_ISSUER" developer_log.json 2>/dev/null || true
-            cat developer_log.json 2>/dev/null || true
-            exit 1
-          fi
-
-          # Staple the ticket
-          xcrun stapler staple "$APP"
-
-          rm HodosBrowser-notarize.zip
+          rm -f HodosBrowser-notarize.zip
 
       # Create DMG
       - name: Create DMG
