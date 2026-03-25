@@ -1,8 +1,39 @@
 # Hodos Browser — Build & Release Guide
 
 **Created:** 2026-03-20
-**Priority:** 🔴 MVP
+**Last Updated:** 2026-03-24
 **Purpose:** How to build installers, sign code, ship updates, and manage releases
+
+---
+
+## Current Status (2026-03-24)
+
+**First beta release shipped: `v0.1.0-beta.1`**
+
+| Component | Status |
+|-----------|--------|
+| Windows installer (Inno Setup) | WORKING — signed with Azure Artifact Signing |
+| Windows portable zip | WORKING |
+| macOS DMG | WORKING — signed, notarization pending (Apple slow) |
+| GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
+| Website (hodosbrowser.com) | LIVE — download links active |
+| Auto-update (WinSparkle/Sparkle) | NOT STARTED — next priority |
+
+### How to Release a New Version
+
+```bash
+# 1. Commit and push changes
+git push origin main
+git push release main
+
+# 2. Tag and push (triggers CI build)
+git tag v0.1.0-beta.2
+git push release v0.1.0-beta.2
+
+# 3. Wait ~35 min, then go to GitHub Releases
+# 4. Review draft release, click Publish
+# 5. Update website download links if needed
+```
 
 ---
 
@@ -10,43 +41,39 @@
 
 | Item | Value |
 |------|-------|
-| Version format | MAJOR.MINOR.PATCH (semver) |
-| Git tag format | `v1.0.0` |
-| GitHub org | `hodos-browser` |
-| Appcast URL | `https://hodosbrowser.com/appcast.xml` |
+| Version format | MAJOR.MINOR.PATCH-prerelease (semver) |
+| Git tag format | `v0.1.0-beta.1`, `v1.0.0` |
+| GitHub org | `Hodos-Browser` |
+| Main repo | `Hodos-Browser/Hodos-Browser` (public) |
+| Website repo | `Hodos-Browser/hodosbrowser.com` |
+| Website URL | `https://hodosbrowser.com` |
+| Appcast URL | `https://hodosbrowser.com/appcast.xml` (not yet implemented) |
 
 ---
 
 ## 1. Prerequisites & Costs
 
-### 1.1 Required Purchases
+### 1.1 Purchases Made
 
-| Item | Cost | Vendor | Priority | Status |
-|------|------|--------|----------|--------|
-| Windows Code Signing | See §1.2 | See §1.2 | 🔴 Required | ⬜ TODO |
-| Apple Developer Program | $99/yr | Apple | 🔴 Required | ⬜ TODO |
-| Domain (hodosbrowser.com) | ~$10/yr | Cloudflare | 🟢 Planned | ⬜ TODO |
+| Item | Cost | Vendor | Status |
+|------|------|--------|--------|
+| Azure Artifact Signing | ~$120/yr ($9.99/mo) | Microsoft Azure | DONE |
+| Apple Developer Program | $99/yr | Apple | DONE (individual account) |
+| Domain (hodosbrowser.com) | ~$10/yr | Cloudflare | DONE |
 
-> **Apple Developer Note:** Must enroll as an **organization** (not individual). Requires a D-U-N-S number from Dun & Bradstreet (free, but takes ~5 business days if you don't have one). **Start this immediately — it's the longest lead time item.**
+### 1.2 Windows Code Signing — DECIDED: Azure Artifact Signing
 
-**Optional later:**
-- Dedicated build server (~$50-100/mo) — if GitHub Actions minutes become costly
+Chose Azure Artifact Signing (formerly Trusted Signing) over OV/EV certificates:
+- **Instant SmartScreen trust** (like EV) — no warnings from day one
+- **No hardware tokens** — fully cloud-managed
+- **Native GitHub Action** — `azure/trusted-signing-action`
+- **~$120/yr** — cheaper than OV (~$280/yr) or EV (~$400-600/yr)
 
-### 1.2 Windows Code Signing Options
-
-***Needs a decision***
-
-| Option | Cost | SmartScreen | Hardware Token | CI/CD Integration |
-|--------|------|-------------|----------------|-------------------|
-| **OV Certificate** (Sectigo) | ~$280/yr | Reputation-based. First ~500 downloads see warning, then clears. | Now required by CA/Browser Forum (even for OV) | .pfx in GitHub Secrets |
-| **EV Certificate** | ~$400-600/yr | Instant trust. No warnings from day one. | Required (USB token = self-hosted runner or cloud HSM needed) | Complex — needs network-attached HSM or DigiCert KeyLocker |
-| **Azure Trusted Signing** | ~$120/yr ($9.99/mo) | **Instant trust** — no warnings from day one. | None — fully cloud-managed | Native GitHub Action (`azure/trusted-signing-action`) |
-
-**Azure Trusted Signing** is a newer Microsoft service that provides instant SmartScreen reputation (like EV) without hardware tokens (like OV). Uses Microsoft's own trust chain backed by FIPS 140-2 Level 3 HSMs. Requires an Azure account + business identity verification (1-3 business days).
-
-**Original recommendation:** Start with OV. Warning is temporary friction (users click "More info" → "Run anyway"). Upgrade to EV later if it hurts adoption.
-
-**Updated recommendation:** Azure Trusted Signing may be the best option — cheaper than OV, instant SmartScreen trust like EV, no hardware tokens, clean CI/CD integration. Evaluate at meeting.
+Configuration:
+- Account: `Hodos-Signing` (West Central US)
+- Profile: `Hodos-signing`
+- Endpoint: `https://wcus.codesigning.azure.net/`
+- Certificate: `CN=Marston Enterprises, O=Marston Enterprises, L=Peyton, S=Colorado, C=US`
 
 ### 1.3 GitHub Infrastructure
 

@@ -59,4 +59,11 @@ docs/
 .superpowers/
 # Release packaging artifacts
 /staging/
+/dist/
 /installer/Output/
+
+# CEF binaries backup (large, not for git)
+/cef-binaries-backup/
+
+# Claude session logs
+/sessions/
