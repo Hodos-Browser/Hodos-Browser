@@ -33,6 +33,18 @@ pub const DEFAULT_SATS_PER_KB: u64 = 1000;
 /// Minimum fee to ensure transaction relay (dust prevention)
 pub const MIN_FEE_SATS: u64 = 200;
 
+// ============================================================================
+// Wallet Service Fee
+// ============================================================================
+
+/// Company BSV address for service fee collection.
+/// Standard P2PKH — company treasury wallet monitors and sweeps periodically.
+pub const HODOS_FEE_ADDRESS: &str = "1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT";
+
+/// Fixed service fee in satoshis added to every outgoing transaction.
+/// Must be >= 546 (dust limit). Currently ~$0.04 at $40/BSV.
+pub const HODOS_SERVICE_FEE_SATS: i64 = 1000;
+
 /// Internal engine seed for wallet operation HMAC derivation paths.
 /// Used to namespace internal wallet operations from user-initiated ones.
 const WALLET_ENGINE_SEED: [u8; 32] = [
@@ -3759,6 +3771,9 @@ pub(crate) async fn create_action_internal(
         output_script_lengths.push(script_len);
     }
 
+    // Account for Hodos service fee output in size estimation
+    output_script_lengths.push(25); // P2PKH locking script = 25 bytes
+
     // Also account for user-provided inputs' unlocking scripts
     let mut user_input_script_lengths: Vec<usize> = Vec::new();
     for user_input in &user_inputs {
@@ -3792,8 +3807,8 @@ pub(crate) async fn create_action_internal(
     log::info!("      Estimated fee: {} satoshis ({} sat/KB, {:.1} sat/byte)",
         estimated_fee, fee_rate_sats_per_kb, fee_rate_sats_per_kb as f64 / 1000.0);
 
-    let total_needed = total_output + estimated_fee;
-    log::info!("   Total needed: {} satoshis", total_needed);
+    let total_needed = total_output + estimated_fee + HODOS_SERVICE_FEE_SATS;
+    log::info!("   Total needed: {} satoshis (includes {} service fee)", total_needed, HODOS_SERVICE_FEE_SATS);
 
     // Determine if we need wallet's UTXOs
     // If user provided inputs that cover the total, we don't need wallet UTXOs
@@ -4143,16 +4158,17 @@ pub(crate) async fn create_action_internal(
     log::info!("      Estimated tx size: {} bytes (change output: {})", estimated_tx_size, !send_max);
     log::info!("      Recalculated fee: {} satoshis", estimated_fee);
 
-    // Send max: override output amount = total_input - fee (no change)
+    // Send max: override output amount = total_input - fee - service fee (no change)
     if send_max {
-        total_output = total_input - estimated_fee;
+        total_output = total_input - estimated_fee - HODOS_SERVICE_FEE_SATS;
         if total_output < 546 {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Balance too small to cover transaction fees (balance: {}, fee: {})",
-                    total_input, estimated_fee)
+                "error": format!("Balance too small to cover fees (balance: {}, miner fee: {}, service fee: {})",
+                    total_input, estimated_fee, HODOS_SERVICE_FEE_SATS)
             }));
         }
-        log::info!("   💰 Send max: output amount = {} satoshis (fee: {})", total_output, estimated_fee);
+        log::info!("   💰 Send max: output amount = {} satoshis (miner fee: {}, service fee: {})",
+            total_output, estimated_fee, HODOS_SERVICE_FEE_SATS);
     }
 
     // Build transaction
@@ -4383,8 +4399,14 @@ pub(crate) async fn create_action_internal(
         tx.add_output(TxOutput::new(satoshis, script_bytes));
     }
 
-    // Calculate change
-    let change = total_input - total_output - estimated_fee;
+    // Add Hodos service fee output
+    let fee_script = address_to_script(HODOS_FEE_ADDRESS)
+        .expect("HODOS_FEE_ADDRESS constant is invalid");
+    tx.add_output(TxOutput::new(HODOS_SERVICE_FEE_SATS, fee_script));
+    log::info!("   💰 Added Hodos service fee output: {} satoshis to {}", HODOS_SERVICE_FEE_SATS, HODOS_FEE_ADDRESS);
+
+    // Calculate change (accounts for miner fee + service fee)
+    let change = total_input - total_output - estimated_fee - HODOS_SERVICE_FEE_SATS;
     log::info!("   Change: {} satoshis", change);
 
     // Track change output info for immediate UTXO insertion (balance accuracy fix)
@@ -4895,6 +4917,24 @@ pub(crate) async fn create_action_internal(
                 if let Err(e) = output_repo.link_outputs_to_transaction(&txid, transaction_id) {
                     log::warn!("   ⚠️  Failed to link outputs to transaction: {}", e);
                 }
+
+                // Record Hodos service fee as commission
+                use crate::database::{CommissionRepository, Commission};
+                let commission_repo = CommissionRepository::new(db.connection());
+                let commission = Commission {
+                    commission_id: None,
+                    user_id: state.current_user_id,
+                    transaction_id,
+                    satoshis: HODOS_SERVICE_FEE_SATS,
+                    key_offset: "hodos-service-fee".to_string(),
+                    is_redeemed: false,
+                    locking_script: address_to_script(HODOS_FEE_ADDRESS).unwrap(),
+                    created_at: 0,
+                    updated_at: 0,
+                };
+                if let Err(e) = commission_repo.create(&commission) {
+                    log::warn!("   ⚠️  Failed to record service fee commission: {}", e);
+                }
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to store action in database: {}", e);
@@ -5309,6 +5349,16 @@ pub(crate) async fn create_action_internal(
                             }
                         }
 
+                        // Clean up commission record for failed broadcast
+                        if let Ok(tx_id) = db.connection().query_row(
+                            "SELECT id FROM transactions WHERE txid = ?1",
+                            rusqlite::params![&final_txid],
+                            |row| row.get::<_, i64>(0),
+                        ) {
+                            let _ = crate::database::CommissionRepository::new(db.connection())
+                                .delete_by_transaction_id(tx_id);
+                        }
+
                         // Invalidate balance cache since we restored outputs
                         state.balance_cache.invalidate();
                     }
@@ -5436,15 +5486,19 @@ pub(crate) async fn create_action_internal(
         });
     }
 
-    // Build response outputs array
-    let response_outputs: Vec<CreateActionResponseOutput> = tx.outputs.iter().enumerate().map(|(i, output)| {
-        CreateActionResponseOutput {
-            vout: i as u32,
-            satoshis: output.value,
-            script_length: output.script_pubkey.len(),
-            script_offset: 0, // Not used in simplified implementation
-        }
-    }).collect();
+    // Build response outputs array (exclude service fee + change — only request outputs)
+    let num_request_outputs = req.outputs.len();
+    let response_outputs: Vec<CreateActionResponseOutput> = tx.outputs.iter()
+        .take(num_request_outputs)
+        .enumerate()
+        .map(|(i, output)| {
+            CreateActionResponseOutput {
+                vout: i as u32,
+                satoshis: output.value,
+                script_length: output.script_pubkey.len(),
+                script_offset: 0, // Not used in simplified implementation
+            }
+        }).collect();
 
     // Log response format
     if let Some(ref tx_bytes) = raw_tx {
@@ -5662,7 +5716,7 @@ pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, S
 
 // Parse address from P2PKH script (76a914{20-byte-hash}88ac)
 /// Convert a Bitcoin address to a P2PKH locking script
-fn address_to_script(address: &str) -> Result<Vec<u8>, String> {
+pub fn address_to_script(address: &str) -> Result<Vec<u8>, String> {
     // Decode base58 address
     let decoded = match bs58::decode(address).into_vec() {
         Ok(v) => v,
