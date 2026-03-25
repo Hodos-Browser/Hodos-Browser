@@ -233,9 +233,9 @@ Solution:
 ### What to Include in Backup
 
 **Include:**
-- All transactions (with rawTx for history)
-- All outputs (with full derivation data)
-- All proven_txs (with merkle proofs)
+- All transactions (metadata: txid, status, satoshis, description, labels — but NOT raw_tx for confirmed txs)
+- All outputs (with full derivation data — but NOT locking_script for spent outputs)
+- All proven_txs (merkle proofs only — NOT raw_tx, which is re-fetchable)
 - All certificates + fields
 - Baskets, tags, labels
 - Settings
@@ -245,18 +245,21 @@ Solution:
 - Balance cache (recomputed)
 - Derived key cache (recomputed)
 - Browser-specific data (domain whitelist)
+- Backup transactions and their associated records (prevents recursive backup-of-backup growth)
+- `raw_tx` bytes for confirmed transactions (re-fetchable from WhatsOnChain for free)
+- `raw_tx` bytes in proven_txs (same — on-chain permanently)
+- `locking_script` for spent outputs (never needed again)
 
-### rawTx Storage Decision
+### rawTx Storage Decision (Updated 2026-03-25)
 
-**Option A: Include rawTx (recommended)**
-- Larger backup but complete history
-- Can show transaction details offline
-- ~200 bytes per transaction adds ~40 KB for 200 txs (compressed: ~1.5 KB)
+**Decision: Strip raw_tx from confirmed transactions**
 
-**Option B: Derivation data only**
-- Smaller backup
-- Must re-fetch transactions from network
-- Loses offline history capability
+Original research recommended Option A (include rawTx). Real-world testing revealed this is the dominant cost driver — a wallet with 27 transactions produced an 85 KB backup, mostly raw_tx bytes. Stripping confirmed raw_tx reduces this to ~5-15 KB.
+
+- Raw bytes for confirmed txs are permanently on-chain and free to re-fetch via WhatsOnChain `/tx/{txid}/hex`
+- Unconfirmed tx raw_tx IS included (not yet on-chain, could be lost)
+- Recovery re-fetches missing raw_tx as a background task (non-blocking)
+- Trade-off: first few minutes after recovery, tx details may show "loading" until re-fetch completes
 
 ---
 

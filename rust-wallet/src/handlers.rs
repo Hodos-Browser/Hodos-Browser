@@ -10736,6 +10736,532 @@ pub struct RestoreResponse {
     pub message: String,
 }
 
+/// On-chain wallet backup via PushDrop UTXO
+///
+/// POST /wallet/backup/onchain
+///
+/// Serializes the entire wallet DB, compresses, encrypts, and stores as a PushDrop
+/// output at the deterministic backup address (BRC-42 self, invoice "1-wallet-backup-1").
+/// If a previous backup UTXO exists, it's spent as input (recovering its sats).
+///
+/// Returns: { "success": true, "txid": "...", "size_bytes": N }
+pub async fn wallet_backup_onchain(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    use crate::database::{OutputRepository, WalletRepository, AddressRepository};
+    use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
+    use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
+    use crate::script::pushdrop::{encode, LockPosition};
+    use secp256k1::{Secp256k1, SecretKey, Message};
+
+    log::info!("💾 POST /wallet/backup/onchain");
+
+    // Step 1: Get master keys and identity info
+    let (master_privkey, master_pubkey, identity_key_hex) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Wallet locked or no wallet: {}", e)
+            })),
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to get master pubkey: {}", e)
+            })),
+        };
+        let id_hex = hex::encode(&pubkey);
+        (privkey, pubkey, id_hex)
+    };
+
+    // Step 2: Serialize + compress + encrypt the wallet
+    let encrypted_payload = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::serialize_for_onchain(db.connection(), &identity_key_hex, &master_privkey) {
+            Ok(bytes) => bytes,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Serialization failed: {}", e)
+            })),
+        }
+    };
+    let payload_size = encrypted_payload.len();
+    log::info!("   📦 Encrypted payload: {} bytes", payload_size);
+
+    // Step 3: Derive backup key pair (BRC-42 self-counterparty)
+    let backup_invoice = "1-wallet-backup-1";
+    let backup_pubkey = match crate::crypto::brc42::derive_child_public_key(
+        &master_privkey, &master_pubkey, backup_invoice,
+    ) {
+        Ok(pk) => pk,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("Backup key derivation failed: {}", e)
+        })),
+    };
+    let backup_privkey = match crate::crypto::brc42::derive_child_private_key(
+        &master_privkey, &master_pubkey, backup_invoice,
+    ) {
+        Ok(sk) => sk,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("Backup signing key derivation failed: {}", e)
+        })),
+    };
+
+    // Step 4: Build PushDrop locking script
+    let locking_script_bytes = match encode(&[encrypted_payload], &backup_pubkey, LockPosition::Before) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("PushDrop encoding failed: {}", e)
+        })),
+    };
+    log::info!("   📜 PushDrop script: {} bytes", locking_script_bytes.len());
+
+    // Step 5: Check for previous backup UTXO (index -3 address)
+    let previous_backup: Option<(String, u32, i64, String)> = {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let wallet_repo = WalletRepository::new(db.connection());
+        let address_repo = AddressRepository::new(db.connection());
+
+        let wallet = wallet_repo.get_primary_wallet().ok().flatten();
+        let wallet_id = wallet.and_then(|w| w.id).unwrap_or(1);
+
+        // Find the backup address
+        if let Ok(Some(backup_addr)) = address_repo.get_by_wallet_and_index(wallet_id, -3) {
+            // Look for spendable outputs with backup derivation
+            let spendable = output_repo.get_spendable_by_derivation(
+                "1-wallet-backup", "1",
+            ).unwrap_or_default();
+
+            if let Some(output) = spendable.first() {
+                if let (Some(txid), Some(output_id)) = (&output.txid, output.output_id) {
+                    let script_hex = output_repo.get_locking_script_hex(output_id)
+                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    if !script_hex.is_empty() {
+                        log::info!("   ♻️  Found previous backup UTXO: {}:{} ({} sats)",
+                            &txid[..16], output.vout, output.satoshis);
+                        Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                log::info!("   🆕 No previous backup — first backup");
+                None
+            }
+        } else {
+            log::info!("   ⚠️  Backup address not found in DB");
+            None
+        }
+    };
+
+    // Step 6: Estimate fee and select funding UTXOs
+    // No Hodos service fee for wallet backups — this is infrastructure protecting the user
+    let backup_output_sats: i64 = 1000; // Token amount for backup UTXO
+    let fee_rate = state.fee_rate_cache.get_rate().await;
+    let output_script_lengths: Vec<usize> = vec![
+        locking_script_bytes.len(),  // PushDrop backup
+        25,                          // Change (P2PKH)
+    ];
+    let num_inputs_estimate = if previous_backup.is_some() { 2 } else { 1 };
+    let estimated_fee = estimate_fee_for_transaction(
+        num_inputs_estimate, &output_script_lengths, false, fee_rate,
+    ) as i64;
+
+    let previous_sats = previous_backup.as_ref().map(|p| p.2).unwrap_or(0);
+    let amount_needed = backup_output_sats + estimated_fee - previous_sats;
+
+    let funding_utxos = {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let all_utxos = output_repo.get_spendable_by_user(1)
+            .unwrap_or_default()
+            .iter()
+            .filter(|o| {
+                // Exclude the previous backup UTXO from funding selection (it's handled separately)
+                if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
+                    !(o.txid.as_deref() == Some(prev_txid.as_str()) && o.vout == prev_vout as i32)
+                } else {
+                    true
+                }
+            })
+            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .collect::<Vec<_>>();
+        drop(db);
+
+        if amount_needed > 0 {
+            let selected = select_utxos(&all_utxos, amount_needed);
+            if selected.is_empty() {
+                log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Insufficient funds (need ~{} sats)", amount_needed),
+                    "skipped": true
+                }));
+            }
+            selected
+        } else {
+            // Previous backup sats cover everything
+            vec![]
+        }
+    };
+
+    let funding_total: i64 = funding_utxos.iter().map(|u| u.satoshis).sum();
+    let total_in = funding_total + previous_sats;
+    log::info!("   💰 Inputs: {} funding UTXOs ({} sats) + previous backup ({} sats) = {} sats total",
+        funding_utxos.len(), funding_total, previous_sats, total_in);
+
+    // Step 7: Reserve inputs with placeholder
+    let placeholder_txid = format!("pending-backup-{}", chrono::Utc::now().timestamp_millis());
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+        if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
+            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+        }
+        let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
+    }
+    state.balance_cache.invalidate();
+
+    // Step 8: Build transaction
+    let mut tx = Transaction::new();
+
+    // Add previous backup UTXO as first input (if exists)
+    if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
+        tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
+    }
+    // Add funding inputs
+    for utxo in &funding_utxos {
+        tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
+    }
+
+    // Output 0: PushDrop backup (1000 sats)
+    tx.add_output(TxOutput::new(backup_output_sats, locking_script_bytes.clone()));
+
+    // Output 1: Change (if above dust) — no service fee for backups
+    let change_amount = total_in - backup_output_sats - estimated_fee;
+    let mut change_address_index: Option<i32> = None;
+    let mut change_script_hex: Option<String> = None;
+
+    if change_amount > 546 {
+        let (change_script, addr_index) = {
+            let db = state.database.lock().unwrap();
+            let wallet_repo = WalletRepository::new(db.connection());
+            let wallet = wallet_repo.get_primary_wallet()
+                .map_err(|e| format!("Wallet error: {}", e)).unwrap();
+            let wallet = wallet.unwrap();
+            let wallet_id = wallet.id.unwrap();
+
+            let address_repo = AddressRepository::new(db.connection());
+            let current_index = address_repo.get_max_index(wallet_id)
+                .ok().flatten().map(|i| i + 1)
+                .unwrap_or(wallet.current_index);
+
+            let invoice = format!("2-receive address-{}", current_index);
+            let derived_pubkey = crate::crypto::brc42::derive_child_public_key(
+                &master_privkey, &master_pubkey, &invoice,
+            ).unwrap();
+            let change_addr = pubkey_to_address(&derived_pubkey).unwrap();
+
+            let created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let addr_model = crate::database::Address {
+                id: None, wallet_id, index: current_index, address: change_addr,
+                public_key: hex::encode(&derived_pubkey), used: true, balance: 0,
+                pending_utxo_check: false, created_at,
+            };
+            let _ = address_repo.create(&addr_model);
+            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
+
+            let pubkey_hash = {
+                use sha2::{Sha256, Digest as _};
+                let sha_hash = Sha256::digest(&derived_pubkey);
+                ripemd::Ripemd160::digest(&sha_hash)
+            };
+            let script = Script::p2pkh_locking_script(&pubkey_hash).unwrap();
+            (script, current_index)
+        };
+        change_script_hex = Some(hex::encode(&change_script.bytes));
+        change_address_index = Some(addr_index);
+        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
+        log::info!("   💸 Change: {} sats (address index {})", change_amount, addr_index);
+    }
+
+    // Step 9: Sign all inputs
+    let secp = Secp256k1::new();
+    let mut input_idx = 0;
+
+    // Sign previous backup UTXO (P2PK)
+    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_backup {
+        let prev_script_bytes = hex::decode(prev_script_hex).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": format!("Sighash failed: {}", e)
+                }));
+            }
+        };
+        let secret = SecretKey::from_slice(&backup_privkey).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        // P2PK unlocking: just <sig> (no pubkey)
+        let mut unlocking = Vec::new();
+        unlocking.push(sig_der.len() as u8);
+        unlocking.extend_from_slice(&sig_der);
+        tx.inputs[input_idx].set_script(unlocking);
+        input_idx += 1;
+    }
+
+    // Sign funding UTXOs (P2PKH)
+    for utxo in &funding_utxos {
+        let private_key_bytes = {
+            let db = state.database.lock().unwrap();
+            let output_repo = OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
+                Ok(Some(output)) => match crate::database::derive_key_for_output(
+                    &db, output.derivation_prefix.as_deref(),
+                    output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
+                ) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        rollback_backup(&state, &placeholder_txid, "").await;
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "success": false, "error": format!("Key derivation: {}", e)
+                        }));
+                    }
+                },
+                _ => {
+                    rollback_backup(&state, &placeholder_txid, "").await;
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false, "error": format!("Output not found: {}:{}", utxo.txid, utxo.vout)
+                    }));
+                }
+            }
+        };
+        let funding_prev_script = hex::decode(&utxo.script).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &funding_prev_script, utxo.satoshis, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": format!("Sighash failed: {}", e)
+                }));
+            }
+        };
+        let secret = SecretKey::from_slice(&private_key_bytes).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
+        input_idx += 1;
+    }
+
+    let txid = match tx.txid() {
+        Ok(t) => t,
+        Err(e) => {
+            rollback_backup(&state, &placeholder_txid, "").await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("txid failed: {}", e)
+            }));
+        }
+    };
+    let raw_tx_hex = match tx.to_hex() {
+        Ok(h) => h,
+        Err(e) => {
+            rollback_backup(&state, &placeholder_txid, "").await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Serialize failed: {}", e)
+            }));
+        }
+    };
+    log::info!("   📝 Backup tx: {} ({} bytes)", txid, raw_tx_hex.len() / 2);
+
+    // Step 10: Store signed tx + create DB records
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+    {
+        let db = state.database.lock().unwrap();
+        // Cache signed tx for BEEF ancestry
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
+    }
+
+    // Create transaction record
+    let tx_record_id: Option<i64> = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+        match db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, is_outgoing, satoshis,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            rusqlite::params![
+                1i64, txid,
+                format!("backup-{}", &txid[..8]),
+                "On-chain wallet backup",
+                raw_tx_bytes,
+                total_in,
+                now, now,
+            ],
+        ) {
+            Ok(rows) if rows > 0 => Some(db.connection().last_insert_rowid()),
+            _ => None,
+        }
+    };
+
+    // Record backup PushDrop output (output 0)
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
+        let locking_script_hex = hex::encode(&locking_script_bytes);
+        let _ = output_repo.insert_output(
+            1, &txid, 0, // vout 0 = PushDrop backup
+            backup_output_sats, &locking_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("1"),
+            None, None, false,
+        );
+        // Record change output (output 1, if exists)
+        if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
+            let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
+            let _ = output_repo.insert_output(
+                1, &txid, 1, // vout 1 = change (no service fee for backups)
+                change_amount, script_hex,
+                default_basket_id,
+                Some("2-receive address"), Some(&addr_idx.to_string()),
+                None, None, true,
+            );
+        }
+        // Link outputs to transaction
+        if let Some(tx_id) = tx_record_id {
+            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
+        }
+    }
+
+    // No commission for wallet backups — service fee waived
+
+    // Update input reservations from placeholder to real txid
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+    }
+
+    // Create proven_tx_req for proof tracking
+    {
+        let db = state.database.lock().unwrap();
+        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
+    }
+
+    // Step 11: Build BEEF and broadcast
+    let beef_bytes = {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let mut beef = crate::beef::Beef::new();
+
+        // Add ancestry for each input's parent tx
+        let mut ancestor_txids: Vec<String> = Vec::new();
+        if let Some((ref prev_txid, _, _, _)) = previous_backup {
+            ancestor_txids.push(prev_txid.clone());
+        }
+        for utxo in &funding_utxos {
+            if !ancestor_txids.contains(&utxo.txid) {
+                ancestor_txids.push(utxo.txid.clone());
+            }
+        }
+
+        for ancestor_txid in &ancestor_txids {
+            if beef.find_txid(ancestor_txid).is_some() {
+                continue;
+            }
+            match crate::beef_helpers::build_beef_for_txid(
+                ancestor_txid, &mut beef, &state.database, &client,
+            ).await {
+                Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
+                Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
+            }
+        }
+
+        beef.sort_topologically();
+        let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+        beef.set_main_transaction(signed_tx_bytes);
+
+        match beef.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, &txid).await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": format!("BEEF serialization failed: {}", e)
+                }));
+            }
+        }
+    };
+    log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
+
+    // Broadcast
+    let beef_hex = hex::encode(&beef_bytes);
+    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(_) => {
+            log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
+        }
+        Err(e) => {
+            log::error!("   ❌ Backup broadcast failed: {} — rolling back", e);
+            rollback_backup(&state, &placeholder_txid, &txid).await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Broadcast failed: {}", e)
+            }));
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    log::info!("   ✅ On-chain wallet backup complete: {} ({} bytes payload)", txid, payload_size);
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "size_bytes": payload_size,
+    }))
+}
+
+/// Rollback helper for failed on-chain backup
+async fn rollback_backup(state: &AppState, placeholder_txid: &str, txid: &str) {
+    let db = state.database.lock().unwrap();
+    let output_repo = crate::database::OutputRepository::new(db.connection());
+    if !txid.is_empty() {
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        let _ = tx_repo.set_transaction_status(txid, crate::action_storage::TransactionStatus::Failed);
+        let _ = output_repo.delete_by_txid(txid);
+        let _ = output_repo.restore_by_spending_description(txid);
+    }
+    let _ = output_repo.restore_by_spending_description(placeholder_txid);
+    drop(db);
+    state.balance_cache.invalidate();
+}
+
 /// Restore wallet database from backup
 ///
 /// POST /wallet/restore

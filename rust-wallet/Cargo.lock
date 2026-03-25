@@ -1033,6 +1033,7 @@ dependencies = [
  "chrono",
  "dirs",
  "env_logger",
+ "flate2",
  "hex",
  "hmac",
  "log",

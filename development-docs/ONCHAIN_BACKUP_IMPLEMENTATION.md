@@ -291,6 +291,78 @@ Add two columns (or use the existing JSON-style settings):
 
 ---
 
+## Payload Size Optimization
+
+The backup payload must be kept small to minimize on-chain costs. Two categories of optimization are applied:
+
+1. **Exclusions** — backup-of-backup data that would cause recursive growth
+2. **Stripping** — data that can be re-fetched from the blockchain for free during recovery
+
+### Exclusions (backup-of-backup prevention)
+
+Without these filters, each backup includes the previous backup's transaction data, causing exponential growth (84 KB → 444 KB → 624 KB → ...). Backup transactions are excluded from the payload entirely:
+
+| Table | Filter | Reason |
+|-------|--------|--------|
+| `transactions` | `reference_number NOT LIKE 'backup-%'` | Backup tx records contain huge raw_tx of previous backups |
+| `outputs` | `derivation_prefix != '1-wallet-backup'` | PushDrop outputs contain the full encrypted payload |
+| `parent_transactions` | txid not in backup txs | Raw hex cache of backup txs |
+| `proven_txs` | txid not in backup txs | Merkle proofs + raw_tx of backup txs |
+| `proven_tx_reqs` | txid not in backup txs | Proof tracking for backup txs |
+
+### Stripping re-fetchable data
+
+The following data is stripped from the on-chain payload and re-fetched from WhatsOnChain during recovery. This is the biggest size win — raw transaction bytes and merkle proofs dominate payload size but are permanently available on-chain for free.
+
+| Stripped Data | Records | Re-fetch Method | Recovery Time |
+|---------------|---------|-----------------|---------------|
+| `transactions.raw_tx` (confirmed only — has `proven_tx_id`) | ~22 | WhatsOnChain `GET /tx/{txid}/hex` per tx | ~5-10s (parallel) |
+| `proven_txs.raw_tx` | ~22 | Same API, same txids | Already covered above |
+| `proven_txs.merkle_path` | ~22 | WhatsOnChain `GET /tx/{txid}/proof/tsc` per tx | ~5-10s (parallel) |
+| `proven_tx_reqs.raw_tx` + `input_beef` | ~28 | Same txids | Already covered |
+| `parent_transactions` (entire table) | ~33 | WhatsOnChain `GET /tx/{txid}/hex` per txid | ~5-10s (parallel) |
+| `outputs.locking_script` (spent only — `spendable = 0`) | ~30 | Parse from raw_tx fetch | Covered by raw_tx fetch |
+
+**Stripping is done in `serialize_for_onchain()` AFTER `collect_payload()`**, so file-based backups (`wallet_backup`) are not affected — they still include everything.
+
+**What is NOT stripped** (essential data that cannot be re-derived):
+- Transaction metadata (txid, status, satoshis, description, labels, timestamps)
+- Output derivation info (prefix, suffix, sender_identity_key — needed for key derivation)
+- Spendable output locking scripts (needed for spending)
+- Unconfirmed transaction raw_tx (not yet mined — could be lost)
+- Certificates and certificate fields
+- Addresses and public keys
+- Settings, baskets, tags, labels
+- Domain permissions
+
+### Size impact (real-world measurements)
+
+Wallet with 26 transactions, 47 outputs, 49 addresses, 4 certificates:
+
+| Optimization Stage | Compressed Size | Notes |
+|--------------------|----------------|-------|
+| No optimization | 84 KB | First implementation |
+| + Backup exclusions | 85 KB | Prevents recursive growth but doesn't reduce current size |
+| + Strip confirmed raw_tx | 65 KB | Biggest single win |
+| + Strip proven_tx_reqs raw data | 39 KB | |
+| + Strip merkle_paths | **21 KB** | Final size — essential wallet data floor |
+
+### Recovery re-fetch plan (Sprint 4)
+
+After restoring from on-chain backup, a background task re-fetches all stripped data:
+
+1. Collect all txids from restored `transactions` and `proven_txs` tables
+2. For each txid (parallel, batched):
+   a. `GET /v1/bsv/main/tx/{txid}/hex` → populate `transactions.raw_tx`, `proven_txs.raw_tx`, `parent_transactions`
+   b. `GET /v1/bsv/main/tx/{txid}/proof/tsc` → populate `proven_txs.merkle_path`
+   c. Parse raw tx → restore `outputs.locking_script` for spent outputs
+3. Rebuild `proven_tx_reqs.raw_tx` from transaction raw bytes
+4. Total time: ~10-15 seconds for typical wallet
+
+The wallet is **immediately functional** after restore — UTXOs, keys, certificates, addresses are all present. The re-fetch only backfills history display data and BEEF cache.
+
+---
+
 ## Transaction Output Order (Backup Tx)
 
 ```
@@ -298,24 +370,25 @@ Input 0:     Previous backup UTXO (P2PK — spend old backup) [if exists]
 Input 1..N:  Wallet UTXOs (P2PKH — funding)
 
 Output 0:    PushDrop backup (1000 sats → backup address)
-Output 1:    Hodos service fee (1000 sats → company address)
-Output 2:    Change (if above dust → new change address)
+Output 1:    Change (if above dust → new change address)
 ```
 
 First backup (no previous UTXO): inputs are only wallet UTXOs.
 
+**No Hodos service fee** — wallet backups are infrastructure protecting the user's funds.
+
 ---
 
-## Cost Summary
+## Cost Summary (Real-World Measurements)
 
-| Operation | Cost | Frequency |
-|-----------|------|-----------|
-| First backup | ~1600 sats (1000 token + ~600 fee) | Once |
-| Subsequent backup | ~600 sats (fee only — old token recovered) | Per trigger |
-| Recovery | **0 sats** (read-only API query) | On demand |
-| Service fee | 1000 sats | Per backup tx |
+| Operation | Cost (sats) | Cost (USD at $40 BSV) | Frequency |
+|-----------|-------------|----------------------|-----------|
+| First backup | ~3,100 (1000 token + ~2,100 fee) | ~$0.0012 | Once |
+| Subsequent backup | ~2,100 (fee only — old token recovered) | ~$0.0008 | Per trigger |
+| Recovery | **0** (read-only API query) | $0.00 | On demand |
+| Service fee | **Waived** | — | — |
 
-Annual cost for daily backups: ~$0.50-$7 depending on wallet size.
+Based on ARC dynamic fee rate of 100 sat/KB with ~21 KB compressed payload. Annual cost for daily backups: **~$0.30**.
 
 ---
 
