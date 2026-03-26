@@ -986,6 +986,53 @@ pub fn serialize_for_onchain(
         ptx.merkle_path = String::new();
     }
 
+    // Null out FK references that point to excluded backup transactions.
+    // Outputs may have spent_by or transaction_id pointing to backup tx IDs
+    // that aren't in the payload — these would cause FK constraint failures on import.
+    let valid_tx_ids: std::collections::HashSet<i64> = payload.transactions.iter()
+        .map(|t| t.id)
+        .collect();
+    let valid_basket_ids: std::collections::HashSet<i64> = payload.output_baskets.iter()
+        .filter_map(|b| Some(b.basket_id))
+        .collect();
+    for output in &mut payload.outputs {
+        if let Some(tx_id) = output.transaction_id {
+            if !valid_tx_ids.contains(&tx_id) {
+                output.transaction_id = None;
+            }
+        }
+        if let Some(spent_by) = output.spent_by {
+            if !valid_tx_ids.contains(&spent_by) {
+                output.spent_by = None;
+            }
+        }
+        if let Some(basket_id) = output.basket_id {
+            if !valid_basket_ids.contains(&basket_id) {
+                output.basket_id = None;
+            }
+        }
+    }
+    // Also null out proven_tx_id refs on transactions if the proven_tx was excluded
+    let valid_proven_tx_ids: std::collections::HashSet<i64> = payload.proven_txs.iter()
+        .map(|p| p.proven_tx_id)
+        .collect();
+    for tx in &mut payload.transactions {
+        if let Some(ptx_id) = tx.proven_tx_id {
+            if !valid_proven_tx_ids.contains(&ptx_id) {
+                tx.proven_tx_id = None;
+            }
+        }
+    }
+    // Remove commissions that reference excluded transactions
+    payload.commissions.retain(|c| valid_tx_ids.contains(&c.transaction_id));
+    // Remove tx_labels_map entries that reference excluded transactions
+    payload.tx_labels_map.retain(|m| valid_tx_ids.contains(&m.transaction_id));
+    // Remove output_tag_map entries that reference excluded outputs
+    let valid_output_ids: std::collections::HashSet<i64> = payload.outputs.iter()
+        .map(|o| o.output_id)
+        .collect();
+    payload.output_tag_map.retain(|m| valid_output_ids.contains(&m.output_id));
+
     // Debug: log post-strip sizes
     if log::log_enabled!(log::Level::Info) {
         fn sz<T: serde::Serialize>(v: &T) -> usize { serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0) }

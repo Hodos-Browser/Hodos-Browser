@@ -11721,7 +11721,19 @@ pub async fn wallet_recover_onchain(
 
     log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
 
-    // Step 5: Import all entities from backup
+    // Step 5: Clean up auto-created records that will conflict with backup import.
+    // create_wallet_from_existing_mnemonic() auto-creates: user, addresses (0, -1, -3),
+    // default basket. The backup payload has its own versions of these.
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+        let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+        let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+        log::info!("   🧹 Cleaned up auto-created records before import");
+    }
+
+    // Step 6: Import all entities from backup
     {
         let db = state.database.lock().unwrap();
         match crate::backup::import_to_db(db.connection(), &backup_payload) {
