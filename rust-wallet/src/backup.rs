@@ -959,23 +959,31 @@ pub fn serialize_for_onchain(
     identity_key: &str,
     master_privkey: &[u8],
 ) -> std::result::Result<Vec<u8>, String> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
-    use aes_gcm::aead::generic_array::GenericArray;
-    use rand::RngCore;
+    // Collect, strip, and compress
+    let compressed = compress_for_onchain(conn, identity_key)?;
+
+    // Encrypt
+    let encrypted = encrypt_compressed(master_privkey, &compressed)?;
+
+    info!("   On-chain backup: {} bytes encrypted (total with nonce)", encrypted.len());
+
+    Ok(encrypted)
+}
+
+/// Collect, strip, and compress the wallet payload (without encrypting).
+/// Returns the compressed bytes suitable for hashing to detect changes.
+pub fn compress_for_onchain(
+    conn: &Connection,
+    identity_key: &str,
+) -> std::result::Result<Vec<u8>, String> {
     use std::io::Write;
 
-    // 1. Collect payload (mnemonic excluded — user already has it for recovery)
+    // 1. Collect payload (mnemonic excluded)
     let mut payload = collect_payload(conn, identity_key, "")
         .map_err(|e| format!("Failed to collect backup payload: {}", e))?;
-    payload.mnemonic = String::new(); // Ensure mnemonic is empty
+    payload.mnemonic = String::new();
 
-    // 2. Strip re-fetchable data to minimize on-chain size
-    //    All stripped data is re-fetched from WhatsOnChain during recovery (~10-15s).
-    //    - parent_transactions: BEEF cache, fully rebuildable from chain
-    //    - proven_tx_reqs: strip raw_tx and input_beef (tracking metadata kept)
-    //    - proven_txs: strip merkle_path (re-fetchable via /tx/{txid}/proof/tsc)
+    // 2. Strip re-fetchable data (same as serialize_for_onchain)
     payload.parent_transactions.clear();
     for req in &mut payload.proven_tx_reqs {
         req.raw_tx = String::new();
@@ -985,9 +993,7 @@ pub fn serialize_for_onchain(
         ptx.merkle_path = String::new();
     }
 
-    // Null out FK references that point to excluded backup transactions.
-    // Outputs may have spent_by or transaction_id pointing to backup tx IDs
-    // that aren't in the payload — these would cause FK constraint failures on import.
+    // Null out orphan FK references
     let valid_tx_ids: std::collections::HashSet<i64> = payload.transactions.iter()
         .map(|t| t.id)
         .collect();
@@ -996,78 +1002,66 @@ pub fn serialize_for_onchain(
         .collect();
     for output in &mut payload.outputs {
         if let Some(tx_id) = output.transaction_id {
-            if !valid_tx_ids.contains(&tx_id) {
-                output.transaction_id = None;
-            }
+            if !valid_tx_ids.contains(&tx_id) { output.transaction_id = None; }
         }
         if let Some(spent_by) = output.spent_by {
-            if !valid_tx_ids.contains(&spent_by) {
-                output.spent_by = None;
-            }
+            if !valid_tx_ids.contains(&spent_by) { output.spent_by = None; }
         }
         if let Some(basket_id) = output.basket_id {
-            if !valid_basket_ids.contains(&basket_id) {
-                output.basket_id = None;
-            }
+            if !valid_basket_ids.contains(&basket_id) { output.basket_id = None; }
         }
     }
-    // Also null out proven_tx_id refs on transactions if the proven_tx was excluded
     let valid_proven_tx_ids: std::collections::HashSet<i64> = payload.proven_txs.iter()
         .map(|p| p.proven_tx_id)
         .collect();
     for tx in &mut payload.transactions {
         if let Some(ptx_id) = tx.proven_tx_id {
-            if !valid_proven_tx_ids.contains(&ptx_id) {
-                tx.proven_tx_id = None;
-            }
+            if !valid_proven_tx_ids.contains(&ptx_id) { tx.proven_tx_id = None; }
         }
     }
-    // Remove commissions that reference excluded transactions
     payload.commissions.retain(|c| valid_tx_ids.contains(&c.transaction_id));
-    // Remove tx_labels_map entries that reference excluded transactions
     payload.tx_labels_map.retain(|m| valid_tx_ids.contains(&m.transaction_id));
-    // Remove output_tag_map entries that reference excluded outputs
     let valid_output_ids: std::collections::HashSet<i64> = payload.outputs.iter()
         .map(|o| o.output_id)
         .collect();
     payload.output_tag_map.retain(|m| valid_output_ids.contains(&m.output_id));
 
-    // Debug: log post-strip sizes
-    if log::log_enabled!(log::Level::Info) {
-        fn sz<T: serde::Serialize>(v: &T) -> usize { serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0) }
-        info!("   📊 Payload size breakdown (after stripping):");
-        info!("      transactions: {} bytes ({}), outputs: {} bytes ({}), addresses: {} bytes ({})",
-            sz(&payload.transactions), payload.transactions.len(),
-            sz(&payload.outputs), payload.outputs.len(),
-            sz(&payload.addresses), payload.addresses.len());
-        info!("      proven_txs: {} bytes ({}), proven_tx_reqs: {} bytes ({}), certs: {} bytes ({})",
-            sz(&payload.proven_txs), payload.proven_txs.len(),
-            sz(&payload.proven_tx_reqs), payload.proven_tx_reqs.len(),
-            sz(&payload.certificates), payload.certificates.len());
-    }
+    compress_payload(&payload)
+}
 
-    // 3. Serialize to JSON
-    let json_bytes = serde_json::to_vec(&payload)
+/// Compress a BackupPayload to gzip bytes.
+fn compress_payload(payload: &BackupPayload) -> std::result::Result<Vec<u8>, String> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let json_bytes = serde_json::to_vec(payload)
         .map_err(|e| format!("Failed to serialize payload to JSON: {}", e))?;
     let json_size = json_bytes.len();
 
-    // 3. Compress with gzip level 9 (BEFORE encryption — encrypted data doesn't compress)
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder.write_all(&json_bytes)
         .map_err(|e| format!("Gzip compression failed: {}", e))?;
     let compressed = encoder.finish()
         .map_err(|e| format!("Gzip finish failed: {}", e))?;
-    let compressed_size = compressed.len();
 
     info!("   On-chain backup: {} bytes JSON → {} bytes compressed ({:.1}% reduction)",
-        json_size, compressed_size,
-        (1.0 - compressed_size as f64 / json_size as f64) * 100.0);
+        json_size, compressed.len(),
+        (1.0 - compressed.len() as f64 / json_size as f64) * 100.0);
 
-    if compressed_size > 200_000 {
-        log::warn!("   ⚠️  On-chain backup is large ({} KB compressed). Consider wallet cleanup.", compressed_size / 1024);
+    if compressed.len() > 200_000 {
+        log::warn!("   ⚠️  On-chain backup is large ({} KB compressed). Consider wallet cleanup.", compressed.len() / 1024);
     }
 
-    // 4. Encrypt with AES-256-GCM
+    Ok(compressed)
+}
+
+/// Encrypt compressed bytes with AES-256-GCM. Returns nonce(12) || ciphertext || tag(16).
+pub fn encrypt_compressed(master_privkey: &[u8], compressed: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+    use rand::RngCore;
+
     let key = derive_onchain_backup_key(master_privkey);
     let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
 
@@ -1075,15 +1069,12 @@ pub fn serialize_for_onchain(
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = GenericArray::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, compressed.as_ref())
+    let ciphertext = cipher.encrypt(nonce, compressed)
         .map_err(|e| format!("AES-256-GCM encryption failed: {}", e))?;
 
-    // 5. Output: nonce(12) || ciphertext+tag (aes-gcm appends 16-byte tag)
     let mut result = Vec::with_capacity(12 + ciphertext.len());
     result.extend_from_slice(&nonce_bytes);
     result.extend_from_slice(&ciphertext);
-
-    info!("   On-chain backup: {} bytes encrypted (total with nonce)", result.len());
 
     Ok(result)
 }

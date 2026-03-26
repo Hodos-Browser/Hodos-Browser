@@ -185,6 +185,35 @@ pub async fn health() -> HttpResponse {
 // Graceful shutdown — called by CEF browser before process termination
 pub async fn shutdown(data: web::Data<crate::AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🛑 /shutdown received — initiating graceful shutdown");
+
+    // Attempt on-chain backup before shutting down.
+    // Hash comparison inside do_onchain_backup will skip if nothing changed.
+    {
+        let should_try = {
+            let db = match data.database.try_lock() {
+                Ok(db) => db,
+                Err(_) => {
+                    log::info!("   ⏭️  Shutdown backup skipped (DB locked)");
+                    data.shutdown.cancel();
+                    return HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }));
+                }
+            };
+            let wallet_exists = crate::database::WalletRepository::new(db.connection())
+                .get_primary_wallet().ok().flatten().is_some();
+            wallet_exists && db.is_unlocked()
+        };
+
+        if should_try {
+            match do_onchain_backup(&data).await {
+                Ok(txid) => log::info!("   ✅ Shutdown backup broadcast: {}", txid),
+                Err(e) if e.contains("skipped") => log::info!("   ⏭️  {}", e),
+                Err(e) => log::warn!("   ⚠️  Shutdown backup failed: {} (proceeding with shutdown)", e),
+            }
+        } else {
+            log::info!("   ⏭️  Shutdown backup skipped (no wallet or locked)");
+        }
+    }
+
     data.shutdown.cancel();
     HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
 }
@@ -10749,43 +10778,83 @@ pub async fn wallet_backup_onchain(
     state: web::Data<AppState>,
     _body: web::Bytes,
 ) -> HttpResponse {
+    log::info!("💾 POST /wallet/backup/onchain");
+    match do_onchain_backup(&state).await {
+        Ok(txid) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "txid": txid,
+            }))
+        }
+        Err(e) => {
+            if e.contains("Insufficient funds") || e.contains("skipped") {
+                HttpResponse::Ok().json(serde_json::json!({
+                    "success": false, "error": e, "skipped": true
+                }))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": e
+                }))
+            }
+        }
+    }
+}
+
+/// Core on-chain backup logic — used by both the HTTP handler and the monitor task.
+/// Returns Ok(txid) on success, Err(message) on failure.
+pub async fn do_onchain_backup(
+    state: &AppState,
+) -> Result<String, String> {
     use crate::database::{OutputRepository, WalletRepository, AddressRepository};
     use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
     use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
     use crate::script::pushdrop::{encode, LockPosition};
     use secp256k1::{Secp256k1, SecretKey, Message};
 
-    log::info!("💾 POST /wallet/backup/onchain");
-
     // Step 1: Get master keys and identity info
     let (master_privkey, master_pubkey, identity_key_hex) = {
         let db = state.database.lock().unwrap();
         let privkey = match crate::database::get_master_private_key_from_db(&db) {
             Ok(k) => k,
-            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("Wallet locked or no wallet: {}", e)
-            })),
+            Err(e) => return Err(format!("Wallet locked or no wallet: {}", e)),
         };
         let pubkey = match crate::database::get_master_public_key_from_db(&db) {
             Ok(k) => k,
-            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("Failed to get master pubkey: {}", e)
-            })),
+            Err(e) => return Err(format!("Failed to get master pubkey: {}", e)),
         };
         let id_hex = hex::encode(&pubkey);
         (privkey, pubkey, id_hex)
     };
 
-    // Step 2: Serialize + compress + encrypt the wallet
-    let encrypted_payload = {
+    // Step 2: Compress wallet data and check hash to detect changes
+    let compressed = {
         let db = state.database.lock().unwrap();
-        match crate::backup::serialize_for_onchain(db.connection(), &identity_key_hex, &master_privkey) {
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
             Ok(bytes) => bytes,
-            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("Serialization failed: {}", e)
-            })),
+            Err(e) => return Err(format!("Serialization failed: {}", e)),
         }
     };
+
+    // Hash the compressed payload and compare with stored hash
+    let new_hash = {
+        use sha2::{Sha256, Digest as _};
+        hex::encode(Sha256::digest(&compressed))
+    };
+    let stored_hash = {
+        let db = state.database.lock().unwrap();
+        crate::database::SettingsRepository::new(db.connection())
+            .get_backup_hash().unwrap_or(None)
+    };
+    if stored_hash.as_deref() == Some(new_hash.as_str()) {
+        log::info!("   ⏭️  Backup hash unchanged — no changes since last backup, skipping");
+        return Err("skipped: no changes since last backup".to_string());
+    }
+    log::info!("   🔄 Backup hash changed (stored: {}, new: {})",
+        stored_hash.as_deref().unwrap_or("none"), &new_hash[..16]);
+
+    // Encrypt the compressed data
+    let encrypted_payload = crate::backup::encrypt_compressed(&master_privkey, &compressed)
+        .map_err(|e| format!("Encryption failed: {}", e))?;
     let payload_size = encrypted_payload.len();
     log::info!("   📦 Encrypted payload: {} bytes", payload_size);
 
@@ -10795,25 +10864,19 @@ pub async fn wallet_backup_onchain(
         &master_privkey, &master_pubkey, backup_invoice,
     ) {
         Ok(pk) => pk,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false, "error": format!("Backup key derivation failed: {}", e)
-        })),
+        Err(e) => return Err(format!("Backup key derivation failed: {}", e)),
     };
     let backup_privkey = match crate::crypto::brc42::derive_child_private_key(
         &master_privkey, &master_pubkey, backup_invoice,
     ) {
         Ok(sk) => sk,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false, "error": format!("Backup signing key derivation failed: {}", e)
-        })),
+        Err(e) => return Err(format!("Backup signing key derivation failed: {}", e)),
     };
 
     // Step 4: Build PushDrop locking script
     let locking_script_bytes = match encode(&[encrypted_payload], &backup_pubkey, LockPosition::Before) {
         Ok(s) => s,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false, "error": format!("PushDrop encoding failed: {}", e)
-        })),
+        Err(e) => return Err(format!("PushDrop encoding failed: {}", e)),
     };
     log::info!("   📜 PushDrop script: {} bytes", locking_script_bytes.len());
 
@@ -10828,8 +10891,8 @@ pub async fn wallet_backup_onchain(
     // Step 5b: Check for previous backup UTXOs (PushDrop + marker)
     // PushDrop: derivation_prefix = "1-wallet-backup", derivation_suffix = "1"
     // Marker: derivation_prefix = "1-wallet-backup", derivation_suffix = "marker"
-    let previous_pushdrop: Option<(String, u32, i64, String)>;
-    let previous_marker: Option<(String, u32, i64, String)>;
+    let mut previous_pushdrop: Option<(String, u32, i64, String)>;
+    let mut previous_marker: Option<(String, u32, i64, String)>;
     {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
@@ -10870,6 +10933,63 @@ pub async fn wallet_backup_onchain(
             log::info!("   🆕 No previous backup — first backup");
         }
     };
+
+    // Step 5c: Validate previous backup UTXOs actually exist on-chain.
+    // DB can be stale from wallet.db swaps, failed backups, or multi-device conflicts.
+    // Query the marker address on WoC — if the on-chain UTXO txid doesn't match
+    // what our DB thinks is the current backup, clear stale outputs and use the
+    // on-chain reality as the source of truth.
+    if previous_pushdrop.is_some() || previous_marker.is_some() {
+        let db_marker_txid = previous_marker.as_ref().map(|(txid, _, _, _)| txid.clone());
+        let onchain_marker = {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build().unwrap_or_else(|_| reqwest::Client::new());
+            let utxo_url = format!(
+                "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
+                backup_address
+            );
+            match client.get(&utxo_url).send().await {
+                Ok(resp) => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let utxos = body.get("result").and_then(|r| r.as_array())
+                        .or_else(|| body.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    utxos.first().and_then(|u| {
+                        u["tx_hash"].as_str().or(u["txid"].as_str()).map(|s| s.to_string())
+                    })
+                }
+                Err(_) => db_marker_txid.clone(), // On network error, trust DB
+            }
+        };
+
+        let db_matches_chain = match (&db_marker_txid, &onchain_marker) {
+            (Some(db_txid), Some(chain_txid)) => db_txid == chain_txid,
+            (None, None) => true, // Both empty = consistent
+            _ => false,
+        };
+
+        if !db_matches_chain {
+            log::warn!("   ⚠️  DB backup txid ({}) doesn't match on-chain ({})",
+                db_marker_txid.as_deref().unwrap_or("none"),
+                onchain_marker.as_deref().unwrap_or("none"));
+            log::info!("   🧹 Clearing stale backup outputs from DB...");
+            let db = state.database.lock().unwrap();
+            let _ = db.connection().execute(
+                "UPDATE outputs SET spendable = 0, spending_description = 'stale-backup' \
+                 WHERE derivation_prefix = '1-wallet-backup' AND spendable = 1",
+                [],
+            );
+            drop(db);
+            state.balance_cache.invalidate();
+            previous_pushdrop = None;
+            previous_marker = None;
+            log::info!("   🆕 Stale backup cleared — treating as first backup");
+        } else {
+            log::info!("   ✅ On-chain marker matches DB — previous backup UTXOs valid");
+        }
+    }
 
     // Step 6: Estimate fee and select funding UTXOs
     // No Hodos service fee for wallet backups — this is infrastructure protecting the user
@@ -10916,11 +11036,7 @@ pub async fn wallet_backup_onchain(
             let selected = select_utxos(&all_utxos, amount_needed);
             if selected.is_empty() {
                 log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Insufficient funds (need ~{} sats)", amount_needed),
-                    "skipped": true
-                }));
+                return Err(format!("Insufficient funds (need ~{} sats)", amount_needed));
             }
             selected
         } else {
@@ -10978,6 +11094,9 @@ pub async fn wallet_backup_onchain(
     let mut change_script_hex: Option<String> = None;
 
     if change_amount > 546 {
+        // Reuse the most recent existing address for backup change (don't create new ones).
+        // This prevents backup transactions from inflating the address table and changing
+        // the backup hash, which would cause unnecessary re-backups.
         let (change_script, addr_index) = {
             let db = state.database.lock().unwrap();
             let wallet_repo = WalletRepository::new(db.connection());
@@ -10988,24 +11107,13 @@ pub async fn wallet_backup_onchain(
 
             let address_repo = AddressRepository::new(db.connection());
             let current_index = address_repo.get_max_index(wallet_id)
-                .ok().flatten().map(|i| i + 1)
-                .unwrap_or(wallet.current_index);
+                .ok().flatten()
+                .unwrap_or(0);
 
             let invoice = format!("2-receive address-{}", current_index);
             let derived_pubkey = crate::crypto::brc42::derive_child_public_key(
                 &master_privkey, &master_pubkey, &invoice,
             ).unwrap();
-            let change_addr = pubkey_to_address(&derived_pubkey).unwrap();
-
-            let created_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            let addr_model = crate::database::Address {
-                id: None, wallet_id, index: current_index, address: change_addr,
-                public_key: hex::encode(&derived_pubkey), used: true, balance: 0,
-                pending_utxo_check: false, created_at,
-            };
-            let _ = address_repo.create(&addr_model);
-            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
 
             let pubkey_hash = {
                 use sha2::{Sha256, Digest as _};
@@ -11032,9 +11140,7 @@ pub async fn wallet_backup_onchain(
             Ok(h) => h,
             Err(e) => {
                 rollback_backup(&state, &placeholder_txid, "").await;
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false, "error": format!("Sighash failed: {}", e)
-                }));
+                return Err(format!("Sighash failed: {}", e));
             }
         };
         let secret = SecretKey::from_slice(&backup_privkey).unwrap();
@@ -11057,9 +11163,7 @@ pub async fn wallet_backup_onchain(
             Ok(h) => h,
             Err(e) => {
                 rollback_backup(&state, &placeholder_txid, "").await;
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false, "error": format!("Sighash failed: {}", e)
-                }));
+                return Err(format!("Sighash failed: {}", e));
             }
         };
         let secret = SecretKey::from_slice(&backup_privkey).unwrap();
@@ -11075,28 +11179,22 @@ pub async fn wallet_backup_onchain(
 
     // Sign funding UTXOs (P2PKH)
     for utxo in &funding_utxos {
-        let private_key_bytes = {
+        let key_result: Result<Vec<u8>, String> = {
             let db = state.database.lock().unwrap();
             let output_repo = OutputRepository::new(db.connection());
             match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
-                Ok(Some(output)) => match crate::database::derive_key_for_output(
+                Ok(Some(output)) => crate::database::derive_key_for_output(
                     &db, output.derivation_prefix.as_deref(),
                     output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
-                ) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        rollback_backup(&state, &placeholder_txid, "").await;
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "success": false, "error": format!("Key derivation: {}", e)
-                        }));
-                    }
-                },
-                _ => {
-                    rollback_backup(&state, &placeholder_txid, "").await;
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "success": false, "error": format!("Output not found: {}:{}", utxo.txid, utxo.vout)
-                    }));
-                }
+                ).map_err(|e| format!("Key derivation: {}", e)),
+                _ => Err(format!("Output not found: {}:{}", utxo.txid, utxo.vout)),
+            }
+        }; // DB lock dropped here
+        let private_key_bytes = match key_result {
+            Ok(k) => k,
+            Err(e) => {
+                rollback_backup(state, &placeholder_txid, "").await;
+                return Err(e);
             }
         };
         let funding_prev_script = hex::decode(&utxo.script).unwrap_or_default();
@@ -11104,9 +11202,7 @@ pub async fn wallet_backup_onchain(
             Ok(h) => h,
             Err(e) => {
                 rollback_backup(&state, &placeholder_txid, "").await;
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false, "error": format!("Sighash failed: {}", e)
-                }));
+                return Err(format!("Sighash failed: {}", e));
             }
         };
         let secret = SecretKey::from_slice(&private_key_bytes).unwrap();
@@ -11124,18 +11220,14 @@ pub async fn wallet_backup_onchain(
         Ok(t) => t,
         Err(e) => {
             rollback_backup(&state, &placeholder_txid, "").await;
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("txid failed: {}", e)
-            }));
+            return Err(format!("txid failed: {}", e));
         }
     };
     let raw_tx_hex = match tx.to_hex() {
         Ok(h) => h,
         Err(e) => {
             rollback_backup(&state, &placeholder_txid, "").await;
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("Serialize failed: {}", e)
-            }));
+            return Err(format!("Serialize failed: {}", e));
         }
     };
     log::info!("   📝 Backup tx: {} ({} bytes)", txid, raw_tx_hex.len() / 2);
@@ -11279,9 +11371,7 @@ pub async fn wallet_backup_onchain(
             Ok(b) => b,
             Err(e) => {
                 rollback_backup(&state, &placeholder_txid, &txid).await;
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false, "error": format!("BEEF serialization failed: {}", e)
-                }));
+                return Err(format!("BEEF serialization failed: {}", e));
             }
         }
     };
@@ -11299,20 +11389,37 @@ pub async fn wallet_backup_onchain(
         Err(e) => {
             log::error!("   ❌ Backup broadcast failed: {} — rolling back", e);
             rollback_backup(&state, &placeholder_txid, &txid).await;
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false, "error": format!("Broadcast failed: {}", e)
-            }));
+            return Err(format!("Broadcast failed: {}", e));
         }
     }
 
     state.balance_cache.invalidate();
 
-    log::info!("   ✅ On-chain wallet backup complete: {} ({} bytes payload)", txid, payload_size);
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "txid": txid,
-        "size_bytes": payload_size,
-    }))
+    // Recompute hash AFTER the backup transaction has modified the DB.
+    // This captures the post-backup state so the next trigger sees an accurate baseline.
+    // Without this, backup side effects (spent_by changes, new proven_tx_reqs, etc.)
+    // would make the next hash different even though no user data changed.
+    let post_backup_hash = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+            Ok(compressed) => {
+                use sha2::{Sha256, Digest as _};
+                hex::encode(Sha256::digest(&compressed))
+            }
+            Err(_) => new_hash.clone(), // Fallback to pre-backup hash
+        }
+    };
+    {
+        let db = state.database.lock().unwrap();
+        let settings_repo = crate::database::SettingsRepository::new(db.connection());
+        let _ = settings_repo.set_backup_hash(&post_backup_hash);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let _ = settings_repo.set_last_backup_at(now);
+    }
+
+    log::info!("   ✅ On-chain wallet backup complete: {} (hash: {})", txid, &post_backup_hash[..16]);
+    Ok(txid)
 }
 
 /// Rollback helper for failed on-chain backup

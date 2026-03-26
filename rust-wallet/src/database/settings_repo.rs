@@ -310,6 +310,50 @@ impl<'a> SettingsRepository<'a> {
         Ok(())
     }
 
+    /// Get the stored backup hash (SHA256 hex of last successful backup's compressed payload)
+    pub fn get_backup_hash(&self) -> Result<Option<String>> {
+        let result: rusqlite::Result<Option<String>> = self.conn.query_row(
+            "SELECT backup_hash FROM settings LIMIT 1",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(None), // Column may not exist yet
+        }
+    }
+
+    /// Store the backup hash after successful backup
+    pub fn set_backup_hash(&self, hash: &str) -> Result<()> {
+        let _ = self.conn.execute(
+            "UPDATE settings SET backup_hash = ?1",
+            rusqlite::params![hash],
+        );
+        Ok(())
+    }
+
+    /// Get the last backup timestamp (Unix seconds, 0 = never)
+    pub fn get_last_backup_at(&self) -> Result<i64> {
+        let result: rusqlite::Result<i64> = self.conn.query_row(
+            "SELECT last_backup_at FROM settings LIMIT 1",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(0),
+        }
+    }
+
+    /// Set the last backup timestamp
+    pub fn set_last_backup_at(&self, timestamp: i64) -> Result<()> {
+        let _ = self.conn.execute(
+            "UPDATE settings SET last_backup_at = ?1",
+            rusqlite::params![timestamp],
+        );
+        Ok(())
+    }
+
     /// Update storage configuration
     pub fn set_storage(&self, identity_key: &str, name: &str) -> Result<()> {
         let now = SystemTime::now()

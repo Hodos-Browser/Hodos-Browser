@@ -930,6 +930,21 @@ impl WalletDatabase {
                 "ALTER TABLE transactions ADD COLUMN recipient_name TEXT", [])?;
         }
 
+        // Repair: backup hash and last backup timestamp on settings
+        let has_backup_hash = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(settings)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "backup_hash")
+        };
+        if !has_backup_hash {
+            info!("   Repair: adding backup_hash and last_backup_at to settings");
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN backup_hash TEXT", [])?;
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN last_backup_at INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
         Ok(())
     }
 
