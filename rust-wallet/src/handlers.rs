@@ -10974,18 +10974,65 @@ pub async fn do_onchain_backup(
             log::warn!("   ⚠️  DB backup txid ({}) doesn't match on-chain ({})",
                 db_marker_txid.as_deref().unwrap_or("none"),
                 onchain_marker.as_deref().unwrap_or("none"));
-            log::info!("   🧹 Clearing stale backup outputs from DB...");
-            let db = state.database.lock().unwrap();
-            let _ = db.connection().execute(
-                "UPDATE outputs SET spendable = 0, spending_description = 'stale-backup' \
-                 WHERE derivation_prefix = '1-wallet-backup' AND spendable = 1",
-                [],
-            );
-            drop(db);
+            log::info!("   🧹 Clearing stale DB outputs and adopting on-chain backup UTXOs...");
+            {
+                let db = state.database.lock().unwrap();
+                let _ = db.connection().execute(
+                    "UPDATE outputs SET spendable = 0, spending_description = 'stale-backup' \
+                     WHERE derivation_prefix = '1-wallet-backup' AND spendable = 1",
+                    [],
+                );
+            }
             state.balance_cache.invalidate();
+
+            // Adopt the on-chain UTXOs as previous backup outputs so we SPEND them
+            // instead of leaving orphans. Fetch all UTXOs at backup address.
             previous_pushdrop = None;
             previous_marker = None;
-            log::info!("   🆕 Stale backup cleared — treating as first backup");
+            if let Some(ref chain_txid) = onchain_marker {
+                // The marker is at the backup address; PushDrop is at vout 0, marker at vout 1
+                // of the same transaction
+                log::info!("   🔄 Adopting on-chain backup tx {} as previous (will spend it)", chain_txid);
+
+                // Fetch the raw tx to get output values
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build().unwrap_or_else(|_| reqwest::Client::new());
+                let tx_url = format!(
+                    "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
+                    chain_txid
+                );
+                if let Ok(resp) = client.get(&tx_url).send().await {
+                    if let Ok(tx_data) = resp.json::<serde_json::Value>().await {
+                        if let Some(vouts) = tx_data["vout"].as_array() {
+                            // PushDrop is vout 0 (nonstandard script with data)
+                            if let Some(vout0) = vouts.get(0) {
+                                let sats = (vout0["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                                let script_hex = vout0["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                                if sats > 0 && !script_hex.is_empty() {
+                                    previous_pushdrop = Some((chain_txid.clone(), 0, sats, script_hex));
+                                    log::info!("   ✅ Adopted on-chain PushDrop: {} sats at {}:0", sats, chain_txid);
+                                }
+                            }
+                            // Marker is vout 1 (P2PKH at backup address)
+                            if let Some(vout1) = vouts.get(1) {
+                                let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                                let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                                if sats > 0 && !script_hex.is_empty() {
+                                    previous_marker = Some((chain_txid.clone(), 1, sats, script_hex));
+                                    log::info!("   ✅ Adopted on-chain marker: {} sats at {}:1", sats, chain_txid);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if previous_pushdrop.is_none() && previous_marker.is_none() {
+                    log::warn!("   ⚠️  Could not adopt on-chain UTXOs — treating as first backup");
+                }
+            } else {
+                log::info!("   🆕 No on-chain backup found — treating as first backup");
+            }
         } else {
             log::info!("   ✅ On-chain marker matches DB — previous backup UTXOs valid");
         }

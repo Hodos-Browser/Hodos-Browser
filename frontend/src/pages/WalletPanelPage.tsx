@@ -823,6 +823,11 @@ export default function WalletPanelPage() {
               <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
                 <strong>Outputs:</strong> {recoveryResult.spendable_utxos} spendable
               </div>
+              {recoveryResult.certificates > 0 && (
+                <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+                  <strong>Tokens / Certificates:</strong> {recoveryResult.certificates}
+                </div>
+              )}
               <div style={{ fontSize: '13px', color: '#f0f0f0' }}>
                 <strong>Balance:</strong> {(recoveryResult.total_balance / 100_000_000).toFixed(8)} BSV
                 <span style={{ color: '#6b7280', marginLeft: '8px' }}>
