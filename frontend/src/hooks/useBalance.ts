@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   getCachedBalance, setCachedBalance,
   getCachedPrice, setCachedPrice,
@@ -25,11 +25,12 @@ export const useBalance = () => {
     calculateUsdValue(cachedBal?.balance ?? 0, cachedPri?.price ?? 0)
   );
 
-  const [isLoading] = useState(!cachedBal);
+  const [isLoading, setIsLoading] = useState(!cachedBal);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
+  const hasAutoFetched = useRef(false);
 
   // Fetch balance + price via CEF bridge (used by manual refresh only)
   const fetchBalance = useCallback(async (): Promise<{ balance: number; price: number }> => {
@@ -80,6 +81,25 @@ export const useBalance = () => {
       }
     }
   }, [fetchBalance, bsvPrice]);
+
+  // Auto-fetch on mount when cache is empty (e.g., after wallet recovery)
+  useEffect(() => {
+    if (!cachedBal && !hasAutoFetched.current) {
+      hasAutoFetched.current = true;
+      fetchBalance()
+        .then(({ balance: b, price: p }) => {
+          if (mountedRef.current) {
+            const effectivePrice = p > 0 ? p : bsvPrice;
+            setUsdValue(calculateUsdValue(b, effectivePrice));
+            setIsLoading(false);
+          }
+        })
+        .catch(() => {
+          if (mountedRef.current) setIsLoading(false);
+        });
+    }
+    return () => { mountedRef.current = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
     balance,

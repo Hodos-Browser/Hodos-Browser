@@ -123,10 +123,12 @@ export default function WalletPanelPage() {
   const [recovering, setRecovering] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recoveryResult, setRecoveryResult] = useState<{
-    addresses_found: number;
-    utxos_found: number;
+    transactions: number;
+    outputs: number;
+    addresses: number;
+    certificates: number;
     total_balance: number;
-    message: string;
+    spendable_utxos: number;
   } | null>(null);
 
   // Backup import state
@@ -423,14 +425,12 @@ export default function WalletPanelPage() {
     setRecoveryError(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/recover', {
+      const res = await fetch('http://127.0.0.1:31301/wallet/recover/onchain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mnemonic: mnemonicPhrase,
           pin,
-          confirm: true,
-          gap_limit: 20,
         }),
       });
 
@@ -442,15 +442,18 @@ export default function WalletPanelPage() {
         return;
       }
 
-      if (data.success) {
+      if (data.success && data.backup_found) {
+        const restored = data.restored || {};
         setRecoveryResult({
-          addresses_found: data.addresses_found || 0,
-          utxos_found: data.utxos_found || 0,
-          total_balance: data.total_balance || 0,
-          message: data.message || 'Recovery complete!',
+          transactions: restored.transactions || 0,
+          outputs: restored.outputs || 0,
+          addresses: restored.addresses || 0,
+          certificates: restored.certificates || 0,
+          total_balance: data.balance_satoshis || 0,
+          spendable_utxos: data.spendable_utxos || 0,
         });
       } else {
-        setRecoveryError(data.error || 'Recovery failed');
+        setRecoveryError(data.error || 'No Hodos wallet backup found for this mnemonic.');
       }
     } catch {
       setRecoveryError('Failed to connect to wallet server');
@@ -800,7 +803,7 @@ export default function WalletPanelPage() {
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
             <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Wallet Recovered</h3>
             <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 16px' }}>
-              {recoveryResult.message}
+              Your wallet has been restored from on-chain backup.
             </p>
 
             <div style={{
@@ -812,10 +815,13 @@ export default function WalletPanelPage() {
               textAlign: 'left',
             }}>
               <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
-                <strong>Addresses found:</strong> {recoveryResult.addresses_found}
+                <strong>Addresses:</strong> {recoveryResult.addresses}
               </div>
               <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
-                <strong>UTXOs found:</strong> {recoveryResult.utxos_found}
+                <strong>Transactions:</strong> {recoveryResult.transactions}
+              </div>
+              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+                <strong>Outputs:</strong> {recoveryResult.spendable_utxos} spendable
               </div>
               <div style={{ fontSize: '13px', color: '#f0f0f0' }}>
                 <strong>Balance:</strong> {(recoveryResult.total_balance / 100_000_000).toFixed(8)} BSV
@@ -913,11 +919,11 @@ export default function WalletPanelPage() {
                 textAlign: 'left',
               }}>
                 <p style={{ color: '#f0f0f0', fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
-                  Scanning blockchain for your addresses...
+                  Searching for on-chain backup...
                 </p>
                 <p style={{ color: '#6b7280', fontSize: '12px', margin: 0 }}>
-                  This may take a minute depending on how many addresses your wallet has used.
-                  You can safely close this and check back later — sync will continue in the background.
+                  Looking up your wallet backup on the blockchain and restoring data.
+                  This usually takes 10-30 seconds.
                 </p>
               </div>
             )}
@@ -1306,23 +1312,23 @@ export default function WalletPanelPage() {
               onClick={() => setShowRecoveryInput(true)}
               style={{ width: '100%', marginBottom: '12px' }}
             >
-              Recover Existing Wallet
-            </HodosButton>
-
-            <HodosButton
-              variant="secondary"
-              onClick={() => setShowImportForm(true)}
-              style={{ width: '100%', marginBottom: '12px' }}
-            >
-              Import from Backup
+              Recover Hodos Wallet
             </HodosButton>
 
             <HodosButton
               variant="secondary"
               onClick={() => setShowCentbeeRecovery(true)}
-              style={{ width: '100%' }}
+              style={{ width: '100%', marginBottom: '12px' }}
             >
               Recover from Centbee
+            </HodosButton>
+
+            <HodosButton
+              variant="secondary"
+              onClick={() => setShowImportForm(true)}
+              style={{ width: '100%' }}
+            >
+              Import from Backup File
             </HodosButton>
           </>
         ) : (

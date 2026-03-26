@@ -11876,6 +11876,29 @@ pub async fn wallet_recover_onchain(
         }));
     }
 
+    // Step 6b: Store backup hash so TaskBackup doesn't overwrite the on-chain backup
+    // with degraded recovered data. The recovered DB is a subset of the original
+    // (stripped raw_tx, merkle_paths, parent_transactions). Auto-backup would push
+    // this incomplete state, destroying the original backup.
+    {
+        let db = state.database.lock().unwrap();
+        let identity_key_hex = {
+            let user_repo = crate::database::UserRepository::new(db.connection());
+            user_repo.get_default().ok().flatten()
+                .map(|u| u.identity_key).unwrap_or_default()
+        };
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+            Ok(compressed) => {
+                use sha2::{Sha256, Digest as _};
+                let hash = hex::encode(Sha256::digest(&compressed));
+                let settings_repo = crate::database::SettingsRepository::new(db.connection());
+                let _ = settings_repo.set_backup_hash(&hash);
+                log::info!("   🔒 Stored post-recovery backup hash to prevent auto-overwrite");
+            }
+            Err(e) => log::warn!("   ⚠️  Failed to compute post-recovery hash: {}", e),
+        }
+    }
+
     // Step 7: Start Monitor and update state
     crate::monitor::Monitor::start(state.clone());
     state.balance_cache.invalidate();
