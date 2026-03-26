@@ -10817,63 +10817,80 @@ pub async fn wallet_backup_onchain(
     };
     log::info!("   📜 PushDrop script: {} bytes", locking_script_bytes.len());
 
-    // Step 5: Check for previous backup UTXO (index -3 address)
-    let previous_backup: Option<(String, u32, i64, String)> = {
+    // Step 5: Build P2PKH marker script for backup address (for on-chain discovery)
+    let backup_address = pubkey_to_address(&backup_pubkey)
+        .unwrap_or_default();
+    let marker_script = address_to_script(&backup_address)
+        .unwrap_or_default();
+    let marker_sats: i64 = 546; // Dust limit — smallest discoverable output
+    log::info!("   📍 Backup marker address: {}", backup_address);
+
+    // Step 5b: Check for previous backup UTXOs (PushDrop + marker)
+    // PushDrop: derivation_prefix = "1-wallet-backup", derivation_suffix = "1"
+    // Marker: derivation_prefix = "1-wallet-backup", derivation_suffix = "marker"
+    let previous_pushdrop: Option<(String, u32, i64, String)>;
+    let previous_marker: Option<(String, u32, i64, String)>;
+    {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
-        let wallet_repo = WalletRepository::new(db.connection());
-        let address_repo = AddressRepository::new(db.connection());
 
-        let wallet = wallet_repo.get_primary_wallet().ok().flatten();
-        let wallet_id = wallet.and_then(|w| w.id).unwrap_or(1);
+        // Find previous PushDrop
+        let pushdrop_outputs = output_repo.get_spendable_by_derivation(
+            "1-wallet-backup", "1",
+        ).unwrap_or_default();
+        previous_pushdrop = pushdrop_outputs.first().and_then(|output| {
+            let txid = output.txid.as_ref()?;
+            let output_id = output.output_id?;
+            let script_hex = output_repo.get_locking_script_hex(output_id)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            if script_hex.is_empty() { return None; }
+            log::info!("   ♻️  Found previous PushDrop: {}:{} ({} sats)",
+                &txid[..16.min(txid.len())], output.vout, output.satoshis);
+            Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
+        });
 
-        // Find the backup address
-        if let Ok(Some(backup_addr)) = address_repo.get_by_wallet_and_index(wallet_id, -3) {
-            // Look for spendable outputs with backup derivation
-            let spendable = output_repo.get_spendable_by_derivation(
-                "1-wallet-backup", "1",
-            ).unwrap_or_default();
+        // Find previous marker
+        let marker_outputs = output_repo.get_spendable_by_derivation(
+            "1-wallet-backup", "marker",
+        ).unwrap_or_default();
+        previous_marker = marker_outputs.first().and_then(|output| {
+            let txid = output.txid.as_ref()?;
+            let output_id = output.output_id?;
+            let script_hex = output_repo.get_locking_script_hex(output_id)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            if script_hex.is_empty() { return None; }
+            log::info!("   ♻️  Found previous marker: {}:{} ({} sats)",
+                &txid[..16.min(txid.len())], output.vout, output.satoshis);
+            Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
+        });
 
-            if let Some(output) = spendable.first() {
-                if let (Some(txid), Some(output_id)) = (&output.txid, output.output_id) {
-                    let script_hex = output_repo.get_locking_script_hex(output_id)
-                        .unwrap_or_default()
-                        .unwrap_or_default();
-                    if !script_hex.is_empty() {
-                        log::info!("   ♻️  Found previous backup UTXO: {}:{} ({} sats)",
-                            &txid[..16], output.vout, output.satoshis);
-                        Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                log::info!("   🆕 No previous backup — first backup");
-                None
-            }
-        } else {
-            log::info!("   ⚠️  Backup address not found in DB");
-            None
+        if previous_pushdrop.is_none() && previous_marker.is_none() {
+            log::info!("   🆕 No previous backup — first backup");
         }
     };
 
     // Step 6: Estimate fee and select funding UTXOs
     // No Hodos service fee for wallet backups — this is infrastructure protecting the user
-    let backup_output_sats: i64 = 1000; // Token amount for backup UTXO
+    let backup_output_sats: i64 = 1000; // Token amount for PushDrop UTXO
     let fee_rate = state.fee_rate_cache.get_rate().await;
     let output_script_lengths: Vec<usize> = vec![
         locking_script_bytes.len(),  // PushDrop backup
+        25,                          // P2PKH marker (for discovery)
         25,                          // Change (P2PKH)
     ];
-    let num_inputs_estimate = if previous_backup.is_some() { 2 } else { 1 };
+    let mut num_inputs_estimate = 1; // At least 1 funding input
+    if previous_pushdrop.is_some() { num_inputs_estimate += 1; }
+    if previous_marker.is_some() { num_inputs_estimate += 1; }
     let estimated_fee = estimate_fee_for_transaction(
         num_inputs_estimate, &output_script_lengths, false, fee_rate,
     ) as i64;
 
-    let previous_sats = previous_backup.as_ref().map(|p| p.2).unwrap_or(0);
-    let amount_needed = backup_output_sats + estimated_fee - previous_sats;
+    let previous_pushdrop_sats = previous_pushdrop.as_ref().map(|p| p.2).unwrap_or(0);
+    let previous_marker_sats = previous_marker.as_ref().map(|p| p.2).unwrap_or(0);
+    let previous_sats = previous_pushdrop_sats + previous_marker_sats;
+    let amount_needed = backup_output_sats + marker_sats + estimated_fee - previous_sats;
 
     let funding_utxos = {
         let db = state.database.lock().unwrap();
@@ -10882,12 +10899,14 @@ pub async fn wallet_backup_onchain(
             .unwrap_or_default()
             .iter()
             .filter(|o| {
-                // Exclude the previous backup UTXO from funding selection (it's handled separately)
-                if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
-                    !(o.txid.as_deref() == Some(prev_txid.as_str()) && o.vout == prev_vout as i32)
-                } else {
-                    true
-                }
+                // Exclude previous backup UTXOs from funding selection (handled separately)
+                let is_prev_pushdrop = previous_pushdrop.as_ref().map_or(false, |(txid, vout, _, _)| {
+                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+                });
+                let is_prev_marker = previous_marker.as_ref().map_or(false, |(txid, vout, _, _)| {
+                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+                });
+                !is_prev_pushdrop && !is_prev_marker
             })
             .map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect::<Vec<_>>();
@@ -10923,7 +10942,10 @@ pub async fn wallet_backup_onchain(
         let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
             .map(|u| (u.txid.clone(), u.vout))
             .collect();
-        if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
+        if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
+            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+        }
+        if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
             utxos_to_reserve.push((prev_txid.clone(), prev_vout));
         }
         let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
@@ -10931,13 +10953,15 @@ pub async fn wallet_backup_onchain(
     state.balance_cache.invalidate();
 
     // Step 8: Build transaction
+    // Input order: [previous PushDrop] [previous marker] [funding UTXOs]
     let mut tx = Transaction::new();
 
-    // Add previous backup UTXO as first input (if exists)
-    if let Some((ref prev_txid, prev_vout, _, _)) = previous_backup {
+    if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
         tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
     }
-    // Add funding inputs
+    if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
+        tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
+    }
     for utxo in &funding_utxos {
         tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
     }
@@ -10945,8 +10969,11 @@ pub async fn wallet_backup_onchain(
     // Output 0: PushDrop backup (1000 sats)
     tx.add_output(TxOutput::new(backup_output_sats, locking_script_bytes.clone()));
 
-    // Output 1: Change (if above dust) — no service fee for backups
-    let change_amount = total_in - backup_output_sats - estimated_fee;
+    // Output 1: P2PKH marker at backup address (546 sats — for on-chain discovery)
+    tx.add_output(TxOutput::new(marker_sats, marker_script.clone()));
+
+    // Output 2: Change (if above dust)
+    let change_amount = total_in - backup_output_sats - marker_sats - estimated_fee;
     let mut change_address_index: Option<i32> = None;
     let mut change_script_hex: Option<String> = None;
 
@@ -10998,8 +11025,8 @@ pub async fn wallet_backup_onchain(
     let secp = Secp256k1::new();
     let mut input_idx = 0;
 
-    // Sign previous backup UTXO (P2PK)
-    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_backup {
+    // Sign previous PushDrop input (P2PK — signature only, no pubkey)
+    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_pushdrop {
         let prev_script_bytes = hex::decode(prev_script_hex).unwrap_or_default();
         let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
@@ -11020,6 +11047,29 @@ pub async fn wallet_backup_onchain(
         unlocking.push(sig_der.len() as u8);
         unlocking.extend_from_slice(&sig_der);
         tx.inputs[input_idx].set_script(unlocking);
+        input_idx += 1;
+    }
+
+    // Sign previous marker input (P2PKH — signature + pubkey, using backup key)
+    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_marker {
+        let prev_script_bytes = hex::decode(prev_script_hex).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": format!("Sighash failed: {}", e)
+                }));
+            }
+        };
+        let secret = SecretKey::from_slice(&backup_privkey).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
         input_idx += 1;
     }
 
@@ -11124,25 +11174,38 @@ pub async fn wallet_backup_onchain(
         }
     };
 
-    // Record backup PushDrop output (output 0)
+    // Record backup outputs
     {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
         let locking_script_hex = hex::encode(&locking_script_bytes);
+
+        // Output 0: PushDrop backup
         let _ = output_repo.insert_output(
-            1, &txid, 0, // vout 0 = PushDrop backup
+            1, &txid, 0,
             backup_output_sats, &locking_script_hex,
             backup_basket_id,
             Some("1-wallet-backup"), Some("1"),
             None, None, false,
         );
-        // Record change output (output 1, if exists)
+
+        // Output 1: P2PKH marker (for on-chain discovery)
+        let marker_script_hex = hex::encode(&marker_script);
+        let _ = output_repo.insert_output(
+            1, &txid, 1,
+            marker_sats, &marker_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("marker"),
+            None, None, false,
+        );
+
+        // Output 2: Change (if exists)
         if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
             let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
             let _ = output_repo.insert_output(
-                1, &txid, 1, // vout 1 = change (no service fee for backups)
+                1, &txid, 2,
                 change_amount, script_hex,
                 default_basket_id,
                 Some("2-receive address"), Some(&addr_idx.to_string()),
@@ -11182,8 +11245,13 @@ pub async fn wallet_backup_onchain(
 
         // Add ancestry for each input's parent tx
         let mut ancestor_txids: Vec<String> = Vec::new();
-        if let Some((ref prev_txid, _, _, _)) = previous_backup {
+        if let Some((ref prev_txid, _, _, _)) = previous_pushdrop {
             ancestor_txids.push(prev_txid.clone());
+        }
+        if let Some((ref prev_txid, _, _, _)) = previous_marker {
+            if !ancestor_txids.contains(prev_txid) {
+                ancestor_txids.push(prev_txid.clone());
+            }
         }
         for utxo in &funding_utxos {
             if !ancestor_txids.contains(&utxo.txid) {
@@ -11260,6 +11328,444 @@ async fn rollback_backup(state: &AppState, placeholder_txid: &str, txid: &str) {
     let _ = output_repo.restore_by_spending_description(placeholder_txid);
     drop(db);
     state.balance_cache.invalidate();
+}
+
+/// Extract the locking script for a specific output from raw transaction bytes.
+fn extract_output_script(raw_tx: &[u8], target_vout: usize) -> Result<Vec<u8>, String> {
+    use crate::transaction::decode_varint;
+
+    let mut pos = 4; // Skip version (4 bytes)
+
+    // Skip inputs
+    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("input count varint: {:?}", e))?;
+    pos += consumed;
+
+    for _ in 0..input_count {
+        pos += 32 + 4; // txid (32) + vout (4)
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("input script varint: {:?}", e))?;
+        pos += consumed + script_len as usize + 4; // script + sequence (4)
+    }
+
+    // Parse outputs
+    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("output count varint: {:?}", e))?;
+    pos += consumed;
+
+    if target_vout >= output_count as usize {
+        return Err(format!("vout {} out of range ({} outputs)", target_vout, output_count));
+    }
+
+    for i in 0..output_count as usize {
+        let _value = u64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
+        pos += 8;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("output script varint: {:?}", e))?;
+        pos += consumed;
+
+        if i == target_vout {
+            return Ok(raw_tx[pos..pos + script_len as usize].to_vec());
+        }
+        pos += script_len as usize;
+    }
+
+    Err("Output not found".to_string())
+}
+
+/// Fetch and decrypt the on-chain backup from the blockchain.
+///
+/// Shared helper for both verify and recover endpoints.
+/// 1. Derive backup address from master keys (BRC-42 self, "1-wallet-backup-1")
+/// 2. Query WhatsOnChain for UTXO at that address
+/// 3. Fetch full transaction hex
+/// 4. Parse PushDrop script → extract encrypted payload
+/// 5. Decrypt + decompress → BackupPayload
+///
+/// Returns Ok(Some(payload)) if backup found, Ok(None) if no backup on-chain.
+async fn fetch_onchain_backup(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+) -> Result<Option<crate::backup::BackupPayload>, String> {
+    use crate::script::pushdrop;
+
+    // Step 1: Derive backup address
+    let backup_invoice = "1-wallet-backup-1";
+    let backup_pubkey = crate::crypto::brc42::derive_child_public_key(
+        master_privkey, master_pubkey, backup_invoice,
+    ).map_err(|e| format!("Backup key derivation failed: {}", e))?;
+
+    // Convert derived pubkey to P2PKH address
+    let backup_address = pubkey_to_address(&backup_pubkey)
+        .map_err(|e| format!("Address derivation failed: {}", e))?;
+    log::info!("   🔑 Backup address: {}", backup_address);
+
+    // Step 2: Query WhatsOnChain for P2PKH marker UTXO at backup address
+    // The marker is a standard P2PKH output that WoC indexes by address.
+    // The PushDrop (nonstandard) lives in the same tx at vout 0.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let utxo_url = format!(
+        "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
+        backup_address
+    );
+    log::info!("   🔍 Querying marker UTXOs at backup address {}...", backup_address);
+
+    let resp = client.get(&utxo_url).send().await
+        .map_err(|e| format!("WhatsOnChain UTXO fetch failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("WhatsOnChain returned status {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse UTXO response: {}", e))?;
+
+    // Handle wrapped response format: { "result": [...] } or flat array
+    let utxos = if let Some(result) = body.get("result") {
+        result.as_array().cloned().unwrap_or_default()
+    } else if let Some(arr) = body.as_array() {
+        arr.clone()
+    } else {
+        Vec::new()
+    };
+
+    if utxos.is_empty() {
+        log::info!("   ℹ️  No backup marker found on-chain at {}", backup_address);
+        return Ok(None);
+    }
+
+    // Take the first marker UTXO — its txid tells us where the PushDrop is
+    let marker_utxo = &utxos[0];
+    let txid = marker_utxo["tx_hash"].as_str()
+        .or_else(|| marker_utxo["txid"].as_str())
+        .ok_or("Missing txid in UTXO response")?;
+    // PushDrop is always at vout 0 in the backup transaction
+    let vout: usize = 0;
+
+    log::info!("   📍 Found backup marker at txid {}, PushDrop at vout {}", txid, vout);
+
+    // Step 3: Fetch full transaction hex
+    let tx_url = format!(
+        "https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex",
+        txid
+    );
+    let tx_resp = client.get(&tx_url).send().await
+        .map_err(|e| format!("WhatsOnChain tx fetch failed: {}", e))?;
+
+    if !tx_resp.status().is_success() {
+        return Err(format!("WhatsOnChain tx fetch returned status {}", tx_resp.status()));
+    }
+
+    let raw_tx_hex = tx_resp.text().await
+        .map_err(|e| format!("Failed to read tx hex: {}", e))?;
+    let raw_tx_hex = raw_tx_hex.trim();
+    let raw_tx_bytes = hex::decode(raw_tx_hex)
+        .map_err(|e| format!("Invalid tx hex: {}", e))?;
+
+    log::info!("   📦 Fetched raw tx: {} bytes", raw_tx_bytes.len());
+
+    // Step 4: Parse raw transaction bytes to extract output script at vout
+    // Manual parsing: version(4) → input_count(varint) → inputs → output_count(varint) → outputs
+    let output_script = extract_output_script(&raw_tx_bytes, vout)
+        .map_err(|e| format!("Failed to extract output script: {}", e))?;
+
+    let decoded = pushdrop::decode(&output_script)
+        .map_err(|e| format!("PushDrop decode failed: {}", e))?;
+
+    if decoded.fields.is_empty() {
+        return Err("PushDrop has no data fields".to_string());
+    }
+
+    let encrypted_payload = &decoded.fields[0];
+    log::info!("   🔓 Extracted encrypted payload: {} bytes", encrypted_payload.len());
+
+    // Step 5: Decrypt + decompress
+    let payload = crate::backup::deserialize_from_onchain(encrypted_payload, master_privkey)?;
+    log::info!("   ✅ Decrypted backup: {} txs, {} outputs, {} addresses, {} certs",
+        payload.transactions.len(), payload.outputs.len(),
+        payload.addresses.len(), payload.certificates.len());
+
+    Ok(Some(payload))
+}
+
+/// Verify on-chain backup against current wallet state.
+///
+/// POST /wallet/backup/onchain/verify
+///
+/// Fetches the on-chain backup, decrypts it, and compares entity counts
+/// against the current database. Returns a detailed diff.
+pub async fn wallet_backup_onchain_verify(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("🔍 POST /wallet/backup/onchain/verify");
+
+    // Get master keys
+    let (master_privkey, master_pubkey) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Wallet locked: {}", e)
+            })),
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to get pubkey: {}", e)
+            })),
+        };
+        (privkey, pubkey)
+    };
+
+    // Fetch and decrypt on-chain backup
+    let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({
+            "success": false, "error": "No backup found on-chain"
+        })),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": e
+        })),
+    };
+
+    // Collect current wallet state for comparison (using same collect_payload)
+    let identity_key_hex = hex::encode(&master_pubkey);
+    let current_payload = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::collect_payload(db.connection(), &identity_key_hex, "") {
+            Ok(p) => p,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to collect current state: {}", e)
+            })),
+        }
+    };
+
+    // Compare entity counts and key fields
+    // Note: backup has stripped data (raw_tx, merkle_path, etc.) so we compare what's present
+    let mut diffs = Vec::new();
+
+    // Helper to compare counts
+    macro_rules! compare_count {
+        ($name:expr, $backup:expr, $current:expr) => {
+            let b = $backup;
+            let c = $current;
+            if b != c {
+                diffs.push(serde_json::json!({
+                    "entity": $name,
+                    "backup": b,
+                    "current": c,
+                    "diff": c as i64 - b as i64
+                }));
+            }
+        };
+    }
+
+    // Exclude backup txs from current counts to match what the backup contains
+    let current_tx_count = current_payload.transactions.iter()
+        .filter(|t| !t.reference_number.starts_with("backup-"))
+        .count();
+    let current_output_count = current_payload.outputs.iter()
+        .filter(|o| o.derivation_prefix.as_deref() != Some("1-wallet-backup"))
+        .count();
+
+    compare_count!("users", backup_payload.users.len(), current_payload.users.len());
+    compare_count!("addresses", backup_payload.addresses.len(), current_payload.addresses.len());
+    compare_count!("transactions", backup_payload.transactions.len(), current_tx_count);
+    compare_count!("outputs", backup_payload.outputs.len(), current_output_count);
+    compare_count!("proven_txs", backup_payload.proven_txs.len(), current_payload.proven_txs.len());
+    compare_count!("certificates", backup_payload.certificates.len(), current_payload.certificates.len());
+    compare_count!("certificate_fields", backup_payload.certificate_fields.len(), current_payload.certificate_fields.len());
+    compare_count!("output_baskets", backup_payload.output_baskets.len(), current_payload.output_baskets.len());
+    compare_count!("output_tags", backup_payload.output_tags.len(), current_payload.output_tags.len());
+    compare_count!("tx_labels", backup_payload.tx_labels.len(), current_payload.tx_labels.len());
+    compare_count!("commissions", backup_payload.commissions.len(), current_payload.commissions.len());
+    compare_count!("settings", backup_payload.settings.len(), current_payload.settings.len());
+    compare_count!("domain_permissions", backup_payload.domain_permissions.len(), current_payload.domain_permissions.len());
+
+    // Check identity key matches
+    let identity_match = backup_payload.identity_key == current_payload.identity_key;
+
+    // Compare spendable output txids (the most critical data)
+    let backup_spendable: Vec<String> = backup_payload.outputs.iter()
+        .filter(|o| o.spendable)
+        .map(|o| format!("{}:{}", o.txid.as_deref().unwrap_or("?"), o.vout))
+        .collect();
+    let current_spendable: Vec<String> = current_payload.outputs.iter()
+        .filter(|o| o.spendable && o.derivation_prefix.as_deref() != Some("1-wallet-backup"))
+        .map(|o| format!("{}:{}", o.txid.as_deref().unwrap_or("?"), o.vout))
+        .collect();
+    let missing_utxos: Vec<&String> = current_spendable.iter()
+        .filter(|u| !backup_spendable.contains(u))
+        .collect();
+    let extra_utxos: Vec<&String> = backup_spendable.iter()
+        .filter(|u| !current_spendable.contains(u))
+        .collect();
+
+    let all_match = diffs.is_empty() && identity_match && missing_utxos.is_empty();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "identity_match": identity_match,
+        "all_counts_match": diffs.is_empty(),
+        "diffs": diffs,
+        "spendable_utxos": {
+            "backup": backup_spendable.len(),
+            "current": current_spendable.len(),
+            "missing_from_backup": missing_utxos,
+            "extra_in_backup": extra_utxos,
+        },
+        "backup_entities": {
+            "transactions": backup_payload.transactions.len(),
+            "outputs": backup_payload.outputs.len(),
+            "addresses": backup_payload.addresses.len(),
+            "proven_txs": backup_payload.proven_txs.len(),
+            "certificates": backup_payload.certificates.len(),
+        },
+        "verdict": if all_match { "MATCH" } else { "DIFFERENCES_FOUND" }
+    }))
+}
+
+/// Recover wallet from on-chain backup.
+///
+/// POST /wallet/recover/onchain
+///
+/// Body: { "mnemonic": "twelve words...", "pin": "1234" (optional) }
+///
+/// Flow:
+/// 1. Validate mnemonic
+/// 2. Derive master keys + backup address
+/// 3. Fetch on-chain backup UTXO
+/// 4. Decrypt + decompress → BackupPayload
+/// 5. Create wallet from mnemonic
+/// 6. Import all entities from backup
+/// 7. Return summary
+#[derive(Deserialize)]
+pub struct OnchainRecoverRequest {
+    pub mnemonic: String,
+    pub pin: Option<String>,
+}
+
+pub async fn wallet_recover_onchain(
+    state: web::Data<AppState>,
+    req: web::Json<OnchainRecoverRequest>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("🔄 POST /wallet/recover/onchain");
+
+    // Step 1: Validate mnemonic and derive master keys
+    let mnemonic_str = req.mnemonic.trim().to_string();
+    let mnemonic = match bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_str) {
+        Ok(m) => m,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": format!("Invalid mnemonic: {}", e)
+        })),
+    };
+
+    let seed = mnemonic.to_seed("");
+    let master_key = match bip32::XPrv::new(&seed) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("Failed to derive master key: {}", e)
+        })),
+    };
+
+    let master_privkey = master_key.private_key().to_bytes().to_vec();
+    let secp = secp256k1::Secp256k1::new();
+    let secret_key = secp256k1::SecretKey::from_slice(&master_privkey).unwrap();
+    let master_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize().to_vec();
+
+    // Step 2: Check that no wallet exists
+    {
+        let db = state.database.lock().unwrap();
+        let wallet_repo = crate::database::WalletRepository::new(db.connection());
+        if let Ok(Some(_)) = wallet_repo.get_primary_wallet() {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "success": false, "error": "Wallet already exists. Delete it first."
+            }));
+        }
+    }
+
+    // Step 3: Fetch on-chain backup
+    log::info!("   🔍 Searching for on-chain backup...");
+    let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({
+            "success": false,
+            "error": "No on-chain backup found for this mnemonic",
+            "backup_found": false
+        })),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("Failed to fetch backup: {}", e)
+        })),
+    };
+
+    log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
+        backup_payload.transactions.len(), backup_payload.outputs.len(),
+        backup_payload.certificates.len());
+
+    // Step 4: Create wallet from mnemonic
+    let (wallet_id, user_id) = {
+        let mut db = state.database.lock().unwrap();
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_str, req.pin.as_deref()) {
+            Ok((wid, uid, _addr, _pubkey)) => (wid, uid),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to create wallet: {}", e)
+            })),
+        }
+    };
+
+    log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
+
+    // Step 5: Import all entities from backup
+    {
+        let db = state.database.lock().unwrap();
+        match crate::backup::import_to_db(db.connection(), &backup_payload) {
+            Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
+            Err(e) => {
+                log::error!("   ❌ Import failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Import failed: {}", e),
+                    "wallet_created": true
+                }));
+            }
+        }
+    }
+
+    // Step 6: Update balance cache
+    state.balance_cache.invalidate();
+
+    // Count what was restored
+    let (total_balance, spendable_count) = {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let balance = output_repo.calculate_total_balance().unwrap_or(0);
+        let count = output_repo.count_spendable(1).unwrap_or(0);
+        (balance, count)
+    };
+
+    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
+        spendable_count, total_balance);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "backup_found": true,
+        "wallet_id": wallet_id,
+        "restored": {
+            "transactions": backup_payload.transactions.len(),
+            "outputs": backup_payload.outputs.len(),
+            "addresses": backup_payload.addresses.len(),
+            "certificates": backup_payload.certificates.len(),
+            "proven_txs": backup_payload.proven_txs.len(),
+        },
+        "balance_satoshis": total_balance,
+        "spendable_utxos": spendable_count,
+    }))
 }
 
 /// Restore wallet database from backup

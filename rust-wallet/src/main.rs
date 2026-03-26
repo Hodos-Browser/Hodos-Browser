@@ -498,6 +498,8 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/address/current", web::get().to(handlers::get_current_address))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/backup/onchain", web::post().to(handlers::wallet_backup_onchain))
+            .route("/wallet/backup/onchain/verify", web::post().to(handlers::wallet_backup_onchain_verify))
+            .route("/wallet/recover/onchain", web::post().to(handlers::wallet_recover_onchain))
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
             .route("/wallet/unlock", web::post().to(handlers::wallet_unlock))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))
