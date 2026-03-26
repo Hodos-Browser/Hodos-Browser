@@ -3335,9 +3335,44 @@ void ShutdownApplication() {
     // TODO: Clear browsing data on exit (PS3) when macOS tab system is implemented
     // (Windows implementation: ClearBrowsingDataOnExit() in cef_browser_shell.cpp)
 
-    // Step 1: Close all CEF browsers
-    LOG_INFO("🔄 Closing CEF browsers...");
+    // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
+    // Using CloseBrowser(true) = force close, skips beforeunload handlers.
+    // This prevents audio/video from continuing to play after the window disappears.
+    // Matches Windows behavior (see cef_browser_shell.cpp ShutdownApplication).
+    LOG_INFO("🔄 Force-closing all CEF browsers...");
 
+    // 1a: Close all tab browsers (each tab has its own CefBrowser + renderer process)
+    {
+        std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+        LOG_INFO("🔄 Closing " + std::to_string(allTabs.size()) + " tab browser(s)...");
+        for (Tab* tab : allTabs) {
+            if (tab && tab->browser) {
+                tab->browser->GetHost()->CloseBrowser(true);
+            }
+        }
+    }
+
+    // 1b: Close all overlay and window browsers via BrowserWindow refs
+    {
+        std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
+        const std::string roles[] = {
+            "header", "webview", "wallet_panel", "overlay", "settings",
+            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
+        };
+        for (BrowserWindow* bw : allWindows) {
+            if (!bw) continue;
+            for (const auto& role : roles) {
+                CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(role);
+                if (b) {
+                    LOG_INFO("🔄 Force-closing browser for role: " + role);
+                    b->GetHost()->CloseBrowser(true);
+                }
+            }
+        }
+    }
+
+    // 1c: Close any remaining browser refs not tracked by WindowManager
     CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
     CefRefPtr<CefBrowser> webview_browser = SimpleHandler::GetWebviewBrowser();
     CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
@@ -3346,68 +3381,24 @@ void ShutdownApplication() {
     CefRefPtr<CefBrowser> brc100_auth_browser = SimpleHandler::GetBRC100AuthBrowser();
     CefRefPtr<CefBrowser> settings_menu_browser = SimpleHandler::GetSettingsMenuBrowser();
     CefRefPtr<CefBrowser> cookie_panel_browser = SimpleHandler::GetCookiePanelBrowser();
-
-    if (header_browser) {
-        LOG_INFO("🔄 Closing header browser...");
-        header_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (webview_browser) {
-        LOG_INFO("🔄 Closing webview browser...");
-        webview_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (settings_browser) {
-        LOG_INFO("🔄 Closing settings browser...");
-        settings_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (wallet_browser) {
-        LOG_INFO("🔄 Closing wallet browser...");
-        wallet_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (backup_browser) {
-        LOG_INFO("🔄 Closing backup browser...");
-        backup_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (brc100_auth_browser) {
-        LOG_INFO("🔄 Closing BRC-100 auth browser...");
-        brc100_auth_browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (settings_menu_browser) {
-        LOG_INFO("🔄 Closing settings menu browser...");
-        settings_menu_browser->GetHost()->CloseBrowser(false);
-    }
-
-    // Close menu overlay browser
-    if (g_menu_overlay_browser_ref && g_menu_overlay_browser_ref->browser) {
-        LOG_INFO("Closing menu overlay browser...");
-        g_menu_overlay_browser_ref->browser->GetHost()->CloseBrowser(false);
-    }
-
-    if (cookie_panel_browser) {
-        LOG_INFO("🔄 Closing cookie panel browser...");
-        cookie_panel_browser->GetHost()->CloseBrowser(false);
-    }
-
     CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
     CefRefPtr<CefBrowser> download_panel_browser = SimpleHandler::GetDownloadPanelBrowser();
     CefRefPtr<CefBrowser> profile_panel_browser = SimpleHandler::GetProfilePanelBrowser();
 
-    if (omnibox_browser) {
-        LOG_INFO("Closing omnibox browser...");
-        omnibox_browser->GetHost()->CloseBrowser(false);
-    }
-    if (download_panel_browser) {
-        LOG_INFO("Closing download panel browser...");
-        download_panel_browser->GetHost()->CloseBrowser(false);
-    }
-    if (profile_panel_browser) {
-        LOG_INFO("Closing profile panel browser...");
-        profile_panel_browser->GetHost()->CloseBrowser(false);
+    if (header_browser) header_browser->GetHost()->CloseBrowser(true);
+    if (webview_browser) webview_browser->GetHost()->CloseBrowser(true);
+    if (settings_browser) settings_browser->GetHost()->CloseBrowser(true);
+    if (wallet_browser) wallet_browser->GetHost()->CloseBrowser(true);
+    if (backup_browser) backup_browser->GetHost()->CloseBrowser(true);
+    if (brc100_auth_browser) brc100_auth_browser->GetHost()->CloseBrowser(true);
+    if (settings_menu_browser) settings_menu_browser->GetHost()->CloseBrowser(true);
+    if (cookie_panel_browser) cookie_panel_browser->GetHost()->CloseBrowser(true);
+    if (omnibox_browser) omnibox_browser->GetHost()->CloseBrowser(true);
+    if (download_panel_browser) download_panel_browser->GetHost()->CloseBrowser(true);
+    if (profile_panel_browser) profile_panel_browser->GetHost()->CloseBrowser(true);
+
+    if (g_menu_overlay_browser_ref && g_menu_overlay_browser_ref->browser) {
+        g_menu_overlay_browser_ref->browser->GetHost()->CloseBrowser(true);
     }
 
     // Step 2: Close overlay windows
