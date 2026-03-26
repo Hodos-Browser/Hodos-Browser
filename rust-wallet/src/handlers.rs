@@ -11821,8 +11821,7 @@ pub async fn wallet_recover_onchain(
     };
     log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
 
-    // Step 5: Import backup if found
-    let mut scan_start_index: u32 = 0;
+    // Step 5: Import backup
     let mut restored_counts = serde_json::json!(null);
     let mut refetch_result = serde_json::json!(null);
 
@@ -11857,16 +11856,6 @@ pub async fn wallet_recover_onchain(
             }
         }
 
-        // Find max address index from imported data — scan starts after this
-        let max_imported_index = payload.addresses.iter()
-            .filter(|a| a.index >= 0) // Exclude special indices (-1, -2, -3)
-            .map(|a| a.index)
-            .max()
-            .unwrap_or(0);
-        scan_start_index = (max_imported_index + 1) as u32;
-        log::info!("   📊 Max imported address index: {} — quick scan will start at {}",
-            max_imported_index, scan_start_index);
-
         restored_counts = serde_json::json!({
             "transactions": payload.transactions.len(),
             "outputs": payload.outputs.len(),
@@ -11878,79 +11867,13 @@ pub async fn wallet_recover_onchain(
         // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
         refetch_result = refetch_stripped_data(&state, payload).await;
     } else {
-        log::info!("   ℹ️  No on-chain backup — full chain scan from index 0");
-    }
-
-    // Post-backup chain scan DISABLED.
-    // The BRC-42 scanning creates duplicate/phantom UTXOs when backup change outputs
-    // exist at high indices. The backup data is the source of truth. TaskSyncPending
-    // will catch any genuinely new UTXOs at known addresses over time.
-    // TODO: Re-enable as a separate sprint after MVP with proper BRC-42 scan logic.
-    let scan_start_index: u32 = 0;
-    let scan_addresses_found: u32 = 0;
-    let scan_utxos_found: u32 = 0;
-    let scan_balance: i64 = 0;
-
-    if !backup_found {
-        // No backup — fall back to BIP32-only scanning (BRC-42 disabled)
-        log::info!("   🔍 No backup found — running BIP32 chain scan from index 0");
-        {
-            let mut status = state.sync_status.write().unwrap();
-            status.active = true;
-            status.phase = "scanning".to_string();
-        }
-
-        let scan_options = crate::recovery::RecoveryOptions {
-            mnemonic: mnemonic_str.clone(),
-            gap_limit: 20,
-            start_index: 0,
-            max_index: None,
-        };
-
-        match crate::recovery::recover_wallet_from_mnemonic(scan_options).await {
-            Ok(result) => {
-                log::info!("   📊 BIP32 scan found {} addresses, {} UTXOs, {} sats",
-                    result.addresses_found, result.utxos_found, result.total_balance);
-
-                let db = state.database.lock().unwrap();
-                let conn = db.connection();
-                let address_repo = crate::database::AddressRepository::new(conn);
-                let output_repo = crate::database::OutputRepository::new(conn);
-                let wallet_repo = crate::database::WalletRepository::new(conn);
-
-                let mut max_index: i32 = 0;
-                for addr in &result.addresses {
-                    let addr_index = addr.index as i32;
-                    if addr_index > max_index { max_index = addr_index; }
-
-                    if address_repo.get_by_wallet_and_index(wallet_id, addr_index).ok().flatten().is_none() {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-                        let address_model = crate::database::Address {
-                            id: None, wallet_id, index: addr_index,
-                            address: addr.address.clone(),
-                            public_key: addr.public_key.clone(),
-                            used: addr.has_utxos, balance: addr.balance,
-                            pending_utxo_check: true, created_at: now,
-                        };
-                        let _ = address_repo.create(&address_model);
-                    }
-
-                    for utxo in &addr.utxos {
-                        let _ = output_repo.upsert_received_utxo_with_derivation(
-                            user_id, &utxo.txid, utxo.vout, utxo.satoshis,
-                            &utxo.script, addr_index, &addr.derivation_method,
-                        );
-                    }
-                }
-                if max_index > 0 {
-                    let _ = wallet_repo.update_current_index(wallet_id, max_index);
-                }
-            }
-            Err(e) => {
-                log::warn!("   ⚠️  BIP32 scan failed: {}", e);
-            }
-        }
+        // No on-chain backup found — this mnemonic has never backed up a Hodos wallet
+        log::info!("   ❌ No on-chain backup found for this mnemonic");
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": false,
+            "error": "No Hodos wallet backup found for this mnemonic. If this is a new wallet, use Create New instead.",
+            "backup_found": false
+        }));
     }
 
     // Step 7: Start Monitor and update state
@@ -11970,27 +11893,19 @@ pub async fn wallet_recover_onchain(
         let mut status = state.sync_status.write().unwrap();
         status.active = false;
         status.phase = "idle".to_string();
-        status.addresses_scanned = scan_addresses_found;
-        status.utxos_found = scan_utxos_found;
         status.total_satoshis = total_balance as u64;
         status.completed_at = Some(std::time::Instant::now());
         status.result_seen = false;
     }
 
-    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis (backup: {}, scan: {} new UTXOs)",
-        spendable_count, total_balance, backup_found, scan_utxos_found);
+    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
+        spendable_count, total_balance);
 
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
-        "backup_found": backup_found,
+        "backup_found": true,
         "wallet_id": wallet_id,
         "restored": restored_counts,
-        "scan": {
-            "start_index": scan_start_index,
-            "addresses_found": scan_addresses_found,
-            "utxos_found": scan_utxos_found,
-            "balance_satoshis": scan_balance,
-        },
         "balance_satoshis": total_balance,
         "spendable_utxos": spendable_count,
         "refetch": refetch_result,
