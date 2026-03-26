@@ -486,8 +486,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
              provided_by, purpose, type, output_description, txid, sender_identity_key, \
              derivation_prefix, derivation_suffix, custom_instructions, spent_by, sequence_number, \
              spending_description, script_length, script_offset, locking_script, created_at, updated_at FROM outputs \
-             WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup' \
-             AND (transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.transaction_id AND t.reference_number LIKE 'backup-%'))"
+             WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup'"
         )?;
         let rows = stmt.query_map([], |row| {
             let spendable = row.get::<_, i32>(4)? != 0;

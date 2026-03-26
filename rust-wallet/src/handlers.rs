@@ -11797,23 +11797,17 @@ pub async fn wallet_recover_onchain(
         }
     }
 
-    // Step 3: Fetch on-chain backup
+    // Step 3: Try on-chain backup first
     log::info!("   🔍 Searching for on-chain backup...");
     let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
-        Ok(Some(p)) => p,
-        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({
-            "success": false,
-            "error": "No on-chain backup found for this mnemonic",
-            "backup_found": false
-        })),
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false, "error": format!("Failed to fetch backup: {}", e)
-        })),
+        Ok(p) => p, // Some or None
+        Err(e) => {
+            log::warn!("   ⚠️  On-chain backup fetch failed: {} — will try chain scanning", e);
+            None
+        }
     };
 
-    log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
-        backup_payload.transactions.len(), backup_payload.outputs.len(),
-        backup_payload.certificates.len());
+    let backup_found = backup_payload.is_some();
 
     // Step 4: Create wallet from mnemonic
     let (wallet_id, user_id) = {
@@ -11825,41 +11819,144 @@ pub async fn wallet_recover_onchain(
             })),
         }
     };
-
     log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
 
-    // Step 5: Clean up auto-created records that will conflict with backup import.
-    // create_wallet_from_existing_mnemonic() auto-creates: user, addresses (0, -1, -3),
-    // default basket. The backup payload has its own versions of these.
-    {
-        let db = state.database.lock().unwrap();
-        let conn = db.connection();
-        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
-        let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
-        let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
-        log::info!("   🧹 Cleaned up auto-created records before import");
+    // Step 5: Import backup if found
+    let mut scan_start_index: u32 = 0;
+    let mut restored_counts = serde_json::json!(null);
+    let mut refetch_result = serde_json::json!(null);
+
+    if let Some(payload) = &backup_payload {
+        log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
+            payload.transactions.len(), payload.outputs.len(), payload.certificates.len());
+
+        // Clean up auto-created records that conflict with backup import
+        {
+            let db = state.database.lock().unwrap();
+            let conn = db.connection();
+            let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+            let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+            let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+            log::info!("   🧹 Cleaned up auto-created records before import");
+        }
+
+        // Import all entities
+        {
+            let db = state.database.lock().unwrap();
+            match crate::backup::import_to_db(db.connection(), payload) {
+                Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
+                Err(e) => {
+                    log::error!("   ❌ Import failed: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Import failed: {}", e),
+                        "wallet_created": true,
+                        "backup_found": true
+                    }));
+                }
+            }
+        }
+
+        // Find max address index from imported data — scan starts after this
+        let max_imported_index = payload.addresses.iter()
+            .filter(|a| a.index >= 0) // Exclude special indices (-1, -2, -3)
+            .map(|a| a.index)
+            .max()
+            .unwrap_or(0);
+        scan_start_index = (max_imported_index + 1) as u32;
+        log::info!("   📊 Max imported address index: {} — quick scan will start at {}",
+            max_imported_index, scan_start_index);
+
+        restored_counts = serde_json::json!({
+            "transactions": payload.transactions.len(),
+            "outputs": payload.outputs.len(),
+            "addresses": payload.addresses.len(),
+            "certificates": payload.certificates.len(),
+            "proven_txs": payload.proven_txs.len(),
+        });
+
+        // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
+        refetch_result = refetch_stripped_data(&state, payload).await;
+    } else {
+        log::info!("   ℹ️  No on-chain backup — full chain scan from index 0");
     }
 
-    // Step 6: Import all entities from backup
-    {
-        let db = state.database.lock().unwrap();
-        match crate::backup::import_to_db(db.connection(), &backup_payload) {
-            Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
+    // Post-backup chain scan DISABLED.
+    // The BRC-42 scanning creates duplicate/phantom UTXOs when backup change outputs
+    // exist at high indices. The backup data is the source of truth. TaskSyncPending
+    // will catch any genuinely new UTXOs at known addresses over time.
+    // TODO: Re-enable as a separate sprint after MVP with proper BRC-42 scan logic.
+    let scan_start_index: u32 = 0;
+    let scan_addresses_found: u32 = 0;
+    let scan_utxos_found: u32 = 0;
+    let scan_balance: i64 = 0;
+
+    if !backup_found {
+        // No backup — fall back to BIP32-only scanning (BRC-42 disabled)
+        log::info!("   🔍 No backup found — running BIP32 chain scan from index 0");
+        {
+            let mut status = state.sync_status.write().unwrap();
+            status.active = true;
+            status.phase = "scanning".to_string();
+        }
+
+        let scan_options = crate::recovery::RecoveryOptions {
+            mnemonic: mnemonic_str.clone(),
+            gap_limit: 20,
+            start_index: 0,
+            max_index: None,
+        };
+
+        match crate::recovery::recover_wallet_from_mnemonic(scan_options).await {
+            Ok(result) => {
+                log::info!("   📊 BIP32 scan found {} addresses, {} UTXOs, {} sats",
+                    result.addresses_found, result.utxos_found, result.total_balance);
+
+                let db = state.database.lock().unwrap();
+                let conn = db.connection();
+                let address_repo = crate::database::AddressRepository::new(conn);
+                let output_repo = crate::database::OutputRepository::new(conn);
+                let wallet_repo = crate::database::WalletRepository::new(conn);
+
+                let mut max_index: i32 = 0;
+                for addr in &result.addresses {
+                    let addr_index = addr.index as i32;
+                    if addr_index > max_index { max_index = addr_index; }
+
+                    if address_repo.get_by_wallet_and_index(wallet_id, addr_index).ok().flatten().is_none() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                        let address_model = crate::database::Address {
+                            id: None, wallet_id, index: addr_index,
+                            address: addr.address.clone(),
+                            public_key: addr.public_key.clone(),
+                            used: addr.has_utxos, balance: addr.balance,
+                            pending_utxo_check: true, created_at: now,
+                        };
+                        let _ = address_repo.create(&address_model);
+                    }
+
+                    for utxo in &addr.utxos {
+                        let _ = output_repo.upsert_received_utxo_with_derivation(
+                            user_id, &utxo.txid, utxo.vout, utxo.satoshis,
+                            &utxo.script, addr_index, &addr.derivation_method,
+                        );
+                    }
+                }
+                if max_index > 0 {
+                    let _ = wallet_repo.update_current_index(wallet_id, max_index);
+                }
+            }
             Err(e) => {
-                log::error!("   ❌ Import failed: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Import failed: {}", e),
-                    "wallet_created": true
-                }));
+                log::warn!("   ⚠️  BIP32 scan failed: {}", e);
             }
         }
     }
 
-    // Step 7: Update balance cache
+    // Step 7: Start Monitor and update state
+    crate::monitor::Monitor::start(state.clone());
     state.balance_cache.invalidate();
 
-    // Count what was restored
     let (total_balance, spendable_count) = {
         let db = state.database.lock().unwrap();
         let output_repo = crate::database::OutputRepository::new(db.connection());
@@ -11868,24 +11965,31 @@ pub async fn wallet_recover_onchain(
         (balance, count)
     };
 
-    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
-        spendable_count, total_balance);
+    // Update sync status
+    {
+        let mut status = state.sync_status.write().unwrap();
+        status.active = false;
+        status.phase = "idle".to_string();
+        status.addresses_scanned = scan_addresses_found;
+        status.utxos_found = scan_utxos_found;
+        status.total_satoshis = total_balance as u64;
+        status.completed_at = Some(std::time::Instant::now());
+        status.result_seen = false;
+    }
 
-    // Step 8: Re-fetch stripped data from WhatsOnChain
-    // The backup payload strips raw_tx, merkle_paths, and parent_transactions
-    // to minimize on-chain size. Re-fetch them now for full wallet functionality.
-    let refetch_result = refetch_stripped_data(&state, &backup_payload).await;
+    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis (backup: {}, scan: {} new UTXOs)",
+        spendable_count, total_balance, backup_found, scan_utxos_found);
 
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
-        "backup_found": true,
+        "backup_found": backup_found,
         "wallet_id": wallet_id,
-        "restored": {
-            "transactions": backup_payload.transactions.len(),
-            "outputs": backup_payload.outputs.len(),
-            "addresses": backup_payload.addresses.len(),
-            "certificates": backup_payload.certificates.len(),
-            "proven_txs": backup_payload.proven_txs.len(),
+        "restored": restored_counts,
+        "scan": {
+            "start_index": scan_start_index,
+            "addresses_found": scan_addresses_found,
+            "utxos_found": scan_utxos_found,
+            "balance_satoshis": scan_balance,
         },
         "balance_satoshis": total_balance,
         "spendable_utxos": spendable_count,
