@@ -17,15 +17,60 @@ Automatically back up the entire wallet database as an encrypted, compressed Pus
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Storage format | PushDrop (spendable) | Recovers sats on each update; single UTXO = latest backup |
+| Storage format | PushDrop (spendable) + P2PKH marker | Recovers sats on each update; marker enables on-chain discovery |
 | Address derivation | BRC-42 self-counterparty, invoice `"1-wallet-backup-1"` | Deterministic from mnemonic, same across all devices |
 | Address DB index | -3 (special index) | Follows pattern: -1 = master, -2 = external, -3 = backup |
-| Token amount | 1000 sats | Above dust, recoverable on next update |
+| PushDrop token amount | 1000 sats | Above dust, recoverable on next update |
+| Marker amount | 546 sats (dust limit) | Smallest amount indexed by block explorers |
 | Compression | gzip level 9 BEFORE encryption | 96-97% reduction; encrypted data doesn't compress |
-| Encryption | AES-256-GCM, key from HKDF(master_privkey) | No password needed — mnemonic-derived key |
+| Encryption | AES-256-GCM, key from SHA256(master_privkey \|\| salt) | No password needed — mnemonic-derived key |
 | Serialization | Reuse existing `BackupPayload` from `backup.rs` | Already has all entity types mapped |
 | Update frequency | On shutdown + event-triggered + periodic safety net | Dirty flag prevents wasted backups when nothing changed |
 | Recovery cost | Zero coins | Read-only chain query — no transaction needed |
+| Service fee | Waived | Wallet backup is infrastructure protecting the user |
+
+---
+
+## On-Chain Discovery: P2PKH Marker Output
+
+### Problem
+
+PushDrop outputs use a nonstandard script format (`<pubkey> OP_CHECKSIG <data> OP_DROP`). Block explorers like WhatsOnChain only index standard script types (P2PKH, P2SH) by address. This means a PushDrop output **cannot be discovered** by querying `GET /address/{addr}/unspent` — it is invisible to address-based UTXO lookups.
+
+This is a critical problem for recovery: the user has only their mnemonic, from which we can derive the backup address, but we cannot find the PushDrop UTXO at that address.
+
+### Solution: Dual-Output Pattern
+
+Each backup transaction creates **two outputs** in the same transaction:
+
+```
+Output 0: PushDrop — encrypted backup data (1000 sats, nonstandard script)
+Output 1: P2PKH marker — standard output at backup address (546 sats, indexed by explorers)
+Output 2: Change (if above dust)
+```
+
+The P2PKH marker at output 1 serves as a **discoverable flag**. On recovery:
+
+1. Derive backup address from mnemonic (BRC-42 self, `"1-wallet-backup-1"`)
+2. Query WhatsOnChain: `GET /address/{backup_address}/unspent/all`
+3. The marker UTXO is returned with its **txid**
+4. The PushDrop is always at **vout 0** of the same txid
+5. Fetch full tx: `GET /tx/{txid}/hex` → parse output 0 → PushDrop → decrypt
+
+The marker adds only 546 sats and ~25 bytes to each backup transaction. Both the PushDrop and marker are spent as inputs on subsequent backups, recovering both amounts.
+
+### Why not other approaches?
+
+| Alternative | Rejected Because |
+|-------------|-----------------|
+| Query by script hash | WhatsOnChain does not index nonstandard scripts by hash |
+| OP_RETURN + P2PKH | OP_RETURN is unspendable — sats burned on every update |
+| Overlay/indexer service | Adds external dependency; not available from mnemonic alone |
+| Store txid off-chain | Defeats the purpose of mnemonic-only recovery |
+
+### BRC Consideration
+
+This dual-output pattern (data in nonstandard script + discoverable marker in standard script) is a general solution for any protocol that stores data in PushDrop/nonstandard outputs but needs on-chain discoverability. It should be documented as a recommended pattern in any BRC specification for on-chain data storage with recovery requirements.
 
 ---
 
@@ -366,14 +411,17 @@ The wallet is **immediately functional** after restore — UTXOs, keys, certific
 ## Transaction Output Order (Backup Tx)
 
 ```
-Input 0:     Previous backup UTXO (P2PK — spend old backup) [if exists]
-Input 1..N:  Wallet UTXOs (P2PKH — funding)
+Input 0:     Previous PushDrop UTXO (P2PK — spend old backup data) [if exists]
+Input 1:     Previous marker UTXO (P2PKH — spend old marker) [if exists]
+Input 2..N:  Wallet UTXOs (P2PKH — funding)
 
-Output 0:    PushDrop backup (1000 sats → backup address)
-Output 1:    Change (if above dust → new change address)
+Output 0:    PushDrop backup (1000 sats — encrypted data, nonstandard script)
+Output 1:    P2PKH marker (546 sats — at backup address, for on-chain discovery)
+Output 2:    Change (if above dust → new change address)
 ```
 
-First backup (no previous UTXO): inputs are only wallet UTXOs.
+First backup (no previous UTXOs): inputs are only wallet UTXOs.
+Subsequent backups: previous PushDrop + marker are spent as inputs, recovering both amounts.
 
 **No Hodos service fee** — wallet backups are infrastructure protecting the user's funds.
 

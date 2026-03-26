@@ -112,21 +112,29 @@ Output 1: OP_FALSE OP_RETURN <encrypted_data>
 - ❌ Two outputs needed
 - ❌ Marker sats not recoverable
 
-### PushDrop (Proposed)
+### PushDrop + P2PKH Marker (Implemented)
 ```
-Output 0: PushDrop to self-derived key
+Output 0: PushDrop to self-derived key (1000 sats)
           <pubkey> OP_CHECKSIG [compressed_encrypted_data]
+Output 1: P2PKH marker at backup address (546 sats)
+          Standard P2PKH — indexed by block explorers for discovery
 ```
 - ✅ Spendable! Recover sats on next update
-- ✅ Single output serves as both marker and data
-- ✅ Natural update model: spend old → create new
-- ✅ Only one UTXO ever exists (the latest)
+- ✅ PushDrop holds encrypted data, marker enables discovery
+- ✅ Natural update model: spend old PushDrop + old marker → create new
+- ✅ Only two UTXOs ever exist (the latest PushDrop + marker)
+
+**Why the marker is required**: PushDrop outputs use nonstandard scripts. Block explorers
+(WhatsOnChain, etc.) only index standard script types (P2PKH, P2SH) by address. Without the
+marker, there is no way to discover the backup UTXO from the mnemonic alone — the PushDrop is
+invisible to address-based UTXO queries. The P2PKH marker at a deterministic BRC-42 address
+solves this: query the address → find marker → same txid → PushDrop at vout 0.
 
 ### Cost Comparison Over Time
 
-With PushDrop, each update spends the previous backup UTXO as input:
-- First backup: pay for new UTXO + fee
-- Subsequent: recover previous UTXO, pay only fee difference
+With PushDrop + marker, each update spends both previous outputs as inputs:
+- First backup: pay for PushDrop (1000) + marker (546) + mining fee
+- Subsequent: recover previous PushDrop + marker, pay only fee difference
 
 **Effectively free updates** after the first backup!
 
