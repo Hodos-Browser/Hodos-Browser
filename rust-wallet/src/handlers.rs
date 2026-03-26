@@ -11749,7 +11749,7 @@ pub async fn wallet_recover_onchain(
         }
     }
 
-    // Step 6: Update balance cache
+    // Step 7: Update balance cache
     state.balance_cache.invalidate();
 
     // Count what was restored
@@ -11764,6 +11764,11 @@ pub async fn wallet_recover_onchain(
     log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
         spendable_count, total_balance);
 
+    // Step 8: Re-fetch stripped data from WhatsOnChain
+    // The backup payload strips raw_tx, merkle_paths, and parent_transactions
+    // to minimize on-chain size. Re-fetch them now for full wallet functionality.
+    let refetch_result = refetch_stripped_data(&state, &backup_payload).await;
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "backup_found": true,
@@ -11777,7 +11782,162 @@ pub async fn wallet_recover_onchain(
         },
         "balance_satoshis": total_balance,
         "spendable_utxos": spendable_count,
+        "refetch": refetch_result,
     }))
+}
+
+/// Re-fetch stripped data after on-chain backup recovery.
+///
+/// Fetches from WhatsOnChain in parallel:
+/// 1. Raw tx hex for all transactions → populates transactions.raw_tx, proven_txs.raw_tx, parent_transactions
+/// 2. Merkle proofs for proven txs → populates proven_txs.merkle_path
+/// 3. Restores spent output locking_scripts from parsed raw tx
+async fn refetch_stripped_data(
+    state: &AppState,
+    payload: &crate::backup::BackupPayload,
+) -> serde_json::Value {
+    use crate::database::{TransactionRepository, OutputRepository, ParentTransactionRepository};
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Collect all unique txids that need raw_tx fetched
+    let mut txids_to_fetch: Vec<String> = Vec::new();
+    for tx in &payload.transactions {
+        if let Some(ref txid) = tx.txid {
+            if !txids_to_fetch.contains(txid) {
+                txids_to_fetch.push(txid.clone());
+            }
+        }
+    }
+    // Also include proven_txs txids (may overlap but dedup handles it)
+    for ptx in &payload.proven_txs {
+        if !txids_to_fetch.contains(&ptx.txid) {
+            txids_to_fetch.push(ptx.txid.clone());
+        }
+    }
+
+    log::info!("   🔄 Re-fetching stripped data for {} unique txids...", txids_to_fetch.len());
+
+    let mut raw_tx_fetched = 0u32;
+    let mut proofs_fetched = 0u32;
+    let mut parent_txs_cached = 0u32;
+    let mut scripts_restored = 0u32;
+    let mut errors = 0u32;
+
+    // Fetch raw tx + merkle proof for each txid
+    for txid in &txids_to_fetch {
+        // 1. Fetch raw transaction hex
+        let raw_tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&client, txid).await {
+            Ok(hex) => {
+                raw_tx_fetched += 1;
+                Some(hex)
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to fetch raw tx for {}: {}", &txid[..16.min(txid.len())], e);
+                errors += 1;
+                None
+            }
+        };
+
+        if let Some(ref hex) = raw_tx_hex {
+            // Update transactions.raw_tx
+            {
+                let db = state.database.lock().unwrap();
+                let raw_bytes = hex::decode(hex).unwrap_or_default();
+                if !raw_bytes.is_empty() {
+                    let _ = db.connection().execute(
+                        "UPDATE transactions SET raw_tx = ?1 WHERE txid = ?2 AND raw_tx IS NULL",
+                        rusqlite::params![raw_bytes, txid],
+                    );
+                }
+            }
+
+            // Update proven_txs.raw_tx
+            {
+                let db = state.database.lock().unwrap();
+                let raw_bytes = hex::decode(hex).unwrap_or_default();
+                if !raw_bytes.is_empty() {
+                    let _ = db.connection().execute(
+                        "UPDATE proven_txs SET raw_tx = ?1 WHERE txid = ?2 AND (raw_tx IS NULL OR LENGTH(raw_tx) = 0)",
+                        rusqlite::params![raw_bytes, txid],
+                    );
+                }
+            }
+
+            // Cache in parent_transactions for BEEF building
+            {
+                let db = state.database.lock().unwrap();
+                let parent_tx_repo = ParentTransactionRepository::new(db.connection());
+                if parent_tx_repo.get_by_txid(txid).unwrap_or(None).is_none() {
+                    let _ = parent_tx_repo.upsert(None, txid, hex);
+                    parent_txs_cached += 1;
+                }
+            }
+
+            // Restore spent output locking_scripts by parsing the raw tx
+            if let Ok(raw_bytes) = hex::decode(hex) {
+                let db = state.database.lock().unwrap();
+                // Find outputs for this txid that have NULL or empty locking_script
+                let mut stmt = db.connection().prepare(
+                    "SELECT outputId, vout FROM outputs WHERE txid = ?1 AND (locking_script IS NULL OR LENGTH(locking_script) = 0)"
+                ).unwrap();
+                let missing: Vec<(i64, i32)> = stmt.query_map(
+                    rusqlite::params![txid],
+                    |row| Ok((row.get(0)?, row.get(1)?))
+                ).unwrap().filter_map(|r| r.ok()).collect();
+                drop(stmt);
+
+                for (output_id, vout) in &missing {
+                    if let Ok(script) = extract_output_script(&raw_bytes, *vout as usize) {
+                        let _ = db.connection().execute(
+                            "UPDATE outputs SET locking_script = ?1 WHERE outputId = ?2",
+                            rusqlite::params![script, output_id],
+                        );
+                        scripts_restored += 1;
+                    }
+                }
+            }
+        }
+
+        // 2. Fetch merkle proof (TSC format)
+        match crate::cache_helpers::fetch_tsc_proof_from_api(&client, txid).await {
+            Ok(Some(proof_json)) => {
+                let db = state.database.lock().unwrap();
+                // Store proof as BLOB in proven_txs
+                let proof_bytes = serde_json::to_vec(&proof_json).unwrap_or_default();
+                if !proof_bytes.is_empty() {
+                    let updated = db.connection().execute(
+                        "UPDATE proven_txs SET merkle_path = ?1 WHERE txid = ?2 AND (merkle_path IS NULL OR LENGTH(merkle_path) = 0)",
+                        rusqlite::params![proof_bytes, txid],
+                    ).unwrap_or(0);
+                    if updated > 0 {
+                        proofs_fetched += 1;
+                    }
+                }
+            }
+            Ok(None) => {
+                // Not yet mined or no proof available — normal for unconfirmed txs
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to fetch proof for {}: {}", &txid[..16.min(txid.len())], e);
+                errors += 1;
+            }
+        }
+    }
+
+    log::info!("   ✅ Re-fetch complete: {} raw txs, {} proofs, {} parent tx cache, {} scripts restored, {} errors",
+        raw_tx_fetched, proofs_fetched, parent_txs_cached, scripts_restored, errors);
+
+    serde_json::json!({
+        "raw_tx_fetched": raw_tx_fetched,
+        "proofs_fetched": proofs_fetched,
+        "parent_txs_cached": parent_txs_cached,
+        "scripts_restored": scripts_restored,
+        "errors": errors,
+    })
 }
 
 /// Restore wallet database from backup
