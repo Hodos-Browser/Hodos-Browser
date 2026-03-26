@@ -11165,7 +11165,7 @@ pub async fn wallet_backup_onchain(
                 format!("backup-{}", &txid[..8]),
                 "On-chain wallet backup",
                 raw_tx_bytes,
-                total_in,
+                estimated_fee, // Actual cost — only the mining fee (token + marker recovered on next backup)
                 now, now,
             ],
         ) {

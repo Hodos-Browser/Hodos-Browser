@@ -433,7 +433,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Transactions (exclude backup txs; strip raw_tx from confirmed txs to save space)
+    // Transactions (exclude backup txs to prevent payload growth)
     let transactions = {
         let mut stmt = conn.prepare(
             "SELECT id, user_id, proven_tx_id, txid, reference_number, raw_tx, description, \
@@ -479,14 +479,15 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Outputs (exclude backup PushDrop; strip locking_script from spent outputs)
+    // Outputs: exclude backup PushDrop + marker outputs AND change outputs from backup txs.
     let outputs = {
         let mut stmt = conn.prepare(
             "SELECT outputId, user_id, transaction_id, basket_id, spendable, change, vout, satoshis, \
              provided_by, purpose, type, output_description, txid, sender_identity_key, \
              derivation_prefix, derivation_suffix, custom_instructions, spent_by, sequence_number, \
              spending_description, script_length, script_offset, locking_script, created_at, updated_at FROM outputs \
-             WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup'"
+             WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup' \
+             AND (transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.transaction_id AND t.reference_number LIKE 'backup-%'))"
         )?;
         let rows = stmt.query_map([], |row| {
             let spendable = row.get::<_, i32>(4)? != 0;
@@ -527,7 +528,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Proven txs (exclude backup txs; strip raw_tx — re-fetchable from chain)
+    // Proven txs (exclude backup txs; raw_tx and merkle_path stripped in serialize_for_onchain)
     let proven_txs = {
         let mut stmt = conn.prepare(
             "SELECT provenTxId, txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root, \
@@ -553,7 +554,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Proven tx reqs (exclude backup transactions)
+    // Proven tx reqs (exclude backup txs; raw_tx and input_beef stripped in serialize_for_onchain)
     let proven_tx_reqs = {
         let mut stmt = conn.prepare(
             "SELECT provenTxReqId, proven_tx_id, txid, status, attempts, notified, batch, history, \
@@ -750,9 +751,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Parent transactions — exclude entirely from on-chain backup.
-    // This is a BEEF-building cache that can be fully rebuilt from the chain.
-    // For file-based backups (collect_payload called from wallet_backup), this is still included.
+    // Parent transactions (entire table cleared in serialize_for_onchain — BEEF cache rebuilt on re-fetch)
     let parent_transactions = {
         let mut stmt = conn.prepare(
             "SELECT pt.id, pt.utxo_id, pt.txid, pt.raw_hex, pt.cached_at FROM parent_transactions pt \

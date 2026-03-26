@@ -4556,7 +4556,7 @@ async fn unpublish_certificate_core(
                 format!("unpublish-{}", &txid[..8]),
                 "Unpublish identity certificate",
                 raw_tx_bytes,
-                total_in as i64, // satoshis (total input value)
+                estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS, // Actual cost (fee + service fee)
                 now, now,
             ],
         ) {
