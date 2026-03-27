@@ -390,14 +390,26 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 | **Testable Total** | **103** | **9** | **49** | **78%** |
 | Wave 5 (Blocked) | — | — | 7 | 🔴 Needs code changes |
 
-**Bugs found so far:**
+**Bugs found: 11 (1 critical, 2 high, 6 medium, 2 low)**
 ```
-1. Zoom +/- closes menu instead of staying open, % never updates
-2. Received payment notification shows 0.00000000 BSV (~$0.00) instead of actual amount
-3. Privacy shield blocked counts not displaying
-4. Scriptlet injection toggle doesn't work
-5. Closing last tab closes the entire window (should keep window open with new tab, like Chrome)
-6. PeerPay notification banner "Details" button missing
-7. Minimum send amount $0.01 USD too high — blocks micro-sends with small balances
+CRITICAL:
+11. All 12 recovery phrase words display as the same word — mnemonic reveal broken
 
+HIGH:
+5.  Closing last tab closes entire window (should open new tab, like Chrome)
+9.  Send button disabled for PeerPay (identity key) and Paymail — only P2PKH works
+
+MEDIUM:
+1.  Zoom +/- closes menu instead of staying open, % never updates
+2.  Received payment notification shows 0.00000000 BSV (~$0.00) instead of actual amount
+4.  Scriptlet injection toggle doesn't work
+7.  Minimum send amount $0.01 USD too high — blocks micro-sends with small balances
+8.  Max button doesn't subtract fee from total balance
+10. New approved sites don't use updated default limits — still get old defaults
+
+LOW:
+3.  Privacy shield blocked counts not displaying
+6.  PeerPay notification banner "Details" button missing
 ```
+
+**Tracking issue:** #89 — Fix bugs found during tedious testing (#49)
