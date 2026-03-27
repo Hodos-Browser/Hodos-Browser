@@ -4761,7 +4761,7 @@ pub(crate) async fn create_action_internal(
     // This ensures the change output is immediately reflected in balance calculations
     // BRC-100: Change outputs go to the "default" basket
     if let Some((_addr_id, addr_index, satoshis, ref script_hex)) = pending_change_utxo {
-        let change_vout = req.outputs.len() as u32; // Change is always the last output
+        let change_vout = (req.outputs.len() + 1) as u32; // +1 for service fee output between user outputs and change
         log::info!("   💾 Inserting pending change output: txid={}, vout={}, satoshis={}", txid, change_vout, satoshis);
 
         let db = state.database.lock().unwrap();
@@ -5166,9 +5166,9 @@ pub(crate) async fn create_action_internal(
             }
         }
 
-        // 2. Update change output txid (change is always the last output)
+        // 2. Update change output txid (change is after user outputs + service fee)
         if pending_change_utxo.is_some() {
-            let change_vout = req.outputs.len() as u32;
+            let change_vout = (req.outputs.len() + 1) as u32;
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_txid(&pre_signing_txid, change_vout, &final_txid) {
                 log::warn!("   ⚠️  Failed to update change output txid: {}", e);
@@ -5554,7 +5554,7 @@ pub(crate) async fn create_action_internal(
     // The SDK uses these to chain transactions: the change outpoints from this noSend tx
     // become inputs (via options.noSendChange) in the next createAction call.
     let no_send_change = if no_send && pending_change_utxo.is_some() && !final_txid.is_empty() {
-        let change_vout = req.outputs.len(); // Change is appended after user outputs
+        let change_vout = req.outputs.len() + 1; // +1 for service fee output between user outputs and change
         let outpoint = format!("{}.{}", final_txid, change_vout);
         log::info!("   📋 noSendChange: {}", outpoint);
         Some(vec![outpoint])
@@ -11527,6 +11527,136 @@ fn extract_output_script(raw_tx: &[u8], target_vout: usize) -> Result<Vec<u8>, S
     Err("Output not found".to_string())
 }
 
+/// After recovery, reconcile the backup transaction with the imported DB.
+/// The backup payload captures pre-backup state, so the funding UTXO is still
+/// marked spendable. This function marks the backup tx's inputs as spent and
+/// inserts the change output (vout 2) so the balance is correct immediately.
+fn reconcile_backup_tx(
+    state: &AppState,
+    backup_txid: &str,
+    raw_tx: &[u8],
+) -> Result<(u32, bool), String> {
+    use crate::transaction::decode_varint;
+
+    let mut pos = 4; // Skip version
+
+    // Parse inputs
+    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("input count varint: {:?}", e))?;
+    pos += consumed;
+
+    let mut inputs: Vec<(String, u32)> = Vec::new();
+    for _ in 0..input_count {
+        let txid_bytes = &raw_tx[pos..pos+32];
+        let txid_hex: String = txid_bytes.iter().rev().map(|b| format!("{:02x}", b)).collect();
+        let vout = u32::from_le_bytes(raw_tx[pos+32..pos+36].try_into().unwrap());
+        pos += 36;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("input script varint: {:?}", e))?;
+        pos += consumed + script_len as usize + 4; // script + sequence
+        inputs.push((txid_hex, vout));
+    }
+
+    // Parse all outputs: vout 0 = PushDrop, vout 1 = marker, vout 2 = change
+    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("output count varint: {:?}", e))?;
+    pos += consumed;
+
+    let mut output_data: Vec<(i64, String)> = Vec::new(); // (sats, script_hex)
+    for _i in 0..output_count as usize {
+        let value = u64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
+        pos += 8;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("output script varint: {:?}", e))?;
+        pos += consumed;
+        let script_hex = hex::encode(&raw_tx[pos..pos + script_len as usize]);
+        output_data.push((value as i64, script_hex));
+        pos += script_len as usize;
+    }
+
+    let db = state.database.lock().unwrap();
+    let output_repo = crate::database::OutputRepository::new(db.connection());
+
+    // Mark inputs as spent (these are funding UTXOs from the imported backup state)
+    let mut inputs_marked = 0u32;
+    for (txid, vout) in &inputs {
+        let rows = db.connection().execute(
+            "UPDATE outputs SET spendable = 0, spending_description = ?1
+             WHERE txid = ?2 AND vout = ?3 AND spendable = 1",
+            rusqlite::params![
+                format!("spent-by-backup-{}", &backup_txid[..16]),
+                txid, *vout as i32
+            ],
+        ).unwrap_or(0);
+        if rows > 0 {
+            inputs_marked += rows as u32;
+        }
+    }
+
+    // Insert backup outputs: PushDrop (vout 0), marker (vout 1), change (vout 2)
+    let mut change_inserted = false;
+    let basket_repo = crate::database::BasketRepository::new(db.connection());
+    let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
+
+    // Vout 0: PushDrop (encrypted backup data)
+    if let Some((sats, ref script_hex)) = output_data.get(0) {
+        let _ = output_repo.insert_output(
+            1, backup_txid, 0,
+            *sats, script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("1"),
+            None, None, false,
+        );
+    }
+
+    // Vout 1: Marker (P2PKH at backup address, for on-chain discovery)
+    if let Some((sats, ref script_hex)) = output_data.get(1) {
+        let _ = output_repo.insert_output(
+            1, backup_txid, 1,
+            *sats, script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("marker"),
+            None, None, false,
+        );
+    }
+
+    // Vout 2: Change (back to wallet)
+    if let Some((sats, ref script_hex)) = output_data.get(2) {
+        if *sats > 546 {
+            let change_addr_index = {
+                let addr_repo = crate::database::AddressRepository::new(db.connection());
+                let wallet_repo = crate::database::WalletRepository::new(db.connection());
+                let wallet = wallet_repo.get_primary_wallet().ok().flatten();
+                let wid = wallet.and_then(|w| w.id).unwrap_or(1);
+                let addresses = addr_repo.get_all_by_wallet(wid).unwrap_or_default();
+
+                let change_script_bytes = hex::decode(script_hex).unwrap_or_default();
+                addresses.iter().find_map(|a| {
+                    let addr_script = crate::handlers::address_to_script(&a.address);
+                    if let Ok(s) = addr_script {
+                        if s == change_script_bytes { Some(a.index) } else { None }
+                    } else { None }
+                }).unwrap_or(-1)
+            };
+
+            if change_addr_index >= 0 {
+                let _ = output_repo.upsert_received_utxo(
+                    state.current_user_id,
+                    backup_txid,
+                    2,
+                    *sats,
+                    script_hex,
+                    change_addr_index,
+                );
+                change_inserted = true;
+            }
+        }
+    }
+
+    state.balance_cache.invalidate();
+    Ok((inputs_marked, change_inserted))
+}
+
 /// Fetch and decrypt the on-chain backup from the blockchain.
 ///
 /// Shared helper for both verify and recover endpoints.
@@ -11537,10 +11667,11 @@ fn extract_output_script(raw_tx: &[u8], target_vout: usize) -> Result<Vec<u8>, S
 /// 5. Decrypt + decompress → BackupPayload
 ///
 /// Returns Ok(Some(payload)) if backup found, Ok(None) if no backup on-chain.
+/// Returns (payload, backup_txid, raw_tx_bytes) if found
 async fn fetch_onchain_backup(
     master_privkey: &[u8],
     master_pubkey: &[u8],
-) -> Result<Option<crate::backup::BackupPayload>, String> {
+) -> Result<Option<(crate::backup::BackupPayload, String, Vec<u8>)>, String> {
     use crate::script::pushdrop;
 
     // Step 1: Derive backup address
@@ -11592,8 +11723,12 @@ async fn fetch_onchain_backup(
         return Ok(None);
     }
 
-    // Take the first marker UTXO — its txid tells us where the PushDrop is
-    let marker_utxo = &utxos[0];
+    // Pick the newest marker UTXO — prefer unconfirmed (height=0 or missing), then highest block height.
+    // Multiple markers can exist from previous backup cycles; only the latest has current data.
+    let marker_utxo = utxos.iter().max_by_key(|u| {
+        let h = u["height"].as_i64().unwrap_or(0);
+        if h == 0 { i64::MAX } else { h }  // Unconfirmed (0) = newest
+    }).unwrap_or(&utxos[0]);
     let txid = marker_utxo["tx_hash"].as_str()
         .or_else(|| marker_utxo["txid"].as_str())
         .ok_or("Missing txid in UTXO response")?;
@@ -11643,7 +11778,7 @@ async fn fetch_onchain_backup(
         payload.transactions.len(), payload.outputs.len(),
         payload.addresses.len(), payload.certificates.len());
 
-    Ok(Some(payload))
+    Ok(Some((payload, txid.to_string(), raw_tx_bytes)))
 }
 
 /// Verify on-chain backup against current wallet state.
@@ -11678,7 +11813,7 @@ pub async fn wallet_backup_onchain_verify(
 
     // Fetch and decrypt on-chain backup
     let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
-        Ok(Some(p)) => p,
+        Ok(Some((p, _, _))) => p,
         Ok(None) => return HttpResponse::Ok().json(serde_json::json!({
             "success": false, "error": "No backup found on-chain"
         })),
@@ -11846,15 +11981,19 @@ pub async fn wallet_recover_onchain(
 
     // Step 3: Try on-chain backup first
     log::info!("   🔍 Searching for on-chain backup...");
-    let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
-        Ok(p) => p, // Some or None
+    let backup_result = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
+        Ok(p) => p, // Some((payload, txid, raw_tx)) or None
         Err(e) => {
             log::warn!("   ⚠️  On-chain backup fetch failed: {} — will try chain scanning", e);
             None
         }
     };
 
-    let backup_found = backup_payload.is_some();
+    let backup_found = backup_result.is_some();
+    let (backup_payload, backup_txid, backup_raw_tx) = match backup_result {
+        Some((p, t, r)) => (Some(p), Some(t), Some(r)),
+        None => (None, None, None),
+    };
 
     // Step 4: Create wallet from mnemonic
     let (wallet_id, user_id) = {
@@ -11913,6 +12052,20 @@ pub async fn wallet_recover_onchain(
 
         // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
         refetch_result = refetch_stripped_data(&state, payload).await;
+
+        // Process backup transaction: the payload captures pre-backup state, so the
+        // funding UTXO spent by the backup tx is still spendable in the DB. Parse the
+        // backup tx to mark its inputs as spent and insert the change output.
+        if let (Some(ref bk_txid), Some(ref bk_raw)) = (&backup_txid, &backup_raw_tx) {
+            log::info!("   🔄 Processing backup tx {} to reconcile funding/change...", &bk_txid[..16]);
+            match reconcile_backup_tx(&state, bk_txid, bk_raw) {
+                Ok((inputs_marked, change_inserted)) => {
+                    log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
+                        inputs_marked, if change_inserted { "inserted" } else { "skipped" });
+                }
+                Err(e) => log::warn!("   ⚠️  Backup tx reconciliation failed: {} (sync will fix later)", e),
+            }
+        }
     } else {
         // No on-chain backup found — this mnemonic has never backed up a Hodos wallet
         log::info!("   ❌ No on-chain backup found for this mnemonic");

@@ -80,6 +80,10 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const notificationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevNotificationCount = useRef(0);
 
+  // Backup state
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<'idle' | 'success' | 'error'>('idle');
+
   // Refs to track current values — avoids re-renders when poll returns same data
   const balanceRef = useRef(0);
   const bsvPriceRef = useRef(0);
@@ -250,6 +254,31 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     setTimeout(() => { fetchBalance(); fetchRecentActivity(); }, 500);
   };
 
+  const handleBackupNow = async () => {
+    setBackingUp(true);
+    setBackupStatus('idle');
+    try {
+      const resp = await fetch('http://127.0.0.1:31301/wallet/backup/onchain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setBackupStatus('success');
+      } else if (data.error?.includes('skipped')) {
+        setBackupStatus('success'); // No changes = already backed up
+      } else {
+        setBackupStatus('error');
+      }
+    } catch {
+      setBackupStatus('error');
+    }
+    setBackingUp(false);
+    // Reset status after 5 seconds
+    setTimeout(() => setBackupStatus('idle'), 5000);
+  };
+
   // Memoize TransactionForm so balance polls don't reset form state.
   // Only re-renders when balance/price/loading actually change.
   const memoizedTransactionForm = useMemo(() => (
@@ -335,6 +364,31 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               </button>
             </div>
           )}
+
+          {/* Manual backup button */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px' }}>
+            <button
+              className="wd-backup-btn"
+              onClick={handleBackupNow}
+              disabled={backingUp}
+              style={{
+                background: backupStatus === 'success' ? '#4caf50' : backupStatus === 'error' ? '#c62828' : '#a67c00',
+                border: 'none',
+                color: '#111',
+                fontSize: '12px',
+                fontWeight: 600,
+                cursor: backingUp ? 'default' : 'pointer',
+                padding: '4px 12px',
+                borderRadius: '4px',
+                transition: 'background 0.15s',
+                opacity: backingUp ? 0.6 : 1,
+              }}
+              onMouseEnter={e => { if (!backingUp) (e.target as HTMLElement).style.background = backupStatus === 'success' ? '#66bb6a' : backupStatus === 'error' ? '#e53935' : '#c49b30'; }}
+              onMouseLeave={e => { (e.target as HTMLElement).style.background = backupStatus === 'success' ? '#4caf50' : backupStatus === 'error' ? '#c62828' : '#a67c00'; }}
+            >
+              {backingUp ? 'Backing up...' : backupStatus === 'success' ? 'Backed up' : backupStatus === 'error' ? 'Backup failed' : 'Backup on Chain'}
+            </button>
+          </div>
         </div>
       </div>
 
