@@ -364,17 +364,18 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 
 ## Summary
 
-| Section | Pass | Fail | Untested |
-|---------|------|------|----------|
-| §1 Wallet Panel | 11 | 1 | 18 |
-| §2 Dashboard | 6 | 0 | 21 |
-| §3 Activity | 0 | 0 | 8 |
-| §4 Certificates | 0 | 0 | 11 |
-| §5 Approved Sites | 0 | 0 | 10 |
-| §6 Wallet Settings | 0 | 0 | 12 |
-| §7 BRC-100 Integration | 0 | 0 | 22 |
-| §8 Cross-Cutting | 16 | 1 | 18 |
-| Site Compatibility | 0 | 0 | 5 |
+| Section | Pass | Fail | Untested | Status |
+|---------|------|------|----------|--------|
+| §1 Wallet Panel | 16 | 2 | 12 | 🟡 Sends left |
+| §2 Dashboard | 21 | 0 | 6 | 🟡 Sends left |
+| §3 Activity | 0 | 0 | 8 | ⬜ Wave 3 |
+| §4 Certificates | 0 | 0 | 11 | ⬜ Wave 4 |
+| §5 Approved Sites | 0 | 0 | 10 | ⬜ Wave 4 |
+| §6 Wallet Settings | 0 | 0 | 12 | ⬜ Wave 4 |
+| §7 BRC-100 Integration | 0 | 0 | 22 | ⬜ Wave 4 |
+| §8 Cross-Cutting | 22 | 1 | 12 | 🟡 WoC/errors left |
+| Site Compatibility | 0 | 0 | 5 | ⬜ Wave 4 |
+| **Total** | **59** | **3** | **98** | **37%** |
 
 **Bugs found so far:**
 ```
