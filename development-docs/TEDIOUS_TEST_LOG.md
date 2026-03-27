@@ -27,7 +27,7 @@
 - [x] 🤖 BSV balance displays correctly (0.00005000 BSV)
 - [x] 🤖 Exchange rate shows (1 BSV = $13.44 USD)
 - [x] 🤖 Refresh button exists and updates balance
-- [ ] Balance updates after send/receive
+- [x] Balance updates after send/receive (PeerPay receive: 5000→6000 sat)
 
 ### Send — Legacy (P2PKH Address)
 - [ ] Enter valid BSV address (starts with 1) — accepted
@@ -55,7 +55,7 @@
 - [x] Receive button generates new address
 - [x] Address copied to clipboard
 - [x] QR code displays correctly and is scannable
-- [ ] "Copy Again" button works
+- [x] "Copy Again" button works
 
 ### Identity Key
 - [x] 🤖 "Copy ID Key" button works — copied 03d902f35f...
@@ -64,11 +64,11 @@
 - [x] QR code is scannable and matches displayed key
 
 ### PeerPay Notifications
-- [ ] Green dot appears on wallet icon when unread payments exist
+- [x] Green dot appears on wallet icon when unread payments exist
 - [ ] ❌ Notification banner shows count + amount — amount shows 0.00000000 BSV (~$0.00) instead of actual
-- [ ] "Details" button opens Activity tab in advanced wallet
-- [ ] "Dismiss" button clears notification and green dot
-- [ ] Green dot clears after dismiss
+- [ ] ❌ "Details" button not visible on notification banner
+- [x] "Dismiss" button clears notification and green dot
+- [x] Green dot clears after dismiss
 
 **Issues found:**
 ```
@@ -78,33 +78,34 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 ### Panel Behavior
 - [x] Panel opens on wallet button click
 - [x] Click outside closes panel
-- [ ] Receive/Identity sections hide when send form is open
-- [ ] All hover effects work (gold on send/receive, silver on ID key buttons, gold on advanced)
+- [x] Receive/Identity sections hide when send form is open
+- [x] Send form Close button works — restores Receive/Identity sections
+- [x] All hover effects work (gold on send/receive, silver on ID key buttons, gold on advanced)
 
 ---
 
 ## 2. Advanced Wallet Dashboard
 
 ### Balance Section (Top-Left Quadrant)
-- [ ] "Total Balance" header matches other section headers
+- [x] "Total Balance" header matches other section headers
 - [x] 🤖 USD balance displays correctly (gold color)
-- [ ] BSV balance displays correctly (silver color)
+- [x] BSV balance displays correctly (silver color)
 - [x] Exchange rate shows
-- [ ] Refresh button works
-- [ ] Incoming payment notification banner appears when PeerPay payments received
-- [ ] Dismiss clears notification
+- [x] Refresh button works
+- [x] Incoming payment notification banner appears when PeerPay payments received
+- [x] Dismiss clears notification
 
 ### Receive Section (Top-Right Quadrant)
 - [x] Identity Key: QR code displays, "Copy Key" works
-- [ ] Identity Key: tooltip info icon shows explanation
-- [ ] Subtitle shows "(Public Key - use with BRC-100 wallets)"
+- [x] Identity Key: tooltip info icon shows explanation
+- [x] Subtitle shows "(Public Key - use with BRC-100 wallets)"
 - [x] Receive Address: QR code displays, "Copy Address" works
 - [x] "New Address" generates fresh address
-- [ ] Subtitle shows "(P2PKH Address - use with Handcash, RockWallet, etc.)"
-- [ ] Tooltip info icon shows explanation
+- [x] Subtitle shows "(P2PKH Address - use with Handcash, RockWallet, etc.)"
+- [x] Tooltip info icon shows explanation
 
 ### Send Section (Bottom-Left Quadrant)
-- [ ] "Send Bitcoin SV" header with divider line
+- [x] "Send Bitcoin SV" header with divider line
 - [ ] All send types work (address, identity key, paymail)
 - [ ] Transaction result banner (success/error) displays correctly
 - [ ] WhatsOnChain link in success banner opens new tab
@@ -112,22 +113,22 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 - [ ] Dismiss (X) clears result banner
 
 ### Recent Activity Section (Bottom-Right Quadrant)
-- [ ] Shows last 5 transactions
-- [ ] Direction arrows correct (up for sent, down for received)
+- [x] Shows last 5 transactions
+- [x] Direction arrows correct (up for sent, down for received)
 - [ ] USD amounts show historical price when available
-- [ ] Relative timestamps accurate (Just now, Xm ago, Xh ago, etc.)
-- [ ] Status badges correct (completed, unproven, failed)
-- [ ] "txid" pill button copies TxID to clipboard
-- [ ] WhatsOnChain icon opens tx in new tab
-- [ ] "View All" navigates to Activity tab
-- [ ] Empty state message when no transactions
+- [x] Relative timestamps accurate (Just now, Xm ago, Xh ago, etc.)
+- [x] Status badges correct (completed, unproven, failed)
+- [x] "txid" pill button copies TxID to clipboard
+- [x] WhatsOnChain icon opens tx in new tab
+- [x] "View All" navigates to Activity tab
+- [ ] Empty state message when no transactions (N/A — has transactions)
 
 ### Layout
 - [x] Four quadrants display correctly
-- [ ] Gold borders on all four sections
+- [x] Gold borders on all four sections
 - [x] Section headers consistent (16px, bold, white, divider line)
-- [ ] No unexpected scrollbars
-- [ ] Responsive: collapses to single column on narrow window
+- [x] No unexpected scrollbars
+- [x] Responsive: collapses to single column on narrow window
 
 ---
 
@@ -379,4 +380,9 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 ```
 1. Zoom +/- closes menu instead of staying open, % never updates
 2. Received payment notification shows 0.00000000 BSV (~$0.00) instead of actual amount
+3. Privacy shield blocked counts not displaying
+4. Scriptlet injection toggle doesn't work
+5. Closing last tab closes the entire window (should keep window open with new tab, like Chrome)
+6. PeerPay notification banner "Details" button missing
+
 ```
