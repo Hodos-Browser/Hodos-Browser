@@ -215,10 +215,7 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 - [ ] File can be imported on fresh install
 
 ### Delete Wallet
-> **NOTE: Settings/delete flow needs changes before testing. Not ready yet.**
-- [ ] Two-step confirmation (type "DELETE" → enter PIN)
-- [ ] Balance warning if funds remain
-- [ ] Successful deletion clears all data
+> Moved to Wave 5 (not ready)
 
 ---
 
@@ -342,10 +339,12 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 
 ---
 
-## Not Ready to Test Yet
+## Wave 5: Not Ready (Blocked — Needs Code Changes)
 
 - [ ] Certificate info in domain approval DB/UI/forms
-- [ ] Wallet delete flow (settings tab delete needs changes)
+- [ ] Wallet delete flow — two-step confirmation (type "DELETE" → enter PIN)
+- [ ] Wallet delete — balance warning if funds remain
+- [ ] Wallet delete — successful deletion clears all data
 - [ ] Wallet recovery from settings
 - [ ] Certificate publish error handling (auto-reclaim PushDrop)
 - [ ] Unpublish refactor (needs createAction)
@@ -366,16 +365,17 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 
 | Section | Pass | Fail | Untested | Status |
 |---------|------|------|----------|--------|
-| §1 Wallet Panel | 16 | 2 | 12 | 🟡 Sends left |
-| §2 Dashboard | 21 | 0 | 6 | 🟡 Sends left |
+| §1 Wallet Panel | 18 | 2 | 10 | 🟡 Sends left (Wave 3) |
+| §2 Dashboard | 21 | 0 | 6 | 🟡 Sends left (Wave 3) |
 | §3 Activity | 0 | 0 | 8 | ⬜ Wave 3 |
 | §4 Certificates | 0 | 0 | 11 | ⬜ Wave 4 |
 | §5 Approved Sites | 0 | 0 | 10 | ⬜ Wave 4 |
-| §6 Wallet Settings | 0 | 0 | 12 | ⬜ Wave 4 |
+| §6 Wallet Settings | 0 | 0 | 9 | ⬜ Wave 4 |
 | §7 BRC-100 Integration | 0 | 0 | 22 | ⬜ Wave 4 |
-| §8 Cross-Cutting | 22 | 1 | 12 | 🟡 WoC/errors left |
+| §8 Cross-Cutting | 26 | 3 | 10 | 🟡 WoC/errors left |
 | Site Compatibility | 0 | 0 | 5 | ⬜ Wave 4 |
-| **Total** | **59** | **3** | **98** | **37%** |
+| **Testable Total** | **65** | **5** | **91** | **40%** |
+| Wave 5 (Blocked) | — | — | 7 | 🔴 Needs code changes |
 
 **Bugs found so far:**
 ```
