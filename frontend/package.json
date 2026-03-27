@@ -12,7 +12,7 @@
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
-    "@mui/icons-material": "^7.1.1",
+    "@mui/icons-material": "^7.3.9",
     "@mui/material": "^7.1.1",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
