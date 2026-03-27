@@ -66,6 +66,8 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
     } catch (err) {
       console.error('Failed to save permissions:', err);
     }
+    // Invalidate C++ DomainPermissionCache so changes take effect immediately
+    window.cefMessage?.send('domain_permission_invalidate', [domain]);
     setSaved(true);
     setTimeout(onClose, 800);
   };
@@ -76,6 +78,8 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
         method: 'DELETE',
       });
     } catch { /* ignore */ }
+    // Invalidate C++ DomainPermissionCache so revocation takes effect immediately
+    window.cefMessage?.send('domain_permission_invalidate', [domain]);
     onClose();
   };
 

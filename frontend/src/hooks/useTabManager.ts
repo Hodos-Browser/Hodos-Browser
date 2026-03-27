@@ -127,41 +127,48 @@ export const useTabManager = () => {
 
   // Listen for payment success indicators from C++ auto-approve engine
   useEffect(() => {
+    const PAYMENT_BADGE_DURATION_MS = 6000;
+
     const handlePaymentIndicator = (event: MessageEvent) => {
       if (event.data?.type === 'payment_success_indicator') {
         try {
-          const { browserId, cents, domain } = JSON.parse(event.data.data);
+          const { cents, domain } = JSON.parse(event.data.data);
           const amount = `$${(cents / 100).toFixed(2)}`;
 
-          // Match browserId to tab — C++ browser IDs correspond to tab IDs
-          setState(prev => ({
-            ...prev,
-            tabs: prev.tabs.map(tab => {
-              // Match by browser ID or by domain in URL
-              const tabDomain = (() => {
-                try { return new URL(tab.url).hostname; } catch { return ''; }
-              })();
-              if (tab.id === browserId || tabDomain === domain || tabDomain.endsWith('.' + domain)) {
-                return {
-                  ...tab,
-                  paymentIndicator: { amount, timestamp: Date.now() },
-                };
-              }
-              return tab;
-            }),
-          }));
+          // Match payment to the specific tab that made the request.
+          // Only badge ONE tab — find the first match by domain (tab.id != CEF browserId).
+          setState(prev => {
+            let matched = false;
+            return {
+              ...prev,
+              tabs: prev.tabs.map(tab => {
+                if (matched) return tab;
+                const tabDomain = (() => {
+                  try { return new URL(tab.url).hostname; } catch { return ''; }
+                })();
+                if (tabDomain === domain || ('.' + tabDomain).endsWith('.' + domain)) {
+                  matched = true;
+                  return {
+                    ...tab,
+                    paymentIndicator: { amount, timestamp: Date.now() },
+                  };
+                }
+                return tab;
+              }),
+            };
+          });
 
-          // Auto-clear the indicator after 6 seconds
+          // Auto-clear the indicator after badge duration
           setTimeout(() => {
             setState(prev => ({
               ...prev,
               tabs: prev.tabs.map(tab =>
-                tab.paymentIndicator && Date.now() - tab.paymentIndicator.timestamp >= 5500
+                tab.paymentIndicator && Date.now() - tab.paymentIndicator.timestamp >= PAYMENT_BADGE_DURATION_MS
                   ? { ...tab, paymentIndicator: undefined }
                   : tab
               ),
             }));
-          }, 6000);
+          }, PAYMENT_BADGE_DURATION_MS);
         } catch (error) {
           console.error('Failed to parse payment indicator:', error);
         }

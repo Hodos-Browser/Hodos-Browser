@@ -3889,6 +3889,22 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "domain_permission_invalidate") {
+        LOG_DEBUG_BROWSER("🔐 domain_permission_invalidate received from role: " + role_);
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string domain = args->GetString(0).ToString();
+            extern void invalidateDomainPermissionCache(const std::string& domain);
+            invalidateDomainPermissionCache(domain);
+            LOG_DEBUG_BROWSER("🔐 Invalidated cached permission for: " + domain);
+        } else {
+            extern void clearDomainPermissionCache();
+            clearDomainPermissionCache();
+            LOG_DEBUG_BROWSER("🔐 Cleared entire domain permission cache");
+        }
+        return true;
+    }
+
     if (message_name == "approve_cert_fields") {
         LOG_DEBUG_BROWSER("📋 approve_cert_fields message received from role: " + role_);
 

@@ -31,7 +31,6 @@ import { useDownloads } from '../hooks/useDownloads';
 import { useProfiles } from '../hooks/useProfiles';
 import { TabBar } from '../components/TabBar';
 import FindBar from '../components/FindBar';
-import PermissionDialog from '../components/PermissionDialog';
 import { isUrl, normalizeUrl, toSearchUrl } from '../utils/urlDetection';
 
 // Map internal localhost URLs to friendly display names
@@ -241,8 +240,6 @@ const MainBrowserView: React.FC = () => {
     // Find-in-page state
     const [findBarVisible, setFindBarVisible] = useState(false);
     const [findResult, setFindResult] = useState<{ count: number; activeMatch: number } | null>(null);
-    const [permissionDomain, setPermissionDomain] = useState<string | null>(null);
-
     // Listen for find_show and find_result IPC events
     useEffect(() => {
         const handleMessage = (event: MessageEvent) => {
@@ -254,9 +251,6 @@ const MainBrowserView: React.FC = () => {
                     addressInputRef.current.focus();
                     addressInputRef.current.select();
                 }
-            } else if (event.data?.type === 'show_permission_dialog') {
-                const domain = typeof event.data.data === 'string' ? event.data.data : '';
-                if (domain) setPermissionDomain(domain);
             } else if (event.data?.type === 'find_result') {
                 try {
                     const data = typeof event.data.data === 'string'
@@ -948,13 +942,6 @@ const MainBrowserView: React.FC = () => {
                 </Alert>
             </Snackbar>
 
-            {/* Permission dialog triggered by right-click "Manage Site Permissions" */}
-            {permissionDomain && (
-                <PermissionDialog
-                    domain={permissionDomain}
-                    onClose={() => setPermissionDomain(null)}
-                />
-            )}
         </Box>
     );
 };

@@ -1479,6 +1479,16 @@ void addDomainPermission(const std::string& domain) {
     LOG_DEBUG_HTTP("🔐 Domain permission task posted to UI thread");
 }
 
+// Invalidate a single domain in the permission cache (called from simple_handler.cpp IPC)
+void invalidateDomainPermissionCache(const std::string& domain) {
+    DomainPermissionCache::GetInstance().invalidate(domain);
+}
+
+// Clear entire domain permission cache (called from simple_handler.cpp IPC)
+void clearDomainPermissionCache() {
+    DomainPermissionCache::GetInstance().clear();
+}
+
 // Function to handle auth response and send it back to the original request
 void handleAuthResponse(const std::string& requestId, const std::string& responseData) {
     LOG_DEBUG_HTTP("🔐 handleAuthResponse called for requestId: " + requestId);
