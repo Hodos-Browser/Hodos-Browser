@@ -11,6 +11,10 @@ export interface Tab {
   isLoading: boolean;
   favicon?: string;
   hasCertError?: boolean;
+  paymentIndicator?: {
+    amount: string;
+    timestamp: number;
+  };
 }
 
 export interface TabListResponse {

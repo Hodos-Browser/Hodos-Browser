@@ -194,6 +194,35 @@ export const TabComponent: React.FC<TabComponentProps> = ({
         </HodosButton>
       </Box>
 
+      {/* Payment indicator badge */}
+      {tab.paymentIndicator && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 2,
+            right: 4,
+            backgroundColor: 'rgba(166, 124, 0, 0.9)',
+            color: '#fff',
+            fontSize: '9px',
+            fontWeight: 700,
+            padding: '1px 5px',
+            borderRadius: '8px',
+            zIndex: 20,
+            lineHeight: 1.4,
+            letterSpacing: '0.3px',
+            animation: 'paymentBadgeFade 6s ease-out forwards',
+            '@keyframes paymentBadgeFade': {
+              '0%': { opacity: 0, transform: 'scale(0.8)' },
+              '8%': { opacity: 1, transform: 'scale(1)' },
+              '70%': { opacity: 1 },
+              '100%': { opacity: 0 },
+            },
+          }}
+        >
+          {tab.paymentIndicator.amount}
+        </Box>
+      )}
+
       {/* Inverted corner - left */}
       {isActive && (
         <Box

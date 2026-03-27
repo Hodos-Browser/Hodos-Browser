@@ -6356,6 +6356,7 @@ static const int MENU_ID_CUSTOM_DELETE          = MENU_ID_USER_FIRST + 18;
 static const int MENU_ID_CUSTOM_SELECT_ALL      = MENU_ID_USER_FIRST + 19;
 static const int MENU_ID_CUSTOM_VIEW_SOURCE     = MENU_ID_USER_FIRST + 20;
 static const int MENU_ID_SET_HOMEPAGE            = MENU_ID_USER_FIRST + 21;
+static const int MENU_ID_MANAGE_PERMISSIONS      = MENU_ID_USER_FIRST + 22;
 
 void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
@@ -6425,6 +6426,10 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
         model->AddSeparator();
         model->AddItem(MENU_ID_SET_HOMEPAGE, "Set as Home Page");
     }
+
+    // --- Site permissions (always available on tab pages) ---
+    model->AddSeparator();
+    model->AddItem(MENU_ID_MANAGE_PERMISSIONS, "Manage Site Permissions");
 
     // --- Always add Inspect at the bottom ---
     model->AddSeparator();
@@ -6574,6 +6579,37 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
             std::string source_url = "view-source:" + current_url;
             LOG_DEBUG_BROWSER("Opening page source in new tab: " + source_url);
             CreateNewTabWithUrl(source_url);
+        }
+        return true;
+    }
+
+    // --- Manage Site Permissions ---
+    if (command_id == MENU_ID_MANAGE_PERMISSIONS) {
+        std::string url = browser->GetMainFrame()->GetURL().ToString();
+        if (!url.empty()) {
+            // Extract domain from URL
+            std::string domain = url;
+            size_t proto = domain.find("://");
+            if (proto != std::string::npos) domain = domain.substr(proto + 3);
+            size_t slash = domain.find('/');
+            if (slash != std::string::npos) domain = domain.substr(0, slash);
+            size_t port = domain.find(':');
+            if (port != std::string::npos) domain = domain.substr(0, port);
+
+            // Reuse the notification overlay with a custom type for editing permissions
+#ifdef _WIN32
+            {
+                extern void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams);
+                extern HINSTANCE g_hInstance;
+                CreateNotificationOverlay(g_hInstance, "edit_permissions", domain, "");
+            }
+#elif defined(__APPLE__)
+            {
+                extern void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
+                CreateNotificationOverlay("edit_permissions", domain, "");
+            }
+#endif
+            LOG_INFO_BROWSER("🔐 Opening permission editor overlay for: " + domain);
         }
         return true;
     }

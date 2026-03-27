@@ -15,6 +15,7 @@ import HistoryPage from './pages/HistoryPage';
 import SettingsPage from './pages/SettingsPage';
 import CertErrorPage from './pages/CertErrorPage';
 import WalletPanelPage from './pages/WalletPanelPage';
+import PermissionDialogPage from './pages/PermissionDialogPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
 import { brc100 } from './bridge/brc100';
 // Removed identity types - now using unified wallet system
@@ -182,6 +183,7 @@ const App = () => {
         <Route path="/downloads" element={<DownloadsOverlayRoot />} />
         <Route path="/profile-picker" element={<ProfilePickerOverlayRoot />} />
         <Route path="/menu" element={<MenuOverlayRoot />} />
+        <Route path="/permission-dialog" element={<PermissionDialogPage />} />
       </Routes>
 
       {/* BRC-100 Authentication Modal */}

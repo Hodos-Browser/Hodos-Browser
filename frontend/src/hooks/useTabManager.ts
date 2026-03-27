@@ -125,6 +125,53 @@ export const useTabManager = () => {
     });
   }, []);
 
+  // Listen for payment success indicators from C++ auto-approve engine
+  useEffect(() => {
+    const handlePaymentIndicator = (event: MessageEvent) => {
+      if (event.data?.type === 'payment_success_indicator') {
+        try {
+          const { browserId, cents, domain } = JSON.parse(event.data.data);
+          const amount = `$${(cents / 100).toFixed(2)}`;
+
+          // Match browserId to tab — C++ browser IDs correspond to tab IDs
+          setState(prev => ({
+            ...prev,
+            tabs: prev.tabs.map(tab => {
+              // Match by browser ID or by domain in URL
+              const tabDomain = (() => {
+                try { return new URL(tab.url).hostname; } catch { return ''; }
+              })();
+              if (tab.id === browserId || tabDomain === domain || tabDomain.endsWith('.' + domain)) {
+                return {
+                  ...tab,
+                  paymentIndicator: { amount, timestamp: Date.now() },
+                };
+              }
+              return tab;
+            }),
+          }));
+
+          // Auto-clear the indicator after 6 seconds
+          setTimeout(() => {
+            setState(prev => ({
+              ...prev,
+              tabs: prev.tabs.map(tab =>
+                tab.paymentIndicator && Date.now() - tab.paymentIndicator.timestamp >= 5500
+                  ? { ...tab, paymentIndicator: undefined }
+                  : tab
+              ),
+            }));
+          }, 6000);
+        } catch (error) {
+          console.error('Failed to parse payment indicator:', error);
+        }
+      }
+    };
+
+    window.addEventListener('message', handlePaymentIndicator);
+    return () => window.removeEventListener('message', handlePaymentIndicator);
+  }, []);
+
   // Listen for tab list updates from C++
   useEffect(() => {
     const handleTabListResponse = (event: MessageEvent) => {

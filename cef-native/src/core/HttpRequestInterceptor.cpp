@@ -970,6 +970,7 @@ public:
 
     int64_t getPreCalculatedCents() const { return preCalculatedCents_; }
     int getBrowserId() const { return browser_ ? browser_->GetIdentifier() : 0; }
+    const std::string& getRequestDomain() const { return requestDomain_; }
 
 private:
     void postAuthTimeout(int delayMs, const std::string& errorJson);
@@ -1638,6 +1639,20 @@ public:
                     int browserId = parent_->getBrowserId();
                     SessionManager::GetInstance().recordSpending(browserId, cents);
                     LOG_DEBUG_HTTP("💰 Recorded spending: " + std::to_string(cents) + " cents for browser " + std::to_string(browserId));
+
+                    // Notify header browser for tab payment badge animation
+                    CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
+                    if (headerBrowser && headerBrowser->GetMainFrame()) {
+                        nlohmann::json payload;
+                        payload["browserId"] = browserId;
+                        payload["domain"] = parent_->getRequestDomain();
+                        payload["cents"] = cents;
+
+                        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
+                        msg->GetArgumentList()->SetString(0, payload.dump());
+                        headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+                        LOG_DEBUG_HTTP("💰 Sent payment indicator to header: " + std::to_string(cents) + " cents from " + parent_->getRequestDomain());
+                    }
                 }
             }
             parent_->onHTTPResponseReceived(responseData_);
