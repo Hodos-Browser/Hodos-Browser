@@ -46,6 +46,8 @@ NOTE: Send is slow and janky
 BUG: Minimum send amount $0.01 USD too high for micro-amounts
 BUG: Max button doesn't subtract fee from total balance
 BUG: Send button disabled for PeerPay (identity key) and Paymail — only P2PKH address works
+BUG: New approved sites don't use updated default limits — still get old defaults (10 cents per-tx)
+CRITICAL: All 12 recovery phrase words display as the same word — mnemonic reveal is broken
 ```
 
 ### Send — PeerPay (Identity Key)
@@ -187,41 +189,42 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 ## 5. Approved Sites Tab
 
 ### Default Limits
-- [ ] Default per-transaction limit displays (in USD)
-- [ ] Default per-session limit displays (in USD)
-- [ ] Default rate limit displays (requests/min)
-- [ ] Edit defaults → saves correctly
-- [ ] "Reset All" with confirmation → resets all sites to defaults
+- [x] Default per-transaction limit displays (in USD)
+- [x] Default per-session limit displays (in USD)
+- [x] Default rate limit displays (requests/min)
+- [x] Edit defaults → saves correctly
+- [x] "Reset All" with confirmation → resets all sites to defaults
 
 ### Per-Site Permissions
-- [ ] All approved domains listed
-- [ ] Edit site → per-tx limit, per-session limit, rate limit editable
-- [ ] Save changes → persisted
-- [ ] Revoke site → domain removed, confirmation required
-- [ ] Revoked site re-prompts on next visit
+- [x] All approved domains listed (teragun.com visible)
+- [x] Edit site → per-tx limit, per-session limit, rate limit editable
+- [x] Save changes → persisted
+- [x] Revoke site → domain removed, confirmation required
+- [ ] Revoked site re-prompts on next visit (need to revisit site to test)
 
 ---
 
 ## 6. Wallet Settings Tab
 
 ### Display Name
-- [ ] Current display name shows
-- [ ] Edit and save → persisted
+- [x] Current display name shows
+- [x] Edit and save → persisted
 
 ### Security & Keys
-- [ ] Identity key show/hide toggle works
-- [ ] Copy identity key works
-- [ ] Recovery phrase reveal: requires PIN → shows numbered word grid
-- [ ] Incorrect PIN → error message
+- [x] Identity key show/hide toggle works
+- [x] Copy identity key works
+- [x] Recovery phrase reveal: requires PIN → shows numbered word grid
+- [ ] ❌ All 12 recovery phrase words display as THE SAME WORD — CRITICAL BUG
+- [ ] Incorrect PIN → error message (not tested, PIN was 0000 default)
 
 ### Wallet Rescan
-- [ ] Rescan button triggers blockchain scan
-- [ ] Results show: addresses scanned, new UTXOs, balance
+- [x] Rescan button triggers blockchain scan (slow but works)
+- [x] Results show: addresses scanned, new UTXOs, balance
 
 ### Export Backup
-- [ ] Requires password (8+ chars)
-- [ ] Downloads `.hodos-wallet` file
-- [ ] File can be imported on fresh install
+- [x] Requires password (8+ chars)
+- [x] Downloads `.hodos-wallet` file
+- [ ] File can be imported on fresh install (not tested)
 
 ### Delete Wallet
 > Moved to Wave 5 (not ready)
