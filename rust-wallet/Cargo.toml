@@ -66,7 +66,7 @@ tokio-util = "0.7"
 
 # Windows DPAPI for mnemonic auto-unlock (tied to Windows user account)
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 # macOS Keychain for mnemonic auto-unlock (tied to macOS user account)
 [target.'cfg(target_os = "macos")'.dependencies]

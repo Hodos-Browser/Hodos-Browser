@@ -46,7 +46,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       # Get version from tag (strips 'v' prefix)
       - name: Get version from tag
@@ -85,7 +85,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
       
@@ -123,7 +123,7 @@ jobs:
       
       # Sign all executables with Azure Trusted Signing
       - name: Sign executables with Azure Trusted Signing
-        uses: azure/trusted-signing-action@v0.3.20
+        uses: azure/trusted-signing-action@v1.1.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -147,7 +147,7 @@ jobs:
       
       # Sign the final installer
       - name: Sign installer with Azure Trusted Signing
-        uses: azure/trusted-signing-action@v0.3.20
+        uses: azure/trusted-signing-action@v1.1.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -163,14 +163,14 @@ jobs:
       
       # Upload for publish job
       - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-installer
           path: dist/*.exe
           if-no-files-found: error
       
       - name: Upload Windows portable zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-portable
           path: dist/*.zip
@@ -184,7 +184,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Get version from tag
         id: version
@@ -236,7 +236,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
@@ -433,7 +433,7 @@ jobs:
 
       # Upload
       - name: Upload macOS DMG
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-dmg
           path: dist/*.dmg
@@ -450,7 +450,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
