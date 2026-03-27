@@ -21,16 +21,6 @@ const SettingsTab: React.FC = () => {
   const [revealingMnemonic, setRevealingMnemonic] = useState(false);
   const [showMnemonicForm, setShowMnemonicForm] = useState(false);
 
-  // Rescan wallet
-  const [rescanning, setRescanning] = useState(false);
-  const [rescanResult, setRescanResult] = useState<{
-    addresses_scanned: number;
-    new_addresses_found: number;
-    new_utxos_found: number;
-    balance: number;
-  } | null>(null);
-  const [rescanError, setRescanError] = useState<string | null>(null);
-
   // Export backup
   const [showExportForm, setShowExportForm] = useState(false);
   const [exportPassword, setExportPassword] = useState('');
@@ -148,29 +138,6 @@ const SettingsTab: React.FC = () => {
       setMnemonicError(err instanceof Error ? err.message : 'Failed to reveal mnemonic');
     } finally {
       setRevealingMnemonic(false);
-    }
-  };
-
-  const handleRescan = async () => {
-    try {
-      setRescanning(true);
-      setRescanError(null);
-      setRescanResult(null);
-      const res = await fetch('http://127.0.0.1:31301/wallet/rescan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setRescanError(data.error || 'Rescan failed');
-        return;
-      }
-      setRescanResult(data);
-    } catch (err) {
-      setRescanError(err instanceof Error ? err.message : 'Failed to connect to wallet server');
-    } finally {
-      setRescanning(false);
     }
   };
 
@@ -394,51 +361,6 @@ const SettingsTab: React.FC = () => {
             </div>
           )}
         </div>
-      </div>
-
-      {/* Wallet Recovery / Rescan */}
-      <div className="wd-settings-section">
-        <div className="wd-section-title">Wallet Rescan</div>
-        <div className="wd-section-desc">
-          Scan the blockchain for all addresses derived from your recovery phrase.
-          Use this if you believe your wallet is missing transactions.
-        </div>
-
-        {rescanError && (
-          <div className="wd-alert error">{rescanError}</div>
-        )}
-
-        {rescanResult && (
-          <div className="wd-rescan-result">
-            <div className="wd-rescan-stat">
-              <span className="wd-rescan-stat-label">Addresses scanned</span>
-              <span className="wd-rescan-stat-value">{rescanResult.addresses_scanned}</span>
-            </div>
-            <div className="wd-rescan-stat">
-              <span className="wd-rescan-stat-label">New addresses found</span>
-              <span className="wd-rescan-stat-value">{rescanResult.new_addresses_found}</span>
-            </div>
-            <div className="wd-rescan-stat">
-              <span className="wd-rescan-stat-label">New UTXOs found</span>
-              <span className="wd-rescan-stat-value">{rescanResult.new_utxos_found}</span>
-            </div>
-            <div className="wd-rescan-stat">
-              <span className="wd-rescan-stat-label">Balance</span>
-              <span className="wd-rescan-stat-value">
-                {(rescanResult.balance / 100000000).toFixed(8)} BSV
-              </span>
-            </div>
-          </div>
-        )}
-
-        <HodosButton
-          variant="secondary"
-          onClick={handleRescan}
-          loading={rescanning}
-          loadingText="Scanning..."
-        >
-          Rescan Wallet
-        </HodosButton>
       </div>
 
       {/* Export Backup */}
