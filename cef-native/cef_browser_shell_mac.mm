@@ -1483,6 +1483,34 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 @end
 
 // Notification Overlay View (domain approval, no-wallet, payment confirmation)
+// Borderless NSWindow returns NO for canBecomeKeyWindow by default,
+// which prevents keyboard events from reaching the view. Override it.
+@interface NotificationOverlayWindow : NSWindow
+@end
+
+@implementation NotificationOverlayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+
+- (void)sendEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+    NSView* view = [self contentView];
+
+    switch (type) {
+        case NSEventTypeLeftMouseDown:  [view mouseDown:event]; return;
+        case NSEventTypeLeftMouseUp:    [view mouseUp:event]; return;
+        case NSEventTypeLeftMouseDragged: [view mouseDragged:event]; return;
+        case NSEventTypeRightMouseDown: [view rightMouseDown:event]; return;
+        case NSEventTypeRightMouseUp:   [view rightMouseUp:event]; return;
+        case NSEventTypeMouseMoved:     [view mouseMoved:event]; return;
+        case NSEventTypeScrollWheel:    [view scrollWheel:event]; return;
+        case NSEventTypeKeyDown:        [view keyDown:event]; return;
+        case NSEventTypeKeyUp:          [view keyUp:event]; return;
+        default: [super sendEvent:event]; return;
+    }
+}
+@end
+
 @interface NotificationOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
 @end
@@ -1998,7 +2026,11 @@ extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores) {
 extern "C" void HideNotificationOverlayWindow() {
     if (g_notification_overlay_window) {
         [g_notification_overlay_window orderOut:nil];
-        LOG_INFO("🔔 Notification overlay hidden (keep-alive)");
+        // Restore focus to main window after overlay hides
+        if (g_main_window) {
+            [g_main_window makeKeyAndOrderFront:nil];
+        }
+        LOG_INFO("🔔 Notification overlay hidden (keep-alive), focus restored to main window");
     }
 }
 
@@ -2657,6 +2689,9 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
 
         existing->GetHost()->WasResized();
         [g_notification_overlay_window makeKeyAndOrderFront:nil];
+        // Ensure the view is first responder for keyboard input (needed for text fields)
+        [g_notification_overlay_window makeFirstResponder:[g_notification_overlay_window contentView]];
+        existing->GetHost()->SetFocus(true);
         return;
     }
 
@@ -2670,7 +2705,7 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
         g_notification_overlay_window = nullptr;
     }
 
-    g_notification_overlay_window = [[NSWindow alloc]
+    g_notification_overlay_window = [[NotificationOverlayWindow alloc]
         initWithContentRect:mainFrame
         styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
@@ -2731,6 +2766,7 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
         LOG_INFO("🔔 Notification overlay pre-created (hidden)");
     } else {
         [g_notification_overlay_window makeKeyAndOrderFront:nil];
+        [g_notification_overlay_window makeFirstResponder:[g_notification_overlay_window contentView]];
     }
 
     LOG_INFO("✅ Notification overlay created successfully");

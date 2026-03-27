@@ -939,6 +939,46 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== PAYMENT SUCCESS INDICATOR (tab badge) ==========
+        if (message_name == "payment_success_indicator") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string payloadJson = args->GetString(0);
+
+            LOG_DEBUG_RENDER("💰 Payment success indicator received, dispatching to React");
+
+            std::string escaped = escapeJsonForJs(payloadJson);
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'payment_success_indicator',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        // ========== SHOW PERMISSION DIALOG ==========
+        if (message_name == "show_permission_dialog") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            std::string domain = args->GetString(0);
+
+            LOG_DEBUG_RENDER("🔐 Show permission dialog for: " + domain);
+
+            std::string escaped = escapeJsonForJs(domain);
+            std::string js = R"(
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: {
+                        type: 'show_permission_dialog',
+                        data: ')" + escaped + R"('
+                    }
+                }));
+            )";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         // ========== DOWNLOAD FOLDER PICKER RESULT ==========
         if (message_name == "download_folder_selected") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();

@@ -20,6 +20,91 @@ const COLORS = {
   errorBg: 'rgba(211, 47, 47, 0.1)',
 };
 
+// Sub-component for editing existing domain permissions (fetches current settings)
+const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = ({ domain, onClose }) => {
+  const [currentSettings, setCurrentSettings] = useState<DomainPermissionSettings | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`);
+        if (res.ok) {
+          const data = await res.json();
+          // Rust GET returns camelCase (trustLevel, perTxLimitCents, etc.)
+          if (data && data.trustLevel === 'approved') {
+            setCurrentSettings({
+              perTxLimitCents: data.perTxLimitCents ?? 100,
+              perSessionLimitCents: data.perSessionLimitCents ?? 1000,
+              rateLimitPerMin: data.rateLimitPerMin ?? 30,
+              maxTxPerSession: data.maxTxPerSession ?? 100,
+            });
+          }
+        }
+      } catch { /* no existing permission */ }
+      setLoading(false);
+    };
+    fetchSettings();
+  }, [domain]);
+
+  const handleSave = async (settings: DomainPermissionSettings) => {
+    try {
+      // POST directly to Rust wallet API (serde rename_all = camelCase)
+      await fetch('http://127.0.0.1:31301/domain/permissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain,
+          trustLevel: 'approved',
+          perTxLimitCents: settings.perTxLimitCents,
+          perSessionLimitCents: settings.perSessionLimitCents,
+          rateLimitPerMin: settings.rateLimitPerMin,
+          maxTxPerSession: settings.maxTxPerSession,
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to save permissions:', err);
+    }
+    setSaved(true);
+    setTimeout(onClose, 800);
+  };
+
+  const handleRevoke = async () => {
+    try {
+      await fetch(`http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`, {
+        method: 'DELETE',
+      });
+    } catch { /* ignore */ }
+    onClose();
+  };
+
+  if (saved) {
+    return <div style={{ textAlign: 'center', padding: '16px 0', color: '#4ade80', fontSize: '14px' }}>Permissions saved</div>;
+  }
+  if (loading) {
+    return <div style={{ textAlign: 'center', padding: '16px 0', color: '#9ca3af', fontSize: '13px' }}>Loading...</div>;
+  }
+
+  return (
+    <>
+      <DomainPermissionForm
+        domain={domain}
+        currentSettings={currentSettings}
+        onSave={handleSave}
+        onCancel={onClose}
+      />
+      {currentSettings && (
+        <div style={{ marginTop: '12px', borderTop: '1px solid #2a2d35', paddingTop: '12px' }}>
+          <HodosButton variant="secondary" size="small" onClick={handleRevoke} style={{ color: '#ef4444', borderColor: '#ef4444' }}>
+            Revoke All Permissions
+          </HodosButton>
+        </div>
+      )}
+    </>
+  );
+};
+
 const BRC100AuthOverlayRoot: React.FC = () => {
   const [notificationType, setNotificationType] = useState<string>('');
   const [notificationDomain, setNotificationDomain] = useState<string>('');
@@ -888,6 +973,44 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               </HodosButton>
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Edit permissions (right-click "Manage Site Permissions") ──
+  if (notificationType === 'edit_permissions') {
+    return (
+      <div style={overlayBackdrop} onClick={() => window.cefMessage?.send('overlay_close', [])}>
+        <div style={cardStyle} onClick={(e) => e.stopPropagation()}>
+          {/* Domain avatar + title */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
+                {cleanDomain}
+              </div>
+              <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
+                Site permissions
+              </div>
+            </div>
+          </div>
+
+          <EditPermissionsForm
+            domain={notificationDomain}
+            onClose={() => window.cefMessage?.send('overlay_close', [])}
+          />
         </div>
       </div>
     );
