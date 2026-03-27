@@ -14,7 +14,7 @@
 - [x] Adblock engine running (port 31302)
 - [x] Frontend dev server running (port 5137)
 - [x] Wallet exists and unlocked
-- [ ] BSV balance confirmed: ______ satoshis ($______)
+- [x] BSV balance confirmed: 5000 satoshis ($0.67)
 - [x] BSV price feed working: 1 BSV = $13.39
 
 ---
@@ -80,29 +80,32 @@ None
 > Automated tests verified: balance area renders with USD/BSV, refresh button exists, identity key copy/show buttons exist, send/receive buttons exist, advanced wallet link exists, dashboard 4-quadrant layout, sidebar 5 tabs, tab switching.
 
 ### Wallet Panel (CEF-only)
-- [ ] Wallet icon in toolbar opens panel
-- [ ] Click outside closes panel
-- [ ] USD + BSV balance display with real data
-- [ ] Refresh button updates balance
-- [ ] Receive → generates address + QR code
-- [ ] Address copies to clipboard
-- [ ] "Copy ID Key" copies to clipboard
-- [ ] "Show ID Key" reveals key + QR
+- [x] Wallet icon in toolbar opens panel
+- [x] Click outside closes panel
+- [x] USD + BSV balance display (0/0, wallet unfunded — correct)
+- [x] Exchange rate shows (1 BSV = $13.39)
+- [x] Refresh button updates balance (5000 sat after funding)
+- [x] Receive → generates address + QR code
+- [x] Address copies to clipboard
+- [x] "Copy ID Key" copies valid key (03d902f35f...)
+- [x] "Show ID Key" reveals key + QR
+- [x] "Hide ID Key" collapses
 
 **Issues found:**
 ```
-
+None
 ```
 
 ### Advanced Wallet (CEF-only)
-- [ ] "Advanced" link opens dashboard in new tab
-- [ ] Real balance data displays
-- [ ] Receive QR codes are scannable
-- [ ] "New Address" generates fresh address
+- [x] "Advanced" link opens dashboard in new tab
+- [x] 4-quadrant layout renders (balance, receive, send, activity)
+- [x] Sidebar tabs: Dashboard, Activity, Certificates, Approved Sites, Settings
+- [x] Receive QR codes are scannable
+- [x] "New Address" generates fresh address
 
 **Issues found:**
 ```
-
+None
 ```
 
 ---
