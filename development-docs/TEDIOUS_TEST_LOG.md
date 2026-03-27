@@ -30,26 +30,35 @@
 - [x] Balance updates after send/receive (PeerPay receive: 5000→6000 sat)
 
 ### Send — Legacy (P2PKH Address)
-- [ ] Enter valid BSV address (starts with 1) — accepted
-- [ ] Enter invalid address — error shown
-- [ ] Enter amount in USD — BSV auto-calculates
-- [ ] Enter amount in BSV — USD auto-calculates
-- [ ] Max button fills balance minus fee
-- [ ] Send succeeds — success message with TxID
-- [ ] WhatsOnChain link works (opens in new tab)
-- [ ] Balance updates after send
-- [ ] Send form Close button works (moves to bottom when form open)
+- [x] Enter valid BSV address (starts with 1) — accepted
+- [x] Enter invalid address — error shown (on send click)
+- [x] Enter amount in USD — BSV auto-calculates
+- [x] Enter amount in BSV — USD auto-calculates
+- [ ] ❌ Max button fills total balance — does NOT subtract fee
+- [x] Send succeeds — success message with TxID (slow/janky but works)
+- [x] WhatsOnChain link works (opens in new tab)
+- [x] Balance updates after send
+- [x] Send form Close button works (moves to bottom when form open)
+
+**Issues found:**
+```
+NOTE: Send is slow and janky
+BUG: Minimum send amount $0.01 USD too high for micro-amounts
+BUG: Max button doesn't subtract fee from total balance
+BUG: Send button disabled for PeerPay (identity key) and Paymail — only P2PKH address works
+```
 
 ### Send — PeerPay (Identity Key)
-- [ ] Enter valid identity key (02/03 + 64 hex) — accepted, routes to PeerPay
-- [ ] Send succeeds via BRC-29 MessageBox delivery
-- [ ] Recipient receives notification (test with second wallet if possible)
+- [x] Enter valid identity key (02/03 + 64 hex) — accepted, routes to PeerPay
+- [ ] ❌ Send button disabled — cannot send via PeerPay
+- [ ] Recipient receives notification (blocked by above)
 
 ### Send — Paymail
-- [ ] Enter valid paymail (user@domain or $handle) — resolves with avatar
-- [ ] P2P-capable paymail: sends via P2P protocol
-- [ ] Basic paymail: falls back to P2PKH
-- [ ] Invalid paymail — error shown
+- [x] Enter valid paymail (user@domain or $handle) — resolves with avatar
+- [ ] ❌ Send button disabled — can't send to paymail
+- [ ] P2P-capable paymail: sends via P2P protocol (blocked)
+- [ ] Basic paymail: falls back to P2PKH (blocked)
+- [x] Invalid paymail — error shown ("paymail not found")
 
 ### Receive
 - [x] Receive button generates new address
@@ -106,11 +115,11 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 
 ### Send Section (Bottom-Left Quadrant)
 - [x] "Send Bitcoin SV" header with divider line
-- [ ] All send types work (address, identity key, paymail)
-- [ ] Transaction result banner (success/error) displays correctly
-- [ ] WhatsOnChain link in success banner opens new tab
-- [ ] Copy TxID button works
-- [ ] Dismiss (X) clears result banner
+- [ ] ❌ Only P2PKH works — PeerPay and Paymail send buttons disabled (same bug as wallet panel)
+- [x] Transaction result banner (success/error) displays correctly
+- [x] WhatsOnChain link in success banner opens new tab
+- [x] Copy TxID button works
+- [x] Dismiss (X) clears result banner
 
 ### Recent Activity Section (Bottom-Right Quadrant)
 - [x] Shows last 5 transactions
@@ -134,14 +143,14 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 
 ## 3. Activity Tab
 
-- [ ] 🤖 Transaction list renders (real pagination needs manual)
-- [ ] 🤖 Filter buttons exist (All, Sent, Received)
-- [ ] Pagination controls work (first, prev, next, last, page numbers)
-- [ ] "Go to" page jump works when >7 pages
-- [ ] Each transaction shows: direction, description, time, status, USD amount, BSV amount
+- [x] 🤖 Transaction list renders
+- [x] 🤖 Filter buttons work (All, Sent, Received)
+- [ ] Pagination controls work (not enough transactions to test)
+- [ ] "Go to" page jump works when >7 pages (not enough transactions)
+- [x] Each transaction shows: direction, description, time, status, USD amount, BSV amount
 - [ ] Historical USD price shown when available, current price as fallback
-- [ ] "txid" pill copies to clipboard
-- [ ] WhatsOnChain icon opens in new tab
+- [x] "txid" pill copies to clipboard
+- [x] WhatsOnChain icon opens in new tab
 
 ---
 
@@ -385,5 +394,6 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 4. Scriptlet injection toggle doesn't work
 5. Closing last tab closes the entire window (should keep window open with new tab, like Chrome)
 6. PeerPay notification banner "Details" button missing
+7. Minimum send amount $0.01 USD too high — blocks micro-sends with small balances
 
 ```
