@@ -162,6 +162,11 @@ async fn main() -> std::io::Result<()> {
                         if let Err(e) = db.ensure_master_address_exists() {
                             eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
                         }
+
+                        // Ensure backup address exists (needs cached mnemonic)
+                        if let Err(e) = db.ensure_backup_address_exists() {
+                            eprintln!("   ⚠️  Failed to ensure backup address exists: {}", e);
+                        }
                     }
                     true
                 }
@@ -492,6 +497,9 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/addresses", web::get().to(handlers::get_all_addresses))
             .route("/wallet/address/current", web::get().to(handlers::get_current_address))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
+            .route("/wallet/backup/onchain", web::post().to(handlers::wallet_backup_onchain))
+            .route("/wallet/backup/onchain/verify", web::post().to(handlers::wallet_backup_onchain_verify))
+            .route("/wallet/recover/onchain", web::post().to(handlers::wallet_recover_onchain))
             .route("/wallet/restore", web::post().to(handlers::wallet_restore))
             .route("/wallet/unlock", web::post().to(handlers::wallet_unlock))
             .route("/wallet/recover", web::post().to(handlers::wallet_recover))

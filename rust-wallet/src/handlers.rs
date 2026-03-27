@@ -33,6 +33,18 @@ pub const DEFAULT_SATS_PER_KB: u64 = 1000;
 /// Minimum fee to ensure transaction relay (dust prevention)
 pub const MIN_FEE_SATS: u64 = 200;
 
+// ============================================================================
+// Wallet Service Fee
+// ============================================================================
+
+/// Company BSV address for service fee collection.
+/// Standard P2PKH — company treasury wallet monitors and sweeps periodically.
+pub const HODOS_FEE_ADDRESS: &str = "1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT";
+
+/// Fixed service fee in satoshis added to every outgoing transaction.
+/// Must be >= 546 (dust limit). Currently ~$0.04 at $40/BSV.
+pub const HODOS_SERVICE_FEE_SATS: i64 = 1000;
+
 /// Internal engine seed for wallet operation HMAC derivation paths.
 /// Used to namespace internal wallet operations from user-initiated ones.
 const WALLET_ENGINE_SEED: [u8; 32] = [
@@ -173,6 +185,35 @@ pub async fn health() -> HttpResponse {
 // Graceful shutdown — called by CEF browser before process termination
 pub async fn shutdown(data: web::Data<crate::AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🛑 /shutdown received — initiating graceful shutdown");
+
+    // Attempt on-chain backup before shutting down.
+    // Hash comparison inside do_onchain_backup will skip if nothing changed.
+    {
+        let should_try = {
+            let db = match data.database.try_lock() {
+                Ok(db) => db,
+                Err(_) => {
+                    log::info!("   ⏭️  Shutdown backup skipped (DB locked)");
+                    data.shutdown.cancel();
+                    return HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }));
+                }
+            };
+            let wallet_exists = crate::database::WalletRepository::new(db.connection())
+                .get_primary_wallet().ok().flatten().is_some();
+            wallet_exists && db.is_unlocked()
+        };
+
+        if should_try {
+            match do_onchain_backup(&data).await {
+                Ok(txid) => log::info!("   ✅ Shutdown backup broadcast: {}", txid),
+                Err(e) if e.contains("skipped") => log::info!("   ⏭️  {}", e),
+                Err(e) => log::warn!("   ⚠️  Shutdown backup failed: {} (proceeding with shutdown)", e),
+            }
+        } else {
+            log::info!("   ⏭️  Shutdown backup skipped (no wallet or locked)");
+        }
+    }
+
     data.shutdown.cancel();
     HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
 }
@@ -3759,6 +3800,9 @@ pub(crate) async fn create_action_internal(
         output_script_lengths.push(script_len);
     }
 
+    // Account for Hodos service fee output in size estimation
+    output_script_lengths.push(25); // P2PKH locking script = 25 bytes
+
     // Also account for user-provided inputs' unlocking scripts
     let mut user_input_script_lengths: Vec<usize> = Vec::new();
     for user_input in &user_inputs {
@@ -3792,8 +3836,8 @@ pub(crate) async fn create_action_internal(
     log::info!("      Estimated fee: {} satoshis ({} sat/KB, {:.1} sat/byte)",
         estimated_fee, fee_rate_sats_per_kb, fee_rate_sats_per_kb as f64 / 1000.0);
 
-    let total_needed = total_output + estimated_fee;
-    log::info!("   Total needed: {} satoshis", total_needed);
+    let total_needed = total_output + estimated_fee + HODOS_SERVICE_FEE_SATS;
+    log::info!("   Total needed: {} satoshis (includes {} service fee)", total_needed, HODOS_SERVICE_FEE_SATS);
 
     // Determine if we need wallet's UTXOs
     // If user provided inputs that cover the total, we don't need wallet UTXOs
@@ -4143,16 +4187,17 @@ pub(crate) async fn create_action_internal(
     log::info!("      Estimated tx size: {} bytes (change output: {})", estimated_tx_size, !send_max);
     log::info!("      Recalculated fee: {} satoshis", estimated_fee);
 
-    // Send max: override output amount = total_input - fee (no change)
+    // Send max: override output amount = total_input - fee - service fee (no change)
     if send_max {
-        total_output = total_input - estimated_fee;
+        total_output = total_input - estimated_fee - HODOS_SERVICE_FEE_SATS;
         if total_output < 546 {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Balance too small to cover transaction fees (balance: {}, fee: {})",
-                    total_input, estimated_fee)
+                "error": format!("Balance too small to cover fees (balance: {}, miner fee: {}, service fee: {})",
+                    total_input, estimated_fee, HODOS_SERVICE_FEE_SATS)
             }));
         }
-        log::info!("   💰 Send max: output amount = {} satoshis (fee: {})", total_output, estimated_fee);
+        log::info!("   💰 Send max: output amount = {} satoshis (miner fee: {}, service fee: {})",
+            total_output, estimated_fee, HODOS_SERVICE_FEE_SATS);
     }
 
     // Build transaction
@@ -4383,8 +4428,14 @@ pub(crate) async fn create_action_internal(
         tx.add_output(TxOutput::new(satoshis, script_bytes));
     }
 
-    // Calculate change
-    let change = total_input - total_output - estimated_fee;
+    // Add Hodos service fee output
+    let fee_script = address_to_script(HODOS_FEE_ADDRESS)
+        .expect("HODOS_FEE_ADDRESS constant is invalid");
+    tx.add_output(TxOutput::new(HODOS_SERVICE_FEE_SATS, fee_script));
+    log::info!("   💰 Added Hodos service fee output: {} satoshis to {}", HODOS_SERVICE_FEE_SATS, HODOS_FEE_ADDRESS);
+
+    // Calculate change (accounts for miner fee + service fee)
+    let change = total_input - total_output - estimated_fee - HODOS_SERVICE_FEE_SATS;
     log::info!("   Change: {} satoshis", change);
 
     // Track change output info for immediate UTXO insertion (balance accuracy fix)
@@ -4710,7 +4761,7 @@ pub(crate) async fn create_action_internal(
     // This ensures the change output is immediately reflected in balance calculations
     // BRC-100: Change outputs go to the "default" basket
     if let Some((_addr_id, addr_index, satoshis, ref script_hex)) = pending_change_utxo {
-        let change_vout = req.outputs.len() as u32; // Change is always the last output
+        let change_vout = (req.outputs.len() + 1) as u32; // +1 for service fee output between user outputs and change
         log::info!("   💾 Inserting pending change output: txid={}, vout={}, satoshis={}", txid, change_vout, satoshis);
 
         let db = state.database.lock().unwrap();
@@ -4894,6 +4945,24 @@ pub(crate) async fn create_action_internal(
                 let output_repo = crate::database::OutputRepository::new(db.connection());
                 if let Err(e) = output_repo.link_outputs_to_transaction(&txid, transaction_id) {
                     log::warn!("   ⚠️  Failed to link outputs to transaction: {}", e);
+                }
+
+                // Record Hodos service fee as commission
+                use crate::database::{CommissionRepository, Commission};
+                let commission_repo = CommissionRepository::new(db.connection());
+                let commission = Commission {
+                    commission_id: None,
+                    user_id: state.current_user_id,
+                    transaction_id,
+                    satoshis: HODOS_SERVICE_FEE_SATS,
+                    key_offset: "hodos-service-fee".to_string(),
+                    is_redeemed: false,
+                    locking_script: address_to_script(HODOS_FEE_ADDRESS).unwrap(),
+                    created_at: 0,
+                    updated_at: 0,
+                };
+                if let Err(e) = commission_repo.create(&commission) {
+                    log::warn!("   ⚠️  Failed to record service fee commission: {}", e);
                 }
             }
             Err(e) => {
@@ -5097,9 +5166,9 @@ pub(crate) async fn create_action_internal(
             }
         }
 
-        // 2. Update change output txid (change is always the last output)
+        // 2. Update change output txid (change is after user outputs + service fee)
         if pending_change_utxo.is_some() {
-            let change_vout = req.outputs.len() as u32;
+            let change_vout = (req.outputs.len() + 1) as u32;
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_txid(&pre_signing_txid, change_vout, &final_txid) {
                 log::warn!("   ⚠️  Failed to update change output txid: {}", e);
@@ -5309,6 +5378,16 @@ pub(crate) async fn create_action_internal(
                             }
                         }
 
+                        // Clean up commission record for failed broadcast
+                        if let Ok(tx_id) = db.connection().query_row(
+                            "SELECT id FROM transactions WHERE txid = ?1",
+                            rusqlite::params![&final_txid],
+                            |row| row.get::<_, i64>(0),
+                        ) {
+                            let _ = crate::database::CommissionRepository::new(db.connection())
+                                .delete_by_transaction_id(tx_id);
+                        }
+
                         // Invalidate balance cache since we restored outputs
                         state.balance_cache.invalidate();
                     }
@@ -5436,15 +5515,19 @@ pub(crate) async fn create_action_internal(
         });
     }
 
-    // Build response outputs array
-    let response_outputs: Vec<CreateActionResponseOutput> = tx.outputs.iter().enumerate().map(|(i, output)| {
-        CreateActionResponseOutput {
-            vout: i as u32,
-            satoshis: output.value,
-            script_length: output.script_pubkey.len(),
-            script_offset: 0, // Not used in simplified implementation
-        }
-    }).collect();
+    // Build response outputs array (exclude service fee + change — only request outputs)
+    let num_request_outputs = req.outputs.len();
+    let response_outputs: Vec<CreateActionResponseOutput> = tx.outputs.iter()
+        .take(num_request_outputs)
+        .enumerate()
+        .map(|(i, output)| {
+            CreateActionResponseOutput {
+                vout: i as u32,
+                satoshis: output.value,
+                script_length: output.script_pubkey.len(),
+                script_offset: 0, // Not used in simplified implementation
+            }
+        }).collect();
 
     // Log response format
     if let Some(ref tx_bytes) = raw_tx {
@@ -5471,7 +5554,7 @@ pub(crate) async fn create_action_internal(
     // The SDK uses these to chain transactions: the change outpoints from this noSend tx
     // become inputs (via options.noSendChange) in the next createAction call.
     let no_send_change = if no_send && pending_change_utxo.is_some() && !final_txid.is_empty() {
-        let change_vout = req.outputs.len(); // Change is appended after user outputs
+        let change_vout = req.outputs.len() + 1; // +1 for service fee output between user outputs and change
         let outpoint = format!("{}.{}", final_txid, change_vout);
         log::info!("   📋 noSendChange: {}", outpoint);
         Some(vec![outpoint])
@@ -5662,7 +5745,7 @@ pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, S
 
 // Parse address from P2PKH script (76a914{20-byte-hash}88ac)
 /// Convert a Bitcoin address to a P2PKH locking script
-fn address_to_script(address: &str) -> Result<Vec<u8>, String> {
+pub fn address_to_script(address: &str) -> Result<Vec<u8>, String> {
     // Decode base58 address
     let decoded = match bs58::decode(address).into_vec() {
         Ok(v) => v,
@@ -10680,6 +10763,1530 @@ pub struct RestoreRequest {
 pub struct RestoreResponse {
     pub success: bool,
     pub message: String,
+}
+
+/// On-chain wallet backup via PushDrop UTXO
+///
+/// POST /wallet/backup/onchain
+///
+/// Serializes the entire wallet DB, compresses, encrypts, and stores as a PushDrop
+/// output at the deterministic backup address (BRC-42 self, invoice "1-wallet-backup-1").
+/// If a previous backup UTXO exists, it's spent as input (recovering its sats).
+///
+/// Returns: { "success": true, "txid": "...", "size_bytes": N }
+pub async fn wallet_backup_onchain(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("💾 POST /wallet/backup/onchain");
+    match do_onchain_backup(&state).await {
+        Ok(txid) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "txid": txid,
+            }))
+        }
+        Err(e) => {
+            if e.contains("Insufficient funds") || e.contains("skipped") {
+                HttpResponse::Ok().json(serde_json::json!({
+                    "success": false, "error": e, "skipped": true
+                }))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": e
+                }))
+            }
+        }
+    }
+}
+
+/// Core on-chain backup logic — used by both the HTTP handler and the monitor task.
+/// Returns Ok(txid) on success, Err(message) on failure.
+pub async fn do_onchain_backup(
+    state: &AppState,
+) -> Result<String, String> {
+    use crate::database::{OutputRepository, WalletRepository, AddressRepository};
+    use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
+    use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
+    use crate::script::pushdrop::{encode, LockPosition};
+    use secp256k1::{Secp256k1, SecretKey, Message};
+
+    // Step 1: Get master keys and identity info
+    let (master_privkey, master_pubkey, identity_key_hex) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return Err(format!("Wallet locked or no wallet: {}", e)),
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return Err(format!("Failed to get master pubkey: {}", e)),
+        };
+        let id_hex = hex::encode(&pubkey);
+        (privkey, pubkey, id_hex)
+    };
+
+    // Step 2: Compress wallet data and check hash to detect changes
+    let compressed = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+            Ok(bytes) => bytes,
+            Err(e) => return Err(format!("Serialization failed: {}", e)),
+        }
+    };
+
+    // Hash the compressed payload and compare with stored hash
+    let new_hash = {
+        use sha2::{Sha256, Digest as _};
+        hex::encode(Sha256::digest(&compressed))
+    };
+    let stored_hash = {
+        let db = state.database.lock().unwrap();
+        crate::database::SettingsRepository::new(db.connection())
+            .get_backup_hash().unwrap_or(None)
+    };
+    if stored_hash.as_deref() == Some(new_hash.as_str()) {
+        log::info!("   ⏭️  Backup hash unchanged — no changes since last backup, skipping");
+        return Err("skipped: no changes since last backup".to_string());
+    }
+    log::info!("   🔄 Backup hash changed (stored: {}, new: {})",
+        stored_hash.as_deref().unwrap_or("none"), &new_hash[..16]);
+
+    // Encrypt the compressed data
+    let encrypted_payload = crate::backup::encrypt_compressed(&master_privkey, &compressed)
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+    let payload_size = encrypted_payload.len();
+    log::info!("   📦 Encrypted payload: {} bytes", payload_size);
+
+    // Step 3: Derive backup key pair (BRC-42 self-counterparty)
+    let backup_invoice = "1-wallet-backup-1";
+    let backup_pubkey = match crate::crypto::brc42::derive_child_public_key(
+        &master_privkey, &master_pubkey, backup_invoice,
+    ) {
+        Ok(pk) => pk,
+        Err(e) => return Err(format!("Backup key derivation failed: {}", e)),
+    };
+    let backup_privkey = match crate::crypto::brc42::derive_child_private_key(
+        &master_privkey, &master_pubkey, backup_invoice,
+    ) {
+        Ok(sk) => sk,
+        Err(e) => return Err(format!("Backup signing key derivation failed: {}", e)),
+    };
+
+    // Step 4: Build PushDrop locking script
+    let locking_script_bytes = match encode(&[encrypted_payload], &backup_pubkey, LockPosition::Before) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("PushDrop encoding failed: {}", e)),
+    };
+    log::info!("   📜 PushDrop script: {} bytes", locking_script_bytes.len());
+
+    // Step 5: Build P2PKH marker script for backup address (for on-chain discovery)
+    let backup_address = pubkey_to_address(&backup_pubkey)
+        .unwrap_or_default();
+    let marker_script = address_to_script(&backup_address)
+        .unwrap_or_default();
+    let marker_sats: i64 = 546; // Dust limit — smallest discoverable output
+    log::info!("   📍 Backup marker address: {}", backup_address);
+
+    // Step 5b: Check for previous backup UTXOs (PushDrop + marker)
+    // PushDrop: derivation_prefix = "1-wallet-backup", derivation_suffix = "1"
+    // Marker: derivation_prefix = "1-wallet-backup", derivation_suffix = "marker"
+    let mut previous_pushdrop: Option<(String, u32, i64, String)>;
+    let mut previous_marker: Option<(String, u32, i64, String)>;
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+
+        // Find previous PushDrop
+        let pushdrop_outputs = output_repo.get_spendable_by_derivation(
+            "1-wallet-backup", "1",
+        ).unwrap_or_default();
+        previous_pushdrop = pushdrop_outputs.first().and_then(|output| {
+            let txid = output.txid.as_ref()?;
+            let output_id = output.output_id?;
+            let script_hex = output_repo.get_locking_script_hex(output_id)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            if script_hex.is_empty() { return None; }
+            log::info!("   ♻️  Found previous PushDrop: {}:{} ({} sats)",
+                &txid[..16.min(txid.len())], output.vout, output.satoshis);
+            Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
+        });
+
+        // Find previous marker
+        let marker_outputs = output_repo.get_spendable_by_derivation(
+            "1-wallet-backup", "marker",
+        ).unwrap_or_default();
+        previous_marker = marker_outputs.first().and_then(|output| {
+            let txid = output.txid.as_ref()?;
+            let output_id = output.output_id?;
+            let script_hex = output_repo.get_locking_script_hex(output_id)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            if script_hex.is_empty() { return None; }
+            log::info!("   ♻️  Found previous marker: {}:{} ({} sats)",
+                &txid[..16.min(txid.len())], output.vout, output.satoshis);
+            Some((txid.clone(), output.vout as u32, output.satoshis, script_hex))
+        });
+
+        if previous_pushdrop.is_none() && previous_marker.is_none() {
+            log::info!("   🆕 No previous backup — first backup");
+        }
+    };
+
+    // Step 5c: Validate previous backup UTXOs actually exist on-chain.
+    // DB can be stale from wallet.db swaps, failed backups, or multi-device conflicts.
+    // Query the marker address on WoC — if the on-chain UTXO txid doesn't match
+    // what our DB thinks is the current backup, clear stale outputs and use the
+    // on-chain reality as the source of truth.
+    if previous_pushdrop.is_some() || previous_marker.is_some() {
+        let db_marker_txid = previous_marker.as_ref().map(|(txid, _, _, _)| txid.clone());
+        let onchain_marker = {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build().unwrap_or_else(|_| reqwest::Client::new());
+            let utxo_url = format!(
+                "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
+                backup_address
+            );
+            match client.get(&utxo_url).send().await {
+                Ok(resp) => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let utxos = body.get("result").and_then(|r| r.as_array())
+                        .or_else(|| body.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    utxos.first().and_then(|u| {
+                        u["tx_hash"].as_str().or(u["txid"].as_str()).map(|s| s.to_string())
+                    })
+                }
+                Err(_) => db_marker_txid.clone(), // On network error, trust DB
+            }
+        };
+
+        let db_matches_chain = match (&db_marker_txid, &onchain_marker) {
+            (Some(db_txid), Some(chain_txid)) => db_txid == chain_txid,
+            (None, None) => true, // Both empty = consistent
+            _ => false,
+        };
+
+        if !db_matches_chain {
+            log::warn!("   ⚠️  DB backup txid ({}) doesn't match on-chain ({})",
+                db_marker_txid.as_deref().unwrap_or("none"),
+                onchain_marker.as_deref().unwrap_or("none"));
+            log::info!("   🧹 Clearing stale DB outputs and adopting on-chain backup UTXOs...");
+            {
+                let db = state.database.lock().unwrap();
+                let _ = db.connection().execute(
+                    "UPDATE outputs SET spendable = 0, spending_description = 'stale-backup' \
+                     WHERE derivation_prefix = '1-wallet-backup' AND spendable = 1",
+                    [],
+                );
+            }
+            state.balance_cache.invalidate();
+
+            // Adopt the on-chain UTXOs as previous backup outputs so we SPEND them
+            // instead of leaving orphans. Fetch all UTXOs at backup address.
+            previous_pushdrop = None;
+            previous_marker = None;
+            if let Some(ref chain_txid) = onchain_marker {
+                // The marker is at the backup address; PushDrop is at vout 0, marker at vout 1
+                // of the same transaction
+                log::info!("   🔄 Adopting on-chain backup tx {} as previous (will spend it)", chain_txid);
+
+                // Fetch the raw tx to get output values
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build().unwrap_or_else(|_| reqwest::Client::new());
+                let tx_url = format!(
+                    "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
+                    chain_txid
+                );
+                if let Ok(resp) = client.get(&tx_url).send().await {
+                    if let Ok(tx_data) = resp.json::<serde_json::Value>().await {
+                        if let Some(vouts) = tx_data["vout"].as_array() {
+                            // PushDrop is vout 0 (nonstandard script with data)
+                            if let Some(vout0) = vouts.get(0) {
+                                let sats = (vout0["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                                let script_hex = vout0["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                                if sats > 0 && !script_hex.is_empty() {
+                                    previous_pushdrop = Some((chain_txid.clone(), 0, sats, script_hex));
+                                    log::info!("   ✅ Adopted on-chain PushDrop: {} sats at {}:0", sats, chain_txid);
+                                }
+                            }
+                            // Marker is vout 1 (P2PKH at backup address)
+                            if let Some(vout1) = vouts.get(1) {
+                                let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                                let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                                if sats > 0 && !script_hex.is_empty() {
+                                    previous_marker = Some((chain_txid.clone(), 1, sats, script_hex));
+                                    log::info!("   ✅ Adopted on-chain marker: {} sats at {}:1", sats, chain_txid);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if previous_pushdrop.is_none() && previous_marker.is_none() {
+                    log::warn!("   ⚠️  Could not adopt on-chain UTXOs — treating as first backup");
+                }
+            } else {
+                log::info!("   🆕 No on-chain backup found — treating as first backup");
+            }
+        } else {
+            log::info!("   ✅ On-chain marker matches DB — previous backup UTXOs valid");
+        }
+    }
+
+    // Step 6: Estimate fee and select funding UTXOs
+    // No Hodos service fee for wallet backups — this is infrastructure protecting the user
+    let backup_output_sats: i64 = 1000; // Token amount for PushDrop UTXO
+    let fee_rate = state.fee_rate_cache.get_rate().await;
+    let output_script_lengths: Vec<usize> = vec![
+        locking_script_bytes.len(),  // PushDrop backup
+        25,                          // P2PKH marker (for discovery)
+        25,                          // Change (P2PKH)
+    ];
+    let mut num_inputs_estimate = 1; // At least 1 funding input
+    if previous_pushdrop.is_some() { num_inputs_estimate += 1; }
+    if previous_marker.is_some() { num_inputs_estimate += 1; }
+    let estimated_fee = estimate_fee_for_transaction(
+        num_inputs_estimate, &output_script_lengths, false, fee_rate,
+    ) as i64;
+
+    let previous_pushdrop_sats = previous_pushdrop.as_ref().map(|p| p.2).unwrap_or(0);
+    let previous_marker_sats = previous_marker.as_ref().map(|p| p.2).unwrap_or(0);
+    let previous_sats = previous_pushdrop_sats + previous_marker_sats;
+    let amount_needed = backup_output_sats + marker_sats + estimated_fee - previous_sats;
+
+    let funding_utxos = {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let all_utxos = output_repo.get_spendable_by_user(1)
+            .unwrap_or_default()
+            .iter()
+            .filter(|o| {
+                // Exclude previous backup UTXOs from funding selection (handled separately)
+                let is_prev_pushdrop = previous_pushdrop.as_ref().map_or(false, |(txid, vout, _, _)| {
+                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+                });
+                let is_prev_marker = previous_marker.as_ref().map_or(false, |(txid, vout, _, _)| {
+                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+                });
+                !is_prev_pushdrop && !is_prev_marker
+            })
+            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .collect::<Vec<_>>();
+        drop(db);
+
+        if amount_needed > 0 {
+            let selected = select_utxos(&all_utxos, amount_needed);
+            if selected.is_empty() {
+                log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);
+                return Err(format!("Insufficient funds (need ~{} sats)", amount_needed));
+            }
+            selected
+        } else {
+            // Previous backup sats cover everything
+            vec![]
+        }
+    };
+
+    let funding_total: i64 = funding_utxos.iter().map(|u| u.satoshis).sum();
+    let total_in = funding_total + previous_sats;
+    log::info!("   💰 Inputs: {} funding UTXOs ({} sats) + previous backup ({} sats) = {} sats total",
+        funding_utxos.len(), funding_total, previous_sats, total_in);
+
+    // Step 7: Reserve inputs with placeholder
+    let placeholder_txid = format!("pending-backup-{}", chrono::Utc::now().timestamp_millis());
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout))
+            .collect();
+        if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
+            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+        }
+        if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
+            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+        }
+        let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
+    }
+    state.balance_cache.invalidate();
+
+    // Step 8: Build transaction
+    // Input order: [previous PushDrop] [previous marker] [funding UTXOs]
+    let mut tx = Transaction::new();
+
+    if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
+        tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
+    }
+    if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
+        tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
+    }
+    for utxo in &funding_utxos {
+        tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
+    }
+
+    // Output 0: PushDrop backup (1000 sats)
+    tx.add_output(TxOutput::new(backup_output_sats, locking_script_bytes.clone()));
+
+    // Output 1: P2PKH marker at backup address (546 sats — for on-chain discovery)
+    tx.add_output(TxOutput::new(marker_sats, marker_script.clone()));
+
+    // Output 2: Change (if above dust)
+    let change_amount = total_in - backup_output_sats - marker_sats - estimated_fee;
+    let mut change_address_index: Option<i32> = None;
+    let mut change_script_hex: Option<String> = None;
+
+    if change_amount > 546 {
+        // Reuse the most recent existing address for backup change (don't create new ones).
+        // This prevents backup transactions from inflating the address table and changing
+        // the backup hash, which would cause unnecessary re-backups.
+        let (change_script, addr_index) = {
+            let db = state.database.lock().unwrap();
+            let wallet_repo = WalletRepository::new(db.connection());
+            let wallet = wallet_repo.get_primary_wallet()
+                .map_err(|e| format!("Wallet error: {}", e)).unwrap();
+            let wallet = wallet.unwrap();
+            let wallet_id = wallet.id.unwrap();
+
+            let address_repo = AddressRepository::new(db.connection());
+            let current_index = address_repo.get_max_index(wallet_id)
+                .ok().flatten()
+                .unwrap_or(0);
+
+            let invoice = format!("2-receive address-{}", current_index);
+            let derived_pubkey = crate::crypto::brc42::derive_child_public_key(
+                &master_privkey, &master_pubkey, &invoice,
+            ).unwrap();
+
+            let pubkey_hash = {
+                use sha2::{Sha256, Digest as _};
+                let sha_hash = Sha256::digest(&derived_pubkey);
+                ripemd::Ripemd160::digest(&sha_hash)
+            };
+            let script = Script::p2pkh_locking_script(&pubkey_hash).unwrap();
+            (script, current_index)
+        };
+        change_script_hex = Some(hex::encode(&change_script.bytes));
+        change_address_index = Some(addr_index);
+        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
+        log::info!("   💸 Change: {} sats (address index {})", change_amount, addr_index);
+    }
+
+    // Step 9: Sign all inputs
+    let secp = Secp256k1::new();
+    let mut input_idx = 0;
+
+    // Sign previous PushDrop input (P2PK — signature only, no pubkey)
+    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_pushdrop {
+        let prev_script_bytes = hex::decode(prev_script_hex).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return Err(format!("Sighash failed: {}", e));
+            }
+        };
+        let secret = SecretKey::from_slice(&backup_privkey).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        // P2PK unlocking: just <sig> (no pubkey)
+        let mut unlocking = Vec::new();
+        unlocking.push(sig_der.len() as u8);
+        unlocking.extend_from_slice(&sig_der);
+        tx.inputs[input_idx].set_script(unlocking);
+        input_idx += 1;
+    }
+
+    // Sign previous marker input (P2PKH — signature + pubkey, using backup key)
+    if let Some((_, _, prev_sats, ref prev_script_hex)) = previous_marker {
+        let prev_script_bytes = hex::decode(prev_script_hex).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return Err(format!("Sighash failed: {}", e));
+            }
+        };
+        let secret = SecretKey::from_slice(&backup_privkey).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
+        input_idx += 1;
+    }
+
+    // Sign funding UTXOs (P2PKH)
+    for utxo in &funding_utxos {
+        let key_result: Result<Vec<u8>, String> = {
+            let db = state.database.lock().unwrap();
+            let output_repo = OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
+                Ok(Some(output)) => crate::database::derive_key_for_output(
+                    &db, output.derivation_prefix.as_deref(),
+                    output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
+                ).map_err(|e| format!("Key derivation: {}", e)),
+                _ => Err(format!("Output not found: {}:{}", utxo.txid, utxo.vout)),
+            }
+        }; // DB lock dropped here
+        let private_key_bytes = match key_result {
+            Ok(k) => k,
+            Err(e) => {
+                rollback_backup(state, &placeholder_txid, "").await;
+                return Err(e);
+            }
+        };
+        let funding_prev_script = hex::decode(&utxo.script).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &funding_prev_script, utxo.satoshis, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return Err(format!("Sighash failed: {}", e));
+            }
+        };
+        let secret = SecretKey::from_slice(&private_key_bytes).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
+        input_idx += 1;
+    }
+
+    let txid = match tx.txid() {
+        Ok(t) => t,
+        Err(e) => {
+            rollback_backup(&state, &placeholder_txid, "").await;
+            return Err(format!("txid failed: {}", e));
+        }
+    };
+    let raw_tx_hex = match tx.to_hex() {
+        Ok(h) => h,
+        Err(e) => {
+            rollback_backup(&state, &placeholder_txid, "").await;
+            return Err(format!("Serialize failed: {}", e));
+        }
+    };
+    log::info!("   📝 Backup tx: {} ({} bytes)", txid, raw_tx_hex.len() / 2);
+
+    // Step 10: Store signed tx + create DB records
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+    {
+        let db = state.database.lock().unwrap();
+        // Cache signed tx for BEEF ancestry
+        let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+        let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
+    }
+
+    // Create transaction record
+    let tx_record_id: Option<i64> = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+        match db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, is_outgoing, satoshis,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            rusqlite::params![
+                1i64, txid,
+                format!("backup-{}", &txid[..8]),
+                "On-chain wallet backup",
+                raw_tx_bytes,
+                estimated_fee, // Actual cost — only the mining fee (token + marker recovered on next backup)
+                now, now,
+            ],
+        ) {
+            Ok(rows) if rows > 0 => Some(db.connection().last_insert_rowid()),
+            _ => None,
+        }
+    };
+
+    // Record backup outputs
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
+        let locking_script_hex = hex::encode(&locking_script_bytes);
+
+        // Output 0: PushDrop backup
+        let _ = output_repo.insert_output(
+            1, &txid, 0,
+            backup_output_sats, &locking_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("1"),
+            None, None, false,
+        );
+
+        // Output 1: P2PKH marker (for on-chain discovery)
+        let marker_script_hex = hex::encode(&marker_script);
+        let _ = output_repo.insert_output(
+            1, &txid, 1,
+            marker_sats, &marker_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("marker"),
+            None, None, false,
+        );
+
+        // Output 2: Change (if exists)
+        if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
+            let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
+            let _ = output_repo.insert_output(
+                1, &txid, 2,
+                change_amount, script_hex,
+                default_basket_id,
+                Some("2-receive address"), Some(&addr_idx.to_string()),
+                None, None, true,
+            );
+        }
+        // Link outputs to transaction
+        if let Some(tx_id) = tx_record_id {
+            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
+        }
+    }
+
+    // No commission for wallet backups — service fee waived
+
+    // Update input reservations from placeholder to real txid
+    {
+        let db = state.database.lock().unwrap();
+        let output_repo = OutputRepository::new(db.connection());
+        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+    }
+
+    // Create proven_tx_req for proof tracking
+    {
+        let db = state.database.lock().unwrap();
+        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
+    }
+
+    // Step 11: Build BEEF and broadcast
+    let beef_bytes = {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let mut beef = crate::beef::Beef::new();
+
+        // Add ancestry for each input's parent tx
+        let mut ancestor_txids: Vec<String> = Vec::new();
+        if let Some((ref prev_txid, _, _, _)) = previous_pushdrop {
+            ancestor_txids.push(prev_txid.clone());
+        }
+        if let Some((ref prev_txid, _, _, _)) = previous_marker {
+            if !ancestor_txids.contains(prev_txid) {
+                ancestor_txids.push(prev_txid.clone());
+            }
+        }
+        for utxo in &funding_utxos {
+            if !ancestor_txids.contains(&utxo.txid) {
+                ancestor_txids.push(utxo.txid.clone());
+            }
+        }
+
+        for ancestor_txid in &ancestor_txids {
+            if beef.find_txid(ancestor_txid).is_some() {
+                continue;
+            }
+            match crate::beef_helpers::build_beef_for_txid(
+                ancestor_txid, &mut beef, &state.database, &client,
+            ).await {
+                Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
+                Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
+            }
+        }
+
+        beef.sort_topologically();
+        let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+        beef.set_main_transaction(signed_tx_bytes);
+
+        match beef.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, &txid).await;
+                return Err(format!("BEEF serialization failed: {}", e));
+            }
+        }
+    };
+    log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
+
+    // Broadcast
+    let beef_hex = hex::encode(&beef_bytes);
+    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(_) => {
+            log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
+        }
+        Err(e) => {
+            log::error!("   ❌ Backup broadcast failed: {} — rolling back", e);
+            rollback_backup(&state, &placeholder_txid, &txid).await;
+            return Err(format!("Broadcast failed: {}", e));
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    // Recompute hash AFTER the backup transaction has modified the DB.
+    // This captures the post-backup state so the next trigger sees an accurate baseline.
+    // Without this, backup side effects (spent_by changes, new proven_tx_reqs, etc.)
+    // would make the next hash different even though no user data changed.
+    let post_backup_hash = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+            Ok(compressed) => {
+                use sha2::{Sha256, Digest as _};
+                hex::encode(Sha256::digest(&compressed))
+            }
+            Err(_) => new_hash.clone(), // Fallback to pre-backup hash
+        }
+    };
+    {
+        let db = state.database.lock().unwrap();
+        let settings_repo = crate::database::SettingsRepository::new(db.connection());
+        let _ = settings_repo.set_backup_hash(&post_backup_hash);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let _ = settings_repo.set_last_backup_at(now);
+    }
+
+    log::info!("   ✅ On-chain wallet backup complete: {} (hash: {})", txid, &post_backup_hash[..16]);
+    Ok(txid)
+}
+
+/// Rollback helper for failed on-chain backup
+async fn rollback_backup(state: &AppState, placeholder_txid: &str, txid: &str) {
+    let db = state.database.lock().unwrap();
+    let output_repo = crate::database::OutputRepository::new(db.connection());
+    if !txid.is_empty() {
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        let _ = tx_repo.set_transaction_status(txid, crate::action_storage::TransactionStatus::Failed);
+        let _ = output_repo.delete_by_txid(txid);
+        let _ = output_repo.restore_by_spending_description(txid);
+    }
+    let _ = output_repo.restore_by_spending_description(placeholder_txid);
+    drop(db);
+    state.balance_cache.invalidate();
+}
+
+/// Extract the locking script for a specific output from raw transaction bytes.
+fn extract_output_script(raw_tx: &[u8], target_vout: usize) -> Result<Vec<u8>, String> {
+    use crate::transaction::decode_varint;
+
+    let mut pos = 4; // Skip version (4 bytes)
+
+    // Skip inputs
+    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("input count varint: {:?}", e))?;
+    pos += consumed;
+
+    for _ in 0..input_count {
+        pos += 32 + 4; // txid (32) + vout (4)
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("input script varint: {:?}", e))?;
+        pos += consumed + script_len as usize + 4; // script + sequence (4)
+    }
+
+    // Parse outputs
+    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("output count varint: {:?}", e))?;
+    pos += consumed;
+
+    if target_vout >= output_count as usize {
+        return Err(format!("vout {} out of range ({} outputs)", target_vout, output_count));
+    }
+
+    for i in 0..output_count as usize {
+        let _value = u64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
+        pos += 8;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("output script varint: {:?}", e))?;
+        pos += consumed;
+
+        if i == target_vout {
+            return Ok(raw_tx[pos..pos + script_len as usize].to_vec());
+        }
+        pos += script_len as usize;
+    }
+
+    Err("Output not found".to_string())
+}
+
+/// After recovery, reconcile the backup transaction with the imported DB.
+/// The backup payload captures pre-backup state, so the funding UTXO is still
+/// marked spendable. This function marks the backup tx's inputs as spent and
+/// inserts the change output (vout 2) so the balance is correct immediately.
+fn reconcile_backup_tx(
+    state: &AppState,
+    backup_txid: &str,
+    raw_tx: &[u8],
+) -> Result<(u32, bool), String> {
+    use crate::transaction::decode_varint;
+
+    let mut pos = 4; // Skip version
+
+    // Parse inputs
+    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("input count varint: {:?}", e))?;
+    pos += consumed;
+
+    let mut inputs: Vec<(String, u32)> = Vec::new();
+    for _ in 0..input_count {
+        let txid_bytes = &raw_tx[pos..pos+32];
+        let txid_hex: String = txid_bytes.iter().rev().map(|b| format!("{:02x}", b)).collect();
+        let vout = u32::from_le_bytes(raw_tx[pos+32..pos+36].try_into().unwrap());
+        pos += 36;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("input script varint: {:?}", e))?;
+        pos += consumed + script_len as usize + 4; // script + sequence
+        inputs.push((txid_hex, vout));
+    }
+
+    // Parse all outputs: vout 0 = PushDrop, vout 1 = marker, vout 2 = change
+    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("output count varint: {:?}", e))?;
+    pos += consumed;
+
+    let mut output_data: Vec<(i64, String)> = Vec::new(); // (sats, script_hex)
+    for _i in 0..output_count as usize {
+        let value = u64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
+        pos += 8;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("output script varint: {:?}", e))?;
+        pos += consumed;
+        let script_hex = hex::encode(&raw_tx[pos..pos + script_len as usize]);
+        output_data.push((value as i64, script_hex));
+        pos += script_len as usize;
+    }
+
+    let db = state.database.lock().unwrap();
+    let output_repo = crate::database::OutputRepository::new(db.connection());
+
+    // Mark inputs as spent (these are funding UTXOs from the imported backup state)
+    let mut inputs_marked = 0u32;
+    for (txid, vout) in &inputs {
+        let rows = db.connection().execute(
+            "UPDATE outputs SET spendable = 0, spending_description = ?1
+             WHERE txid = ?2 AND vout = ?3 AND spendable = 1",
+            rusqlite::params![
+                format!("spent-by-backup-{}", &backup_txid[..16]),
+                txid, *vout as i32
+            ],
+        ).unwrap_or(0);
+        if rows > 0 {
+            inputs_marked += rows as u32;
+        }
+    }
+
+    // Insert backup outputs: PushDrop (vout 0), marker (vout 1), change (vout 2)
+    let mut change_inserted = false;
+    let basket_repo = crate::database::BasketRepository::new(db.connection());
+    let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
+
+    // Vout 0: PushDrop (encrypted backup data)
+    if let Some((sats, ref script_hex)) = output_data.get(0) {
+        let _ = output_repo.insert_output(
+            1, backup_txid, 0,
+            *sats, script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("1"),
+            None, None, false,
+        );
+    }
+
+    // Vout 1: Marker (P2PKH at backup address, for on-chain discovery)
+    if let Some((sats, ref script_hex)) = output_data.get(1) {
+        let _ = output_repo.insert_output(
+            1, backup_txid, 1,
+            *sats, script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("marker"),
+            None, None, false,
+        );
+    }
+
+    // Vout 2: Change (back to wallet)
+    if let Some((sats, ref script_hex)) = output_data.get(2) {
+        if *sats > 546 {
+            let change_addr_index = {
+                let addr_repo = crate::database::AddressRepository::new(db.connection());
+                let wallet_repo = crate::database::WalletRepository::new(db.connection());
+                let wallet = wallet_repo.get_primary_wallet().ok().flatten();
+                let wid = wallet.and_then(|w| w.id).unwrap_or(1);
+                let addresses = addr_repo.get_all_by_wallet(wid).unwrap_or_default();
+
+                let change_script_bytes = hex::decode(script_hex).unwrap_or_default();
+                addresses.iter().find_map(|a| {
+                    let addr_script = crate::handlers::address_to_script(&a.address);
+                    if let Ok(s) = addr_script {
+                        if s == change_script_bytes { Some(a.index) } else { None }
+                    } else { None }
+                }).unwrap_or(-1)
+            };
+
+            if change_addr_index >= 0 {
+                let _ = output_repo.upsert_received_utxo(
+                    state.current_user_id,
+                    backup_txid,
+                    2,
+                    *sats,
+                    script_hex,
+                    change_addr_index,
+                );
+                change_inserted = true;
+            }
+        }
+    }
+
+    state.balance_cache.invalidate();
+    Ok((inputs_marked, change_inserted))
+}
+
+/// Fetch and decrypt the on-chain backup from the blockchain.
+///
+/// Shared helper for both verify and recover endpoints.
+/// 1. Derive backup address from master keys (BRC-42 self, "1-wallet-backup-1")
+/// 2. Query WhatsOnChain for UTXO at that address
+/// 3. Fetch full transaction hex
+/// 4. Parse PushDrop script → extract encrypted payload
+/// 5. Decrypt + decompress → BackupPayload
+///
+/// Returns Ok(Some(payload)) if backup found, Ok(None) if no backup on-chain.
+/// Returns (payload, backup_txid, raw_tx_bytes) if found
+async fn fetch_onchain_backup(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+) -> Result<Option<(crate::backup::BackupPayload, String, Vec<u8>)>, String> {
+    use crate::script::pushdrop;
+
+    // Step 1: Derive backup address
+    let backup_invoice = "1-wallet-backup-1";
+    let backup_pubkey = crate::crypto::brc42::derive_child_public_key(
+        master_privkey, master_pubkey, backup_invoice,
+    ).map_err(|e| format!("Backup key derivation failed: {}", e))?;
+
+    // Convert derived pubkey to P2PKH address
+    let backup_address = pubkey_to_address(&backup_pubkey)
+        .map_err(|e| format!("Address derivation failed: {}", e))?;
+    log::info!("   🔑 Backup address: {}", backup_address);
+
+    // Step 2: Query WhatsOnChain for P2PKH marker UTXO at backup address
+    // The marker is a standard P2PKH output that WoC indexes by address.
+    // The PushDrop (nonstandard) lives in the same tx at vout 0.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let utxo_url = format!(
+        "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
+        backup_address
+    );
+    log::info!("   🔍 Querying marker UTXOs at backup address {}...", backup_address);
+
+    let resp = client.get(&utxo_url).send().await
+        .map_err(|e| format!("WhatsOnChain UTXO fetch failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("WhatsOnChain returned status {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse UTXO response: {}", e))?;
+
+    // Handle wrapped response format: { "result": [...] } or flat array
+    let utxos = if let Some(result) = body.get("result") {
+        result.as_array().cloned().unwrap_or_default()
+    } else if let Some(arr) = body.as_array() {
+        arr.clone()
+    } else {
+        Vec::new()
+    };
+
+    if utxos.is_empty() {
+        log::info!("   ℹ️  No backup marker found on-chain at {}", backup_address);
+        return Ok(None);
+    }
+
+    // Pick the newest marker UTXO — prefer unconfirmed (height=0 or missing), then highest block height.
+    // Multiple markers can exist from previous backup cycles; only the latest has current data.
+    let marker_utxo = utxos.iter().max_by_key(|u| {
+        let h = u["height"].as_i64().unwrap_or(0);
+        if h == 0 { i64::MAX } else { h }  // Unconfirmed (0) = newest
+    }).unwrap_or(&utxos[0]);
+    let txid = marker_utxo["tx_hash"].as_str()
+        .or_else(|| marker_utxo["txid"].as_str())
+        .ok_or("Missing txid in UTXO response")?;
+    // PushDrop is always at vout 0 in the backup transaction
+    let vout: usize = 0;
+
+    log::info!("   📍 Found backup marker at txid {}, PushDrop at vout {}", txid, vout);
+
+    // Step 3: Fetch full transaction hex
+    let tx_url = format!(
+        "https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex",
+        txid
+    );
+    let tx_resp = client.get(&tx_url).send().await
+        .map_err(|e| format!("WhatsOnChain tx fetch failed: {}", e))?;
+
+    if !tx_resp.status().is_success() {
+        return Err(format!("WhatsOnChain tx fetch returned status {}", tx_resp.status()));
+    }
+
+    let raw_tx_hex = tx_resp.text().await
+        .map_err(|e| format!("Failed to read tx hex: {}", e))?;
+    let raw_tx_hex = raw_tx_hex.trim();
+    let raw_tx_bytes = hex::decode(raw_tx_hex)
+        .map_err(|e| format!("Invalid tx hex: {}", e))?;
+
+    log::info!("   📦 Fetched raw tx: {} bytes", raw_tx_bytes.len());
+
+    // Step 4: Parse raw transaction bytes to extract output script at vout
+    // Manual parsing: version(4) → input_count(varint) → inputs → output_count(varint) → outputs
+    let output_script = extract_output_script(&raw_tx_bytes, vout)
+        .map_err(|e| format!("Failed to extract output script: {}", e))?;
+
+    let decoded = pushdrop::decode(&output_script)
+        .map_err(|e| format!("PushDrop decode failed: {}", e))?;
+
+    if decoded.fields.is_empty() {
+        return Err("PushDrop has no data fields".to_string());
+    }
+
+    let encrypted_payload = &decoded.fields[0];
+    log::info!("   🔓 Extracted encrypted payload: {} bytes", encrypted_payload.len());
+
+    // Step 5: Decrypt + decompress
+    let payload = crate::backup::deserialize_from_onchain(encrypted_payload, master_privkey)?;
+    log::info!("   ✅ Decrypted backup: {} txs, {} outputs, {} addresses, {} certs",
+        payload.transactions.len(), payload.outputs.len(),
+        payload.addresses.len(), payload.certificates.len());
+
+    Ok(Some((payload, txid.to_string(), raw_tx_bytes)))
+}
+
+/// Verify on-chain backup against current wallet state.
+///
+/// POST /wallet/backup/onchain/verify
+///
+/// Fetches the on-chain backup, decrypts it, and compares entity counts
+/// against the current database. Returns a detailed diff.
+pub async fn wallet_backup_onchain_verify(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("🔍 POST /wallet/backup/onchain/verify");
+
+    // Get master keys
+    let (master_privkey, master_pubkey) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Wallet locked: {}", e)
+            })),
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to get pubkey: {}", e)
+            })),
+        };
+        (privkey, pubkey)
+    };
+
+    // Fetch and decrypt on-chain backup
+    let backup_payload = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
+        Ok(Some((p, _, _))) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({
+            "success": false, "error": "No backup found on-chain"
+        })),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": e
+        })),
+    };
+
+    // Collect current wallet state for comparison (using same collect_payload)
+    let identity_key_hex = hex::encode(&master_pubkey);
+    let current_payload = {
+        let db = state.database.lock().unwrap();
+        match crate::backup::collect_payload(db.connection(), &identity_key_hex, "") {
+            Ok(p) => p,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to collect current state: {}", e)
+            })),
+        }
+    };
+
+    // Compare entity counts and key fields
+    // Note: backup has stripped data (raw_tx, merkle_path, etc.) so we compare what's present
+    let mut diffs = Vec::new();
+
+    // Helper to compare counts
+    macro_rules! compare_count {
+        ($name:expr, $backup:expr, $current:expr) => {
+            let b = $backup;
+            let c = $current;
+            if b != c {
+                diffs.push(serde_json::json!({
+                    "entity": $name,
+                    "backup": b,
+                    "current": c,
+                    "diff": c as i64 - b as i64
+                }));
+            }
+        };
+    }
+
+    // Exclude backup txs from current counts to match what the backup contains
+    let current_tx_count = current_payload.transactions.iter()
+        .filter(|t| !t.reference_number.starts_with("backup-"))
+        .count();
+    let current_output_count = current_payload.outputs.iter()
+        .filter(|o| o.derivation_prefix.as_deref() != Some("1-wallet-backup"))
+        .count();
+
+    compare_count!("users", backup_payload.users.len(), current_payload.users.len());
+    compare_count!("addresses", backup_payload.addresses.len(), current_payload.addresses.len());
+    compare_count!("transactions", backup_payload.transactions.len(), current_tx_count);
+    compare_count!("outputs", backup_payload.outputs.len(), current_output_count);
+    compare_count!("proven_txs", backup_payload.proven_txs.len(), current_payload.proven_txs.len());
+    compare_count!("certificates", backup_payload.certificates.len(), current_payload.certificates.len());
+    compare_count!("certificate_fields", backup_payload.certificate_fields.len(), current_payload.certificate_fields.len());
+    compare_count!("output_baskets", backup_payload.output_baskets.len(), current_payload.output_baskets.len());
+    compare_count!("output_tags", backup_payload.output_tags.len(), current_payload.output_tags.len());
+    compare_count!("tx_labels", backup_payload.tx_labels.len(), current_payload.tx_labels.len());
+    compare_count!("commissions", backup_payload.commissions.len(), current_payload.commissions.len());
+    compare_count!("settings", backup_payload.settings.len(), current_payload.settings.len());
+    compare_count!("domain_permissions", backup_payload.domain_permissions.len(), current_payload.domain_permissions.len());
+
+    // Check identity key matches
+    let identity_match = backup_payload.identity_key == current_payload.identity_key;
+
+    // Compare spendable output txids (the most critical data)
+    let backup_spendable: Vec<String> = backup_payload.outputs.iter()
+        .filter(|o| o.spendable)
+        .map(|o| format!("{}:{}", o.txid.as_deref().unwrap_or("?"), o.vout))
+        .collect();
+    let current_spendable: Vec<String> = current_payload.outputs.iter()
+        .filter(|o| o.spendable && o.derivation_prefix.as_deref() != Some("1-wallet-backup"))
+        .map(|o| format!("{}:{}", o.txid.as_deref().unwrap_or("?"), o.vout))
+        .collect();
+    let missing_utxos: Vec<&String> = current_spendable.iter()
+        .filter(|u| !backup_spendable.contains(u))
+        .collect();
+    let extra_utxos: Vec<&String> = backup_spendable.iter()
+        .filter(|u| !current_spendable.contains(u))
+        .collect();
+
+    let all_match = diffs.is_empty() && identity_match && missing_utxos.is_empty();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "identity_match": identity_match,
+        "all_counts_match": diffs.is_empty(),
+        "diffs": diffs,
+        "spendable_utxos": {
+            "backup": backup_spendable.len(),
+            "current": current_spendable.len(),
+            "missing_from_backup": missing_utxos,
+            "extra_in_backup": extra_utxos,
+        },
+        "backup_entities": {
+            "transactions": backup_payload.transactions.len(),
+            "outputs": backup_payload.outputs.len(),
+            "addresses": backup_payload.addresses.len(),
+            "proven_txs": backup_payload.proven_txs.len(),
+            "certificates": backup_payload.certificates.len(),
+        },
+        "verdict": if all_match { "MATCH" } else { "DIFFERENCES_FOUND" }
+    }))
+}
+
+/// Recover wallet from on-chain backup.
+///
+/// POST /wallet/recover/onchain
+///
+/// Body: { "mnemonic": "twelve words...", "pin": "1234" (optional) }
+///
+/// Flow:
+/// 1. Validate mnemonic
+/// 2. Derive master keys + backup address
+/// 3. Fetch on-chain backup UTXO
+/// 4. Decrypt + decompress → BackupPayload
+/// 5. Create wallet from mnemonic
+/// 6. Import all entities from backup
+/// 7. Return summary
+#[derive(Deserialize)]
+pub struct OnchainRecoverRequest {
+    pub mnemonic: String,
+    pub pin: Option<String>,
+}
+
+pub async fn wallet_recover_onchain(
+    state: web::Data<AppState>,
+    req: web::Json<OnchainRecoverRequest>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("🔄 POST /wallet/recover/onchain");
+
+    // Step 1: Validate mnemonic and derive master keys
+    let mnemonic_str = req.mnemonic.trim().to_string();
+    let mnemonic = match bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_str) {
+        Ok(m) => m,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": format!("Invalid mnemonic: {}", e)
+        })),
+    };
+
+    let seed = mnemonic.to_seed("");
+    let master_key = match bip32::XPrv::new(&seed) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("Failed to derive master key: {}", e)
+        })),
+    };
+
+    let master_privkey = master_key.private_key().to_bytes().to_vec();
+    let secp = secp256k1::Secp256k1::new();
+    let secret_key = secp256k1::SecretKey::from_slice(&master_privkey).unwrap();
+    let master_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize().to_vec();
+
+    // Step 2: Check that no wallet exists
+    {
+        let db = state.database.lock().unwrap();
+        let wallet_repo = crate::database::WalletRepository::new(db.connection());
+        if let Ok(Some(_)) = wallet_repo.get_primary_wallet() {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "success": false, "error": "Wallet already exists. Delete it first."
+            }));
+        }
+    }
+
+    // Step 3: Try on-chain backup first
+    log::info!("   🔍 Searching for on-chain backup...");
+    let backup_result = match fetch_onchain_backup(&master_privkey, &master_pubkey).await {
+        Ok(p) => p, // Some((payload, txid, raw_tx)) or None
+        Err(e) => {
+            log::warn!("   ⚠️  On-chain backup fetch failed: {} — will try chain scanning", e);
+            None
+        }
+    };
+
+    let backup_found = backup_result.is_some();
+    let (backup_payload, backup_txid, backup_raw_tx) = match backup_result {
+        Some((p, t, r)) => (Some(p), Some(t), Some(r)),
+        None => (None, None, None),
+    };
+
+    // Step 4: Create wallet from mnemonic
+    let (wallet_id, user_id) = {
+        let mut db = state.database.lock().unwrap();
+        match db.create_wallet_from_existing_mnemonic(&mnemonic_str, req.pin.as_deref()) {
+            Ok((wid, uid, _addr, _pubkey)) => (wid, uid),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": format!("Failed to create wallet: {}", e)
+            })),
+        }
+    };
+    log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
+
+    // Step 5: Import backup
+    let mut restored_counts = serde_json::json!(null);
+    let mut refetch_result = serde_json::json!(null);
+
+    if let Some(payload) = &backup_payload {
+        log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
+            payload.transactions.len(), payload.outputs.len(), payload.certificates.len());
+
+        // Clean up auto-created records that conflict with backup import
+        {
+            let db = state.database.lock().unwrap();
+            let conn = db.connection();
+            let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+            let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+            let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+            log::info!("   🧹 Cleaned up auto-created records before import");
+        }
+
+        // Import all entities
+        {
+            let db = state.database.lock().unwrap();
+            match crate::backup::import_to_db(db.connection(), payload) {
+                Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
+                Err(e) => {
+                    log::error!("   ❌ Import failed: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Import failed: {}", e),
+                        "wallet_created": true,
+                        "backup_found": true
+                    }));
+                }
+            }
+        }
+
+        restored_counts = serde_json::json!({
+            "transactions": payload.transactions.len(),
+            "outputs": payload.outputs.len(),
+            "addresses": payload.addresses.len(),
+            "certificates": payload.certificates.len(),
+            "proven_txs": payload.proven_txs.len(),
+        });
+
+        // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
+        refetch_result = refetch_stripped_data(&state, payload).await;
+
+        // Process backup transaction: the payload captures pre-backup state, so the
+        // funding UTXO spent by the backup tx is still spendable in the DB. Parse the
+        // backup tx to mark its inputs as spent and insert the change output.
+        if let (Some(ref bk_txid), Some(ref bk_raw)) = (&backup_txid, &backup_raw_tx) {
+            log::info!("   🔄 Processing backup tx {} to reconcile funding/change...", &bk_txid[..16]);
+            match reconcile_backup_tx(&state, bk_txid, bk_raw) {
+                Ok((inputs_marked, change_inserted)) => {
+                    log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
+                        inputs_marked, if change_inserted { "inserted" } else { "skipped" });
+                }
+                Err(e) => log::warn!("   ⚠️  Backup tx reconciliation failed: {} (sync will fix later)", e),
+            }
+        }
+    } else {
+        // No on-chain backup found — this mnemonic has never backed up a Hodos wallet
+        log::info!("   ❌ No on-chain backup found for this mnemonic");
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": false,
+            "error": "No Hodos wallet backup found for this mnemonic. If this is a new wallet, use Create New instead.",
+            "backup_found": false
+        }));
+    }
+
+    // Step 6b: Store backup hash so TaskBackup doesn't overwrite the on-chain backup
+    // with degraded recovered data. The recovered DB is a subset of the original
+    // (stripped raw_tx, merkle_paths, parent_transactions). Auto-backup would push
+    // this incomplete state, destroying the original backup.
+    {
+        let db = state.database.lock().unwrap();
+        let identity_key_hex = {
+            let user_repo = crate::database::UserRepository::new(db.connection());
+            user_repo.get_default().ok().flatten()
+                .map(|u| u.identity_key).unwrap_or_default()
+        };
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+            Ok(compressed) => {
+                use sha2::{Sha256, Digest as _};
+                let hash = hex::encode(Sha256::digest(&compressed));
+                let settings_repo = crate::database::SettingsRepository::new(db.connection());
+                let _ = settings_repo.set_backup_hash(&hash);
+                log::info!("   🔒 Stored post-recovery backup hash to prevent auto-overwrite");
+            }
+            Err(e) => log::warn!("   ⚠️  Failed to compute post-recovery hash: {}", e),
+        }
+    }
+
+    // Step 7: Start Monitor and update state
+    crate::monitor::Monitor::start(state.clone());
+    state.balance_cache.invalidate();
+
+    let (total_balance, spendable_count) = {
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let balance = output_repo.calculate_total_balance().unwrap_or(0);
+        let count = output_repo.count_spendable(1).unwrap_or(0);
+        (balance, count)
+    };
+
+    // Update sync status
+    {
+        let mut status = state.sync_status.write().unwrap();
+        status.active = false;
+        status.phase = "idle".to_string();
+        status.total_satoshis = total_balance as u64;
+        status.completed_at = Some(std::time::Instant::now());
+        status.result_seen = false;
+    }
+
+    log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
+        spendable_count, total_balance);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "backup_found": true,
+        "wallet_id": wallet_id,
+        "restored": restored_counts,
+        "balance_satoshis": total_balance,
+        "spendable_utxos": spendable_count,
+        "refetch": refetch_result,
+    }))
+}
+
+/// Re-fetch stripped data after on-chain backup recovery.
+///
+/// Fetches from WhatsOnChain in parallel:
+/// 1. Raw tx hex for all transactions → populates transactions.raw_tx, proven_txs.raw_tx, parent_transactions
+/// 2. Merkle proofs for proven txs → populates proven_txs.merkle_path
+/// 3. Restores spent output locking_scripts from parsed raw tx
+async fn refetch_stripped_data(
+    state: &AppState,
+    payload: &crate::backup::BackupPayload,
+) -> serde_json::Value {
+    use crate::database::{TransactionRepository, OutputRepository, ParentTransactionRepository};
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Collect all unique txids that need raw_tx fetched
+    let mut txids_to_fetch: Vec<String> = Vec::new();
+    for tx in &payload.transactions {
+        if let Some(ref txid) = tx.txid {
+            if !txids_to_fetch.contains(txid) {
+                txids_to_fetch.push(txid.clone());
+            }
+        }
+    }
+    // Also include proven_txs txids (may overlap but dedup handles it)
+    for ptx in &payload.proven_txs {
+        if !txids_to_fetch.contains(&ptx.txid) {
+            txids_to_fetch.push(ptx.txid.clone());
+        }
+    }
+
+    log::info!("   🔄 Re-fetching stripped data for {} unique txids...", txids_to_fetch.len());
+
+    let mut raw_tx_fetched = 0u32;
+    let mut proofs_fetched = 0u32;
+    let mut parent_txs_cached = 0u32;
+    let mut scripts_restored = 0u32;
+    let mut errors = 0u32;
+
+    // Fetch raw tx + merkle proof for each txid
+    for txid in &txids_to_fetch {
+        // 1. Fetch raw transaction hex
+        let raw_tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&client, txid).await {
+            Ok(hex) => {
+                raw_tx_fetched += 1;
+                Some(hex)
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to fetch raw tx for {}: {}", &txid[..16.min(txid.len())], e);
+                errors += 1;
+                None
+            }
+        };
+
+        if let Some(ref hex) = raw_tx_hex {
+            // Update transactions.raw_tx
+            {
+                let db = state.database.lock().unwrap();
+                let raw_bytes = hex::decode(hex).unwrap_or_default();
+                if !raw_bytes.is_empty() {
+                    let _ = db.connection().execute(
+                        "UPDATE transactions SET raw_tx = ?1 WHERE txid = ?2 AND raw_tx IS NULL",
+                        rusqlite::params![raw_bytes, txid],
+                    );
+                }
+            }
+
+            // Update proven_txs.raw_tx
+            {
+                let db = state.database.lock().unwrap();
+                let raw_bytes = hex::decode(hex).unwrap_or_default();
+                if !raw_bytes.is_empty() {
+                    let _ = db.connection().execute(
+                        "UPDATE proven_txs SET raw_tx = ?1 WHERE txid = ?2 AND (raw_tx IS NULL OR LENGTH(raw_tx) = 0)",
+                        rusqlite::params![raw_bytes, txid],
+                    );
+                }
+            }
+
+            // Cache in parent_transactions for BEEF building
+            {
+                let db = state.database.lock().unwrap();
+                let parent_tx_repo = ParentTransactionRepository::new(db.connection());
+                if parent_tx_repo.get_by_txid(txid).unwrap_or(None).is_none() {
+                    let _ = parent_tx_repo.upsert(None, txid, hex);
+                    parent_txs_cached += 1;
+                }
+            }
+
+            // Restore spent output locking_scripts by parsing the raw tx
+            if let Ok(raw_bytes) = hex::decode(hex) {
+                let db = state.database.lock().unwrap();
+                // Find outputs for this txid that have NULL or empty locking_script
+                let mut stmt = db.connection().prepare(
+                    "SELECT outputId, vout FROM outputs WHERE txid = ?1 AND (locking_script IS NULL OR LENGTH(locking_script) = 0)"
+                ).unwrap();
+                let missing: Vec<(i64, i32)> = stmt.query_map(
+                    rusqlite::params![txid],
+                    |row| Ok((row.get(0)?, row.get(1)?))
+                ).unwrap().filter_map(|r| r.ok()).collect();
+                drop(stmt);
+
+                for (output_id, vout) in &missing {
+                    if let Ok(script) = extract_output_script(&raw_bytes, *vout as usize) {
+                        let _ = db.connection().execute(
+                            "UPDATE outputs SET locking_script = ?1 WHERE outputId = ?2",
+                            rusqlite::params![script, output_id],
+                        );
+                        scripts_restored += 1;
+                    }
+                }
+            }
+        }
+
+        // 2. Fetch merkle proof (TSC format)
+        match crate::cache_helpers::fetch_tsc_proof_from_api(&client, txid).await {
+            Ok(Some(proof_json)) => {
+                let db = state.database.lock().unwrap();
+                // Store proof as BLOB in proven_txs
+                let proof_bytes = serde_json::to_vec(&proof_json).unwrap_or_default();
+                if !proof_bytes.is_empty() {
+                    let updated = db.connection().execute(
+                        "UPDATE proven_txs SET merkle_path = ?1 WHERE txid = ?2 AND (merkle_path IS NULL OR LENGTH(merkle_path) = 0)",
+                        rusqlite::params![proof_bytes, txid],
+                    ).unwrap_or(0);
+                    if updated > 0 {
+                        proofs_fetched += 1;
+                    }
+                }
+            }
+            Ok(None) => {
+                // Not yet mined or no proof available — normal for unconfirmed txs
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Failed to fetch proof for {}: {}", &txid[..16.min(txid.len())], e);
+                errors += 1;
+            }
+        }
+    }
+
+    log::info!("   ✅ Re-fetch complete: {} raw txs, {} proofs, {} parent tx cache, {} scripts restored, {} errors",
+        raw_tx_fetched, proofs_fetched, parent_txs_cached, scripts_restored, errors);
+
+    serde_json::json!({
+        "raw_tx_fetched": raw_tx_fetched,
+        "proofs_fetched": proofs_fetched,
+        "parent_txs_cached": parent_txs_cached,
+        "scripts_restored": scripts_restored,
+        "errors": errors,
+    })
 }
 
 /// Restore wallet database from backup

@@ -339,6 +339,26 @@ cmake --build build --config Release
 
 ---
 
+## Wallet Service Fee
+
+Every outgoing transaction includes a **1000-satoshi service fee** output sent to the Hodos company treasury address (`1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT`). This applies to all three transaction builders:
+
+| Builder | Location |
+|---------|----------|
+| `create_action_internal` | `handlers.rs` — standard sends, PeerPay, Paymail |
+| `publish_certificate` | `certificate_handlers.rs` — identity certificate publish |
+| `unpublish_certificate_core` | `certificate_handlers.rs` — identity certificate unpublish |
+
+**Constants**: `HODOS_FEE_ADDRESS`, `HODOS_SERVICE_FEE_SATS` in `handlers.rs` (both `pub`).
+
+**Output order**: request outputs → service fee → change. The `CreateActionResponse.outputs` array excludes the service fee and change (only returns request outputs).
+
+**Commission tracking**: Each service fee is recorded in the `commissions` table. Commission records are cleaned up on broadcast failure.
+
+**Implementation doc**: `development-docs/WALLET_SERVICE_FEE_IMPLEMENTATION.md`
+
+---
+
 ## Glossary
 
 | Term | Meaning |

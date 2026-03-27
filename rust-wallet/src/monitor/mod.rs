@@ -26,6 +26,7 @@ pub mod task_purge;
 pub mod task_sync_pending;
 pub mod task_check_peerpay;
 pub mod task_validate_utxos;
+pub mod task_backup;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -48,6 +49,7 @@ struct TaskSchedule {
     sync_pending: u64,
     check_peerpay: u64,
     validate_utxos: u64,
+    backup: u64,
 }
 
 impl Default for TaskSchedule {
@@ -62,6 +64,7 @@ impl Default for TaskSchedule {
             sync_pending: 30,         // 30 seconds
             check_peerpay: 60,        // 1 minute
             validate_utxos: 600,      // 10 minutes
+            backup: 1800,             // 30 minutes
         }
     }
 }
@@ -124,7 +127,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 9 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 10 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -134,6 +137,7 @@ impl Monitor {
         info!("   TaskSyncPending: every {}s (pending addresses only)", self.schedule.sync_pending);
         info!("   TaskCheckPeerPay: every {}s", self.schedule.check_peerpay);
         info!("   TaskValidateUtxos: every {}s (all spendable outputs)", self.schedule.validate_utxos);
+        info!("   TaskBackup: every {}s (if dirty)", self.schedule.backup);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -145,6 +149,7 @@ impl Monitor {
         let mut last_sync_pending: u64 = 0;
         let mut last_check_peerpay: u64 = 0;
         let mut last_validate_utxos: u64 = 0; // 0 = runs on first tick
+        let mut last_backup: u64 = Self::now_secs(); // Don't run on first tick — wait for interval
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -239,6 +244,15 @@ impl Monitor {
                 if let Err(e) = task_check_peerpay::run(&self.state, &self.client).await {
                     error!("   ❌ TaskCheckPeerPay failed: {}", e);
                     self.log_event("TaskCheckPeerPay:error", Some(&e));
+                }
+            }
+
+            // TaskBackup
+            if now - last_backup >= self.schedule.backup {
+                last_backup = now;
+                if let Err(e) = task_backup::run(&self.state).await {
+                    error!("   ❌ TaskBackup failed: {}", e);
+                    self.log_event("TaskBackup:error", Some(&e));
                 }
             }
 

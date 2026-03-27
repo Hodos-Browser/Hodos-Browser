@@ -433,22 +433,35 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Transactions
+    // Transactions (exclude backup txs and failed txs — both are dead weight in backup)
     let transactions = {
         let mut stmt = conn.prepare(
             "SELECT id, user_id, proven_tx_id, txid, reference_number, raw_tx, description, \
              status, is_outgoing, satoshis, input_beef, version, lock_time, block_height, \
-             confirmations, failed_at, created_at, updated_at FROM transactions"
+             confirmations, failed_at, created_at, updated_at FROM transactions \
+             WHERE reference_number NOT LIKE 'backup-%' AND status != 'failed'"
         )?;
         let rows = stmt.query_map([], |row| {
+            let proven_tx_id: Option<i64> = row.get(2)?;
+            // Strip raw_tx for confirmed transactions (has proven_tx_id) — re-fetchable from chain
+            let raw_tx_blob: Option<Vec<u8>> = if proven_tx_id.is_some() {
+                None // Confirmed — raw_tx on-chain, free to re-fetch
+            } else {
+                row.get::<_, Option<Vec<u8>>>(5)
+                    .or_else(|_| {
+                        row.get::<_, Option<String>>(5).map(|opt| {
+                            opt.and_then(|s| hex::decode(&s).ok())
+                        })
+                    })?
+            };
             let input_beef: Option<Vec<u8>> = row.get(10)?;
             Ok(BackupTransaction {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
-                proven_tx_id: row.get(2)?,
+                proven_tx_id,
                 txid: row.get(3)?,
                 reference_number: row.get(4)?,
-                raw_tx: row.get(5)?,
+                raw_tx: raw_tx_blob.map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b)),
                 description: row.get(6)?,
                 status: row.get(7)?,
                 is_outgoing: row.get::<_, i32>(8)? != 0,
@@ -466,22 +479,34 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Outputs
+    // Outputs: exclude backup PushDrop/marker outputs AND outputs spent by backup transactions.
+    // Outputs spent by backup txs have spendable=0 and spent_by pointing to a backup tx.
+    // Including them with spent_by=NULL (FK cleanup) causes TaskReviewStatus to incorrectly
+    // restore them to spendable, inflating the balance.
     let outputs = {
         let mut stmt = conn.prepare(
             "SELECT outputId, user_id, transaction_id, basket_id, spendable, change, vout, satoshis, \
              provided_by, purpose, type, output_description, txid, sender_identity_key, \
              derivation_prefix, derivation_suffix, custom_instructions, spent_by, sequence_number, \
-             spending_description, script_length, script_offset, locking_script, created_at, updated_at FROM outputs"
+             spending_description, script_length, script_offset, locking_script, created_at, updated_at FROM outputs \
+             WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup' \
+             AND (spent_by IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.spent_by AND t.reference_number LIKE 'backup-%')) \
+             AND (transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.transaction_id AND t.status = 'failed'))"
         )?;
         let rows = stmt.query_map([], |row| {
-            let locking_script: Option<Vec<u8>> = row.get(22)?;
+            let spendable = row.get::<_, i32>(4)? != 0;
+            // Strip locking_script from spent outputs — never needed again
+            let locking_script: Option<Vec<u8>> = if spendable {
+                row.get(22)?
+            } else {
+                None
+            };
             Ok(BackupOutput {
                 output_id: row.get(0)?,
                 user_id: row.get(1)?,
                 transaction_id: row.get(2)?,
                 basket_id: row.get(3)?,
-                spendable: row.get::<_, i32>(4)? != 0,
+                spendable,
                 change: row.get::<_, i32>(5)? != 0,
                 vout: row.get(6)?,
                 satoshis: row.get(7)?,
@@ -507,22 +532,23 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Proven txs
+    // Proven txs (exclude backup txs; raw_tx and merkle_path stripped in serialize_for_onchain)
     let proven_txs = {
         let mut stmt = conn.prepare(
             "SELECT provenTxId, txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root, \
-             created_at, updated_at FROM proven_txs"
+             created_at, updated_at FROM proven_txs \
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_txs.txid AND t.reference_number LIKE 'backup-%')"
         )?;
         let rows = stmt.query_map([], |row| {
             let merkle_path: Vec<u8> = row.get(4)?;
-            let raw_tx: Vec<u8> = row.get(5)?;
+            // Strip raw_tx — confirmed tx bytes are on-chain permanently, free to re-fetch
             Ok(BackupProvenTx {
                 proven_tx_id: row.get(0)?,
                 txid: row.get(1)?,
                 height: row.get(2)?,
                 tx_index: row.get(3)?,
                 merkle_path: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &merkle_path),
-                raw_tx: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw_tx),
+                raw_tx: String::new(), // Stripped — re-fetch from WhatsOnChain on recovery
                 block_hash: row.get(6)?,
                 merkle_root: row.get(7)?,
                 created_at: row.get(8)?,
@@ -532,11 +558,12 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Proven tx reqs
+    // Proven tx reqs (exclude backup txs; raw_tx and input_beef stripped in serialize_for_onchain)
     let proven_tx_reqs = {
         let mut stmt = conn.prepare(
             "SELECT provenTxReqId, proven_tx_id, txid, status, attempts, notified, batch, history, \
-             notify, raw_tx, input_beef, created_at, updated_at FROM proven_tx_reqs"
+             notify, raw_tx, input_beef, created_at, updated_at FROM proven_tx_reqs \
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_tx_reqs.txid AND t.reference_number LIKE 'backup-%')"
         )?;
         let rows = stmt.query_map([], |row| {
             let raw_tx: Vec<u8> = row.get(9)?;
@@ -728,10 +755,11 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Parent transactions
+    // Parent transactions (entire table cleared in serialize_for_onchain — BEEF cache rebuilt on re-fetch)
     let parent_transactions = {
         let mut stmt = conn.prepare(
-            "SELECT id, utxo_id, txid, raw_hex, cached_at FROM parent_transactions"
+            "SELECT pt.id, pt.utxo_id, pt.txid, pt.raw_hex, pt.cached_at FROM parent_transactions pt \
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = pt.txid AND t.reference_number LIKE 'backup-%')"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupParentTransaction {
             id: row.get(0)?,
@@ -904,6 +932,197 @@ pub fn decrypt_backup(backup: &EncryptedBackup, password: &str) -> std::result::
         .map_err(|e| format!("Invalid UTF-8 in decrypted data: {}", e))?;
 
     serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse backup JSON: {}", e))
+}
+
+// ============================================================================
+// On-chain backup — serialize + compress + encrypt / decrypt + decompress
+// ============================================================================
+
+/// Derive the 32-byte AES key for on-chain backup encryption.
+/// Uses SHA-256(master_privkey || "hodos-wallet-backup-v1") — simple and secure
+/// since the input is already a 256-bit secret.
+fn derive_onchain_backup_key(master_privkey: &[u8]) -> [u8; 32] {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(master_privkey);
+    hasher.update(b"hodos-wallet-backup-v1");
+    hasher.finalize().into()
+}
+
+/// Serialize the current wallet state into encrypted, compressed bytes for on-chain storage.
+///
+/// Pipeline: BackupPayload → JSON → gzip(level 9) → AES-256-GCM encrypt
+///
+/// The mnemonic is excluded from the payload (set to empty string) because the
+/// recovery user already has it — they need it to derive the backup address.
+///
+/// Output format: nonce(12) || ciphertext || tag(16)
+pub fn serialize_for_onchain(
+    conn: &Connection,
+    identity_key: &str,
+    master_privkey: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    // Collect, strip, and compress
+    let compressed = compress_for_onchain(conn, identity_key)?;
+
+    // Encrypt
+    let encrypted = encrypt_compressed(master_privkey, &compressed)?;
+
+    info!("   On-chain backup: {} bytes encrypted (total with nonce)", encrypted.len());
+
+    Ok(encrypted)
+}
+
+/// Collect, strip, and compress the wallet payload (without encrypting).
+/// Returns the compressed bytes suitable for hashing to detect changes.
+pub fn compress_for_onchain(
+    conn: &Connection,
+    identity_key: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Write;
+
+    // 1. Collect payload (mnemonic excluded)
+    let mut payload = collect_payload(conn, identity_key, "")
+        .map_err(|e| format!("Failed to collect backup payload: {}", e))?;
+    payload.mnemonic = String::new();
+
+    // 2. Strip re-fetchable data (same as serialize_for_onchain)
+    payload.parent_transactions.clear();
+    for req in &mut payload.proven_tx_reqs {
+        req.raw_tx = String::new();
+        req.input_beef = None;
+    }
+    for ptx in &mut payload.proven_txs {
+        ptx.merkle_path = String::new();
+    }
+
+    // Null out orphan FK references
+    let valid_tx_ids: std::collections::HashSet<i64> = payload.transactions.iter()
+        .map(|t| t.id)
+        .collect();
+    let valid_basket_ids: std::collections::HashSet<i64> = payload.output_baskets.iter()
+        .filter_map(|b| Some(b.basket_id))
+        .collect();
+    for output in &mut payload.outputs {
+        if let Some(tx_id) = output.transaction_id {
+            if !valid_tx_ids.contains(&tx_id) { output.transaction_id = None; }
+        }
+        if let Some(spent_by) = output.spent_by {
+            if !valid_tx_ids.contains(&spent_by) { output.spent_by = None; }
+        }
+        if let Some(basket_id) = output.basket_id {
+            if !valid_basket_ids.contains(&basket_id) { output.basket_id = None; }
+        }
+    }
+    let valid_proven_tx_ids: std::collections::HashSet<i64> = payload.proven_txs.iter()
+        .map(|p| p.proven_tx_id)
+        .collect();
+    for tx in &mut payload.transactions {
+        if let Some(ptx_id) = tx.proven_tx_id {
+            if !valid_proven_tx_ids.contains(&ptx_id) { tx.proven_tx_id = None; }
+        }
+    }
+    payload.commissions.retain(|c| valid_tx_ids.contains(&c.transaction_id));
+    payload.tx_labels_map.retain(|m| valid_tx_ids.contains(&m.transaction_id));
+    let valid_output_ids: std::collections::HashSet<i64> = payload.outputs.iter()
+        .map(|o| o.output_id)
+        .collect();
+    payload.output_tag_map.retain(|m| valid_output_ids.contains(&m.output_id));
+
+    compress_payload(&payload)
+}
+
+/// Compress a BackupPayload to gzip bytes.
+fn compress_payload(payload: &BackupPayload) -> std::result::Result<Vec<u8>, String> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload to JSON: {}", e))?;
+    let json_size = json_bytes.len();
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&json_bytes)
+        .map_err(|e| format!("Gzip compression failed: {}", e))?;
+    let compressed = encoder.finish()
+        .map_err(|e| format!("Gzip finish failed: {}", e))?;
+
+    info!("   On-chain backup: {} bytes JSON → {} bytes compressed ({:.1}% reduction)",
+        json_size, compressed.len(),
+        (1.0 - compressed.len() as f64 / json_size as f64) * 100.0);
+
+    if compressed.len() > 200_000 {
+        log::warn!("   ⚠️  On-chain backup is large ({} KB compressed). Consider wallet cleanup.", compressed.len() / 1024);
+    }
+
+    Ok(compressed)
+}
+
+/// Encrypt compressed bytes with AES-256-GCM. Returns nonce(12) || ciphertext || tag(16).
+pub fn encrypt_compressed(master_privkey: &[u8], compressed: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+    use rand::RngCore;
+
+    let key = derive_onchain_backup_key(master_privkey);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, compressed)
+        .map_err(|e| format!("AES-256-GCM encryption failed: {}", e))?;
+
+    let mut result = Vec::with_capacity(12 + ciphertext.len());
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&ciphertext);
+
+    Ok(result)
+}
+
+/// Decrypt and decompress on-chain backup bytes back into a BackupPayload.
+///
+/// Pipeline: AES-256-GCM decrypt → gzip decompress → JSON parse → BackupPayload
+///
+/// Input format: nonce(12) || ciphertext || tag(16)
+pub fn deserialize_from_onchain(
+    encrypted_bytes: &[u8],
+    master_privkey: &[u8],
+) -> std::result::Result<BackupPayload, String> {
+    use flate2::read::GzDecoder;
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+    use std::io::Read;
+
+    // Minimum: 12 nonce + 16 tag + at least 1 byte ciphertext
+    if encrypted_bytes.len() < 29 {
+        return Err("Encrypted backup data too short".to_string());
+    }
+
+    // 1. Decrypt
+    let key = derive_onchain_backup_key(master_privkey);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+
+    let nonce = GenericArray::from_slice(&encrypted_bytes[..12]);
+    let ciphertext_with_tag = &encrypted_bytes[12..];
+
+    let compressed = cipher.decrypt(nonce, ciphertext_with_tag)
+        .map_err(|_| "Failed to decrypt on-chain backup (wrong key or corrupt data)".to_string())?;
+
+    // 2. Decompress gzip
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut json_bytes = Vec::new();
+    decoder.read_to_end(&mut json_bytes)
+        .map_err(|e| format!("Gzip decompression failed: {}", e))?;
+
+    info!("   On-chain backup recovery: {} bytes encrypted → {} bytes compressed → {} bytes JSON",
+        encrypted_bytes.len(), compressed.len(), json_bytes.len());
+
+    // 3. Parse JSON
+    serde_json::from_slice::<BackupPayload>(&json_bytes)
         .map_err(|e| format!("Failed to parse backup JSON: {}", e))
 }
 
@@ -1497,4 +1716,187 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
           export_data.utxos.len());
 
     Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that the on-chain encryption key derivation is deterministic
+    #[test]
+    fn test_onchain_key_derivation_deterministic() {
+        let privkey = [0x42u8; 32];
+        let key1 = derive_onchain_backup_key(&privkey);
+        let key2 = derive_onchain_backup_key(&privkey);
+        assert_eq!(key1, key2);
+
+        // Different privkey → different key
+        let other_privkey = [0x43u8; 32];
+        let key3 = derive_onchain_backup_key(&other_privkey);
+        assert_ne!(key1, key3);
+    }
+
+    /// Test round-trip: serialize → encrypt → decrypt → deserialize produces identical payload
+    #[test]
+    fn test_onchain_round_trip() {
+        let privkey = [0x01u8; 32];
+
+        // Build a minimal BackupPayload
+        let payload = BackupPayload {
+            version: 1,
+            identity_key: "02abcdef".to_string(),
+            mnemonic: String::new(),
+            wallet: BackupWallet {
+                id: 1, current_index: 5, backed_up: true,
+                created_at: 1000, updated_at: 2000,
+            },
+            users: vec![BackupUser {
+                user_id: 1, identity_key: "02abcdef".to_string(),
+                active_storage: "local".to_string(), created_at: 1000, updated_at: 2000,
+            }],
+            addresses: vec![BackupAddress {
+                id: 1, wallet_id: 1, index: 0, address: "1test".to_string(),
+                public_key: "02ab".to_string(), used: false, balance: 5000,
+                pending_utxo_check: false, created_at: 1000,
+            }],
+            output_baskets: vec![],
+            transactions: vec![],
+            outputs: vec![],
+            proven_txs: vec![],
+            proven_tx_reqs: vec![],
+            certificates: vec![],
+            certificate_fields: vec![],
+            output_tags: vec![],
+            output_tag_map: vec![],
+            tx_labels: vec![],
+            tx_labels_map: vec![],
+            commissions: vec![],
+            settings: vec![],
+            sync_states: vec![],
+            parent_transactions: vec![],
+            block_headers: vec![],
+            domain_permissions: vec![],
+            cert_field_permissions: vec![],
+        };
+
+        // Serialize to JSON, compress, encrypt
+        let json_bytes = serde_json::to_vec(&payload).unwrap();
+
+        // Compress
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&json_bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Verify compression ratio
+        assert!(compressed.len() < json_bytes.len(),
+            "compressed {} should be smaller than json {}", compressed.len(), json_bytes.len());
+
+        // Encrypt
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aes_gcm::aead::generic_array::GenericArray;
+        use rand::RngCore;
+
+        let key = derive_onchain_backup_key(&privkey);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = GenericArray::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, compressed.as_ref()).unwrap();
+
+        let mut encrypted = Vec::new();
+        encrypted.extend_from_slice(&nonce_bytes);
+        encrypted.extend_from_slice(&ciphertext);
+
+        // Now decrypt and deserialize using the public API
+        let recovered = deserialize_from_onchain(&encrypted, &privkey).unwrap();
+
+        assert_eq!(recovered.version, payload.version);
+        assert_eq!(recovered.identity_key, payload.identity_key);
+        assert_eq!(recovered.mnemonic, "");
+        assert_eq!(recovered.addresses.len(), 1);
+        assert_eq!(recovered.addresses[0].address, "1test");
+        assert_eq!(recovered.users.len(), 1);
+    }
+
+    /// Test that wrong key fails decryption
+    #[test]
+    fn test_onchain_wrong_key_fails() {
+        let privkey = [0x01u8; 32];
+        let wrong_privkey = [0x02u8; 32];
+
+        let payload = BackupPayload {
+            version: 1,
+            identity_key: "02ab".to_string(),
+            mnemonic: String::new(),
+            wallet: BackupWallet {
+                id: 1, current_index: 0, backed_up: true,
+                created_at: 1000, updated_at: 2000,
+            },
+            users: vec![],
+            addresses: vec![],
+            output_baskets: vec![],
+            transactions: vec![],
+            outputs: vec![],
+            proven_txs: vec![],
+            proven_tx_reqs: vec![],
+            certificates: vec![],
+            certificate_fields: vec![],
+            output_tags: vec![],
+            output_tag_map: vec![],
+            tx_labels: vec![],
+            tx_labels_map: vec![],
+            commissions: vec![],
+            settings: vec![],
+            sync_states: vec![],
+            parent_transactions: vec![],
+            block_headers: vec![],
+            domain_permissions: vec![],
+            cert_field_permissions: vec![],
+        };
+
+        // Encrypt with correct key
+        let json_bytes = serde_json::to_vec(&payload).unwrap();
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&json_bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aes_gcm::aead::generic_array::GenericArray;
+        use rand::RngCore;
+
+        let key = derive_onchain_backup_key(&privkey);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = GenericArray::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, compressed.as_ref()).unwrap();
+
+        let mut encrypted = Vec::new();
+        encrypted.extend_from_slice(&nonce_bytes);
+        encrypted.extend_from_slice(&ciphertext);
+
+        // Decrypt with wrong key should fail
+        let result = deserialize_from_onchain(&encrypted, &wrong_privkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("wrong key or corrupt data"));
+    }
+
+    /// Test that data too short is rejected
+    #[test]
+    fn test_onchain_short_data_rejected() {
+        let privkey = [0x01u8; 32];
+        let result = deserialize_from_onchain(&[0u8; 20], &privkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
+    }
 }

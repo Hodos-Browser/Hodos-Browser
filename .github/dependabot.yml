@@ -1,0 +1,53 @@
+# Dependabot configuration
+# Automatically creates PRs when dependencies have updates
+# Review these PRs weekly - don't auto-merge without checking changelogs
+
+version: 2
+updates:
+  # Rust wallet dependencies
+  - package-ecosystem: "cargo"
+    directory: "/rust-wallet"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(rust-wallet):"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Adblock engine dependencies  
+  - package-ecosystem: "cargo"
+    directory: "/adblock-engine"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(adblock):"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Frontend dependencies
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(frontend):"
+    labels:
+      - "dependencies"
+      - "javascript"
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(actions):"
+    labels:
+      - "dependencies"
+      - "ci"

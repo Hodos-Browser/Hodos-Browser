@@ -361,6 +361,39 @@ impl WalletDatabase {
         address_repo.create(&master_address_model)?;
         info!("   ✅ Master pubkey address stored with index -1");
 
+        // 7. Create backup address (index -3) for on-chain wallet backup
+        let backup_invoice = "1-wallet-backup-1";
+        let backup_derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, backup_invoice)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 backup address derivation failed: {}", e))
+            ))?;
+
+        let backup_sha_hash = Sha256::digest(&backup_derived_pubkey);
+        let backup_pubkey_hash = Ripemd160::digest(&backup_sha_hash);
+
+        let mut backup_addr_bytes = vec![0x00]; // Mainnet prefix
+        backup_addr_bytes.extend_from_slice(backup_pubkey_hash.as_slice());
+        let backup_checksum_full = Sha256::digest(&Sha256::digest(&backup_addr_bytes));
+        backup_addr_bytes.extend_from_slice(&backup_checksum_full[0..4]);
+        let backup_address = bs58::encode(&backup_addr_bytes).into_string();
+        info!("   ✅ Backup address: {}", backup_address);
+
+        let backup_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -3,  // Special index for on-chain backup address
+            address: backup_address,
+            public_key: hex::encode(&backup_derived_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: false,  // Not for UTXO sync — only used by backup system
+            created_at,
+        };
+
+        address_repo.create(&backup_address_model)?;
+        info!("   ✅ Backup address stored with index -3");
+
         info!("   ✅ Wallet created successfully with first address and master address");
         Ok((wallet_id, mnemonic_phrase, address))
     }
@@ -488,6 +521,37 @@ impl WalletDatabase {
         address_repo.create(&master_address_model)?;
         info!("   ✅ Master pubkey address stored with index -1");
 
+        // 7. Create backup address (index -3) for on-chain wallet backup
+        let backup_invoice = "1-wallet-backup-1";
+        let backup_derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, backup_invoice)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 backup address derivation failed: {}", e))
+            ))?;
+
+        let backup_sha_hash = Sha256::digest(&backup_derived_pubkey);
+        let backup_pubkey_hash = Ripemd160::digest(&backup_sha_hash);
+
+        let mut backup_addr_bytes = vec![0x00];
+        backup_addr_bytes.extend_from_slice(backup_pubkey_hash.as_slice());
+        let backup_checksum_full = Sha256::digest(&Sha256::digest(&backup_addr_bytes));
+        backup_addr_bytes.extend_from_slice(&backup_checksum_full[0..4]);
+        let backup_address = bs58::encode(&backup_addr_bytes).into_string();
+
+        let backup_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -3,  // Special index for on-chain backup address
+            address: backup_address.clone(),
+            public_key: hex::encode(&backup_derived_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: false,  // Not for UTXO sync — only used by backup system
+            created_at,
+        };
+        address_repo.create(&backup_address_model)?;
+        info!("   ✅ Backup address stored with index -3: {}", backup_address);
+
         let master_pubkey_hex = hex::encode(&master_pubkey);
         info!("   ✅ Wallet recovery: DB records created successfully");
         Ok((wallet_id, user_id, address, master_pubkey_hex))
@@ -572,6 +636,95 @@ impl WalletDatabase {
 
         address_repo.create(&master_address_model)?;
         info!("   ✅ Master pubkey address created with index -1");
+
+        Ok(())
+    }
+
+    /// Ensure the backup address (index -3) exists in the database.
+    /// This should be called on startup for existing wallets that were created
+    /// before on-chain backup support was added. Requires cached mnemonic.
+    pub fn ensure_backup_address_exists(&self) -> Result<()> {
+        use super::{WalletRepository, AddressRepository};
+        use crate::crypto::brc42::derive_child_public_key;
+        use crate::database::helpers::{get_master_private_key_from_db, get_master_public_key_from_db};
+        use sha2::{Sha256, Digest};
+        use ripemd::Ripemd160;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use bs58;
+
+        info!("🔑 Checking if backup address exists...");
+
+        let wallet_repo = WalletRepository::new(&self.conn);
+        let address_repo = AddressRepository::new(&self.conn);
+
+        // Get the primary wallet
+        let wallet = match wallet_repo.get_primary_wallet()? {
+            Some(w) => w,
+            None => {
+                info!("   No wallet found, skipping backup address check");
+                return Ok(());
+            }
+        };
+        let wallet_id = wallet.id.ok_or_else(|| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+            Some("Wallet has no ID".to_string())
+        ))?;
+
+        // Check if backup address already exists (index -3)
+        match address_repo.get_by_wallet_and_index(wallet_id, -3) {
+            Ok(Some(_)) => {
+                info!("   ✅ Backup address already exists");
+                return Ok(());
+            }
+            Ok(None) => {
+                info!("   Backup address not found, creating...");
+            }
+            Err(e) => {
+                info!("   Error checking for backup address: {}, will try to create", e);
+            }
+        }
+
+        // Derive backup address using BRC-42 self-counterparty
+        let master_privkey = get_master_private_key_from_db(self)?;
+        let master_pubkey = get_master_public_key_from_db(self)?;
+
+        let backup_invoice = "1-wallet-backup-1";
+        let backup_derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, backup_invoice)
+            .map_err(|e| rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("BRC-42 backup address derivation failed: {}", e))
+            ))?;
+
+        // Convert to P2PKH address
+        let sha_hash = Sha256::digest(&backup_derived_pubkey);
+        let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+        let mut addr_bytes = vec![0x00]; // Mainnet prefix
+        addr_bytes.extend_from_slice(pubkey_hash.as_slice());
+        let checksum_full = Sha256::digest(&Sha256::digest(&addr_bytes));
+        addr_bytes.extend_from_slice(&checksum_full[0..4]);
+        let backup_address = bs58::encode(&addr_bytes).into_string();
+        info!("   Backup address: {}", backup_address);
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let backup_address_model = super::Address {
+            id: None,
+            wallet_id,
+            index: -3,  // Special index for on-chain backup address
+            address: backup_address,
+            public_key: hex::encode(&backup_derived_pubkey),
+            used: false,
+            balance: 0,
+            pending_utxo_check: false,  // Not for UTXO sync — only used by backup system
+            created_at,
+        };
+
+        address_repo.create(&backup_address_model)?;
+        info!("   ✅ Backup address created with index -3");
 
         Ok(())
     }
@@ -775,6 +928,21 @@ impl WalletDatabase {
                 "ALTER TABLE transactions ADD COLUMN recipient TEXT", [])?;
             self.conn.execute(
                 "ALTER TABLE transactions ADD COLUMN recipient_name TEXT", [])?;
+        }
+
+        // Repair: backup hash and last backup timestamp on settings
+        let has_backup_hash = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(settings)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == "backup_hash")
+        };
+        if !has_backup_hash {
+            info!("   Repair: adding backup_hash and last_backup_at to settings");
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN backup_hash TEXT", [])?;
+            self.conn.execute(
+                "ALTER TABLE settings ADD COLUMN last_backup_at INTEGER NOT NULL DEFAULT 0", [])?;
         }
 
         Ok(())

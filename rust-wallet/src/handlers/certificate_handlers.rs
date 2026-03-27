@@ -2635,7 +2635,7 @@ async fn create_certificate_transaction(
     // Calculate fee based on transaction size
     // Certificate tx: 1-2 inputs (P2PKH) + 1 certificate output + 1 change output
     let certificate_script_len = locking_script_bytes.len();
-    let output_script_lengths = vec![certificate_script_len, 25]; // certificate + P2PKH change
+    let output_script_lengths = vec![certificate_script_len, 25, 25]; // certificate + service fee + P2PKH change
     let fee_rate_sats_per_kb = state.fee_rate_cache.get_rate().await;
     let estimated_fee = crate::handlers::estimate_fee_for_transaction(
         2,  // Estimate 2 inputs
@@ -2646,7 +2646,7 @@ async fn create_certificate_transaction(
     log::info!("   📊 Certificate tx fee estimate: {} satoshis (script: {} bytes, rate: {} sat/KB)",
         estimated_fee, certificate_script_len, fee_rate_sats_per_kb);
 
-    let total_needed = certificate_output_amount + estimated_fee;
+    let total_needed = certificate_output_amount + estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS;
 
     // Get addresses from database (reuse from createAction)
     use crate::database::{address_to_address_info, output_to_fetcher_utxo};
@@ -2770,11 +2770,17 @@ async fn create_certificate_transaction(
     tx.add_output(certificate_output);
     log::info!("   📤 Added certificate output: {} satoshis", certificate_output_amount);
 
+    // Add Hodos service fee output
+    let fee_script = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+        .expect("HODOS_FEE_ADDRESS constant is invalid");
+    tx.add_output(TxOutput::new(crate::handlers::HODOS_SERVICE_FEE_SATS, fee_script));
+    log::info!("   💰 Added Hodos service fee: {} satoshis", crate::handlers::HODOS_SERVICE_FEE_SATS);
+
     // Calculate fees (use same estimate as createAction)
     let fee = estimated_fee; // Already calculated above
 
-    // Calculate change amount
-    let change_amount = total_input - certificate_output_amount - fee;
+    // Calculate change amount (accounts for miner fee + service fee)
+    let change_amount = total_input - certificate_output_amount - fee - crate::handlers::HODOS_SERVICE_FEE_SATS;
 
     // Add change output if needed (reuse logic from createAction)
     if change_amount > 546 {
@@ -4333,7 +4339,7 @@ async fn unpublish_certificate_core(
     // Select funding UTXOs
     let fee_rate = state.fee_rate_cache.get_rate().await;
     let estimated_fee = crate::handlers::estimate_fee_for_transaction(
-        2, &[25], false, fee_rate,
+        2, &[25, 25], false, fee_rate,  // service fee output (25) + change (25)
     ) as i64;
 
     let funding_utxos = {
@@ -4346,7 +4352,7 @@ async fn unpublish_certificate_core(
             .map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect::<Vec<_>>();
         drop(db);
-        let selected = select_utxos(&all_utxos, estimated_fee);
+        let selected = select_utxos(&all_utxos, estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS);
         if selected.is_empty() {
             return Err("Insufficient funds for unpublish fee".to_string());
         }
@@ -4377,9 +4383,15 @@ async fn unpublish_certificate_core(
         tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
     }
 
+    // Add Hodos service fee output
+    let fee_script = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+        .expect("HODOS_FEE_ADDRESS constant is invalid");
+    tx.add_output(TxOutput::new(crate::handlers::HODOS_SERVICE_FEE_SATS, fee_script));
+    log::info!("   💰 Added Hodos service fee: {} satoshis", crate::handlers::HODOS_SERVICE_FEE_SATS);
+
     // Change output
     let total_in = funding_total + output_satoshis;
-    let change_amount = total_in - estimated_fee;
+    let change_amount = total_in - estimated_fee - crate::handlers::HODOS_SERVICE_FEE_SATS;
     let mut change_address_index: Option<i32> = None;
     let mut change_script_hex: Option<String> = None;
 
@@ -4544,7 +4556,7 @@ async fn unpublish_certificate_core(
                 format!("unpublish-{}", &txid[..8]),
                 "Unpublish identity certificate",
                 raw_tx_bytes,
-                total_in as i64, // satoshis (total input value)
+                estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS, // Actual cost (fee + service fee)
                 now, now,
             ],
         ) {

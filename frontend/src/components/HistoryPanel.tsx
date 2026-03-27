@@ -282,7 +282,7 @@ export function HistoryPanel() {
                       onClick={() => handleDelete(entry.url)}
                       aria-label="Delete this entry"
                       title="Delete this entry"
-                      sx={{ color: '#666', '&:hover': { color: '#e57373' } }}
+                      style={{ color: '#666' }}
                     >
                       <Delete fontSize="small" />
                     </HodosButton>
