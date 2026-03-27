@@ -294,26 +294,26 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 - [x] Red background on 0 matches
 
 ### New Tab Page
-- [ ] New tab shows search bar
-- [ ] Quick-access tiles display
-- [ ] Search bar works (navigates to search engine)
-- [ ] Tiles navigate to correct sites
+- [x] New tab shows search bar
+- [x] Quick-access tiles display
+- [x] Search bar works (navigates to search engine)
+- [x] Tiles navigate to correct sites
 
 ### Privacy Shield
-- [ ] Shield icon in toolbar opens overlay
-- [ ] Shows domain name of current site
-- [ ] Ad blocking toggle works
-- [ ] Cookie blocking toggle works
-- [ ] Scriptlet injection toggle works
-- [ ] Blocked counts display
+- [x] Shield icon in toolbar opens overlay
+- [x] Shows domain name of current site
+- [x] Ad blocking toggle works
+- [x] Cookie blocking toggle works
+- [ ] ❌ Scriptlet injection toggle doesn't work
+- [ ] ❌ Blocked counts not displaying
 
 ### Downloads
-- [ ] Cmd+J opens downloads panel
-- [ ] Download a file → progress bar shows
-- [ ] Pause/resume works
-- [ ] Open file works
-- [ ] Show in folder works
-- [ ] Clear completed works
+- [x] Cmd+J opens downloads panel
+- [x] Download a file → progress bar shows
+- [x] Pause/resume works
+- [x] Open file works
+- [x] Show in folder works
+- [x] Clear completed works
 
 ### Tab Management
 - [x] Cmd+T creates new tab
