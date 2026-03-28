@@ -6005,14 +6005,25 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
         if (siteAdblockEnabled) {
             const char* resourceType = CefResourceTypeToAdblock(request->GetResourceType());
-            bool adblockBlocked = AdblockCache::GetInstance().check(url, sourceUrl, resourceType);
-            if (adblockBlocked) {
-                LOG_DEBUG_BROWSER("🛡️ Blocked by adblock: " + url);
+            auto cacheResult = AdblockCache::GetInstance().checkCacheOnly(url);
+
+            if (cacheResult == AdblockCache::CacheResult::HIT_BLOCKED) {
+                LOG_DEBUG_BROWSER("🛡️ Blocked by adblock (cached): " + url);
                 if (browser) {
                     AdblockCache::GetInstance().incrementBlockedCount(browser->GetIdentifier());
                 }
                 return new AdblockBlockHandler();
             }
+
+            if (cacheResult == AdblockCache::CacheResult::MISS) {
+                // Defer to background thread — IO thread stays free
+                bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
+                bool needsResponseFilter = g_adblockServerRunning;
+                return new DeferredAdblockHandler(url, sourceUrl, resourceType,
+                    browser ? browser->GetIdentifier() : 0,
+                    needsCookieFilter, needsResponseFilter);
+            }
+            // HIT_ALLOWED: fall through to wallet interception + cookie filtering
         }
     }
 
