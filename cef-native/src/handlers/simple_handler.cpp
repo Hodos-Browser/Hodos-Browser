@@ -5868,6 +5868,18 @@ private:
     IMPLEMENT_REFCOUNTING(AdblockResponseFilter);
 };
 
+// Factory functions for DeferredAdblockHandler delegation
+CefRefPtr<CefCookieAccessFilter> CreateCookieAccessFilter() {
+    if (CookieBlockManager::GetInstance().IsInitialized()) {
+        return new CookieAccessFilterWrapper();
+    }
+    return nullptr;
+}
+
+CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter() {
+    return new AdblockResponseFilter();
+}
+
 // CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
 // so cookie blocking applies to all browsing. Also returns AdblockResponseFilter
 // for YouTube responses to strip ad configuration at the network level.

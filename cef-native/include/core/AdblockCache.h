@@ -14,6 +14,8 @@
 #include "include/cef_request.h"
 #include "include/cef_browser.h"
 #include "include/cef_frame.h"
+#include "include/cef_task.h"
+#include "include/wrapper/cef_closure_task.h"
 #include <string>
 #include <unordered_map>
 #include <atomic>
@@ -78,6 +80,107 @@ public:
     }
 
     IMPLEMENT_REFCOUNTING(AdblockBlockHandler);
+};
+
+// Forward declaration
+class AdblockCache;
+
+// ============================================================================
+// AdblockFetchTask — runs adblock check on background thread
+// ============================================================================
+
+class AdblockFetchTask : public CefTask {
+public:
+    AdblockFetchTask(const std::string& url, const std::string& sourceUrl,
+                     const std::string& resourceType, int browserId,
+                     CefRefPtr<CefCallback> callback)
+        : url_(url), sourceUrl_(sourceUrl), resourceType_(resourceType),
+          browserId_(browserId), callback_(callback) {}
+
+    void Execute() override;  // Defined after AdblockCache class
+
+    IMPLEMENT_REFCOUNTING(AdblockFetchTask);
+
+private:
+    std::string url_;
+    std::string sourceUrl_;
+    std::string resourceType_;
+    int browserId_;
+    CefRefPtr<CefCallback> callback_;
+};
+
+// ============================================================================
+// DeferredAdblockHandler — defers adblock check to background thread
+// ============================================================================
+
+class DeferredAdblockHandler : public CefResourceRequestHandler {
+public:
+    DeferredAdblockHandler(const std::string& url, const std::string& sourceUrl,
+                           const std::string& resourceType, int browserId,
+                           bool needsCookieFilter, bool needsResponseFilter)
+        : url_(url), sourceUrl_(sourceUrl), resourceType_(resourceType),
+          browserId_(browserId), needsCookieFilter_(needsCookieFilter),
+          needsResponseFilter_(needsResponseFilter) {}
+
+    cef_return_value_t OnBeforeResourceLoad(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefCallback> callback) override {
+        // Post the blocking HTTP check to a background thread
+        CefPostTask(TID_FILE_USER_BLOCKING,
+            new AdblockFetchTask(url_, sourceUrl_, resourceType_, browserId_, callback));
+        return RV_CONTINUE_ASYNC;
+    }
+
+    CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override {
+        if (needsCookieFilter_) {
+            // Delegate to factory function defined in simple_handler.cpp
+            extern CefRefPtr<CefCookieAccessFilter> CreateCookieAccessFilter();
+            return CreateCookieAccessFilter();
+        }
+        return nullptr;
+    }
+
+    CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefResponse> response) override {
+        if (!needsResponseFilter_ || !g_adblockServerRunning) return nullptr;
+
+        std::string reqUrl = request->GetURL().ToString();
+        bool isYouTube = (reqUrl.find("://www.youtube.com/") != std::string::npos ||
+                          reqUrl.find("://youtube.com/") != std::string::npos ||
+                          reqUrl.find("://m.youtube.com/") != std::string::npos);
+        if (!isYouTube) return nullptr;
+
+        std::string contentType = response->GetHeaderByName("Content-Type").ToString();
+        if (reqUrl.find("/youtubei/") != std::string::npos &&
+            contentType.find("application/json") != std::string::npos) {
+            extern CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter();
+            return CreateAdblockResponseFilter();
+        }
+        if (request->GetResourceType() == RT_MAIN_FRAME &&
+            contentType.find("text/html") != std::string::npos) {
+            extern CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter();
+            return CreateAdblockResponseFilter();
+        }
+        return nullptr;
+    }
+
+    IMPLEMENT_REFCOUNTING(DeferredAdblockHandler);
+
+private:
+    std::string url_;
+    std::string sourceUrl_;
+    std::string resourceType_;
+    int browserId_;
+    bool needsCookieFilter_;
+    bool needsResponseFilter_;
 };
 
 // ============================================================================
@@ -748,6 +851,22 @@ private:
                                           const std::vector<std::string>& ids) { return ""; }
 #endif
 };
+
+// ============================================================================
+// AdblockFetchTask::Execute — must be after AdblockCache definition
+// ============================================================================
+
+inline void AdblockFetchTask::Execute() {
+    bool blocked = AdblockCache::GetInstance().fetchFromBackendPublic(url_, sourceUrl_, resourceType_);
+    AdblockCache::GetInstance().cacheResult(url_, blocked);
+
+    if (blocked) {
+        AdblockCache::GetInstance().incrementBlockedCount(browserId_);
+        callback_->Cancel();
+    } else {
+        callback_->Continue();
+    }
+}
 
 // ============================================================================
 // Helper: check if a URL should skip adblock checking
