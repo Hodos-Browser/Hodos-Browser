@@ -115,6 +115,37 @@ public:
         return global_enabled_.load(std::memory_order_relaxed);
     }
 
+    // Cache-only lookup result — used by async path
+    enum class CacheResult { HIT_BLOCKED, HIT_ALLOWED, MISS };
+
+    // Cache-only check — no HTTP, no blocking. Returns MISS on cache miss.
+    // Used by GetResourceRequestHandler() to avoid blocking the IO thread.
+    CacheResult checkCacheOnly(const std::string& url) {
+        if (!g_adblockServerRunning) return CacheResult::HIT_ALLOWED;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(url);
+        if (it != cache_.end()) {
+            return it->second ? CacheResult::HIT_BLOCKED : CacheResult::HIT_ALLOWED;
+        }
+        return CacheResult::MISS;
+    }
+
+    // Insert a check result from background thread (thread-safe)
+    void cacheResult(const std::string& url, bool blocked) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (cache_.size() >= MAX_CACHE_SIZE) {
+            cache_.clear();
+        }
+        cache_[url] = blocked;
+    }
+
+    // Public wrapper for background thread access to fetchFromBackend
+    bool fetchFromBackendPublic(const std::string& url, const std::string& sourceUrl,
+                                const std::string& resourceType) {
+        return fetchFromBackend(url, sourceUrl, resourceType);
+    }
+
     // Check if a URL should be blocked.
     // Returns true if blocked. Uses cache; calls backend on cache miss.
     bool check(const std::string& url, const std::string& sourceUrl,
