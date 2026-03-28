@@ -27,7 +27,7 @@
 
 ```
          ┌─────────┐
-         │   E2E   │  ← Few (manual checklists for MVP)
+         │   E2E   │  ← Playwright smoke tests (73) + manual checklists
         ┌┴─────────┴┐
         │Integration│  ← Some (handler + DB tests)
        ┌┴───────────┴┐
@@ -41,7 +41,8 @@
 |-------|----------|-----------|
 | Rust (unit) | `src/**/*_tests.rs` or inline `#[cfg(test)]` | `cargo test` |
 | Rust (integration) | `tests/*.rs` | `cargo test` |
-| Frontend | `src/**/__tests__/*.test.tsx` | Vitest |
+| Frontend (unit) | `src/**/__tests__/*.test.tsx` | Vitest |
+| Frontend (e2e) | `e2e/tests/*.spec.ts` | Playwright |
 | C++ | `tests/*.cpp` | Google Test (future) |
 
 ---
@@ -297,6 +298,59 @@ describe('SendForm', () => {
   });
 });
 ```
+
+---
+
+## 3A. Playwright E2E Smoke Tests (ACTIVE)
+
+> **Added:** 2026-03-27 via PR #82 by John Calhoun
+> **Status:** 73 tests passing on macOS. Windows verification pending.
+
+### What These Are
+
+Playwright (Microsoft's browser testing framework) launches real Chromium and tests our React frontend routes, components, and UI structure. These are **smoke tests** — they verify elements exist and render correctly, not full transaction flows.
+
+Since Playwright runs in regular Chromium (not our CEF shell), John built a **CEF bridge mock** (`e2e/helpers/bridge-mock.ts`) that stubs `window.hodosBrowser` with 12 API namespaces and 30+ IPC handlers so React components render without errors.
+
+### Test Coverage
+
+| Spec File | What It Tests | Tests |
+|-----------|---------------|-------|
+| `smoke.spec.ts` | All 20 routes load without JS errors | 20 |
+| `wallet-panel.spec.ts` | Balance area, send/receive buttons, transaction form | 9 |
+| `wallet-dashboard.spec.ts` | 4-quadrant layout, sidebar tabs, tab switching | 10 |
+| `wallet-activity.spec.ts` | Filter buttons, empty state, transaction list | 4 |
+| `settings-page.spec.ts` | All 5 settings sections render, privacy toggles | 10 |
+| `cross-cutting.spec.ts` | Menu items, downloads, privacy shield, new tab | 20 |
+
+### How to Run
+
+```bash
+cd frontend
+npm test           # run all 73 tests headless
+npm run test:ui    # interactive UI mode (opens browser, shows test steps)
+```
+
+Requires frontend dev server running on `:5137` (`npm run dev`).
+
+### What These Do NOT Test
+
+- Real BSV transactions (needs funded wallet + Rust backend)
+- BRC-100 auth flows (needs CEF + live BRC-100 site)
+- CEF overlay lifecycle (open/close/focus behavior)
+- Settings persistence (needs Rust backend)
+- Certificate operations (needs BRC-100 site with certs)
+
+### Future: Integrating with Unit Tests
+
+When we build out proper unit tests (Vitest for frontend, expanded `cargo test` for Rust):
+
+1. **Keep Playwright for route/UI smoke tests** — they catch "did someone break a route" regressions fast
+2. **Add Vitest unit tests** (section 3 above) for pure logic: formatters, validators, hooks with mocked fetch
+3. **Expand Playwright** to hit the real Rust backend for integration-level tests (create wallet → check balance → send tx). This requires starting the Rust server in CI, which the bridge mock currently avoids
+4. **CI integration**: `npm test` (Playwright) should run alongside Vitest in the `frontend-test` CI job. Both are fast enough to run on every PR
+
+The bridge mock (`bridge-mock.ts`) is also useful as documentation of all IPC contracts between React and CEF — keep it up to date when adding new IPC messages.
 
 ---
 

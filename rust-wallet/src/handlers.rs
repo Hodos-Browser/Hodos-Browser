@@ -6740,15 +6740,35 @@ pub async fn sign_action(
 
                     match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
                         Ok(Some(tsc_json)) => {
-                            // Enhance with block height
+                            // Enhance with block height (lock scoped, dropped before any network I/O)
                             let enhanced_result = {
-                                let db = state.database.lock().unwrap();
-                                let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                                crate::cache_helpers::enhance_tsc_with_height(
-                                    &client,
-                                    &block_header_repo,
-                                    &tsc_json,
-                                ).await
+                                let target_hash = tsc_json["target"].as_str()
+                                    .ok_or_else(|| crate::cache_errors::CacheError::InvalidData("Missing target hash in TSC proof".to_string()));
+                                match target_hash {
+                                    Ok(hash) => {
+                                        // Step A: Check cache (brief lock)
+                                        let cached_height = {
+                                            let db = state.database.lock().unwrap();
+                                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                                            crate::cache_helpers::get_cached_block_height(&block_header_repo, hash)
+                                        }; // lock dropped
+
+                                        // Step B: Fetch from API on miss (no lock held)
+                                        let height_result = match cached_height {
+                                            Ok(Some(h)) => Ok(h),
+                                            Ok(None) => crate::cache_helpers::fetch_and_cache_block_header(&client, &state.database, hash).await,
+                                            Err(e) => Err(e),
+                                        };
+
+                                        // Step C: Enhance TSC with height
+                                        height_result.map(|height| {
+                                            let mut enhanced = tsc_json.clone();
+                                            enhanced["height"] = serde_json::json!(height);
+                                            enhanced
+                                        })
+                                    }
+                                    Err(e) => Err(e),
+                                }
                             };
 
                             match enhanced_result {
@@ -10500,69 +10520,96 @@ pub async fn wallet_activity(
         }
     }
 
-    // 2. Query received payments (peerpay + address sync)
+    // 2. Query received payments from outputs table (authoritative UTXO history)
+    // Only dedup against RECEIVED items from section 1 (not sent items).
+    // Self-payments should show both the send and the receive.
+    let received_txids_from_tx_table: std::collections::HashSet<String> = sent_items.iter()
+        .filter(|item| item["direction"].as_str() == Some("received"))
+        .filter_map(|item| item["txid"].as_str().map(|s| s.to_string()))
+        .collect();
+
     let mut received_items: Vec<serde_json::Value> = Vec::new();
     if filter == "all" || filter == "received" {
+        // Group non-change outputs by txid, summing satoshis per tx.
+        // change=0 excludes change outputs from outgoing transactions.
+        // Outputs with no transaction_id are standalone (address sync / PeerPay UTXOs).
         let mut stmt = match db.connection().prepare(
-            "SELECT txid, amount_satoshis, accepted_at, source, price_usd_cents
-             FROM peerpay_received
-             ORDER BY id DESC"
+            "SELECT o.txid, SUM(o.satoshis) as total_sats,
+                    MIN(o.created_at) as created_at,
+                    t.status, t.price_usd_cents
+             FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             WHERE o.user_id = ?1
+               AND o.satoshis > 0
+               AND o.change = 0
+             GROUP BY COALESCE(o.txid, CAST(o.outputId AS TEXT))
+             ORDER BY created_at DESC"
         ) {
             Ok(s) => s,
             Err(e) => {
-                log::error!("   Failed to query peerpay_received: {}", e);
+                log::error!("   Failed to query outputs for activity: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("DB error: {}", e)
                 }));
             }
         };
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params![state.current_user_id], |row| {
             let txid: Option<String> = row.get(0)?;
-            let amount: i64 = row.get(1)?;
-            let accepted_at: String = row.get(2)?;
-            let source: String = row.get(3)?;
+            let total_sats: i64 = row.get(1)?;
+            let created_at: i64 = row.get(2)?;
+            let status: Option<String> = row.get(3)?;
             let price_usd_cents: Option<i64> = row.get(4)?;
-            Ok((txid, amount, accepted_at, source, price_usd_cents))
+            Ok((txid, total_sats, created_at, status, price_usd_cents))
         });
 
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (txid, amount, accepted_at, source, price_usd_cents) = row;
+                let (txid, total_sats, created_at, status, price_usd_cents) = row;
 
-                // Skip peerpay_received entries that also exist in transactions
-                // (to avoid double-counting internalized transactions)
+                // Skip txids already shown as received in section 1 (dedup)
                 if let Some(ref tid) = txid {
-                    let exists_in_tx: bool = db.connection().query_row(
-                        "SELECT COUNT(*) FROM transactions WHERE txid = ?1",
-                        rusqlite::params![tid],
-                        |row| row.get::<_, i64>(0),
-                    ).unwrap_or(0) > 0;
-                    if exists_in_tx { continue; }
+                    if received_txids_from_tx_table.contains(tid) { continue; }
                 }
 
-                // Parse accepted_at (SQLite datetime string) to unix timestamp for sorting
-                let sort_key = chrono::NaiveDateTime::parse_from_str(&accepted_at, "%Y-%m-%d %H:%M:%S")
-                    .map(|dt| dt.and_utc().timestamp())
-                    .unwrap_or(0);
+                let timestamp = chrono::DateTime::from_timestamp(created_at, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default();
 
-                let timestamp = chrono::NaiveDateTime::parse_from_str(&accepted_at, "%Y-%m-%d %H:%M:%S")
-                    .map(|dt| dt.and_utc().to_rfc3339())
-                    .unwrap_or_else(|_| accepted_at.clone());
+                // Check peerpay_received for source and sender info
+                let (source, sender_key) = if let Some(ref tid) = txid {
+                    let result = db.connection().query_row(
+                        "SELECT source, sender_identity_key FROM peerpay_received WHERE txid = ?1 LIMIT 1",
+                        rusqlite::params![tid],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    );
+                    match result {
+                        Ok((src, key)) => (src, Some(key)),
+                        Err(_) => ("address_sync".to_string(), None),
+                    }
+                } else {
+                    ("address_sync".to_string(), None)
+                };
 
                 let desc = match source.as_str() {
-                    "peerpay" => "Received via PeerPay",
-                    "address_sync" => "Received BSV",
-                    _ => "Received",
+                    "peerpay" => {
+                        if let Some(ref key) = sender_key {
+                            let short_key = if key.len() > 12 { &key[..12] } else { key.as_str() };
+                            format!("Received via PeerPay from {}...", short_key)
+                        } else {
+                            "Received via PeerPay".to_string()
+                        }
+                    },
+                    _ => "Received BSV".to_string(),
                 };
 
                 received_items.push(serde_json::json!({
                     "txid": txid.unwrap_or_default(),
                     "direction": "received",
-                    "satoshis": amount,
-                    "status": "completed",
+                    "satoshis": total_sats,
+                    "status": status.unwrap_or_else(|| "completed".to_string()),
                     "timestamp": timestamp,
-                    "sort_key": sort_key,
+                    "sort_key": created_at,
                     "description": desc,
                     "price_usd_cents": price_usd_cents,
                     "source": source

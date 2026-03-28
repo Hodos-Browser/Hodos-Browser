@@ -88,6 +88,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const balanceRef = useRef(0);
   const bsvPriceRef = useRef(0);
   const initialLoadDone = useRef(false);
+  const fetchRecentActivityRef = useRef<() => void>(() => {});
 
   const fetchBalance = useCallback(async (showLoading = false) => {
     try {
@@ -99,8 +100,11 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
       const newPrice = data.bsvPrice || 0;
       // Only update state if values actually changed
       if (newBalance !== balanceRef.current) {
+        const balanceChanged = balanceRef.current !== 0; // skip initial load
         balanceRef.current = newBalance;
         setBalance(newBalance);
+        // Balance changed — refresh recent activity to show new transactions
+        if (balanceChanged) fetchRecentActivityRef.current();
       }
       if (newPrice !== bsvPriceRef.current) {
         bsvPriceRef.current = newPrice;
@@ -145,6 +149,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     }
   }, []);
 
+  // Keep ref in sync so fetchBalance can call it without circular deps
+  fetchRecentActivityRef.current = fetchRecentActivity;
+
   useEffect(() => {
     fetchBalance(true); // show loading spinner on initial load
     fetchAddress();
@@ -162,9 +169,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     const fetchNotification = () => {
       fetch('http://127.0.0.1:31301/wallet/peerpay/status')
         .then(r => r.json())
-        .then((data: { unread_count?: number; total_satoshis?: number }) => {
+        .then((data: { unread_count?: number; unread_amount?: number }) => {
           if (data.unread_count && data.unread_count > 0) {
-            setNotification({ count: data.unread_count, amount: data.total_satoshis || 0 });
+            setNotification({ count: data.unread_count, amount: data.unread_amount || 0 });
             // Auto-refresh balance when new notifications appear
             if (data.unread_count > prevNotificationCount.current) {
               fetchBalance();

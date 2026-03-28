@@ -63,7 +63,7 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
         ).to_vec();
 
         // Free the system-allocated buffer
-        let _ = LocalFree(HLOCAL(data_out.pbData as *mut core::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(data_out.pbData as *mut core::ffi::c_void)));
 
         Ok(encrypted)
     }
@@ -114,7 +114,7 @@ pub fn dpapi_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
         ).to_vec();
 
         // Free the system-allocated buffer
-        let _ = LocalFree(HLOCAL(data_out.pbData as *mut core::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(data_out.pbData as *mut core::ffi::c_void)));
 
         Ok(decrypted)
     }

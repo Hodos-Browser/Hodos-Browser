@@ -50,11 +50,17 @@ const ActivityTab: React.FC = () => {
   const [copiedTxid, setCopiedTxid] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pageRef = useRef(page);
+  const filterRef = useRef(filter);
+  pageRef.current = page;
+  filterRef.current = filter;
 
-  const fetchActivity = useCallback(async (p: number, f: DirectionFilter) => {
+  const fetchActivity = useCallback(async (p: number, f: DirectionFilter, showLoading = true) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (showLoading) {
+        setLoading(true);
+        setError(null);
+      }
 
       const res = await fetch(
         `http://127.0.0.1:31301/wallet/activity?page=${p}&limit=${PAGE_SIZE}&filter=${f}`
@@ -67,15 +73,25 @@ const ActivityTab: React.FC = () => {
       setTotal(data.total || 0);
       setCurrentPrice(data.current_price_usd_cents ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load transactions');
+      if (showLoading) {
+        setError(err instanceof Error ? err.message : 'Failed to load transactions');
+      }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     fetchActivity(page, filter);
   }, [fetchActivity, page, filter]);
+
+  // Background poll every 30s to pick up new transactions without manual refresh
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchActivity(pageRef.current, filterRef.current, false);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [fetchActivity]);
 
   const handleFilterChange = (f: DirectionFilter) => {
     setFilter(f);

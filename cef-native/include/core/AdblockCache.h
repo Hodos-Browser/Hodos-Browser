@@ -14,6 +14,8 @@
 #include "include/cef_request.h"
 #include "include/cef_browser.h"
 #include "include/cef_frame.h"
+#include "include/cef_task.h"
+#include "include/wrapper/cef_closure_task.h"
 #include <string>
 #include <unordered_map>
 #include <atomic>
@@ -23,6 +25,7 @@
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
+#include "SyncHttpClient.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -79,6 +82,107 @@ public:
     IMPLEMENT_REFCOUNTING(AdblockBlockHandler);
 };
 
+// Forward declaration
+class AdblockCache;
+
+// ============================================================================
+// AdblockFetchTask — runs adblock check on background thread
+// ============================================================================
+
+class AdblockFetchTask : public CefTask {
+public:
+    AdblockFetchTask(const std::string& url, const std::string& sourceUrl,
+                     const std::string& resourceType, int browserId,
+                     CefRefPtr<CefCallback> callback)
+        : url_(url), sourceUrl_(sourceUrl), resourceType_(resourceType),
+          browserId_(browserId), callback_(callback) {}
+
+    void Execute() override;  // Defined after AdblockCache class
+
+    IMPLEMENT_REFCOUNTING(AdblockFetchTask);
+
+private:
+    std::string url_;
+    std::string sourceUrl_;
+    std::string resourceType_;
+    int browserId_;
+    CefRefPtr<CefCallback> callback_;
+};
+
+// ============================================================================
+// DeferredAdblockHandler — defers adblock check to background thread
+// ============================================================================
+
+class DeferredAdblockHandler : public CefResourceRequestHandler {
+public:
+    DeferredAdblockHandler(const std::string& url, const std::string& sourceUrl,
+                           const std::string& resourceType, int browserId,
+                           bool needsCookieFilter, bool needsResponseFilter)
+        : url_(url), sourceUrl_(sourceUrl), resourceType_(resourceType),
+          browserId_(browserId), needsCookieFilter_(needsCookieFilter),
+          needsResponseFilter_(needsResponseFilter) {}
+
+    cef_return_value_t OnBeforeResourceLoad(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefCallback> callback) override {
+        // Post the blocking HTTP check to a background thread
+        CefPostTask(TID_FILE_USER_BLOCKING,
+            new AdblockFetchTask(url_, sourceUrl_, resourceType_, browserId_, callback));
+        return RV_CONTINUE_ASYNC;
+    }
+
+    CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override {
+        if (needsCookieFilter_) {
+            // Delegate to factory function defined in simple_handler.cpp
+            extern CefRefPtr<CefCookieAccessFilter> CreateCookieAccessFilter();
+            return CreateCookieAccessFilter();
+        }
+        return nullptr;
+    }
+
+    CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefResponse> response) override {
+        if (!needsResponseFilter_ || !g_adblockServerRunning) return nullptr;
+
+        std::string reqUrl = request->GetURL().ToString();
+        bool isYouTube = (reqUrl.find("://www.youtube.com/") != std::string::npos ||
+                          reqUrl.find("://youtube.com/") != std::string::npos ||
+                          reqUrl.find("://m.youtube.com/") != std::string::npos);
+        if (!isYouTube) return nullptr;
+
+        std::string contentType = response->GetHeaderByName("Content-Type").ToString();
+        if (reqUrl.find("/youtubei/") != std::string::npos &&
+            contentType.find("application/json") != std::string::npos) {
+            extern CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter();
+            return CreateAdblockResponseFilter();
+        }
+        if (request->GetResourceType() == RT_MAIN_FRAME &&
+            contentType.find("text/html") != std::string::npos) {
+            extern CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter();
+            return CreateAdblockResponseFilter();
+        }
+        return nullptr;
+    }
+
+    IMPLEMENT_REFCOUNTING(DeferredAdblockHandler);
+
+private:
+    std::string url_;
+    std::string sourceUrl_;
+    std::string resourceType_;
+    int browserId_;
+    bool needsCookieFilter_;
+    bool needsResponseFilter_;
+};
+
 // ============================================================================
 // AdblockCache — singleton for URL check results + WinHTTP backend calls
 // ============================================================================
@@ -113,6 +217,37 @@ public:
 
     bool IsGlobalEnabled() const {
         return global_enabled_.load(std::memory_order_relaxed);
+    }
+
+    // Cache-only lookup result — used by async path
+    enum class CacheResult { HIT_BLOCKED, HIT_ALLOWED, MISS };
+
+    // Cache-only check — no HTTP, no blocking. Returns MISS on cache miss.
+    // Used by GetResourceRequestHandler() to avoid blocking the IO thread.
+    CacheResult checkCacheOnly(const std::string& url) {
+        if (!g_adblockServerRunning) return CacheResult::HIT_ALLOWED;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(url);
+        if (it != cache_.end()) {
+            return it->second ? CacheResult::HIT_BLOCKED : CacheResult::HIT_ALLOWED;
+        }
+        return CacheResult::MISS;
+    }
+
+    // Insert a check result from background thread (thread-safe)
+    void cacheResult(const std::string& url, bool blocked) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (cache_.size() >= MAX_CACHE_SIZE) {
+            cache_.clear();
+        }
+        cache_[url] = blocked;
+    }
+
+    // Public wrapper for background thread access to fetchFromBackend
+    bool fetchFromBackendPublic(const std::string& url, const std::string& sourceUrl,
+                                const std::string& resourceType) {
+        return fetchFromBackend(url, sourceUrl, resourceType);
     }
 
     // Check if a URL should be blocked.
@@ -406,36 +541,27 @@ private:
     mutable std::mutex versionMutex_;
     int64_t lastKnownVersion_ = -1;  // -1 = not yet seen
 
-#ifdef _WIN32
+    // Escape JSON string (minimal: backslash and double-quote)
+    static std::string escapeJson(const std::string& s) {
+        std::string result;
+        result.reserve(s.size() + 16);
+        for (char c : s) {
+            switch (c) {
+                case '"':  result += "\\\""; break;
+                case '\\': result += "\\\\"; break;
+                case '\n': result += "\\n";  break;
+                case '\r': result += "\\r";  break;
+                case '\t': result += "\\t";  break;
+                default:   result += c;      break;
+            }
+        }
+        return result;
+    }
 
-    // Sync WinHTTP POST to localhost:31302/check
+    // Cross-platform sync HTTP POST to localhost:31302/check
+    // Called from background thread (TID_FILE_USER_BLOCKING) or from check() for backward compat
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
-        HINTERNET hSession = WinHttpOpen(L"AdblockCache/1.0",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) return false;
-
-        DWORD timeout = 2000; // 2s timeout — fast for localhost
-        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-
-        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return false;
-        }
-
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/check",
-            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return false;
-        }
-
-        // Build JSON body
         std::string body = "{\"url\":\"";
         body += escapeJson(url);
         body += "\",\"sourceUrl\":\"";
@@ -444,52 +570,32 @@ private:
         body += resourceType;
         body += "\"}";
 
-        // Set content type
-        LPCWSTR contentType = L"Content-Type: application/json";
-        BOOL ok = WinHttpSendRequest(hRequest, contentType, -1L,
-            (LPVOID)body.c_str(), (DWORD)body.size(), (DWORD)body.size(), 0);
+        auto resp = SyncHttpClient::Post("http://127.0.0.1:31302/check", body, "application/json", 2000);
+        if (!resp.success) return false;
 
-        bool blocked = false;
+        bool blocked = (resp.body.find("\"blocked\":true") != std::string::npos);
 
-        if (ok) {
-            ok = WinHttpReceiveResponse(hRequest, nullptr);
-            if (ok) {
-                DWORD dwSize = 0;
-                WinHttpQueryDataAvailable(hRequest, &dwSize);
-                if (dwSize > 0 && dwSize < 4096) {
-                    std::vector<char> buf(dwSize + 1, 0);
-                    DWORD dwRead = 0;
-                    WinHttpReadData(hRequest, buf.data(), dwSize, &dwRead);
-                    std::string response(buf.data(), dwRead);
-                    // Simple parse: look for "blocked":true
-                    blocked = (response.find("\"blocked\":true") != std::string::npos);
-
-                    // Check engine version for cache invalidation (Phase 8d)
-                    auto vpos = response.find("\"version\":");
-                    if (vpos != std::string::npos) {
-                        int64_t ver = 0;
-                        size_t numStart = vpos + 10;
-                        while (numStart < response.size() && response[numStart] == ' ') numStart++;
-                        if (numStart < response.size()) {
-                            try { ver = std::stoll(response.substr(numStart)); } catch (...) {}
-                        }
-                        std::lock_guard<std::mutex> vlock(versionMutex_);
-                        if (lastKnownVersion_ >= 0 && ver != lastKnownVersion_) {
-                            // Engine was rebuilt — clear URL cache
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            cache_.clear();
-                        }
-                        lastKnownVersion_ = ver;
-                    }
-                }
+        // Check engine version for cache invalidation
+        auto vpos = resp.body.find("\"version\":");
+        if (vpos != std::string::npos) {
+            int64_t ver = 0;
+            size_t numStart = vpos + 10;
+            while (numStart < resp.body.size() && resp.body[numStart] == ' ') numStart++;
+            if (numStart < resp.body.size()) {
+                try { ver = std::stoll(resp.body.substr(numStart)); } catch (...) {}
             }
+            std::lock_guard<std::mutex> vlock(versionMutex_);
+            if (lastKnownVersion_ >= 0 && ver != lastKnownVersion_) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cache_.clear();
+            }
+            lastKnownVersion_ = ver;
         }
 
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         return blocked;
     }
+
+#ifdef _WIN32
 
     // Sync WinHTTP POST to localhost:31302/cosmetic-resources
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
@@ -732,43 +838,35 @@ private:
         return selectors;
     }
 
-    // Escape JSON string (minimal: backslash and double-quote)
-    static std::string escapeJson(const std::string& s) {
-        std::string result;
-        result.reserve(s.size() + 16);
-        for (char c : s) {
-            switch (c) {
-                case '"':  result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\n': result += "\\n";  break;
-                case '\r': result += "\\r";  break;
-                case '\t': result += "\\t";  break;
-                default:   result += c;      break;
-            }
-        }
-        return result;
-    }
 #elif defined(__APPLE__)
-    // macOS stub — TODO: implement with libcurl or NSURLSession
-    bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
-                          const std::string& resourceType) {
-        return false;
-    }
+    // macOS stub — TODO: implement with SyncHttpClient (libcurl)
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
                                           const std::vector<std::string>& ids) { return ""; }
 #else
-    bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
-                          const std::string& resourceType) {
-        return false;
-    }
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
                                           const std::vector<std::string>& ids) { return ""; }
 #endif
 };
+
+// ============================================================================
+// AdblockFetchTask::Execute — must be after AdblockCache definition
+// ============================================================================
+
+inline void AdblockFetchTask::Execute() {
+    bool blocked = AdblockCache::GetInstance().fetchFromBackendPublic(url_, sourceUrl_, resourceType_);
+    AdblockCache::GetInstance().cacheResult(url_, blocked);
+
+    if (blocked) {
+        AdblockCache::GetInstance().incrementBlockedCount(browserId_);
+        callback_->Cancel();
+    } else {
+        callback_->Continue();
+    }
+}
 
 // ============================================================================
 // Helper: check if a URL should skip adblock checking

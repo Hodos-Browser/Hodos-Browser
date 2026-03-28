@@ -5,7 +5,7 @@
 
 use crate::beef::{Beef, ParsedTransaction};
 use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository, ProvenTxRepository, BlockHeaderRepository};
-use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api, enhance_tsc_with_height};
+use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api, get_cached_block_height, fetch_and_cache_block_header};
 use reqwest::Client;
 use std::sync::Mutex;
 use sha2::{Sha256, Digest};
@@ -254,12 +254,35 @@ pub async fn build_beef_for_txid(
                     log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
                     match fetch_tsc_proof_from_api(client, &current_txid).await {
                         Ok(Some(tsc_json)) => {
-                            // Enhance with block height
+                            // Enhance with block height (lock scoped, dropped before any network I/O)
                             let enhanced_result = {
-                                let db_guard = db.lock().unwrap();
-                                let conn = db_guard.connection();
-                                let block_header_repo = BlockHeaderRepository::new(conn);
-                                enhance_tsc_with_height(client, &block_header_repo, &tsc_json).await
+                                let target_hash = tsc_json["target"].as_str()
+                                    .ok_or_else(|| "Missing target hash in TSC proof".to_string());
+                                match target_hash {
+                                    Ok(hash) => {
+                                        // Step A: Check cache (brief lock)
+                                        let cached_height = {
+                                            let db_guard = db.lock().unwrap();
+                                            let block_header_repo = BlockHeaderRepository::new(db_guard.connection());
+                                            get_cached_block_height(&block_header_repo, hash)
+                                        }; // lock dropped
+
+                                        // Step B: Fetch from API on miss (no lock held)
+                                        let height_result = match cached_height {
+                                            Ok(Some(h)) => Ok(h),
+                                            Ok(None) => fetch_and_cache_block_header(client, db, hash).await,
+                                            Err(e) => Err(e),
+                                        };
+
+                                        // Step C: Enhance TSC with height
+                                        height_result.map(|height| {
+                                            let mut enhanced = tsc_json.clone();
+                                            enhanced["height"] = serde_json::json!(height);
+                                            enhanced
+                                        })
+                                    }
+                                    Err(e) => Err(crate::cache_errors::CacheError::InvalidData(e)),
+                                }
                             };
 
                             match enhanced_result {
