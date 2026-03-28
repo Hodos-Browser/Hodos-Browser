@@ -35,6 +35,7 @@ export const useTabManager = () => {
   // Close a tab — optimistic removal for instant visual feedback
   const closeTab = useCallback((tabId: number) => {
     if (window.cefMessage) {
+      // Send close to C++ (backend creates NTP if this was the last tab)
       window.cefMessage.send('tab_close', tabId);
 
       // Suppress this tab from incoming tab_list_response until C++ confirms removal
@@ -44,6 +45,13 @@ export const useTabManager = () => {
       // Remove tab from local state immediately
       setState(prev => {
         const remaining = prev.tabs.filter(t => t.id !== tabId);
+
+        // If closing the last tab, don't update local state to empty —
+        // C++ will create a new NTP tab and push an updated tab list
+        if (remaining.length === 0) {
+          return prev;
+        }
+
         let newActiveId = prev.activeTabId;
         if (tabId === prev.activeTabId && remaining.length > 0) {
           const closedIndex = prev.tabs.findIndex(t => t.id === tabId);

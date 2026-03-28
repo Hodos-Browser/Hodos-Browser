@@ -1531,6 +1531,15 @@ bool SimpleHandler::OnProcessMessageReceived(
                              (success ? " succeeded" : " failed"));
 
             if (success) {
+                // Check if this window still has tabs — never leave window empty
+                bool windowHasTabs = false;
+                for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+                    if (t->window_id == window_id_) { windowHasTabs = true; break; }
+                }
+                if (!windowHasTabs) {
+                    LOG_INFO_BROWSER("📑 Last tab closed in window " + std::to_string(window_id_) + " — creating NTP");
+                    CreateNewTabWithUrl("");
+                }
                 NotifyWindowTabListChanged(window_id_);
             }
         }
@@ -2197,9 +2206,12 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("Menu action received: " + action);
 
-        // Auto-hide menu first
-        extern void HideMenuOverlay();
-        HideMenuOverlay();
+        // Auto-hide menu for most actions, but keep open for zoom controls
+        bool isZoomAction = (action == "zoom_in" || action == "zoom_out" || action == "zoom_reset");
+        if (!isZoomAction) {
+            extern void HideMenuOverlay();
+            HideMenuOverlay();
+        }
 
         // Dispatch actions
         if (action == "new_tab") {
@@ -2262,17 +2274,20 @@ bool SimpleHandler::OnProcessMessageReceived(
                 double level = active_tab->browser->GetHost()->GetZoomLevel();
                 active_tab->browser->GetHost()->SetZoomLevel(level + 0.5);
             }
+            SendCurrentZoomToMenuOverlay(GetMenuBrowser());
         } else if (action == "zoom_out") {
             auto* active_tab = GetZoomTargetTab();
             if (active_tab && active_tab->browser) {
                 double level = active_tab->browser->GetHost()->GetZoomLevel();
                 active_tab->browser->GetHost()->SetZoomLevel(level - 0.5);
             }
+            SendCurrentZoomToMenuOverlay(GetMenuBrowser());
         } else if (action == "zoom_reset") {
             auto* active_tab = GetZoomTargetTab();
             if (active_tab && active_tab->browser) {
                 active_tab->browser->GetHost()->SetZoomLevel(0.0);
             }
+            SendCurrentZoomToMenuOverlay(GetMenuBrowser());
         } else if (action == "fullscreen") {
             // Toggle fullscreen via Windows API
 #ifdef _WIN32
@@ -4810,11 +4825,9 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_get_blocked_count") {
-        // Use per-window active tab's browser ID
+        // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
-        BrowserWindow* cookie_cnt_win = GetOwnerWindow();
-        int cookie_cnt_wid = cookie_cnt_win ? cookie_cnt_win->window_id : 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(cookie_cnt_wid);
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
@@ -4867,11 +4880,9 @@ bool SimpleHandler::OnProcessMessageReceived(
     // ========== ADBLOCK MESSAGES (Sprint 8c) ==========
 
     if (message_name == "adblock_get_blocked_count") {
-        // Use per-window active tab's browser ID
+        // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
-        BrowserWindow* adblock_cnt_win = GetOwnerWindow();
-        int adblock_cnt_wid = adblock_cnt_win ? adblock_cnt_win->window_id : 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(adblock_cnt_wid);
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
@@ -4887,11 +4898,9 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "adblock_reset_blocked_count") {
-        // Use per-window active tab's browser ID
+        // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
-        BrowserWindow* adblock_rst_win = GetOwnerWindow();
-        int adblock_rst_wid = adblock_rst_win ? adblock_rst_win->window_id : 0;
-        auto* active_tab = TabManager::GetInstance().GetActiveTabForWindow(adblock_rst_wid);
+        auto* active_tab = TabManager::GetInstance().GetActiveTab();
         if (active_tab && active_tab->browser) {
             browser_id = active_tab->browser->GetIdentifier();
         }
