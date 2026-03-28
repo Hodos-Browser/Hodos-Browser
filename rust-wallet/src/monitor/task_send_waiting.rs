@@ -134,10 +134,16 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             continue;
         }
 
-        // Step 3: Re-broadcast
-        info!("   📡 Re-broadcasting {} (stuck for {}s)...", short_txid, age_secs);
+        // Step 3: Re-broadcast — prefer BEEF if available (stored raw_tx may be BEEF from createAction,
+        // or input_beef may contain the original BEEF from the transaction build).
+        let broadcast_hex = get_beef_for_rebroadcast(state, &txid, &raw_tx);
+        if broadcast_hex.starts_with("0100beef") || broadcast_hex.starts_with("0200beef") || broadcast_hex.starts_with("01010101") {
+            info!("   📡 Re-broadcasting {} with BEEF ({} hex chars, stuck for {}s)...", short_txid, broadcast_hex.len(), age_secs);
+        } else {
+            info!("   📡 Re-broadcasting {} with raw tx (stuck for {}s)...", short_txid, age_secs);
+        }
         match crate::handlers::broadcast_transaction(
-            &raw_tx,
+            &broadcast_hex,
             Some(&state.database),
             Some(&txid),
         ).await {
@@ -291,4 +297,41 @@ fn is_permanent_error(error: &str) -> bool {
     }
 
     false
+}
+
+/// Get the best available hex for re-broadcasting a stuck transaction.
+/// Checks (in order):
+/// 1. If the stored raw_tx is already BEEF format (createAction stores BEEF)
+/// 2. If there's an input_beef blob stored from the original transaction build
+/// 3. Falls back to the raw tx hex
+fn get_beef_for_rebroadcast(
+    state: &web::Data<AppState>,
+    txid: &str,
+    raw_tx_hex: &str,
+) -> String {
+    // Check if raw_tx is already BEEF (createAction stores Atomic BEEF / BEEF V1/V2)
+    if raw_tx_hex.starts_with("0100beef") || raw_tx_hex.starts_with("0200beef") || raw_tx_hex.starts_with("01010101") {
+        return raw_tx_hex.to_string();
+    }
+
+    // Check if there's a stored input_beef from the original build
+    if let Ok(db) = state.database.lock() {
+        let conn = db.connection();
+        if let Ok(blob) = conn.query_row(
+            "SELECT input_beef FROM transactions WHERE txid = ?1 AND input_beef IS NOT NULL",
+            rusqlite::params![txid],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            if !blob.is_empty() {
+                let beef_hex = hex::encode(&blob);
+                if beef_hex.starts_with("0100beef") || beef_hex.starts_with("0200beef") {
+                    info!("   📦 Using stored input_beef for re-broadcast of {}", &txid[..txid.len().min(16)]);
+                    return beef_hex;
+                }
+            }
+        }
+    }
+
+    // Fallback to raw tx
+    raw_tx_hex.to_string()
 }
