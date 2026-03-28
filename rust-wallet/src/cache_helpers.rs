@@ -3,7 +3,7 @@
 //! Provides reusable functions for fetching data from APIs and managing cache operations.
 
 use crate::cache_errors::{CacheError, CacheResult};
-use crate::database::BlockHeaderRepository;
+use crate::database::{BlockHeaderRepository, WalletDatabase};
 use reqwest::Client;
 use serde_json::Value;
 
@@ -319,23 +319,23 @@ pub async fn verify_tsc_proof_against_block(
     }
 }
 
-/// Enhance TSC proof with block height (fetch from cache or API)
-pub async fn enhance_tsc_with_height<'a>(
-    client: &Client,
-    block_header_repo: &'a BlockHeaderRepository<'a>,
-    tsc_json: &Value,
-) -> CacheResult<Value> {
-    let target_hash = tsc_json["target"].as_str()
-        .ok_or_else(|| CacheError::InvalidData("Missing target hash in TSC proof".to_string()))?;
-
-    // Try cache first
-    if let Some(header) = block_header_repo.get_by_hash(target_hash)? {
-        let mut enhanced = tsc_json.clone();
-        enhanced["height"] = serde_json::json!(header.height);
-        return Ok(enhanced);
+/// Check block header cache for a known height (sync, no network)
+pub fn get_cached_block_height(
+    block_header_repo: &BlockHeaderRepository,
+    target_hash: &str,
+) -> CacheResult<Option<u32>> {
+    match block_header_repo.get_by_hash(target_hash)? {
+        Some(header) => Ok(Some(header.height)),
+        None => Ok(None),
     }
+}
 
-    // Fetch from API
+/// Fetch block header from WhatsOnChain API and cache it (async, manages own lock)
+pub async fn fetch_and_cache_block_header(
+    client: &Client,
+    db: &std::sync::Mutex<WalletDatabase>,
+    target_hash: &str,
+) -> CacheResult<u32> {
     let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target_hash);
     let response = client.get(&block_header_url).send().await
         .map_err(|e| CacheError::Api(format!("Failed to fetch block header: {}", e)))?;
@@ -346,20 +346,21 @@ pub async fn enhance_tsc_with_height<'a>(
         )));
     }
 
-    let header_json: Value = response.json().await
+    let header_json: serde_json::Value = response.json().await
         .map_err(|e| CacheError::Api(format!("Failed to parse block header JSON: {}", e)))?;
 
     let height = header_json["height"].as_u64()
         .ok_or_else(|| CacheError::InvalidData("Missing height in block header".to_string()))? as u32;
 
-    // Cache the header
+    // Brief lock to cache the header
     let header_hex = header_json["header"].as_str().unwrap_or("");
-    block_header_repo.upsert(target_hash, height, header_hex)?;
+    {
+        let db_guard = db.lock().unwrap();
+        let block_header_repo = BlockHeaderRepository::new(db_guard.connection());
+        block_header_repo.upsert(target_hash, height, header_hex)?;
+    }
 
-    // Enhance TSC proof
-    let mut enhanced = tsc_json.clone();
-    enhanced["height"] = serde_json::json!(height);
-    Ok(enhanced)
+    Ok(height)
 }
 
 /// Verify that transaction bytes match expected TXID

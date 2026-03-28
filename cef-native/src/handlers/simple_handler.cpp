@@ -1069,6 +1069,15 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("🧭 header browser initialized.");
         LOG_DEBUG_BROWSER("🧭 header browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
 
+        // Pre-warm wallet caches on background thread (fire-and-forget)
+        // Reduces IO thread blocking on first BRC-100 request
+        CefPostDelayedTask(TID_FILE_USER_BLOCKING, base::BindOnce([]() {
+            extern void warmWalletStatusCache();
+            extern void warmBSVPriceCache();
+            warmWalletStatusCache();
+            warmBSVPriceCache();
+        }), 1000);  // 1s delay to let wallet backend start
+
 #ifdef __APPLE__
         // macOS: Aggressively trigger paint for windowless rendering
         LOG_DEBUG_BROWSER("🎨 Forcing header browser paint on macOS");
@@ -5725,6 +5734,27 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
     }
 #endif
 
+    // Pre-warm domain permission cache for navigated domain (fire-and-forget)
+    if (frame->IsMain()) {
+        std::string warmUrl = request->GetURL().ToString();
+        std::string warmDomain;
+        {
+            size_t dstart = warmUrl.find("://");
+            if (dstart != std::string::npos) {
+                dstart += 3;
+                size_t dend = warmUrl.find_first_of(":/", dstart);
+                if (dend == std::string::npos) dend = warmUrl.size();
+                warmDomain = warmUrl.substr(dstart, dend - dstart);
+            }
+        }
+        if (!warmDomain.empty() && warmDomain != "127.0.0.1" && warmDomain != "localhost") {
+            CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](std::string dom) {
+                extern void warmDomainPermissionCache(const std::string& domain);
+                warmDomainPermissionCache(dom);
+            }, std::move(warmDomain)));
+        }
+    }
+
     // Sprint 12c: Send fingerprint seed to renderer for this navigation
     if (frame->IsMain() && FingerprintProtection::GetInstance().IsEnabled()) {
         std::string navUrl = request->GetURL().ToString();
@@ -5868,6 +5898,18 @@ private:
     IMPLEMENT_REFCOUNTING(AdblockResponseFilter);
 };
 
+// Factory functions for DeferredAdblockHandler delegation
+CefRefPtr<CefCookieAccessFilter> CreateCookieAccessFilter() {
+    if (CookieBlockManager::GetInstance().IsInitialized()) {
+        return new CookieAccessFilterWrapper();
+    }
+    return nullptr;
+}
+
+CefRefPtr<CefResponseFilter> CreateAdblockResponseFilter() {
+    return new AdblockResponseFilter();
+}
+
 // CookieFilterResourceHandler - Returns CookieAccessFilterWrapper for non-wallet requests
 // so cookie blocking applies to all browsing. Also returns AdblockResponseFilter
 // for YouTube responses to strip ad configuration at the network level.
@@ -5993,14 +6035,25 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
 
         if (siteAdblockEnabled) {
             const char* resourceType = CefResourceTypeToAdblock(request->GetResourceType());
-            bool adblockBlocked = AdblockCache::GetInstance().check(url, sourceUrl, resourceType);
-            if (adblockBlocked) {
-                LOG_DEBUG_BROWSER("🛡️ Blocked by adblock: " + url);
+            auto cacheResult = AdblockCache::GetInstance().checkCacheOnly(url);
+
+            if (cacheResult == AdblockCache::CacheResult::HIT_BLOCKED) {
+                LOG_DEBUG_BROWSER("🛡️ Blocked by adblock (cached): " + url);
                 if (browser) {
                     AdblockCache::GetInstance().incrementBlockedCount(browser->GetIdentifier());
                 }
                 return new AdblockBlockHandler();
             }
+
+            if (cacheResult == AdblockCache::CacheResult::MISS) {
+                // Defer to background thread — IO thread stays free
+                bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
+                bool needsResponseFilter = g_adblockServerRunning;
+                return new DeferredAdblockHandler(url, sourceUrl, resourceType,
+                    browser ? browser->GetIdentifier() : 0,
+                    needsCookieFilter, needsResponseFilter);
+            }
+            // HIT_ALLOWED: fall through to wallet interception + cookie filtering
         }
     }
 
