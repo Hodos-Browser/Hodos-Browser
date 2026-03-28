@@ -6740,15 +6740,35 @@ pub async fn sign_action(
 
                     match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
                         Ok(Some(tsc_json)) => {
-                            // Enhance with block height
+                            // Enhance with block height (lock scoped, dropped before any network I/O)
                             let enhanced_result = {
-                                let db = state.database.lock().unwrap();
-                                let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                                crate::cache_helpers::enhance_tsc_with_height(
-                                    &client,
-                                    &block_header_repo,
-                                    &tsc_json,
-                                ).await
+                                let target_hash = tsc_json["target"].as_str()
+                                    .ok_or_else(|| crate::cache_errors::CacheError::InvalidData("Missing target hash in TSC proof".to_string()));
+                                match target_hash {
+                                    Ok(hash) => {
+                                        // Step A: Check cache (brief lock)
+                                        let cached_height = {
+                                            let db = state.database.lock().unwrap();
+                                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
+                                            crate::cache_helpers::get_cached_block_height(&block_header_repo, hash)
+                                        }; // lock dropped
+
+                                        // Step B: Fetch from API on miss (no lock held)
+                                        let height_result = match cached_height {
+                                            Ok(Some(h)) => Ok(h),
+                                            Ok(None) => crate::cache_helpers::fetch_and_cache_block_header(&client, &state.database, hash).await,
+                                            Err(e) => Err(e),
+                                        };
+
+                                        // Step C: Enhance TSC with height
+                                        height_result.map(|height| {
+                                            let mut enhanced = tsc_json.clone();
+                                            enhanced["height"] = serde_json::json!(height);
+                                            enhanced
+                                        })
+                                    }
+                                    Err(e) => Err(e),
+                                }
                             };
 
                             match enhanced_result {
