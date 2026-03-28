@@ -23,6 +23,7 @@
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
+#include "SyncHttpClient.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -437,36 +438,27 @@ private:
     mutable std::mutex versionMutex_;
     int64_t lastKnownVersion_ = -1;  // -1 = not yet seen
 
-#ifdef _WIN32
+    // Escape JSON string (minimal: backslash and double-quote)
+    static std::string escapeJson(const std::string& s) {
+        std::string result;
+        result.reserve(s.size() + 16);
+        for (char c : s) {
+            switch (c) {
+                case '"':  result += "\\\""; break;
+                case '\\': result += "\\\\"; break;
+                case '\n': result += "\\n";  break;
+                case '\r': result += "\\r";  break;
+                case '\t': result += "\\t";  break;
+                default:   result += c;      break;
+            }
+        }
+        return result;
+    }
 
-    // Sync WinHTTP POST to localhost:31302/check
+    // Cross-platform sync HTTP POST to localhost:31302/check
+    // Called from background thread (TID_FILE_USER_BLOCKING) or from check() for backward compat
     bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
                           const std::string& resourceType) {
-        HINTERNET hSession = WinHttpOpen(L"AdblockCache/1.0",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) return false;
-
-        DWORD timeout = 2000; // 2s timeout — fast for localhost
-        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-
-        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return false;
-        }
-
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/check",
-            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return false;
-        }
-
-        // Build JSON body
         std::string body = "{\"url\":\"";
         body += escapeJson(url);
         body += "\",\"sourceUrl\":\"";
@@ -475,52 +467,32 @@ private:
         body += resourceType;
         body += "\"}";
 
-        // Set content type
-        LPCWSTR contentType = L"Content-Type: application/json";
-        BOOL ok = WinHttpSendRequest(hRequest, contentType, -1L,
-            (LPVOID)body.c_str(), (DWORD)body.size(), (DWORD)body.size(), 0);
+        auto resp = SyncHttpClient::Post("http://127.0.0.1:31302/check", body, "application/json", 2000);
+        if (!resp.success) return false;
 
-        bool blocked = false;
+        bool blocked = (resp.body.find("\"blocked\":true") != std::string::npos);
 
-        if (ok) {
-            ok = WinHttpReceiveResponse(hRequest, nullptr);
-            if (ok) {
-                DWORD dwSize = 0;
-                WinHttpQueryDataAvailable(hRequest, &dwSize);
-                if (dwSize > 0 && dwSize < 4096) {
-                    std::vector<char> buf(dwSize + 1, 0);
-                    DWORD dwRead = 0;
-                    WinHttpReadData(hRequest, buf.data(), dwSize, &dwRead);
-                    std::string response(buf.data(), dwRead);
-                    // Simple parse: look for "blocked":true
-                    blocked = (response.find("\"blocked\":true") != std::string::npos);
-
-                    // Check engine version for cache invalidation (Phase 8d)
-                    auto vpos = response.find("\"version\":");
-                    if (vpos != std::string::npos) {
-                        int64_t ver = 0;
-                        size_t numStart = vpos + 10;
-                        while (numStart < response.size() && response[numStart] == ' ') numStart++;
-                        if (numStart < response.size()) {
-                            try { ver = std::stoll(response.substr(numStart)); } catch (...) {}
-                        }
-                        std::lock_guard<std::mutex> vlock(versionMutex_);
-                        if (lastKnownVersion_ >= 0 && ver != lastKnownVersion_) {
-                            // Engine was rebuilt — clear URL cache
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            cache_.clear();
-                        }
-                        lastKnownVersion_ = ver;
-                    }
-                }
+        // Check engine version for cache invalidation
+        auto vpos = resp.body.find("\"version\":");
+        if (vpos != std::string::npos) {
+            int64_t ver = 0;
+            size_t numStart = vpos + 10;
+            while (numStart < resp.body.size() && resp.body[numStart] == ' ') numStart++;
+            if (numStart < resp.body.size()) {
+                try { ver = std::stoll(resp.body.substr(numStart)); } catch (...) {}
             }
+            std::lock_guard<std::mutex> vlock(versionMutex_);
+            if (lastKnownVersion_ >= 0 && ver != lastKnownVersion_) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cache_.clear();
+            }
+            lastKnownVersion_ = ver;
         }
 
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         return blocked;
     }
+
+#ifdef _WIN32
 
     // Sync WinHTTP POST to localhost:31302/cosmetic-resources
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
@@ -763,37 +735,13 @@ private:
         return selectors;
     }
 
-    // Escape JSON string (minimal: backslash and double-quote)
-    static std::string escapeJson(const std::string& s) {
-        std::string result;
-        result.reserve(s.size() + 16);
-        for (char c : s) {
-            switch (c) {
-                case '"':  result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\n': result += "\\n";  break;
-                case '\r': result += "\\r";  break;
-                case '\t': result += "\\t";  break;
-                default:   result += c;      break;
-            }
-        }
-        return result;
-    }
 #elif defined(__APPLE__)
-    // macOS stub — TODO: implement with libcurl or NSURLSession
-    bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
-                          const std::string& resourceType) {
-        return false;
-    }
+    // macOS stub — TODO: implement with SyncHttpClient (libcurl)
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
                                           const std::vector<std::string>& ids) { return ""; }
 #else
-    bool fetchFromBackend(const std::string& url, const std::string& sourceUrl,
-                          const std::string& resourceType) {
-        return false;
-    }
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
