@@ -64,7 +64,7 @@ impl Default for TaskSchedule {
             sync_pending: 30,         // 30 seconds
             check_peerpay: 60,        // 1 minute
             validate_utxos: 600,      // 10 minutes
-            backup: 1800,             // 30 minutes
+            backup: 10800,            // 3 hours (180 minutes) — significant events trigger sooner via backup_check_needed flag
         }
     }
 }
@@ -247,9 +247,17 @@ impl Monitor {
                 }
             }
 
-            // TaskBackup
-            if now - last_backup >= self.schedule.backup {
+            // TaskBackup — runs on periodic schedule (3 hours) OR when significant event flag is set (after 3-min delay)
+            let backup_triggered_by_event = {
+                let guard = self.state.backup_check_needed.lock().ok();
+                guard.and_then(|g| *g).map(|ts| now as i64 - ts >= 180).unwrap_or(false)  // 3-minute delay
+            };
+            if now - last_backup >= self.schedule.backup || backup_triggered_by_event {
                 last_backup = now;
+                // Clear the "soon" flag before running (so new events during backup can re-trigger)
+                if let Ok(mut guard) = self.state.backup_check_needed.lock() {
+                    *guard = None;
+                }
                 if let Err(e) = task_backup::run(&self.state).await {
                     error!("   ❌ TaskBackup failed: {}", e);
                     self.log_event("TaskBackup:error", Some(&e));

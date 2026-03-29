@@ -370,6 +370,9 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
         // Invalidate balance cache
         state.balance_cache.invalidate();
 
+        // Request backup check if received amount is significant (> $3 USD)
+        state.request_backup_check_if_significant(found_satoshis);
+
         processed_count += 1;
         message_ids_to_ack.push(msg.message_id.clone());
     }

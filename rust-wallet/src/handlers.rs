@@ -5229,6 +5229,9 @@ pub(crate) async fn create_action_internal(
                         }
                     }
 
+                    // Request backup check if transaction value is significant (> $3 USD)
+                    state.request_backup_check_if_significant(total_output);
+
                     // After successful ARC broadcast, check if this transaction contains
                     // identity token outputs and submit to the BSV overlay service.
                     // The overlay is UTXO-based and idempotent — duplicate submissions

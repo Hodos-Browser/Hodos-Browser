@@ -2572,6 +2572,8 @@ async fn acquire_certificate_issuance(
         };
 
         log::info!("   ✅ Certificate stored successfully");
+        // New certificate acquired — always trigger backup check
+        state.request_backup_check();
         log::info!("   📍 Returning certificate with certifier's revocationOutpoint: {}", revocation_outpoint);
         // Log the exact response being returned for debugging
         if let Ok(response_json) = serde_json::to_string_pretty(&cert_obj) {
@@ -4211,6 +4213,9 @@ pub async fn publish_certificate(
         }
     };
 
+    // Certificate published — always trigger backup check
+    state.request_backup_check();
+
     // Report accurate status to frontend
     let success = final_status == "published";
     let error = if !success {
@@ -4668,6 +4673,8 @@ async fn unpublish_certificate_core(
     match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ Unpublish broadcast successful");
+            // Certificate unpublished — always trigger backup check
+            state.request_backup_check();
             // Update transaction status to unproven (broadcast succeeded, waiting for mining)
             let db = state.database.lock().unwrap();
             let tx_repo = crate::database::TransactionRepository::new(db.connection());

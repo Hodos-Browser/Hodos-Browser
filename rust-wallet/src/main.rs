@@ -58,6 +58,39 @@ pub struct AppState {
     pub current_user_id: i64,  // Default user ID for all operations (multi-user foundation, Phase 3)
     pub shutdown: tokio_util::sync::CancellationToken,  // Graceful shutdown signal (Phase 8D)
     pub sync_status: Arc<std::sync::RwLock<handlers::SyncStatus>>,  // Recovery sync progress
+    pub backup_check_needed: Arc<Mutex<Option<i64>>>,  // Timestamp when a significant event requested backup check (3-min delay before checking)
+}
+
+impl AppState {
+    /// Signal that a significant wallet event occurred and backup should be checked soon.
+    /// The monitor task will check the DB hash after a 3-minute delay.
+    pub fn request_backup_check(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if let Ok(mut guard) = self.backup_check_needed.lock() {
+            // Only set if not already pending (don't push back the timer)
+            if guard.is_none() {
+                *guard = Some(now);
+                log::info!("   📋 Backup check requested — will check in ~3 minutes");
+            }
+        }
+    }
+
+    /// Check if a backup should be triggered based on the "soon" flag and USD threshold.
+    /// Call this from event handlers after significant financial events.
+    pub fn request_backup_check_if_significant(&self, satoshis: i64) {
+        // Convert satoshis to USD using cached price (price_cache returns f64 in USD, e.g. 13.55)
+        let price_usd = self.price_cache.get_cached()
+            .or_else(|| self.price_cache.get_stale());
+        if let Some(price) = price_usd {
+            let usd_value = (satoshis as f64 / 100_000_000.0) * price;
+            if usd_value >= 3.0 {
+                self.request_backup_check();
+            }
+        }
+    }
 }
 
 #[actix_web::main]
@@ -333,6 +366,7 @@ async fn main() -> std::io::Result<()> {
         current_user_id,  // Multi-user foundation (Phase 3)
         shutdown: shutdown_token.clone(),  // Graceful shutdown signal (Phase 8D)
         sync_status: Arc::new(std::sync::RwLock::new(handlers::SyncStatus::default())),
+        backup_check_needed: Arc::new(Mutex::new(None)),
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");

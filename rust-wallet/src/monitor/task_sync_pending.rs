@@ -79,6 +79,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
 
     // Step 4: Process results (re-acquire DB lock)
     let mut new_utxo_count = 0u32;
+    let mut new_sats_total: i64 = 0;
     let mut reconciled_count = 0u32;
     let mut new_txids: Vec<String> = Vec::new(); // Collect txids that need parent tx caching
     {
@@ -104,6 +105,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                         ) {
                             Ok(1) => {
                                 new_utxo_count += 1;
+                                new_sats_total += utxo.satoshis;
                                 // Record notification for the new UTXO
                                 if let Err(e) = PeerPayRepository::insert_address_sync_notification(
                                     db.connection(),
@@ -196,6 +198,8 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         state.balance_cache.invalidate();
         if new_utxo_count > 0 {
             info!("   💰 TaskSyncPending: inserted {} new output(s)", new_utxo_count);
+            // Request backup check if received amount is significant (> $3 USD)
+            state.request_backup_check_if_significant(new_sats_total);
         }
         if reconciled_count > 0 {
             info!("   🔄 TaskSyncPending: reconciled {} stale output(s)", reconciled_count);
