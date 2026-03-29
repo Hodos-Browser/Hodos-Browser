@@ -951,13 +951,13 @@ public:
             fieldsList += info.fieldsToReveal[i];
         }
 
-        // Build extra params for overlay URL
+        // Build extra params for overlay URL (URL-encode base64 values to preserve + chars)
         std::string extraParams = "&fields=" + fieldsList;
         if (!info.certType.empty()) {
-            extraParams += "&certType=" + info.certType;
+            extraParams += "&certType=" + urlEncode(info.certType);
         }
         if (!info.certifier.empty()) {
-            extraParams += "&certifier=" + info.certifier;
+            extraParams += "&certifier=" + urlEncode(info.certifier);
         }
 
         // Post to UI thread

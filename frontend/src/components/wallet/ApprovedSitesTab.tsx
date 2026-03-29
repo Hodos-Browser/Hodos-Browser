@@ -143,7 +143,7 @@ const ApprovedSitesTab: React.FC = () => {
               <div className="wd-default-field">
                 <label>Per-Transaction Limit</label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
+                  <span style={{ color: '#9ca3af', fontSize: '13px', fontWeight: 500 }}>$</span>
                   <input
                     type="text"
                     inputMode="decimal"
@@ -157,14 +157,14 @@ const ApprovedSitesTab: React.FC = () => {
                     }}
                   />
                 </div>
-                <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>
-                  Max auto-approved for a single payment
+                <div style={{ color: '#9ca3af', fontSize: '10px', marginTop: '2px' }}>
+                  Max auto-approved per payment
                 </div>
               </div>
               <div className="wd-default-field">
                 <label>Per-Session Limit</label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
+                  <span style={{ color: '#9ca3af', fontSize: '13px', fontWeight: 500 }}>$</span>
                   <input
                     type="text"
                     inputMode="decimal"
@@ -178,12 +178,12 @@ const ApprovedSitesTab: React.FC = () => {
                     }}
                   />
                 </div>
-                <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>
-                  Total spending allowed before prompting again
+                <div style={{ color: '#9ca3af', fontSize: '10px', marginTop: '2px' }}>
+                  Total spending before prompting
                 </div>
               </div>
               <div className="wd-default-field">
-                <label>Rate Limit (per minute)</label>
+                <label>Rate Limit (/min)</label>
                 <input
                   type="number"
                   step="1"
@@ -191,12 +191,12 @@ const ApprovedSitesTab: React.FC = () => {
                   value={defaults.defaultRateLimitPerMin}
                   onChange={(e) => setDefaults((d) => ({ ...d, defaultRateLimitPerMin: Math.max(1, parseInt(e.target.value || '1', 10)) }))}
                 />
-                <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>
-                  Max payment requests per minute (safety limit)
+                <div style={{ color: '#9ca3af', fontSize: '10px', marginTop: '2px' }}>
+                  Max requests per minute
                 </div>
               </div>
               <div className="wd-default-field">
-                <label>Max Transactions per Session</label>
+                <label>Max Tx/Session</label>
                 <input
                   type="number"
                   step="1"
@@ -204,8 +204,8 @@ const ApprovedSitesTab: React.FC = () => {
                   value={defaults.defaultMaxTxPerSession}
                   onChange={(e) => setDefaults((d) => ({ ...d, defaultMaxTxPerSession: Math.max(0, parseInt(e.target.value || '0', 10)) }))}
                 />
-                <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>
-                  Total payments allowed per session before prompting
+                <div style={{ color: '#9ca3af', fontSize: '10px', marginTop: '2px' }}>
+                  Payments per session before prompting
                 </div>
               </div>
             </div>

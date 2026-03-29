@@ -1315,19 +1315,19 @@
 
 .wd-defaults-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
   margin-bottom: 16px;
 }
 
 .wd-default-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 3px;
 }
 
 .wd-default-field label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--wd-text-muted);
   text-transform: uppercase;
@@ -1335,12 +1335,14 @@
 }
 
 .wd-default-field input {
-  padding: 8px 12px;
+  padding: 5px 8px;
   background: #000;
   border: 1px solid var(--wd-card-border);
   border-radius: 6px;
   color: var(--wd-text-primary);
-  font-size: 14px;
+  font-size: 13px;
+  width: 50%;
+  box-sizing: border-box;
 }
 
 .wd-default-field input:focus {
@@ -1351,6 +1353,7 @@
 .wd-defaults-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 /* ---- Settings Tab ---- */
@@ -1897,7 +1900,7 @@
   }
 
   .wd-defaults-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .wd-mnemonic-words {

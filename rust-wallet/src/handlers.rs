@@ -8977,17 +8977,47 @@ pub async fn list_domain_permissions(
 
     match repo.list_all(state.current_user_id) {
         Ok(perms) => {
-            let items: Vec<serde_json::Value> = perms.iter().map(|p| serde_json::json!({
-                "id": p.id,
-                "domain": p.domain,
-                "trustLevel": p.trust_level,
-                "perTxLimitCents": p.per_tx_limit_cents,
-                "perSessionLimitCents": p.per_session_limit_cents,
-                "rateLimitPerMin": p.rate_limit_per_min,
-                "maxTxPerSession": p.max_tx_per_session,
-                "createdAt": p.created_at,
-                "updatedAt": p.updated_at,
-            })).collect();
+            let items: Vec<serde_json::Value> = perms.iter().map(|p| {
+                // Fetch cert field permissions for this domain
+                let cert_fields = p.id.map(|perm_id| {
+                    let mut stmt = db.connection().prepare(
+                        "SELECT cert_type, field_name FROM cert_field_permissions
+                         WHERE domain_permission_id = ?1 ORDER BY cert_type, field_name"
+                    ).ok();
+                    if let Some(ref mut s) = stmt {
+                        let rows: Vec<(String, String)> = s.query_map(
+                            rusqlite::params![perm_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        ).ok()
+                        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default();
+
+                        // Group by cert_type
+                        let mut grouped: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                        for (ct, field) in rows {
+                            grouped.entry(ct).or_default().push(field);
+                        }
+                        grouped.into_iter().map(|(ct, fields)| {
+                            serde_json::json!({ "certType": ct, "fields": fields })
+                        }).collect::<Vec<_>>()
+                    } else {
+                        vec![]
+                    }
+                }).unwrap_or_default();
+
+                serde_json::json!({
+                    "id": p.id,
+                    "domain": p.domain,
+                    "trustLevel": p.trust_level,
+                    "perTxLimitCents": p.per_tx_limit_cents,
+                    "perSessionLimitCents": p.per_session_limit_cents,
+                    "rateLimitPerMin": p.rate_limit_per_min,
+                    "maxTxPerSession": p.max_tx_per_session,
+                    "createdAt": p.created_at,
+                    "updatedAt": p.updated_at,
+                    "certFieldPermissions": cert_fields,
+                })
+            }).collect();
             HttpResponse::Ok().json(serde_json::json!({
                 "permissions": items,
                 "count": items.len(),
@@ -9134,6 +9164,53 @@ pub async fn approve_cert_fields(
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Database error: {}", e)
             }))
+        }
+    }
+}
+
+/// DELETE /domain/permissions/certificate?domain=X&cert_type=Y[&field=Z]
+///
+/// Revoke cert field permissions. If `field` is provided, revokes a single field.
+/// If `field` is omitted, revokes ALL fields for the given cert_type.
+pub async fn revoke_cert_fields(
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "domain parameter is required"})),
+    };
+    let cert_type = match query.get("cert_type") {
+        Some(ct) => ct,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "cert_type parameter is required"})),
+    };
+    let field = query.get("field");
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+
+    let perm = match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Domain permission not found"})),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Database error: {}", e)})),
+    };
+
+    let perm_id = perm.id.unwrap();
+
+    if let Some(field_name) = field {
+        // Revoke single field
+        match repo.revoke_field(perm_id, cert_type, field_name) {
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({"revoked": 1, "field": field_name})),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Database error: {}", e)})),
+        }
+    } else {
+        // Revoke all fields for this cert_type
+        match db.connection().execute(
+            "DELETE FROM cert_field_permissions WHERE domain_permission_id = ?1 AND cert_type = ?2",
+            rusqlite::params![perm_id, cert_type],
+        ) {
+            Ok(count) => HttpResponse::Ok().json(serde_json::json!({"revoked": count})),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Database error: {}", e)})),
         }
     }
 }
