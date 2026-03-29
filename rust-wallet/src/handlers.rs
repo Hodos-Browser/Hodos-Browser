@@ -4536,7 +4536,7 @@ pub(crate) async fn create_action_internal(
             public_key: hex::encode(&derived_pubkey),
             used: true, // Mark as used since it's receiving change
             balance: 0,
-            pending_utxo_check: false, // Change addresses don't need immediate check
+            pending_utxo_check: false, // Change addresses don't need sync — UTXO is recorded at creation time
             created_at,
         };
 
@@ -8423,6 +8423,19 @@ pub async fn get_current_address(state: web::Data<AppState>) -> HttpResponse {
             // Sort by index descending to get latest
             addresses.sort_by(|a, b| b.index.cmp(&a.index));
             let current = &addresses[0];
+
+            // Ensure the current address is flagged for UTXO sync so incoming
+            // payments are detected. Change addresses are created with pending=false
+            // but become the receive address shown to users.
+            if !current.pending_utxo_check {
+                if let Some(addr_id) = current.id {
+                    let _ = db.connection().execute(
+                        "UPDATE addresses SET pending_utxo_check = 1 WHERE id = ?1",
+                        rusqlite::params![addr_id],
+                    );
+                    log::info!("   📋 Flagged current address for UTXO sync (was unflagged)");
+                }
+            }
 
             log::info!("   ✅ Current address: {} (index: {})", current.address, current.index);
 
