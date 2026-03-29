@@ -6046,7 +6046,7 @@ pub fn store_derived_utxo(
 /// If `confirmed_utxos` is provided, tries to select from confirmed UTXOs first.
 /// Falls back to `all_utxos` if confirmed outputs are insufficient.
 /// This prevents building long chains of unconfirmed transactions.
-fn select_utxos_with_preference(
+pub(crate) fn select_utxos_with_preference(
     confirmed_utxos: Option<&[UTXO]>,
     all_utxos: &[UTXO],
     amount_needed: i64,
@@ -7573,7 +7573,11 @@ pub(crate) async fn broadcast_transaction(
                             }
                         }
 
-                        // SEEN_IN_ORPHAN_MEMPOOL — transient, retry ARC then fall through
+                        // SEEN_IN_ORPHAN_MEMPOOL — tx IS in ARC's mempool, parent not yet found.
+                        // Retry a few times (parent may propagate), then treat as provisional success.
+                        // DO NOT fall through to raw tx broadcast — that strips BEEF ancestry and
+                        // guarantees "Missing inputs" for transactions with unconfirmed parents.
+                        // TaskCheckForProofs will monitor and clean up after 30 minutes if needed.
                         if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
                             if arc_attempt < MAX_BROADCAST_ATTEMPTS {
                                 log::info!("   🔄 SEEN_IN_ORPHAN_MEMPOOL — retrying in {}ms...", arc_backoff_ms);
@@ -7581,8 +7585,12 @@ pub(crate) async fn broadcast_transaction(
                                 arc_backoff_ms *= 2;
                                 continue;
                             }
-                            log::warn!("   ⚠️ ARC returned SEEN_IN_ORPHAN_MEMPOOL after {} attempts", MAX_BROADCAST_ATTEMPTS);
-                            break; // Fall through to raw tx broadcasters
+                            // Transaction is in ARC's orphan pool — it may still confirm once
+                            // ARC receives the parent tx. Return success so callers don't
+                            // prematurely roll back (which causes DB desync if the tx later mines).
+                            let msg = format!("ARC accepted (orphan mempool): {} — monitoring for confirmation", arc_txid);
+                            log::warn!("   ⚠️ {}", msg);
+                            return Ok(msg);
                         }
 
                         let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
@@ -8864,7 +8872,14 @@ pub async fn set_domain_permission(
     let db = state.database.lock().unwrap();
     let repo = crate::database::DomainPermissionRepository::new(db.connection());
 
+    // Use user's configured default limits instead of hardcoded values
     let mut perm = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
+    let settings_repo = crate::database::SettingsRepository::new(db.connection());
+    if let Ok((per_tx, per_session, rate)) = settings_repo.get_default_limits() {
+        perm.per_tx_limit_cents = per_tx;
+        perm.per_session_limit_cents = per_session;
+        perm.rate_limit_per_min = rate;
+    }
     if let Some(ref tl) = req.trust_level {
         perm.trust_level = tl.clone();
     }
@@ -9078,11 +9093,17 @@ pub async fn approve_cert_fields(
         match existing {
             Ok(Some(p)) => p.id.unwrap(),
             Ok(None) => {
-                // Auto-create with "approved" trust since they're interacting
+                // Auto-create with "approved" trust and user's configured default limits
                 let mut perm = crate::database::DomainPermission::defaults(
                     state.current_user_id, &req.domain,
                 );
                 perm.trust_level = "approved".to_string();
+                let settings_repo = crate::database::SettingsRepository::new(db.connection());
+                if let Ok((per_tx, per_session, rate)) = settings_repo.get_default_limits() {
+                    perm.per_tx_limit_cents = per_tx;
+                    perm.per_session_limit_cents = per_session;
+                    perm.rate_limit_per_min = rate;
+                }
                 match repo.upsert(&perm) {
                     Ok(id) => id,
                     Err(e) => {
@@ -11109,25 +11130,35 @@ pub async fn do_onchain_backup(
     let funding_utxos = {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
-        let all_utxos = output_repo.get_spendable_by_user(1)
+        let exclude_prev_backup = |o: &&crate::database::Output| {
+            // Exclude previous backup UTXOs from funding selection (handled separately)
+            let is_prev_pushdrop = previous_pushdrop.as_ref().map_or(false, |(txid, vout, _, _)| {
+                o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+            });
+            let is_prev_marker = previous_marker.as_ref().map_or(false, |(txid, vout, _, _)| {
+                o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
+            });
+            !is_prev_pushdrop && !is_prev_marker
+        };
+        // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
+        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(1)
             .unwrap_or_default()
             .iter()
-            .filter(|o| {
-                // Exclude previous backup UTXOs from funding selection (handled separately)
-                let is_prev_pushdrop = previous_pushdrop.as_ref().map_or(false, |(txid, vout, _, _)| {
-                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
-                });
-                let is_prev_marker = previous_marker.as_ref().map_or(false, |(txid, vout, _, _)| {
-                    o.txid.as_deref() == Some(txid.as_str()) && o.vout == *vout as i32
-                });
-                !is_prev_pushdrop && !is_prev_marker
-            })
+            .filter(exclude_prev_backup)
             .map(|o| crate::database::output_to_fetcher_utxo(o))
-            .collect::<Vec<_>>();
+            .collect();
+        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(1)
+            .unwrap_or_default()
+            .iter()
+            .filter(exclude_prev_backup)
+            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .collect();
         drop(db);
 
         if amount_needed > 0 {
-            let selected = select_utxos(&all_utxos, amount_needed);
+            let selected = select_utxos_with_preference(
+                Some(&confirmed_utxos), &all_utxos, amount_needed,
+            );
             if selected.is_empty() {
                 log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);
                 return Err(format!("Insufficient funds (need ~{} sats)", amount_needed));

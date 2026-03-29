@@ -80,7 +80,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -265,7 +265,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'",
             rusqlite::params![user_id],
             |row| row.get(0),
@@ -283,7 +283,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'",
             [],
             |row| row.get(0),
@@ -299,7 +299,7 @@ impl<'a> OutputRepository<'a> {
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed'))",
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))",
             rusqlite::params![user_id],
             |row| row.get(0),
         )?;

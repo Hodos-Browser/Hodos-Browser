@@ -17,6 +17,8 @@ const ApprovedSitesTab: React.FC = () => {
     defaultMaxTxPerSession: 100,
   });
   const [savedDefaults, setSavedDefaults] = useState<DefaultLimits>(defaults);
+  const [perTxUsd, setPerTxUsd] = useState('1.00');
+  const [perSessionUsd, setPerSessionUsd] = useState('10.00');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | null>(null);
@@ -38,6 +40,8 @@ const ApprovedSitesTab: React.FC = () => {
       };
       setDefaults(loaded);
       setSavedDefaults(loaded);
+      setPerTxUsd((loaded.defaultPerTxLimitCents / 100).toFixed(2));
+      setPerSessionUsd((loaded.defaultPerSessionLimitCents / 100).toFixed(2));
     } catch {
       // Use current defaults if endpoint doesn't exist yet
     } finally {
@@ -80,6 +84,8 @@ const ApprovedSitesTab: React.FC = () => {
         };
         setDefaults(confirmed);
         setSavedDefaults(confirmed);
+        setPerTxUsd((confirmed.defaultPerTxLimitCents / 100).toFixed(2));
+        setPerSessionUsd((confirmed.defaultPerSessionLimitCents / 100).toFixed(2));
       } else {
         setSavedDefaults(defaults);
       }
@@ -139,11 +145,16 @@ const ApprovedSitesTab: React.FC = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
                   <input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={(defaults.defaultPerTxLimitCents / 100).toFixed(0)}
-                    onChange={(e) => setDefaults((d) => ({ ...d, defaultPerTxLimitCents: Math.max(0, parseInt(e.target.value || '0', 10) * 100) }))}
+                    type="text"
+                    inputMode="decimal"
+                    value={perTxUsd}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) {
+                        setPerTxUsd(v);
+                        setDefaults((d) => ({ ...d, defaultPerTxLimitCents: Math.max(0, Math.round(parseFloat(v || '0') * 100)) }));
+                      }
+                    }}
                   />
                 </div>
                 <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>
@@ -155,11 +166,16 @@ const ApprovedSitesTab: React.FC = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <span style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>$</span>
                   <input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={(defaults.defaultPerSessionLimitCents / 100).toFixed(0)}
-                    onChange={(e) => setDefaults((d) => ({ ...d, defaultPerSessionLimitCents: Math.max(0, parseInt(e.target.value || '0', 10) * 100) }))}
+                    type="text"
+                    inputMode="decimal"
+                    value={perSessionUsd}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || /^\d*\.?\d{0,2}$/.test(v)) {
+                        setPerSessionUsd(v);
+                        setDefaults((d) => ({ ...d, defaultPerSessionLimitCents: Math.max(0, Math.round(parseFloat(v || '0') * 100)) }));
+                      }
+                    }}
                   />
                 </div>
                 <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '3px' }}>

@@ -2678,6 +2678,12 @@ async fn create_certificate_transaction(
     let output_repo = OutputRepository::new(db.connection());
 
     // Get spendable outputs from database cache first (same logic as createAction)
+    // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
+    let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(DEFAULT_USER_ID)
+        .unwrap_or_default()
+        .iter()
+        .map(|output| output_to_fetcher_utxo(output))
+        .collect();
     let mut all_utxos = match output_repo.get_spendable_by_user(DEFAULT_USER_ID) {
         Ok(db_outputs) => {
             // Convert database outputs to fetcher format
@@ -2737,8 +2743,10 @@ async fn create_certificate_transaction(
         return Err(CertificateError::Database("No UTXOs available for certificate transaction".to_string()));
     }
 
-    // Select UTXOs (reuse helper function)
-    let selected_utxos = select_utxos(&all_utxos, total_needed);
+    // Select UTXOs — prefer confirmed to avoid orphaned parents
+    let selected_utxos = crate::handlers::select_utxos_with_preference(
+        Some(&confirmed_utxos), &all_utxos, total_needed,
+    );
     if selected_utxos.is_empty() {
         return Err(CertificateError::Database(format!(
             "Insufficient funds: need {} satoshis for certificate transaction (have {} satoshis)",
@@ -4345,14 +4353,27 @@ async fn unpublish_certificate_core(
     let funding_utxos = {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
-        let all_utxos = output_repo.get_spendable_by_user(1)
+        let exclude_pushdrop = |o: &&crate::database::Output| {
+            !(o.txid.as_deref() == Some(publish_txid) && o.vout == publish_vout as i32)
+        };
+        // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
+        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(1)
+            .unwrap_or_default()
+            .iter()
+            .filter(exclude_pushdrop)
+            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .collect();
+        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(1)
             .map_err(|e| format!("Failed to get UTXOs: {}", e))?
             .iter()
-            .filter(|o| !(o.txid.as_deref() == Some(publish_txid) && o.vout == publish_vout as i32))
+            .filter(exclude_pushdrop)
             .map(|o| crate::database::output_to_fetcher_utxo(o))
-            .collect::<Vec<_>>();
+            .collect();
         drop(db);
-        let selected = select_utxos(&all_utxos, estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS);
+        let amount_needed = estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS;
+        let selected = crate::handlers::select_utxos_with_preference(
+            Some(&confirmed_utxos), &all_utxos, amount_needed,
+        );
         if selected.is_empty() {
             return Err("Insufficient funds for unpublish fee".to_string());
         }
@@ -4442,6 +4463,33 @@ async fn unpublish_certificate_core(
     let secp = Secp256k1::new();
     let prev_script_bytes = hex::decode(&locking_script_hex)
         .map_err(|e| format!("Invalid script hex: {}", e))?;
+
+    // Verify key derivation: the derived child privkey should produce the same pubkey
+    // as the one embedded in the PushDrop locking script
+    {
+        let secret = SecretKey::from_slice(&child_privkey)
+            .map_err(|_| "Invalid derived private key".to_string())?;
+        let derived_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let locking_pubkey = if prev_script_bytes.len() > 34 && prev_script_bytes[0] == 0x21 {
+            &prev_script_bytes[1..34]
+        } else {
+            &[]
+        };
+        log::info!("   🔑 PushDrop signing key verification:");
+        log::info!("      Locking pubkey:  {}", hex::encode(locking_pubkey));
+        log::info!("      Derived pubkey:  {}", hex::encode(&derived_pubkey));
+        if derived_pubkey.as_slice() != locking_pubkey {
+            log::error!("   ❌ KEY MISMATCH: derived signing key does not match PushDrop locking key!");
+            log::error!("      This means the BRC-42 derivation produced a different key than what was used during publish.");
+            log::error!("      The transaction signature will be invalid and miners will reject it.");
+            return Err(format!(
+                "PushDrop key mismatch: locking={} derived={}. The signing key does not match the key in the published token.",
+                hex::encode(locking_pubkey), hex::encode(&derived_pubkey)
+            ));
+        }
+        log::info!("      ✅ Keys match — signature will be valid");
+    }
+
     {
         let sighash = calculate_sighash(&tx, 0, &prev_script_bytes, output_satoshis, SIGHASH_ALL_FORKID)
             .map_err(|e| format!("Sighash failed: {}", e))?;
@@ -4583,7 +4631,7 @@ async fn unpublish_certificate_core(
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
         let _ = output_repo.insert_output(
-            1, &txid, 0, // vout 0 is change (only output)
+            1, &txid, 1, // vout 1 is change (vout 0 is service fee)
             change_amount, script_hex,
             default_basket_id,
             Some("2-receive address"), Some(&addr_idx.to_string()),
