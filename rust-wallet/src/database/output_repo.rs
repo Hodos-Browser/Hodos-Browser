@@ -951,16 +951,23 @@ impl<'a> OutputRepository<'a> {
             .map(|u| (u.txid.clone(), u.vout as i32))
             .collect();
 
-        // Get all spendable outputs for this derivation path from DB (older than grace period)
-        // Filter out NULL txids since we can't compare them with API UTXOs
+        // Get all spendable outputs for this derivation path from DB (older than grace period).
+        // Filter out NULL txids since we can't compare them with API UTXOs.
+        // IMPORTANT: Exclude outputs whose parent transaction is still unconfirmed (not 'completed').
+        // The bulk API only returns confirmed UTXOs, so unconfirmed wallet-created outputs
+        // (change outputs, PeerPay sends) would be falsely marked as "externally spent."
         let query = if derivation_prefix.is_some() {
-            "SELECT txid, vout FROM outputs
-             WHERE user_id = ?1 AND derivation_prefix = ?2 AND derivation_suffix = ?3
-               AND spendable = 1 AND created_at < ?4 AND txid IS NOT NULL"
+            "SELECT o.txid, o.vout FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             WHERE o.user_id = ?1 AND o.derivation_prefix = ?2 AND o.derivation_suffix = ?3
+               AND o.spendable = 1 AND o.created_at < ?4 AND o.txid IS NOT NULL
+               AND (o.transaction_id IS NULL OR t.status = 'completed')"
         } else {
-            "SELECT txid, vout FROM outputs
-             WHERE user_id = ?1 AND derivation_prefix IS NULL AND derivation_suffix IS NULL
-               AND spendable = 1 AND created_at < ?2 AND txid IS NOT NULL"
+            "SELECT o.txid, o.vout FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             WHERE o.user_id = ?1 AND o.derivation_prefix IS NULL AND o.derivation_suffix IS NULL
+               AND o.spendable = 1 AND o.created_at < ?2 AND o.txid IS NOT NULL
+               AND (o.transaction_id IS NULL OR t.status = 'completed')"
         };
 
         let db_outputs: Vec<(String, i32)> = if derivation_prefix.is_some() {
