@@ -8699,6 +8699,9 @@ pub async fn send_transaction(
                 );
             }
 
+            // Request backup check if send is significant (> $3 USD)
+            state.request_backup_check_if_significant(output_satoshis);
+
             let whats_on_chain_url = format!("https://whatsonchain.com/tx/{}", txid);
 
             HttpResponse::Ok().json(serde_json::json!({
@@ -14608,6 +14611,9 @@ pub async fn peerpay_send(
                 rusqlite::params![req.recipient_identity_key, txid],
             );
             drop(db);
+
+            // Request backup check if PeerPay send is significant (> $3 USD)
+            state.request_backup_check_if_significant(req.amount_satoshis);
         }
         Err(e) => {
             log::error!("   ❌ PeerPay broadcast failed: {}", e);
@@ -14963,6 +14969,9 @@ pub async fn paymail_send(
                 rusqlite::params![paymail_str, txid],
             );
             drop(db);
+
+            // Request backup check if paymail send is significant (> $3 USD)
+            state.request_backup_check_if_significant(req.amount_satoshis);
         }
         Err(e) => {
             log::error!("   Paymail broadcast failed: {}", e);
