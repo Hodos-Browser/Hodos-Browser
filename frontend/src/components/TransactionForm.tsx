@@ -196,7 +196,11 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       if (field === 'amount' && prev.sendMax) next.sendMax = false;
       return next;
     });
-    if (errors[field]) setErrors(prev => ({ ...prev, [field]: undefined }));
+    if (errors[field]) setErrors(prev => {
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
   }, [errors]);
 
   const handleBsvAmountChange = useCallback((value: string) => {
@@ -391,7 +395,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   id="amount-usd"
                   type="number"
                   step="0.01"
-                  min="0.01"
+                  min="0"
                   value={usdInput}
                   onChange={(e) => handleUsdAmountChange(e.target.value)}
                   placeholder="0.00"
@@ -404,10 +408,17 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   size="small"
                   className="max-button"
                   onClick={() => {
-                    const bsvMax = formatBalance(balance);
+                    // Subtract estimated fees: 1000 sat service fee + ~500 sat mining fee
+                    const estimatedFeeSats = 1500;
+                    const maxSpendable = Math.max(0, balance - estimatedFeeSats);
+                    const bsvMax = formatBalance(maxSpendable);
                     setFormData(prev => ({ ...prev, amount: bsvMax, sendMax: true }));
-                    if (bsvPrice > 0) setUsdInput(convertSatoshisToUsd(balance, bsvPrice).toFixed(2));
-                    if (errors.amount) setErrors(prev => ({ ...prev, amount: undefined }));
+                    if (bsvPrice > 0) setUsdInput(convertSatoshisToUsd(maxSpendable, bsvPrice).toFixed(2));
+                    if (errors.amount) setErrors(prev => {
+                      const next = { ...prev };
+                      delete next.amount;
+                      return next;
+                    });
                   }}
                   disabled={isSubmitting || isLoading}
                 >
