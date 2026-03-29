@@ -8,16 +8,17 @@ import '../components/WalletPanel.css';
 // Lazy-load heavier tabs
 const ActivityTab = lazy(() => import('../components/wallet/ActivityTab'));
 const CertificatesTab = lazy(() => import('../components/wallet/CertificatesTab'));
+const TokensTab = lazy(() => import('../components/wallet/TokensTab'));
 const ApprovedSitesTab = lazy(() => import('../components/wallet/ApprovedSitesTab'));
 const SettingsTab = lazy(() => import('../components/wallet/SettingsTab'));
 
-const TAB_TITLES = ['Dashboard', 'Activity', 'Certificates', 'Approved Sites', 'Settings'];
+const TAB_TITLES = ['Dashboard', 'Activity', 'Certificates', 'Tokens', 'Approved Sites', 'Settings'];
 
 const WalletOverlayRoot: React.FC = () => {
   const getInitialTab = () => {
     const params = new URLSearchParams(window.location.search);
     const tab = parseInt(params.get('tab') || '0', 10);
-    return tab >= 0 && tab <= 4 ? tab : 0;
+    return tab >= 0 && tab <= 5 ? tab : 0;
   };
 
   const [activeTab, setActiveTab] = useState(getInitialTab);
@@ -72,10 +73,16 @@ const WalletOverlayRoot: React.FC = () => {
       case 3:
         return (
           <Suspense fallback={fallback}>
-            <ApprovedSitesTab key={`sites-${refreshKey}`} />
+            <TokensTab key={`tokens-${refreshKey}`} />
           </Suspense>
         );
       case 4:
+        return (
+          <Suspense fallback={fallback}>
+            <ApprovedSitesTab key={`sites-${refreshKey}`} />
+          </Suspense>
+        );
+      case 5:
         return (
           <Suspense fallback={fallback}>
             <SettingsTab key={`settings-${refreshKey}`} />

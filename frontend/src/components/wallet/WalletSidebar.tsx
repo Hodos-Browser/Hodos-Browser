@@ -10,8 +10,9 @@ const TABS: WalletTab[] = [
   { id: 0, label: 'Dashboard', icon: '\u2302' },    // ⌂
   { id: 1, label: 'Activity', icon: '\u29D6' },      // ⧖
   { id: 2, label: 'Certificates', icon: '\u26E8' },   // ⛨
-  { id: 3, label: 'Approved Sites', icon: '\u2713' }, // ✓
-  { id: 4, label: 'Settings', icon: '\u2699' },       // ⚙
+  { id: 3, label: 'Tokens', icon: '\u2B21' },         // ⬡
+  { id: 4, label: 'Approved Sites', icon: '\u2713' }, // ✓
+  { id: 5, label: 'Settings', icon: '\u2699' },       // ⚙
 ];
 
 const HodosWalletLogo: React.FC = () => (

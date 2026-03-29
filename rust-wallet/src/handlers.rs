@@ -11597,6 +11597,20 @@ pub async fn do_onchain_backup(
 
     state.balance_cache.invalidate();
 
+    // Clean up stale backup outputs — previous backups that were spent by this one.
+    // These hold large PushDrop locking scripts (30-40KB each) that bloat the DB and
+    // the on-chain backup payload. They're spendable=0 and will never be needed again.
+    {
+        let db = state.database.lock().unwrap();
+        match db.connection().execute(
+            "DELETE FROM outputs WHERE spending_description = 'stale-backup'",
+            [],
+        ) {
+            Ok(count) if count > 0 => log::info!("   🧹 Cleaned up {} stale backup output(s)", count),
+            _ => {}
+        }
+    }
+
     // Recompute hash AFTER the backup transaction has modified the DB.
     // This captures the post-backup state so the next trigger sees an accurate baseline.
     // Without this, backup side effects (spent_by changes, new proven_tx_reqs, etc.)
@@ -13641,6 +13655,73 @@ pub async fn list_outputs(
         outputs,
         BEEF: beef_bytes,
     })
+}
+
+/// GET /wallet/tokens — List all token outputs (non-default, non-certificate baskets)
+///
+/// Returns all spendable outputs from app-created baskets, grouped by basket name.
+/// Used by the Tokens tab in the wallet UI.
+pub async fn list_token_outputs(
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let db = state.database.lock().unwrap();
+    let conn = db.connection();
+
+    // Query all spendable outputs in non-default, non-certificate baskets.
+    // For wallet-backup basket, only show the PushDrop (vout=0), not the marker (vout=1).
+    let mut stmt = match conn.prepare(
+        "SELECT o.outputId, o.txid, o.vout, o.satoshis, o.output_description,
+                o.created_at, o.spendable, b.name as basket_name
+         FROM outputs o
+         JOIN output_baskets b ON o.basket_id = b.basketId
+         WHERE o.user_id = ?1 AND o.spendable = 1
+           AND b.name NOT IN ('default', 'identity_certificates')
+           AND (b.is_deleted IS NULL OR b.is_deleted = 0)
+           AND NOT (b.name = 'wallet-backup' AND o.vout = 1)
+         ORDER BY b.name, o.created_at DESC"
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Database error: {}", e)
+            }));
+        }
+    };
+
+    let rows: Vec<serde_json::Value> = match stmt.query_map(
+        rusqlite::params![state.current_user_id],
+        |row| {
+            Ok(serde_json::json!({
+                "outputId": row.get::<_, i64>(0)?,
+                "txid": row.get::<_, Option<String>>(1)?,
+                "vout": row.get::<_, i32>(2)?,
+                "satoshis": row.get::<_, i64>(3)?,
+                "description": row.get::<_, Option<String>>(4)?,
+                "createdAt": row.get::<_, i64>(5)?,
+                "spendable": row.get::<_, bool>(6)?,
+                "basket": row.get::<_, String>(7)?,
+            }))
+        },
+    ) {
+        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        Err(_) => vec![],
+    };
+
+    // Fetch tags for each output
+    let tag_repo = crate::database::TagRepository::new(conn);
+    let tokens: Vec<serde_json::Value> = rows.into_iter().map(|mut token| {
+        if let Some(output_id) = token["outputId"].as_i64() {
+            if let Ok(tags) = tag_repo.get_tags_for_output(output_id) {
+                token["tags"] = serde_json::json!(tags);
+            }
+        }
+        token
+    }).collect();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "tokens": tokens,
+        "count": tokens.len(),
+    }))
 }
 
 /// Request structure for /relinquishOutput endpoint

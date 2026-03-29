@@ -467,6 +467,7 @@ async fn main() -> std::io::Result<()> {
             .route("/updateConfirmations", web::post().to(handlers::update_confirmations_endpoint))  // NEW
             .route("/listOutputs", web::post().to(handlers::list_outputs))  // Group C - Part 1
             .route("/relinquishOutput", web::post().to(handlers::relinquish_output))  // Group C - Part 1
+            .route("/wallet/tokens", web::get().to(handlers::list_token_outputs))  // Token list for wallet UI
 
             // Part 2: Blockchain Queries
             .route("/getHeight", web::post().to(handlers::get_height))  // Group C - Part 2
