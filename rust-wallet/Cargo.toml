@@ -45,7 +45,7 @@ uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
 
 # HD Wallet (BIP39/BIP32)
-bip39 = "2.0"
+bip39 = "2.2"
 bip32 = "0.5"
 
 # HTTP client for blockchain API calls
