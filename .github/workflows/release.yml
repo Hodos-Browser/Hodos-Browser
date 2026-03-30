@@ -123,7 +123,7 @@ jobs:
       
       # Sign all executables with Azure Trusted Signing
       - name: Sign executables with Azure Trusted Signing
-        uses: azure/trusted-signing-action@v1.1.0
+        uses: azure/trusted-signing-action@v1.2.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -147,7 +147,7 @@ jobs:
       
       # Sign the final installer
       - name: Sign installer with Azure Trusted Signing
-        uses: azure/trusted-signing-action@v1.1.0
+        uses: azure/trusted-signing-action@v1.2.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
