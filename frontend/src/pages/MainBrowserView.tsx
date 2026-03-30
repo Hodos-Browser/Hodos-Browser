@@ -184,12 +184,13 @@ const MainBrowserView: React.FC = () => {
     // Downloads — only need icon visibility state; overlay handles controls
     const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
 
-    // PeerPay notification state — green dot on wallet button
+    // PeerPay notification state — dot on wallet button (green=receive, red=failure)
     const [hasUnreadPayments, setHasUnreadPayments] = useState(false);
+    const [hasFailedPayments, setHasFailedPayments] = useState(false);
     const [unreadPaymentCount, setUnreadPaymentCount] = useState(0);
     const [unreadPaymentAmount, setUnreadPaymentAmount] = useState(0);
 
-    // Poll /wallet/peerpay/status every 60s + listen for IPC dismiss events
+    // Poll /wallet/peerpay/status every 10s + listen for IPC dismiss events
     useEffect(() => {
         const checkPeerpayStatus = async () => {
             try {
@@ -200,8 +201,10 @@ const MainBrowserView: React.FC = () => {
                         setHasUnreadPayments(true);
                         setUnreadPaymentCount(data.unread_count);
                         setUnreadPaymentAmount(data.unread_amount || 0);
+                        setHasFailedPayments((data.failure_count || 0) > 0);
                     } else {
                         setHasUnreadPayments(false);
+                        setHasFailedPayments(false);
                         setUnreadPaymentCount(0);
                         setUnreadPaymentAmount(0);
                     }
@@ -212,12 +215,13 @@ const MainBrowserView: React.FC = () => {
         };
         // Initial check after short delay (let wallet server start)
         const initialTimer = setTimeout(checkPeerpayStatus, 5000);
-        // Periodic check every 60s
-        const interval = setInterval(checkPeerpayStatus, 60000);
+        // Periodic check every 10s (trivial indexed DB query, negligible cost)
+        const interval = setInterval(checkPeerpayStatus, 10000);
 
         const handlePaymentDismissed = (event: MessageEvent) => {
             if (event.data?.type === 'wallet_payment_dismissed') {
                 setHasUnreadPayments(false);
+                setHasFailedPayments(false);
                 setUnreadPaymentCount(0);
                 setUnreadPaymentAmount(0);
             }
@@ -836,7 +840,7 @@ const MainBrowserView: React.FC = () => {
                         invisible={!hasUnreadPayments}
                         sx={{
                             '& .MuiBadge-badge': {
-                                backgroundColor: '#2e7d32',
+                                backgroundColor: hasFailedPayments ? '#d32f2f' : '#2e7d32',
                                 minWidth: 8,
                                 height: 8,
                                 borderRadius: '50%',

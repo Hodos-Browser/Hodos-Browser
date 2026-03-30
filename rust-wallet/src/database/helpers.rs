@@ -178,5 +178,6 @@ pub fn output_to_fetcher_utxo(output: &super::Output) -> crate::utxo_fetcher::UT
         script,
         address_index,
         custom_instructions: output.custom_instructions.clone(),
+        confirmed: true,
     }
 }

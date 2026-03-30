@@ -709,6 +709,11 @@
   color: #ef5350;
 }
 
+.wd-recent-status.unconfirmed {
+  background: rgba(255, 183, 77, 0.15);
+  color: #ffb74d;
+}
+
 /* Send Form Card (right column) */
 .wd-send-card {
   background: var(--wd-card-bg);
@@ -965,6 +970,11 @@
 .wd-activity-status.failed {
   background: rgba(198, 40, 40, 0.15);
   color: #ef5350;
+}
+
+.wd-activity-status.unconfirmed {
+  background: rgba(255, 183, 77, 0.15);
+  color: #ffb74d;
 }
 
 /* Activity Expanded Details */
@@ -1870,6 +1880,26 @@
 .wd-notification-dismiss:hover {
   background: rgba(46, 125, 50, 0.2);
   border-color: #4caf50;
+}
+
+/* Red failure notification banner */
+.wd-notification-bar.wd-notification-failure {
+  background: rgba(198, 40, 40, 0.12);
+  border-color: #c62828;
+}
+
+.wd-notification-failure .wd-notification-text {
+  color: #ef5350;
+}
+
+.wd-notification-failure .wd-notification-dismiss {
+  border-color: rgba(198, 40, 40, 0.4);
+  color: #ef5350;
+}
+
+.wd-notification-failure .wd-notification-dismiss:hover {
+  background: rgba(198, 40, 40, 0.2);
+  border-color: #ef5350;
 }
 
 /* ---- Responsive ---- */

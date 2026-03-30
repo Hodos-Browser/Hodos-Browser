@@ -10653,7 +10653,8 @@ pub async fn wallet_activity(
         let mut stmt = match db.connection().prepare(
             "SELECT o.txid, SUM(o.satoshis) as total_sats,
                     MIN(o.created_at) as created_at,
-                    t.status, t.price_usd_cents
+                    t.status, t.price_usd_cents,
+                    MIN(o.confirmed) as confirmed
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1
@@ -10677,12 +10678,13 @@ pub async fn wallet_activity(
             let created_at: i64 = row.get(2)?;
             let status: Option<String> = row.get(3)?;
             let price_usd_cents: Option<i64> = row.get(4)?;
-            Ok((txid, total_sats, created_at, status, price_usd_cents))
+            let confirmed: Option<i32> = row.get(5)?;
+            Ok((txid, total_sats, created_at, status, price_usd_cents, confirmed))
         });
 
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (txid, total_sats, created_at, status, price_usd_cents) = row;
+                let (txid, total_sats, created_at, status, price_usd_cents, confirmed) = row;
 
                 // Skip txids already shown as received in section 1 (dedup)
                 if let Some(ref tid) = txid {
@@ -10720,11 +10722,18 @@ pub async fn wallet_activity(
                     _ => "Received BSV".to_string(),
                 };
 
+                // Unconfirmed outputs (confirmed=0) show as "unconfirmed" status
+                let display_status = if confirmed.unwrap_or(1) == 0 {
+                    "unconfirmed".to_string()
+                } else {
+                    status.unwrap_or_else(|| "completed".to_string())
+                };
+
                 received_items.push(serde_json::json!({
                     "txid": txid.unwrap_or_default(),
                     "direction": "received",
                     "satoshis": total_sats,
-                    "status": status.unwrap_or_else(|| "completed".to_string()),
+                    "status": display_status,
                     "timestamp": timestamp,
                     "sort_key": created_at,
                     "description": desc,
@@ -14714,21 +14723,28 @@ pub async fn peerpay_check(
 
 /// GET /wallet/peerpay/status — Notification badge data
 ///
-/// Returns count and total of undismissed received payments from the database.
-/// Used by the frontend green dot badge on the wallet toolbar icon.
+/// Returns count and total of undismissed received payments from the database,
+/// split by notification type (receive = green, failure = red).
+/// Used by the frontend badge on the wallet toolbar icon.
 pub async fn peerpay_status(
     state: web::Data<AppState>,
 ) -> HttpResponse {
     let db = state.database.lock().unwrap();
+    let conn = db.connection();
 
-    let (unread_count, unread_amount) = match crate::database::PeerPayRepository::get_undismissed_summary(db.connection()) {
-        Ok((count, total)) => (count, total),
-        Err(_) => (0, 0),
-    };
+    let (receive_count, receive_amount) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "receive")
+        .unwrap_or((0, 0));
+
+    let (failure_count, failure_amount) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "failure")
+        .unwrap_or((0, 0));
 
     HttpResponse::Ok().json(serde_json::json!({
-        "unread_count": unread_count,
-        "unread_amount": unread_amount,
+        "unread_count": receive_count + failure_count,
+        "unread_amount": receive_amount + failure_amount,
+        "receive_count": receive_count,
+        "receive_amount": receive_amount,
+        "failure_count": failure_count,
+        "failure_amount": failure_amount,
         "auto_accept": true,
     }))
 }

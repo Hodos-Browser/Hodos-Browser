@@ -15,7 +15,13 @@ pub struct UTXO {
     pub address_index: i32, // Which address owns this UTXO (negative = derived, -1 = master)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_instructions: Option<String>, // BRC-29 derivation info for spending derived UTXOs
+    /// Whether this UTXO has been confirmed on-chain (height > 0).
+    /// Unconfirmed UTXOs (mempool-only) have confirmed = false.
+    #[serde(default = "default_true")]
+    pub confirmed: bool,
 }
+
+fn default_true() -> bool { true }
 
 /// WhatsOnChain API response format (single-address endpoint)
 #[derive(Debug, Deserialize)]
@@ -23,6 +29,9 @@ struct WhatsOnChainUTXO {
     tx_hash: String,
     tx_pos: u32,
     value: i64,
+    /// Block height. 0 or negative = unconfirmed (mempool only).
+    #[serde(default)]
+    height: i64,
 }
 
 /// WhatsOnChain /unspent/all wrapper response
@@ -96,6 +105,16 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Resul
     Err(format!("All UTXO API providers failed for address {}", address))
 }
 
+/// Fetch UTXOs for a single address including unconfirmed (mempool) UTXOs.
+///
+/// Uses WhatsOnChain single-address API which returns both confirmed and
+/// unconfirmed UTXOs (unconfirmed have height=0). No GorillaPool fallback
+/// since GorillaPool doesn't expose unconfirmed.
+pub async fn fetch_utxos_single_address_with_unconfirmed(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
+    let client = reqwest::Client::new();
+    fetch_utxos_woc(&client, address, address_index).await
+}
+
 /// Fetch UTXOs from WhatsOnChain
 async fn fetch_utxos_woc(client: &reqwest::Client, address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
     let url = format!("https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all", address);
@@ -123,16 +142,27 @@ async fn fetch_utxos_woc(client: &reqwest::Client, address: &str, address_index:
         };
 
         let p2pkh_script = generate_p2pkh_script_from_address(address)?;
-        let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| UTXO {
-            txid: u.tx_hash,
-            vout: u.tx_pos,
-            satoshis: u.value,
-            script: p2pkh_script.clone(),
-            address_index,
-            custom_instructions: None,
+        let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| {
+            let confirmed = u.height > 0;
+            UTXO {
+                txid: u.tx_hash,
+                vout: u.tx_pos,
+                satoshis: u.value,
+                script: p2pkh_script.clone(),
+                address_index,
+                custom_instructions: None,
+                confirmed,
+            }
         }).collect();
 
-        log::info!("   ✅ WoC: {} UTXOs ({} sats)", utxos.len(), utxos.iter().map(|u| u.satoshis).sum::<i64>());
+        let unconfirmed_count = utxos.iter().filter(|u| !u.confirmed).count();
+        if unconfirmed_count > 0 {
+            log::info!("   ✅ WoC: {} UTXOs ({} confirmed, {} unconfirmed, {} sats)",
+                utxos.len(), utxos.len() - unconfirmed_count, unconfirmed_count,
+                utxos.iter().map(|u| u.satoshis).sum::<i64>());
+        } else {
+            log::info!("   ✅ WoC: {} UTXOs ({} sats)", utxos.len(), utxos.iter().map(|u| u.satoshis).sum::<i64>());
+        }
         Ok(utxos)
     } else {
         Err(format!("WoC returned status {}", status))
@@ -163,6 +193,7 @@ async fn fetch_utxos_gorillapool(client: &reqwest::Client, address: &str, addres
             script: p2pkh_script.clone(),
             address_index,
             custom_instructions: None,
+            confirmed: true, // GorillaPool only returns confirmed UTXOs
         }).collect();
 
         log::info!("   ✅ GorillaPool: {} UTXOs ({} sats)", utxos.len(), utxos.iter().map(|u| u.satoshis).sum::<i64>());
@@ -357,6 +388,7 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
                                     script: script.clone(),
                                     address_index,
                                     custom_instructions: None,
+                                    confirmed: true, // Bulk endpoint only returns confirmed UTXOs
                                 });
                             }
                         }

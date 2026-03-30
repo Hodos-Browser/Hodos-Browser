@@ -237,6 +237,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             script_length INTEGER,
             script_offset INTEGER,
             locking_script BLOB,
+            confirmed INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(userId),
@@ -245,6 +246,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             FOREIGN KEY (spent_by) REFERENCES transactions(id),
             UNIQUE(txid, vout)
         );
+        CREATE INDEX IF NOT EXISTS idx_outputs_confirmed ON outputs(confirmed);
 
         CREATE TABLE IF NOT EXISTS output_tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -508,7 +510,8 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
             accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
             dismissed INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'peerpay',
-            price_usd_cents INTEGER
+            price_usd_cents INTEGER,
+            notification_type TEXT NOT NULL DEFAULT 'receive'
         );
         CREATE INDEX IF NOT EXISTS idx_peerpay_dismissed ON peerpay_received(dismissed);
         CREATE INDEX IF NOT EXISTS idx_peerpay_source ON peerpay_received(source);
@@ -847,5 +850,52 @@ pub fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
     }
 
     info!("   ✅ V13 migration applied (recipient autocomplete)");
+    Ok(())
+}
+
+/// Migrate V13 → V14: Add confirmed column to outputs, notification_type to peerpay_received
+///
+/// - `confirmed` tracks whether a received UTXO has been seen in confirmed API (vs unconfirmed mempool only)
+/// - `notification_type` distinguishes green receive notifications from red failure notifications
+pub fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
+    info!("   Adding confirmed column to outputs and notification_type to peerpay_received...");
+
+    // outputs: add confirmed column (1 = confirmed, 0 = unconfirmed/mempool-only)
+    let output_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(outputs)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !output_cols.iter().any(|c| c == "confirmed") {
+        conn.execute(
+            "ALTER TABLE outputs ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outputs_confirmed ON outputs(confirmed)",
+            [],
+        )?;
+    }
+
+    // peerpay_received: add notification_type column ('receive' or 'failure')
+    let pp_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(peerpay_received)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !pp_cols.iter().any(|c| c == "notification_type") {
+        conn.execute(
+            "ALTER TABLE peerpay_received ADD COLUMN notification_type TEXT NOT NULL DEFAULT 'receive'",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V14 migration applied (confirmed outputs + notification types)");
     Ok(())
 }

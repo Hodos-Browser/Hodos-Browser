@@ -77,6 +77,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
 
   // Notification state (incoming payments)
   const [notification, setNotification] = useState<{ count: number; amount: number } | null>(null);
+  const [failureNotification, setFailureNotification] = useState<{ count: number; amount: number } | null>(null);
   const notificationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevNotificationCount = useRef(0);
 
@@ -164,30 +165,44 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     return () => clearInterval(balanceInterval);
   }, [fetchBalance, fetchAddress, fetchRecentActivity]);
 
-  // Notification polling (incoming payments)
+  // Notification polling (incoming payments + failures)
   useEffect(() => {
     const fetchNotification = () => {
       fetch('http://127.0.0.1:31301/wallet/peerpay/status')
         .then(r => r.json())
-        .then((data: { unread_count?: number; unread_amount?: number }) => {
-          if (data.unread_count && data.unread_count > 0) {
-            setNotification({ count: data.unread_count, amount: data.unread_amount || 0 });
-            // Auto-refresh balance when new notifications appear
-            if (data.unread_count > prevNotificationCount.current) {
-              fetchBalance();
-              fetchRecentActivity();
-            }
-            prevNotificationCount.current = data.unread_count;
+        .then((data: { unread_count?: number; unread_amount?: number;
+                       receive_count?: number; receive_amount?: number;
+                       failure_count?: number; failure_amount?: number }) => {
+          const receiveCount = data.receive_count || 0;
+          const receiveAmount = data.receive_amount || 0;
+          const failureCount = data.failure_count || 0;
+          const failureAmount = data.failure_amount || 0;
+          const totalCount = (data.unread_count || 0);
+
+          if (receiveCount > 0) {
+            setNotification({ count: receiveCount, amount: receiveAmount });
           } else {
             setNotification(null);
-            prevNotificationCount.current = 0;
           }
+
+          if (failureCount > 0) {
+            setFailureNotification({ count: failureCount, amount: failureAmount });
+          } else {
+            setFailureNotification(null);
+          }
+
+          // Auto-refresh balance when new notifications appear
+          if (totalCount > prevNotificationCount.current) {
+            fetchBalance();
+            fetchRecentActivity();
+          }
+          prevNotificationCount.current = totalCount;
         })
         .catch(() => {});
     };
 
     fetchNotification();
-    notificationRef.current = setInterval(fetchNotification, 60000);
+    notificationRef.current = setInterval(fetchNotification, 10000);
     return () => {
       if (notificationRef.current) clearInterval(notificationRef.current);
     };
@@ -252,6 +267,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
 
   const handleDismissNotification = () => {
     setNotification(null);
+    setFailureNotification(null);
     prevNotificationCount.current = 0;
     fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     if ((window as any).cefMessage?.send) {
@@ -358,13 +374,26 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
             </>
           )}
 
-          {/* Incoming payment notification banner */}
+          {/* Incoming payment notification banner (green) */}
           {notification && notification.count > 0 && (
             <div className="wd-notification-bar">
               <span className="wd-notification-text">
                 Received {notification.count} payment{notification.count > 1 ? 's' : ''}:{' '}
                 {formatBsv(notification.amount)} BSV
                 {bsvPrice > 0 && ` (~${formatUsd(notification.amount, bsvPrice)})`}
+              </span>
+              <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Failed payment notification banner (red) */}
+          {failureNotification && failureNotification.count > 0 && (
+            <div className="wd-notification-bar wd-notification-failure">
+              <span className="wd-notification-text">
+                {failureNotification.count} payment{failureNotification.count > 1 ? 's' : ''} failed to confirm:{' '}
+                {formatBsv(failureNotification.amount)} BSV
               </span>
               <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
                 Dismiss

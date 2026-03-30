@@ -423,6 +423,23 @@ impl<'a> OutputRepository<'a> {
         script_hex: &str,
         address_index: i32,
     ) -> Result<usize> {
+        self.upsert_received_utxo_with_confirmed(user_id, txid, vout, satoshis, script_hex, address_index, true)
+    }
+
+    /// Insert a received UTXO with explicit confirmed flag.
+    ///
+    /// `confirmed = true` for UTXOs from the confirmed bulk API.
+    /// `confirmed = false` for UTXOs only seen in mempool (single-address API, height <= 0).
+    pub fn upsert_received_utxo_with_confirmed(
+        &self,
+        user_id: i64,
+        txid: &str,
+        vout: u32,
+        satoshis: i64,
+        script_hex: &str,
+        address_index: i32,
+        confirmed: bool,
+    ) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -442,12 +459,14 @@ impl<'a> OutputRepository<'a> {
             (None, None)
         };
 
+        let confirmed_int: i32 = if confirmed { 1 } else { 0 };
+
         let rows_affected = self.conn.execute(
             "INSERT OR IGNORE INTO outputs (
                 user_id, txid, vout, satoshis, locking_script,
                 derivation_prefix, derivation_suffix,
-                spendable, change, provided_by, purpose, type, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9)",
+                spendable, change, provided_by, purpose, type, confirmed, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -456,17 +475,65 @@ impl<'a> OutputRepository<'a> {
                 locking_script,
                 derivation_prefix,
                 derivation_suffix,
+                confirmed_int,
                 now,
                 now,
             ],
         )?;
 
         if rows_affected > 0 {
-            info!("   ✅ Inserted received output {}:{} ({} sats, addr_idx={})",
-                  &txid[..std::cmp::min(16, txid.len())], vout, satoshis, address_index);
+            let status_str = if confirmed { "confirmed" } else { "unconfirmed" };
+            info!("   ✅ Inserted {} received output {}:{} ({} sats, addr_idx={})",
+                  status_str, &txid[..std::cmp::min(16, txid.len())], vout, satoshis, address_index);
         }
 
         Ok(rows_affected)
+    }
+
+    /// Mark a previously-unconfirmed output as confirmed.
+    /// Called when an output that was only in mempool now appears in the confirmed API.
+    pub fn mark_output_confirmed(&self, txid: &str, vout: i32) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let rows = self.conn.execute(
+            "UPDATE outputs SET confirmed = 1, updated_at = ?1 WHERE txid = ?2 AND vout = ?3 AND confirmed = 0",
+            rusqlite::params![now, txid, vout],
+        )?;
+        if rows > 0 {
+            info!("   ✅ Marked output {}:{} as confirmed", &txid[..std::cmp::min(16, txid.len())], vout);
+        }
+        Ok(rows)
+    }
+
+    /// Get unconfirmed outputs older than the given timeout.
+    /// Used by TaskSyncPending to detect unconfirmed receives that failed to confirm.
+    pub fn get_stale_unconfirmed(&self, user_id: i64, timeout_secs: i64) -> Result<Vec<(String, u32, i64)>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cutoff = now - timeout_secs;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT txid, vout, satoshis FROM outputs
+             WHERE user_id = ?1 AND confirmed = 0 AND spendable = 1 AND created_at < ?2 AND txid IS NOT NULL"
+        )?;
+        let results = stmt.query_map(
+            rusqlite::params![user_id, cutoff],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
+        )?.filter_map(|r| r.ok()).collect();
+        Ok(results)
+    }
+
+    /// Delete an unconfirmed output (failed to confirm after timeout).
+    pub fn delete_unconfirmed_output(&self, txid: &str, vout: u32) -> Result<usize> {
+        let rows = self.conn.execute(
+            "DELETE FROM outputs WHERE txid = ?1 AND vout = ?2 AND confirmed = 0",
+            rusqlite::params![txid, vout as i32],
+        )?;
+        Ok(rows)
     }
 
     /// Upsert a received UTXO with explicit derivation method (recovery flow)
@@ -956,17 +1023,18 @@ impl<'a> OutputRepository<'a> {
         // IMPORTANT: Exclude outputs whose parent transaction is still unconfirmed (not 'completed').
         // The bulk API only returns confirmed UTXOs, so unconfirmed wallet-created outputs
         // (change outputs, PeerPay sends) would be falsely marked as "externally spent."
+        // Also exclude outputs with confirmed=0 (received UTXOs still in mempool only).
         let query = if derivation_prefix.is_some() {
             "SELECT o.txid, o.vout FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.derivation_prefix = ?2 AND o.derivation_suffix = ?3
-               AND o.spendable = 1 AND o.created_at < ?4 AND o.txid IS NOT NULL
+               AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?4 AND o.txid IS NOT NULL
                AND (o.transaction_id IS NULL OR t.status = 'completed')"
         } else {
             "SELECT o.txid, o.vout FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.derivation_prefix IS NULL AND o.derivation_suffix IS NULL
-               AND o.spendable = 1 AND o.created_at < ?2 AND o.txid IS NOT NULL
+               AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?2 AND o.txid IS NOT NULL
                AND (o.transaction_id IS NULL OR t.status = 'completed')"
         };
 

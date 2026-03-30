@@ -120,6 +120,54 @@ impl PeerPayRepository {
         )?;
         Ok(())
     }
+
+    /// Insert a failure notification for an unconfirmed UTXO that timed out.
+    ///
+    /// Uses `fail:{txid}:{vout}` as message_id (distinct from `utxo:{txid}:{vout}`).
+    /// notification_type = 'failure' (red dot/banner in frontend).
+    pub fn insert_failure_notification(
+        conn: &Connection,
+        txid: &str,
+        vout: i64,
+        amount: i64,
+        price_usd_cents: Option<i64>,
+    ) -> Result<()> {
+        let message_id = format!("fail:{}:{}", txid, vout);
+        conn.execute(
+            "INSERT OR IGNORE INTO peerpay_received (
+                message_id, sender_identity_key, amount_satoshis,
+                derivation_prefix, derivation_suffix, txid,
+                source, notification_type, price_usd_cents
+            ) VALUES (?1, 'unknown', ?2, '', '', ?3, 'address_sync', 'failure', ?4)",
+            params![message_id, amount, txid, price_usd_cents],
+        )?;
+        Ok(())
+    }
+
+    /// Dismiss all notifications matching a txid prefix (e.g., `utxo:{txid}:%`).
+    ///
+    /// Used to auto-dismiss green receive notifications when a red failure
+    /// notification is created for the same transaction.
+    pub fn dismiss_by_txid_prefix(conn: &Connection, txid: &str) -> Result<usize> {
+        let pattern = format!("utxo:{}:%", txid);
+        let rows = conn.execute(
+            "UPDATE peerpay_received SET dismissed = 1 WHERE message_id LIKE ?1 AND dismissed = 0",
+            params![pattern],
+        )?;
+        Ok(rows)
+    }
+
+    /// Get summary of undismissed notifications filtered by type: (count, total_satoshis)
+    pub fn get_undismissed_summary_by_type(conn: &Connection, notification_type: &str) -> Result<(i64, i64)> {
+        let result = conn.query_row(
+            "SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(amount_satoshis), 0)
+             FROM peerpay_received
+             WHERE dismissed = 0 AND notification_type = ?1",
+            params![notification_type],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -141,7 +189,8 @@ mod tests {
                 accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
                 dismissed INTEGER NOT NULL DEFAULT 0,
                 source TEXT NOT NULL DEFAULT 'peerpay',
-                price_usd_cents INTEGER
+                price_usd_cents INTEGER,
+                notification_type TEXT NOT NULL DEFAULT 'receive'
             );
             CREATE INDEX idx_peerpay_dismissed ON peerpay_received(dismissed);
             CREATE INDEX idx_peerpay_source ON peerpay_received(source);

@@ -22,6 +22,9 @@ const RECONCILE_GRACE_PERIOD_SECS: i64 = 600;
 /// Stale pending addresses older than this are cleared without checking
 const PENDING_TIMEOUT_HOURS: i64 = 2160; // 90 days
 
+/// Unconfirmed UTXOs older than this are considered failed (never mined)
+const UNCONFIRMED_TIMEOUT_SECS: i64 = 30 * 60; // 30 minutes
+
 /// Run the TaskSyncPending task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     // Step 1: Get pending addresses (DB lock held briefly)
@@ -63,7 +66,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         })
         .collect();
 
-    // Step 3: Fetch UTXOs from WhatsOnChain (NO DB lock held)
+    // Step 3: Fetch confirmed UTXOs from WhatsOnChain bulk API (NO DB lock held)
     let api_utxos = match crate::utxo_fetcher::fetch_all_utxos(&address_infos).await {
         Ok(utxos) => utxos,
         Err(e) => {
@@ -71,6 +74,34 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
             return Err(format!("API fetch failed: {}", e));
         }
     };
+
+    // Step 3b: Supplementary single-address fetch to catch unconfirmed (mempool) UTXOs.
+    // The bulk API only returns confirmed UTXOs. The single-address API includes
+    // unconfirmed UTXOs with height=0, letting us show receives immediately.
+    let confirmed_set: std::collections::HashSet<(String, u32)> = api_utxos.iter()
+        .map(|u| (u.txid.clone(), u.vout))
+        .collect();
+
+    let mut unconfirmed_utxos: Vec<crate::utxo_fetcher::UTXO> = Vec::new();
+    for addr in &addresses_to_sync {
+        match crate::utxo_fetcher::fetch_utxos_single_address_with_unconfirmed(&addr.address, addr.index).await {
+            Ok(all_utxos) => {
+                for utxo in all_utxos {
+                    if !utxo.confirmed && !confirmed_set.contains(&(utxo.txid.clone(), utxo.vout)) {
+                        unconfirmed_utxos.push(utxo);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("   Single-address fetch failed for {}: {}", addr.address, e);
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    if !unconfirmed_utxos.is_empty() {
+        info!("   🆕 Found {} unconfirmed UTXO(s) in mempool", unconfirmed_utxos.len());
+    }
 
     // Snapshot current BSV/USD price for historical display
     let price_usd_cents = state.price_cache.get_cached()
@@ -125,11 +156,53 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                                     }
                                 }
                             }
-                            Ok(_) => {}
+                            Ok(_) => {
+                                // Output already existed — if it was unconfirmed, upgrade to confirmed
+                                let _ = output_repo.mark_output_confirmed(&utxo.txid, utxo.vout as i32);
+                            }
                             Err(e) => warn!("   Failed to insert output {}:{}: {}", utxo.txid, utxo.vout, e),
                         }
                     }
                     let _ = address_repo.mark_used(addr_id);
+                }
+
+                // Insert unconfirmed UTXOs for this address
+                let addr_unconfirmed: Vec<_> = unconfirmed_utxos.iter()
+                    .filter(|u| u.address_index == addr.index)
+                    .collect();
+                for utxo in &addr_unconfirmed {
+                    match output_repo.upsert_received_utxo_with_confirmed(
+                        state.current_user_id,
+                        &utxo.txid,
+                        utxo.vout,
+                        utxo.satoshis,
+                        &utxo.script,
+                        addr.index,
+                        false, // unconfirmed
+                    ) {
+                        Ok(1) => {
+                            new_utxo_count += 1;
+                            new_sats_total += utxo.satoshis;
+                            // Record notification for unconfirmed receive
+                            if let Err(e) = PeerPayRepository::insert_address_sync_notification(
+                                db.connection(),
+                                &utxo.txid,
+                                utxo.vout as i64,
+                                utxo.satoshis,
+                                price_usd_cents,
+                            ) {
+                                warn!("   Failed to record unconfirmed notification: {}", e);
+                            }
+                            if !new_txids.contains(&utxo.txid) {
+                                let parent_tx_repo = ParentTransactionRepository::new(db.connection());
+                                if parent_tx_repo.get_by_txid(&utxo.txid).ok().flatten().is_none() {
+                                    new_txids.push(utxo.txid.clone());
+                                }
+                            }
+                        }
+                        Ok(_) => {} // Already exists
+                        Err(e) => warn!("   Failed to insert unconfirmed output {}:{}: {}", utxo.txid, utxo.vout, e),
+                    }
                 }
 
                 // Reconcile stale outputs
@@ -193,8 +266,40 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         }
     }
 
-    // Step 6: Invalidate balance cache if anything changed
-    if new_utxo_count > 0 || reconciled_count > 0 {
+    // Step 6: Check for stale unconfirmed outputs (> 30 min without confirmation)
+    // If a received UTXO was only seen in mempool and never confirmed, create a
+    // failure notification and remove the output.
+    let mut failed_unconfirmed = 0u32;
+    {
+        let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let output_repo = OutputRepository::new(db.connection());
+
+        let stale = output_repo.get_stale_unconfirmed(state.current_user_id, UNCONFIRMED_TIMEOUT_SECS)
+            .map_err(|e| format!("Failed to get stale unconfirmed: {}", e))?;
+
+        for (txid, vout, satoshis) in &stale {
+            // Insert red failure notification
+            if let Err(e) = PeerPayRepository::insert_failure_notification(
+                db.connection(), txid, *vout as i64, *satoshis, price_usd_cents,
+            ) {
+                warn!("   Failed to insert failure notification for {}:{}: {}", txid, vout, e);
+            }
+
+            // Auto-dismiss the corresponding green receive notification
+            let _ = PeerPayRepository::dismiss_by_txid_prefix(db.connection(), txid);
+
+            // Remove the unconfirmed output
+            if let Err(e) = output_repo.delete_unconfirmed_output(txid, *vout) {
+                warn!("   Failed to delete unconfirmed output {}:{}: {}", txid, vout, e);
+            }
+            failed_unconfirmed += 1;
+            warn!("   🔴 Unconfirmed output {}:{} ({} sats) failed after {}min timeout",
+                  &txid[..std::cmp::min(16, txid.len())], vout, satoshis, UNCONFIRMED_TIMEOUT_SECS / 60);
+        }
+    } // DB lock dropped
+
+    // Step 7: Invalidate balance cache if anything changed
+    if new_utxo_count > 0 || reconciled_count > 0 || failed_unconfirmed > 0 {
         state.balance_cache.invalidate();
         if new_utxo_count > 0 {
             info!("   💰 TaskSyncPending: inserted {} new output(s)", new_utxo_count);
@@ -203,6 +308,9 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         }
         if reconciled_count > 0 {
             info!("   🔄 TaskSyncPending: reconciled {} stale output(s)", reconciled_count);
+        }
+        if failed_unconfirmed > 0 {
+            warn!("   🔴 TaskSyncPending: {} unconfirmed output(s) failed to confirm", failed_unconfirmed);
         }
     }
 

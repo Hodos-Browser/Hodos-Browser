@@ -85,10 +85,34 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     return null;
   });
 
+  // Failure notification state (red banner)
+  const [failureNotification, setFailureNotification] = useState<{ count: number; amount: number } | null>(null);
+
+  // Self-poll peerpay status every 10s while panel is visible (live updates)
+  useEffect(() => {
+    const pollStatus = () => {
+      fetch('http://127.0.0.1:31301/wallet/peerpay/status')
+        .then(r => r.json())
+        .then((data: { receive_count?: number; receive_amount?: number;
+                       failure_count?: number; failure_amount?: number }) => {
+          const rc = data.receive_count || 0;
+          const ra = data.receive_amount || 0;
+          const fc = data.failure_count || 0;
+          const fa = data.failure_amount || 0;
+          setPeerpayNotification(rc > 0 ? { count: rc, amount: ra } : null);
+          setFailureNotification(fc > 0 ? { count: fc, amount: fa } : null);
+        })
+        .catch(() => {});
+    };
+    const interval = setInterval(pollStatus, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleDismissPeerpay = () => {
     setPeerpayNotification(null);
+    setFailureNotification(null);
     fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
-    // Notify header to clear the green dot
+    // Notify header to clear the dot
     if (window.cefMessage?.send) {
       window.cefMessage.send('wallet_payment_dismissed', []);
     }
@@ -410,6 +434,23 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             >
               Details
             </HodosButton>
+            <HodosButton variant="ghost" size="small" className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
+              Dismiss
+            </HodosButton>
+          </div>
+        </div>
+      )}
+
+      {/* Failed Payment Banner (red) */}
+      {failureNotification && failureNotification.count > 0 && (
+        <div className="peerpay-banner-light peerpay-banner-failure">
+          <div className="peerpay-banner-content">
+            <span>
+              {failureNotification.count} payment{failureNotification.count > 1 ? 's' : ''} failed to confirm:{' '}
+              {(failureNotification.amount / 100_000_000).toFixed(8)} BSV
+            </span>
+          </div>
+          <div className="peerpay-banner-actions">
             <HodosButton variant="ghost" size="small" className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
               Dismiss
             </HodosButton>

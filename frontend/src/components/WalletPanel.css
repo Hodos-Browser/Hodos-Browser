@@ -1454,6 +1454,21 @@
   animation: fadeInLight 0.3s ease-in;
 }
 
+/* Red failure banner variant */
+.peerpay-banner-failure {
+  border-left-color: #c62828;
+  background: linear-gradient(135deg, #1a0a0a 0%, #221111 100%);
+  color: #ef9a9a;
+}
+
+.peerpay-banner-failure .peerpay-dismiss-button {
+  background: #c62828;
+}
+
+.peerpay-banner-failure .peerpay-dismiss-button:hover {
+  background: #b71c1c;
+}
+
 .peerpay-banner-content {
   margin-bottom: 6px;
   font-weight: 500;
