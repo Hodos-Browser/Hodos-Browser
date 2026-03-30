@@ -281,11 +281,14 @@ jobs:
 
       # Download Sparkle 2 framework for auto-updates
       - name: Download Sparkle 2
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Downloading Sparkle 2..."
-          curl -L -o Sparkle-2.7.5.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/2.7.5/Sparkle-2.7.5.tar.xz"
+          echo "Downloading Sparkle 2.9.0..."
+          gh release download 2.9.0 --repo sparkle-project/Sparkle --pattern "Sparkle-*.tar.xz" --output Sparkle.tar.xz
           mkdir -p sparkle-extract
-          tar -xf Sparkle-2.7.5.tar.xz -C sparkle-extract
+          tar -xf Sparkle.tar.xz -C sparkle-extract
+          ls -la sparkle-extract/
           # Copy framework to expected location
           cp -r sparkle-extract/Sparkle.framework external/Sparkle.framework
           echo "Sparkle 2 framework installed:"
