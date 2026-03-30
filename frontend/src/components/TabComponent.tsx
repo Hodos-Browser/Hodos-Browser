@@ -3,6 +3,7 @@ import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import { HodosButton } from './HodosButton';
 import PublicIcon from '@mui/icons-material/Public';
+import { tokens } from '../theme/tokens';
 import CircularProgress from '@mui/material/CircularProgress';
 import type { Tab } from '../types/TabTypes';
 
@@ -101,7 +102,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           width: isActive ? '100%' : 'calc(100% - 8px)',
           height: isActive ? 36 : 30,
           boxSizing: 'border-box',
-          backgroundColor: isActive ? '#111827' : 'transparent',
+          backgroundColor: isActive ? '#46464f' : 'transparent',
           borderRadius: isActive ? '8px 8px 0 0' : '6px',
           marginBottom: isActive ? 0 : '6px',
           position: 'relative',
@@ -121,7 +122,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
           } : {},
 
           '&:hover': {
-            backgroundColor: isActive ? '#111827' : 'rgba(255, 255, 255, 0.06)',
+            backgroundColor: isActive ? '#46464f' : 'rgba(255, 255, 255, 0.06)',
             '& .tab-close-btn': {
               opacity: 1,
             },
@@ -168,7 +169,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
             whiteSpace: 'nowrap',
             fontSize: 12,
             fontWeight: isActive ? 500 : 400,
-            color: isActive ? '#f0f0f0' : '#9ca3af',
+            color: isActive ? tokens.textPrimary : tokens.textSecondary,
             lineHeight: 1,
           }}
         >
@@ -239,7 +240,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
               width: 24,
               height: 24,
               borderRadius: '50%',
-              boxShadow: '12px 12px 0 #111827',
+              boxShadow: '12px 12px 0 #46464f',
               bottom: 0,
               left: -12,
             },
@@ -263,7 +264,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
               width: 24,
               height: 24,
               borderRadius: '50%',
-              boxShadow: '-12px 12px 0 #111827',
+              boxShadow: '-12px 12px 0 #46464f',
               bottom: 0,
               right: -12,
             },

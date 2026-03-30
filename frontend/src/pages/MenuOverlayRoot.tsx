@@ -19,6 +19,7 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import RemoveIcon from '@mui/icons-material/Remove';
 import { HodosButton } from '../components/HodosButton';
+import { tokens } from '../theme/tokens';
 
 declare global {
   interface Window {
@@ -44,20 +45,20 @@ const MenuItemRow: React.FC<MenuItemRowProps> = ({ icon, label, shortcut, onClic
       py: 0.75,
       cursor: disabled ? 'default' : 'pointer',
       opacity: disabled ? 0.5 : 1,
-      '&:hover': disabled ? {} : { backgroundColor: '#1f2937' },
+      '&:hover': disabled ? {} : { backgroundColor: tokens.bgSurfaceHover },
       userSelect: 'none',
     }}
   >
     {icon && (
-      <Box sx={{ width: 24, mr: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af' }}>
+      <Box sx={{ width: 24, mr: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', color: tokens.textSecondary }}>
         {icon}
       </Box>
     )}
-    <Typography sx={{ flex: 1, fontSize: '0.82rem', color: '#f0f0f0' }}>
+    <Typography sx={{ flex: 1, fontSize: '0.82rem', color: tokens.textPrimary }}>
       {label}
     </Typography>
     {shortcut && (
-      <Typography sx={{ fontSize: '0.72rem', color: '#6b7280', ml: 2 }}>
+      <Typography sx={{ fontSize: '0.72rem', color: tokens.textMuted, ml: 2 }}>
         {shortcut}
       </Typography>
     )}
@@ -66,11 +67,11 @@ const MenuItemRow: React.FC<MenuItemRowProps> = ({ icon, label, shortcut, onClic
 
 const ZoomRow: React.FC<{ currentZoom: number; onAction: (a: string) => void }> = ({ currentZoom, onAction }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 0.5, height: 36 }}>
-    <ZoomOutIcon sx={{ fontSize: 16, color: '#9ca3af', mr: 0.5 }} />
+    <ZoomOutIcon sx={{ fontSize: 16, color: tokens.textSecondary, mr: 0.5 }} />
     <HodosButton variant="icon" size="small" onClick={() => onAction('zoom_out')} aria-label="Zoom out">
       <RemoveIcon sx={{ fontSize: 16 }} />
     </HodosButton>
-    <Typography sx={{ mx: 1, minWidth: 40, textAlign: 'center', fontSize: '0.78rem', color: '#f0f0f0' }}>
+    <Typography sx={{ mx: 1, minWidth: 40, textAlign: 'center', fontSize: '0.78rem', color: tokens.textPrimary }}>
       {currentZoom}%
     </Typography>
     <HodosButton variant="icon" size="small" onClick={() => onAction('zoom_in')} aria-label="Zoom in">
@@ -127,8 +128,8 @@ const MenuOverlayRoot: React.FC = () => {
       sx={{
         width: '100%',
         height: '100%',
-        bgcolor: '#1a1d23',
-        color: '#f0f0f0',
+        bgcolor: tokens.bgSurface,
+        color: tokens.textPrimary,
         py: 0.5,
         overflowY: 'auto',
       }}
@@ -141,7 +142,7 @@ const MenuOverlayRoot: React.FC = () => {
         onClick={() => handleAction('new_tab')}
       />
 
-      <Divider sx={{ borderColor: '#2a2d35', my: 0.5 }} />
+      <Divider sx={{ borderColor: tokens.borderDefault, my: 0.5 }} />
 
       {/* Section 2: Content Access */}
       <MenuItemRow
@@ -163,7 +164,7 @@ const MenuOverlayRoot: React.FC = () => {
         onClick={() => handleAction('downloads')}
       />
 
-      <Divider sx={{ borderColor: '#2a2d35', my: 0.5 }} />
+      <Divider sx={{ borderColor: tokens.borderDefault, my: 0.5 }} />
 
       {/* Section 3: Page Actions */}
       <ZoomRow currentZoom={currentZoom} onAction={handleAction} />
@@ -180,7 +181,7 @@ const MenuOverlayRoot: React.FC = () => {
         onClick={() => handleAction('find')}
       />
 
-      <Divider sx={{ borderColor: '#2a2d35', my: 0.5 }} />
+      <Divider sx={{ borderColor: tokens.borderDefault, my: 0.5 }} />
 
       {/* Section 4: Developer Tools */}
       <MenuItemRow
@@ -190,7 +191,7 @@ const MenuOverlayRoot: React.FC = () => {
         onClick={() => handleAction('devtools')}
       />
 
-      <Divider sx={{ borderColor: '#2a2d35', my: 0.5 }} />
+      <Divider sx={{ borderColor: tokens.borderDefault, my: 0.5 }} />
 
       {/* Section 5: Settings + Exit */}
       <MenuItemRow

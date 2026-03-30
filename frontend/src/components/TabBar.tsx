@@ -3,6 +3,7 @@ import { Box, Tooltip, CircularProgress, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import { HodosButton } from './HodosButton';
 import type { Tab } from '../types/TabTypes';
+import { tokens } from '../theme/tokens';
 import { TabComponent } from './TabComponent';
 
 const DRAG_THRESHOLD = 5; // px before horizontal drag starts
@@ -232,7 +233,7 @@ export const TabBar: React.FC<TabBarProps> = ({
       sx={{
         display: 'flex',
         alignItems: 'center',
-        backgroundColor: '#0f1117',
+        backgroundColor: '#1e1e24',
         paddingX: '6px',
         height: 42,
         overflowX: 'auto',
@@ -261,8 +262,8 @@ export const TabBar: React.FC<TabBarProps> = ({
       {/* Loading indicator or empty state */}
       {tabs.length === 0 && (
         <Box sx={{ display: 'flex', alignItems: 'center', px: 2, height: '100%' }}>
-          {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: '#9ca3af' }} />}
-          <Typography variant="body2" sx={{ color: '#9ca3af', fontSize: 12 }}>
+          {isLoading && <CircularProgress size={14} sx={{ mr: 1, color: tokens.textSecondary }} />}
+          <Typography variant="body2" sx={{ color: tokens.textSecondary, fontSize: 12 }}>
             {isLoading ? 'Loading tabs...' : 'No tabs'}
           </Typography>
         </Box>

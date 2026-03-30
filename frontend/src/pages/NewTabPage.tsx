@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { isUrl, normalizeUrl, toSearchUrl } from '../utils/urlDetection';
+import { tokens } from '../theme/tokens';
 
 interface TopSite {
     url: string;
@@ -202,12 +203,12 @@ const NewTabPage: React.FC = () => {
         <div style={{
             width: '100vw',
             height: '100vh',
-            backgroundColor: '#1a1a1a',
+            background: `radial-gradient(ellipse 70% 30% at 50% 58%, rgba(166, 124, 0, 0.18) 0%, transparent 60%), radial-gradient(ellipse 90% 85% at 50% 45%, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0.06) 50%, transparent 80%), ${tokens.bgPrimary}`,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'flex-start',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            fontFamily: tokens.fontUi,
             overflow: 'hidden',
             margin: 0,
             padding: 0,
@@ -295,20 +296,20 @@ const NewTabPage: React.FC = () => {
                             borderRadius: 24,
                             paddingLeft: 44,
                             paddingRight: 16,
-                            backgroundColor: '#2d2d2d',
-                            border: '1px solid #3d3d3d',
+                            backgroundColor: tokens.bgSurface,
+                            border: `1px solid ${tokens.borderDefault}`,
                             fontSize: 16,
-                            color: '#e8e8e8',
+                            color: tokens.textPrimary,
                             outline: 'none',
-                            caretColor: '#a67c00',
+                            caretColor: tokens.gold,
                         }}
                         onFocus={(e) => {
-                            e.target.style.borderColor = '#a67c00';
-                            e.target.style.backgroundColor = '#333';
+                            e.target.style.borderColor = tokens.gold;
+                            e.target.style.backgroundColor = tokens.bgSurfaceHover;
                         }}
                         onBlur={(e) => {
-                            e.target.style.borderColor = '#3d3d3d';
-                            e.target.style.backgroundColor = '#2d2d2d';
+                            e.target.style.borderColor = tokens.borderDefault;
+                            e.target.style.backgroundColor = tokens.bgSurface;
                         }}
                     />
                 </div>
@@ -329,21 +330,24 @@ const NewTabPage: React.FC = () => {
                                 width: 84,
                                 height: 84,
                                 borderRadius: 12,
-                                backgroundColor: '#2d2d2d',
+                                background: `radial-gradient(ellipse 80% 50% at 50% 80%, rgba(166, 124, 0, 0.10) 0%, transparent 70%), radial-gradient(ellipse 70% 50% at 50% 30%, rgba(255, 255, 255, 0.08) 0%, transparent 70%), ${tokens.bgSurface}`,
+                                border: `1px solid ${tokens.borderSubtle}`,
                                 display: 'flex',
                                 flexDirection: 'column',
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 cursor: 'pointer',
-                                transition: 'background-color 0.15s',
+                                transition: 'border-color 0.2s, box-shadow 0.2s',
                                 padding: 8,
                                 boxSizing: 'border-box',
                             }}
                             onMouseEnter={(e) => {
-                                (e.currentTarget as HTMLDivElement).style.backgroundColor = '#3a3a3a';
+                                (e.currentTarget as HTMLDivElement).style.borderColor = tokens.borderDefault;
+                                (e.currentTarget as HTMLDivElement).style.boxShadow = '0 4px 16px rgba(0,0,0,0.4), 0 0 12px rgba(166, 124, 0, 0.06)';
                             }}
                             onMouseLeave={(e) => {
-                                (e.currentTarget as HTMLDivElement).style.backgroundColor = '#2d2d2d';
+                                (e.currentTarget as HTMLDivElement).style.borderColor = tokens.borderSubtle;
+                                (e.currentTarget as HTMLDivElement).style.boxShadow = 'none';
                             }}
                         >
                             <img
@@ -361,7 +365,7 @@ const NewTabPage: React.FC = () => {
                                 }}
                             />
                             <span style={{
-                                color: '#ccc',
+                                color: tokens.textSecondary,
                                 fontSize: 11,
                                 textAlign: 'center',
                                 overflow: 'hidden',

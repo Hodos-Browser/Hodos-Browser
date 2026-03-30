@@ -9,6 +9,7 @@ import {
     CircularProgress,
 } from '@mui/material';
 import { HodosButton } from '../components/HodosButton';
+import { tokens } from '../theme/tokens';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -486,7 +487,7 @@ const MainBrowserView: React.FC = () => {
                 overflow: 'hidden',
                 margin: '-8px',
                 padding: 0,
-                bgcolor: '#0f1117',
+                bgcolor: '#1e1e24',
             }}
         >
             {/* Tab Bar */}
@@ -503,8 +504,8 @@ const MainBrowserView: React.FC = () => {
 
             {/* Top Navigation Bar */}
             <Toolbar sx={{
-                bgcolor: '#111827',
-                borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                bgcolor: '#46464f',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
                 borderRadius: '0',
                 minHeight: '53px !important',
                 height: '53px',
@@ -570,7 +571,7 @@ const MainBrowserView: React.FC = () => {
                                 <LockIcon sx={{ fontSize: 16, color: '#188038' }} />
                             )}
                             {securityState === 'insecure' && (
-                                <LockOpenIcon sx={{ fontSize: 16, color: '#6b7280' }} />
+                                <LockOpenIcon sx={{ fontSize: 16, color: '#666' }} />
                             )}
                             {securityState === 'error' && (
                                 <ErrorOutlineIcon sx={{ fontSize: 16, color: '#d93025' }} />
@@ -680,10 +681,10 @@ const MainBrowserView: React.FC = () => {
                             borderRadius: 20,
                             paddingLeft: securityState !== 'none' ? 30 : 16,
                             paddingRight: 110,
-                            backgroundColor: '#1a1d23',
-                            border: '1px solid #2a2d35',
+                            background: 'linear-gradient(90deg, #c0c2c8 0%, #b0b2b8 70%, #3a3a42 100%)',
+                            border: '1px solid #4a4a55',
                             fontSize: 14,
-                            color: '#f0f0f0',
+                            color: '#1a1a1a',
                             outline: 'none',
                         }}
                     />
@@ -758,7 +759,7 @@ const MainBrowserView: React.FC = () => {
                             }}
                             aria-label="Privacy Shield"
                             title="Privacy Shield"
-                            style={{ color: adblockEnabled ? '#a67c00' : '#6b7280' }}
+                            style={{ color: adblockEnabled ? tokens.gold : tokens.textMuted }}
                         >
                             <Badge
                                 variant="dot"
@@ -780,6 +781,9 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Spacer to help center address bar */}
                 <Box sx={{ flex: 1 }} />
+
+                {/* Right-side toolbar buttons */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexShrink: 0 }}>
 
                 {/* Download Button */}
                 <HodosButton
@@ -896,6 +900,8 @@ const MainBrowserView: React.FC = () => {
                 >
                     <MoreVertIcon fontSize="small" />
                 </HodosButton>
+
+                </Box>
 
                 {/* Find Bar - inline in toolbar */}
                 {findBarVisible && (

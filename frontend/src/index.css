@@ -1,3 +1,5 @@
+@import './theme/tokens.css';
+
 /* Reset only html/body/root — do NOT reset all elements (breaks MUI component spacing) */
 html, body, #root {
   margin: 0;
