@@ -388,9 +388,17 @@ jobs:
           # 0. Sign Sparkle.framework if present (must be signed before main app)
           if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
             echo "Signing Sparkle.framework..."
-            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
-            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
-            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework"
+            # Sign inside-out: binaries first, then XPC services, then the versioned framework
+            find "$APP/Contents/Frameworks/Sparkle.framework" -name "*.dylib" -type f -exec $CODESIGN "$IDENTITY" {} \;
+            for sparkle_bin in Autoupdate "Updater.app"; do
+              if [ -e "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/$sparkle_bin" ]; then
+                $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/$sparkle_bin"
+              fi
+            done
+            # Sign XPC services if present
+            find "$APP/Contents/Frameworks/Sparkle.framework" -name "*.xpc" -type d -exec $CODESIGN "$IDENTITY" {} \;
+            # Sign the versioned framework bundle (not the symlink at top level)
+            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
             echo "Sparkle.framework signed"
           fi
 
