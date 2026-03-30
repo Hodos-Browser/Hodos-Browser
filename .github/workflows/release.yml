@@ -389,18 +389,12 @@ jobs:
           CODESIGN="codesign --force --timestamp --options runtime --sign"
 
           # 0. Sign Sparkle.framework if present (must be signed before main app)
-          # IMPORTANT: Only sign through Versions/B/ (real path), never through
-          # Versions/Current/ (symlink) — signing both causes signature mismatch.
-          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
-          if [ -d "$SPARKLE" ]; then
-            echo "Signing Sparkle.framework..."
-            # Sign inside-out: XPC services first, then binaries, then bundle
-            for xpc in "$SPARKLE/XPCServices/"*.xpc; do
-              [ -d "$xpc" ] && $CODESIGN "$IDENTITY" "$xpc"
-            done
-            [ -f "$SPARKLE/Autoupdate" ] && $CODESIGN "$IDENTITY" "$SPARKLE/Autoupdate"
-            [ -d "$SPARKLE/Updater.app" ] && $CODESIGN "$IDENTITY" "$SPARKLE/Updater.app"
-            $CODESIGN "$IDENTITY" "$SPARKLE"
+          # Sparkle ships pre-signed. We just need to re-sign with our identity.
+          # codesign --deep handles the entire framework hierarchy correctly.
+          SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+          if [ -d "$SPARKLE_FW" ]; then
+            echo "Signing Sparkle.framework with --deep..."
+            codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "$SPARKLE_FW"
             echo "Sparkle.framework signed"
           fi
 
