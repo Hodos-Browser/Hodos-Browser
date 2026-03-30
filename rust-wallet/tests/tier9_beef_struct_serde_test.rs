@@ -774,6 +774,7 @@ fn t9_05_serde_roundtrips() {
             script: "76a914...88ac".to_string(),
             address_index: 3,
             custom_instructions: None,
+            confirmed: true,
         };
         let json = serde_json::to_string(&utxo).map_err(|e| format!("{}", e))?;
         let back: UTXO = serde_json::from_str(&json).map_err(|e| format!("{}", e))?;
@@ -795,6 +796,7 @@ fn t9_05_serde_roundtrips() {
             script: "76a914...88ac".to_string(),
             address_index: -1,
             custom_instructions: Some("brc29-derivation".to_string()),
+            confirmed: true,
         };
         let json = serde_json::to_string(&utxo).map_err(|e| format!("{}", e))?;
         if !json.contains("custom_instructions") {

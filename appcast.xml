@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:ns0="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Hodos Browser Updates</title>
+    <link>https://hodosbrowser.com</link>
+    <description>Auto-update feed for Hodos Browser</description>
+    <language>en</language>
+    <item>
+      <title>Version 0.2.0-beta.1</title>
+      <pubDate>Mon, 30 Mar 2026 18:15:04 +0000</pubDate>
+      <ns0:version>0.2.0-beta.1</ns0:version>
+      <ns0:os>windows</ns0:os>
+      <enclosure url="https://github.com/Hodos-Browser/Hodos-Browser/releases/download/v0.2.0-beta.1/HodosBrowser-0.2.0-beta.1-setup.exe" length="0" type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 0.2.0-beta.1</title>
+      <pubDate>Mon, 30 Mar 2026 18:15:04 +0000</pubDate>
+      <ns0:version>0.2.0-beta.1</ns0:version>
+      <ns0:os>macos</ns0:os>
+      <enclosure url="https://github.com/Hodos-Browser/Hodos-Browser/releases/download/v0.2.0-beta.1/HodosBrowser-0.2.0-beta.1.dmg" length="0" type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>
