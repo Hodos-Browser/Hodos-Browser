@@ -13,6 +13,7 @@ struct BrowserSettings {
     std::string downloadsPath;  // Empty = system default
     bool restoreSessionOnStart = false;
     bool askWhereToSave = true;
+    bool autoUpdateEnabled = true;  // Check for updates automatically on startup
 };
 
 // Privacy settings (ad blocking, tracking, etc.)
@@ -37,7 +38,7 @@ struct WalletSettings {
 // JSON serialization
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
     homepage, searchEngine, zoomLevel, showBookmarkBar,
-    downloadsPath, restoreSessionOnStart, askWhereToSave)
+    downloadsPath, restoreSessionOnStart, askWhereToSave, autoUpdateEnabled)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
@@ -76,6 +77,7 @@ public:
     void SetDownloadsPath(const std::string& path);
     void SetRestoreSessionOnStart(bool restore);
     void SetAskWhereToSave(bool ask);
+    void SetAutoUpdateEnabled(bool enabled);
 
     // Privacy settings
     void SetAdBlockEnabled(bool enabled);

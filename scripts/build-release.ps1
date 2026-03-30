@@ -104,6 +104,15 @@ Copy-Item (Join-Path $ProjectRoot "adblock-engine\target\release\hodos-adblock.e
 # Copy all CEF runtime DLLs (wildcard to prevent breakage on CEF updates)
 Copy-Item (Join-Path $CefRelease "*.dll") $StagingDir
 
+# Copy WinSparkle.dll for auto-updates
+$WinSparkleDll = Join-Path $ProjectRoot "external\winsparkle\WinSparkle-0.8.1\x64\Release\WinSparkle.dll"
+if (Test-Path $WinSparkleDll) {
+    Copy-Item $WinSparkleDll $StagingDir
+    Write-Host "   Copied WinSparkle.dll" -ForegroundColor Green
+} else {
+    Write-Host "   WARNING: WinSparkle.dll not found at $WinSparkleDll" -ForegroundColor Yellow
+}
+
 # Copy CEF runtime data files
 Copy-Item (Join-Path $CefRelease "*.bin") $StagingDir
 Copy-Item (Join-Path $CefRelease "*.dat") $StagingDir

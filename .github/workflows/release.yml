@@ -108,6 +108,14 @@ jobs:
         run: |
           vcpkg install nlohmann-json:x64-windows-static sqlite3:x64-windows-static
 
+      # Download WinSparkle for auto-update support
+      - name: Download WinSparkle
+        shell: pwsh
+        run: |
+          New-Item -Path "external\winsparkle" -ItemType Directory -Force
+          Invoke-WebRequest -Uri "https://github.com/vslavik/winsparkle/releases/download/v0.8.1/WinSparkle-0.8.1.zip" -OutFile "external\winsparkle\WinSparkle.zip"
+          Expand-Archive "external\winsparkle\WinSparkle.zip" -DestinationPath "external\winsparkle"
+
       # Configure CMake (needed before build script)
       - name: Configure CMake
         shell: pwsh
@@ -465,6 +473,28 @@ jobs:
           find . -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.dmg" \) -exec sha256sum {} \; > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Checkout code (for appcast script)
+        uses: actions/checkout@v6
+
+      - name: Generate appcast.xml
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+
+          # Get file sizes
+          WIN_SIZE=$(stat -c%s "artifacts/windows-installer/HodosBrowser-${VERSION}-setup.exe" 2>/dev/null || echo "0")
+          MAC_SIZE=$(stat -c%s "artifacts/macos-dmg/HodosBrowser-${VERSION}.dmg" 2>/dev/null || echo "0")
+
+          python3 scripts/generate-appcast.py \
+            --version "$VERSION" \
+            --windows-url "${REPO_URL}/HodosBrowser-${VERSION}-setup.exe" \
+            --windows-size "$WIN_SIZE" \
+            --macos-url "${REPO_URL}/HodosBrowser-${VERSION}.dmg" \
+            --macos-size "$MAC_SIZE" \
+            --output artifacts/appcast.xml
+
+          cat artifacts/appcast.xml
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -474,4 +504,5 @@ jobs:
             artifacts/windows-installer/*
             artifacts/windows-portable/*
             artifacts/macos-dmg/*
+            artifacts/appcast.xml
             artifacts/SHA256SUMS.txt

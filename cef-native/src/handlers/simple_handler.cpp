@@ -32,6 +32,7 @@
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/SettingsManager.h"
+#include "../../include/core/AutoUpdater.h"
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/ProfileImporter.h"
@@ -2436,6 +2437,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             settings.SetDefaultRateLimitPerMin(std::stoi(value));
         } else if (key == "wallet.peerpayAutoAccept") {
             settings.SetPeerpayAutoAccept(value == "true");
+        }
+        // Auto-update settings
+        else if (key == "browser.autoUpdateEnabled") {
+            settings.SetAutoUpdateEnabled(value == "true");
+            AutoUpdater::GetInstance().SetAutoCheckEnabled(value == "true");
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }
@@ -2450,6 +2456,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("⚙️ Broadcast settings_updated to header browser");
         }
 
+        return true;
+    }
+
+    // Check for updates — triggered by "Check for updates" button in Settings > About
+    if (message_name == "check_for_updates") {
+        LOG_INFO_BROWSER("🔄 Manual update check requested from frontend");
+        AutoUpdater::GetInstance().CheckForUpdatesInteractively();
         return true;
     }
 

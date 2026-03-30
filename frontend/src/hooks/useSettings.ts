@@ -9,6 +9,7 @@ export interface BrowserSettings {
   downloadsPath: string;
   restoreSessionOnStart: boolean;
   askWhereToSave: boolean;
+  autoUpdateEnabled: boolean;
 }
 
 export interface PrivacySettings {
@@ -44,6 +45,7 @@ const defaultSettings: AllSettings = {
     downloadsPath: '',
     restoreSessionOnStart: false,
     askWhereToSave: true,
+    autoUpdateEnabled: true,
   },
   privacy: {
     adBlockEnabled: true,

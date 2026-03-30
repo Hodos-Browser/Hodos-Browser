@@ -39,6 +39,8 @@ rust-wallet/target/
 
 # Reference libraries and external dependencies
 reference/
+external/winsparkle/
+external/keys/
 
 # Archived documentation (already in repo, no longer tracking changes)
 archived-docs/

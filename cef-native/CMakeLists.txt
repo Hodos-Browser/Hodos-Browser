@@ -163,6 +163,7 @@ if(APPLE)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
+        src/core/AutoUpdater_mac.mm
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
 
@@ -227,6 +228,8 @@ elseif(WIN32)
         src/core/ProfileImporter.cpp
         include/core/LayoutHelpers.h
         include/core/LocalFileResourceHandler.h
+        include/core/AutoUpdater.h
+        src/core/AutoUpdater.cpp
         hodos.rc
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
@@ -331,10 +334,15 @@ if(APPLE)
     )
 
 elseif(WIN32)
+    # WinSparkle for auto-updates
+    set(WINSPARKLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../external/winsparkle/WinSparkle-0.8.1")
+    target_include_directories(HodosBrowserShell PRIVATE "${WINSPARKLE_DIR}/include")
+
     # Windows: Link Windows DLLs and libraries
     target_link_directories(HodosBrowserShell PRIVATE
         "${CEF_ROOT}/Release"
         "${WRAPPER_LIB_PATH}"
+        "${WINSPARKLE_DIR}/x64/Release"
     )
 
     target_link_libraries(HodosBrowserShell PRIVATE
@@ -356,6 +364,7 @@ elseif(WIN32)
         dwmapi
         version
         winhttp
+        WinSparkle
         OpenSSL::SSL
         OpenSSL::Crypto
         nlohmann_json::nlohmann_json
@@ -385,8 +394,13 @@ if(WIN32)
             "${RESOURCES_DIR}"
             "${OUTPUT_DIR}"
 
-        COMMAND ${CMAKE_COMMAND} -E echo "CEF files copied."
-        COMMENT "Copying all CEF binaries and resources"
+        # Copy WinSparkle.dll for auto-updates
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${WINSPARKLE_DIR}/x64/Release/WinSparkle.dll"
+            "${OUTPUT_DIR}/WinSparkle.dll"
+
+        COMMAND ${CMAKE_COMMAND} -E echo "CEF files + WinSparkle.dll copied."
+        COMMENT "Copying all CEF binaries, resources, and WinSparkle"
     )
 elseif(APPLE)
     # ============================================================================

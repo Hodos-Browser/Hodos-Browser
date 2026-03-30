@@ -39,6 +39,7 @@
 #include "include/core/ProfileLock.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
+#include "include/core/AutoUpdater.h"
 #include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
@@ -428,6 +429,9 @@ void ClearBrowsingDataOnExit() {
 // Graceful shutdown function
 void ShutdownApplication() {
     LOG_INFO("🛑 Starting graceful application shutdown...");
+
+    // Step 0: Clean up auto-updater (cancels any pending operations)
+    AutoUpdater::GetInstance().Cleanup();
 
     // Step 0a: Save session tabs before anything is closed
     SaveSession();
@@ -3042,6 +3046,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             g_window_shown = true;
         }
     }), 5000);
+
+    // Initialize auto-updater after all windows/overlays are created.
+    // WinSparkle will check for updates in the background if auto-check is enabled.
+    {
+        auto& settings = SettingsManager::GetInstance();
+        bool autoCheck = settings.GetBrowserSettings().autoUpdateEnabled;
+        std::string appVersion = "0.2.0-beta.1"; // TODO: derive from build system
+        std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
+
+        auto& updater = AutoUpdater::GetInstance();
+        updater.SetShutdownCallback([]() {
+            // WinSparkle needs us to shut down so the installer can run.
+            // Post WM_CLOSE to the main window to trigger graceful shutdown.
+            extern HWND g_hwnd;
+            if (g_hwnd && IsWindow(g_hwnd)) {
+                PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+            }
+        });
+        updater.Initialize(appVersion, appcastUrl, autoCheck);
+        LOG_INFO("Auto-updater initialized (version=" + appVersion + ", autoCheck=" + std::string(autoCheck ? "true" : "false") + ")");
+    }
 
     CefRunMessageLoop();
 
