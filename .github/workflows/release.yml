@@ -382,6 +382,8 @@ jobs:
         run: |
           APP="cef-native/build/bin/HodosBrowserShell.app"
           ENTITLEMENTS="cef-native/mac/entitlements.plist"
+          # Fix Windows CRLF line endings that break codesign plist parsing
+          sed -i '' 's/\r$//' "$ENTITLEMENTS"
           IDENTITY="Developer ID Application: Matthew Archbold"
           CODESIGN="codesign --force --timestamp --options runtime --sign"
 
