@@ -279,6 +279,18 @@ jobs:
           npm ci
           npm run build
 
+      # Download Sparkle 2 framework for auto-updates
+      - name: Download Sparkle 2
+        run: |
+          echo "Downloading Sparkle 2..."
+          curl -L -o Sparkle-2.7.5.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/2.7.5/Sparkle-2.7.5.tar.xz"
+          mkdir -p sparkle-extract
+          tar -xf Sparkle-2.7.5.tar.xz -C sparkle-extract
+          # Copy framework to expected location
+          cp -r sparkle-extract/Sparkle.framework external/Sparkle.framework
+          echo "Sparkle 2 framework installed:"
+          ls -la external/Sparkle.framework/
+
       # Build CEF shell
       - name: Configure and build CEF shell
         run: |
@@ -328,6 +340,12 @@ jobs:
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
+          # Copy Sparkle.framework into app bundle Frameworks/
+          if [ -d "external/Sparkle.framework" ]; then
+            cp -r external/Sparkle.framework "$APP/Frameworks/"
+            echo "Sparkle.framework copied to app bundle"
+          fi
+
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
           echo "App bundle structure:"
           find "cef-native/build/bin/HodosBrowserShell.app" -maxdepth 4 -type d | head -30
@@ -362,6 +380,15 @@ jobs:
           ENTITLEMENTS="cef-native/mac/entitlements.plist"
           IDENTITY="Developer ID Application: Matthew Archbold"
           CODESIGN="codesign --force --timestamp --options runtime --sign"
+
+          # 0. Sign Sparkle.framework if present (must be signed before main app)
+          if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+            echo "Signing Sparkle.framework..."
+            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
+            $CODESIGN "$IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework"
+            echo "Sparkle.framework signed"
+          fi
 
           # 1. Sign all dylibs inside CEF framework individually
           find "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" -name "*.dylib" -type f | while read dylib; do
@@ -506,3 +533,20 @@ jobs:
             artifacts/macos-dmg/*
             artifacts/appcast.xml
             artifacts/SHA256SUMS.txt
+
+      # Push appcast.xml to website repo for auto-update discovery
+      - name: Push appcast to website
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/hodosbrowser.com.git website-repo
+          cp artifacts/appcast.xml website-repo/public/appcast.xml 2>/dev/null || \
+          cp artifacts/appcast.xml website-repo/static/appcast.xml 2>/dev/null || \
+          cp artifacts/appcast.xml website-repo/src/pages/appcast.xml 2>/dev/null || \
+          cp artifacts/appcast.xml website-repo/appcast.xml
+          cd website-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Update appcast.xml for ${GITHUB_REF_NAME}"
+          git push || echo "WARNING: Could not push appcast to website repo (check permissions)"

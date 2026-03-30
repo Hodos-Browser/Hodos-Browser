@@ -26,5 +26,9 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://hodosbrowser.com/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q=</string>
 </dict>
 </plist>

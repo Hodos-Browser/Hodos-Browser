@@ -241,8 +241,8 @@ if(APPLE)
     set_target_properties(HodosBrowserShell PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
         MACOSX_BUNDLE_BUNDLE_NAME "HodosBrowser"
-        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.2.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.0"
     )
 elseif(WIN32)
     add_executable(HodosBrowserShell WIN32 ${SOURCES})
@@ -302,6 +302,17 @@ if(APPLE)
 
     message(STATUS "CEF framework found: ${CEF_LIBRARY}")
 
+    # Sparkle 2 framework for auto-updates (optional — downloaded by CI)
+    set(SPARKLE_FRAMEWORK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../external/Sparkle.framework")
+    if(EXISTS "${SPARKLE_FRAMEWORK_PATH}")
+        message(STATUS "Sparkle framework found: ${SPARKLE_FRAMEWORK_PATH}")
+        target_include_directories(HodosBrowserShell PRIVATE "${SPARKLE_FRAMEWORK_PATH}/Headers")
+        set(SPARKLE_LINK_LIB "${SPARKLE_FRAMEWORK_PATH}")
+    else()
+        message(STATUS "Sparkle framework not found — auto-update will be disabled on macOS")
+        set(SPARKLE_LINK_LIB "")
+    endif()
+
     target_link_libraries(HodosBrowserShell PRIVATE
         "${WRAPPER_LIB_PATH}/libcef_dll_wrapper.a"
         "${CEF_LIBRARY}"
@@ -315,6 +326,7 @@ if(APPLE)
         OpenSSL::SSL
         OpenSSL::Crypto
         ${SQLITE3_LIBRARY}
+        ${SPARKLE_LINK_LIB}
     )
 
     # macOS-specific compiler flags
