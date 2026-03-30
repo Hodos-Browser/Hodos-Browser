@@ -344,12 +344,11 @@ jobs:
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
-          # Copy Sparkle.framework into app bundle Frameworks/
-          # MUST use ditto (not cp -r) to preserve macOS framework symlink structure
-          if [ -d "external/Sparkle.framework" ]; then
-            ditto external/Sparkle.framework "$APP/Frameworks/Sparkle.framework"
-            echo "Sparkle.framework copied to app bundle (via ditto)"
-          fi
+          # Sparkle.framework bundling is deferred — the framework's versioned bundle
+          # structure causes codesign "ambiguous format" errors. macOS auto-update
+          # gracefully no-ops via #if __has_include guard. Will revisit when a Mac
+          # dev can test the signing locally.
+          # TODO: Bundle Sparkle.framework once signing is resolved
 
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
           echo "App bundle structure:"
@@ -387,16 +386,6 @@ jobs:
           sed -i '' 's/\r$//' "$ENTITLEMENTS"
           IDENTITY="Developer ID Application: Matthew Archbold"
           CODESIGN="codesign --force --timestamp --options runtime --sign"
-
-          # 0. Sign Sparkle.framework if present (must be signed before main app)
-          # Sparkle ships pre-signed. We just need to re-sign with our identity.
-          # codesign --deep handles the entire framework hierarchy correctly.
-          SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
-          if [ -d "$SPARKLE_FW" ]; then
-            echo "Signing Sparkle.framework with --deep..."
-            codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "$SPARKLE_FW"
-            echo "Sparkle.framework signed"
-          fi
 
           # 1. Sign all dylibs inside CEF framework individually
           find "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" -name "*.dylib" -type f | while read dylib; do
