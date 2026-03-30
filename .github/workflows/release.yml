@@ -519,9 +519,14 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           REPO_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
+          ls -la artifacts/ || true
+          ls -la artifacts/*/ || true
+
           # Get file sizes
-          WIN_SIZE=$(stat -c%s "artifacts/windows-installer/HodosBrowser-${VERSION}-setup.exe" 2>/dev/null || echo "0")
-          MAC_SIZE=$(stat -c%s "artifacts/macos-dmg/HodosBrowser-${VERSION}.dmg" 2>/dev/null || echo "0")
+          WIN_SIZE=$(find artifacts -name "HodosBrowser-${VERSION}-setup.exe" -exec stat -c%s {} \; 2>/dev/null | head -1)
+          MAC_SIZE=$(find artifacts -name "HodosBrowser-${VERSION}.dmg" -exec stat -c%s {} \; 2>/dev/null | head -1)
+          WIN_SIZE=${WIN_SIZE:-0}
+          MAC_SIZE=${MAC_SIZE:-0}
 
           python3 scripts/generate-appcast.py \
             --version "$VERSION" \
@@ -529,9 +534,10 @@ jobs:
             --windows-size "$WIN_SIZE" \
             --macos-url "${REPO_URL}/HodosBrowser-${VERSION}.dmg" \
             --macos-size "$MAC_SIZE" \
-            --output artifacts/appcast.xml
+            --output appcast.xml
 
-          cat artifacts/appcast.xml
+          cat appcast.xml
+          cp appcast.xml artifacts/appcast.xml || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -551,10 +557,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/hodosbrowser.com.git website-repo
-          cp artifacts/appcast.xml website-repo/public/appcast.xml 2>/dev/null || \
-          cp artifacts/appcast.xml website-repo/static/appcast.xml 2>/dev/null || \
-          cp artifacts/appcast.xml website-repo/src/pages/appcast.xml 2>/dev/null || \
-          cp artifacts/appcast.xml website-repo/appcast.xml
+          cp appcast.xml website-repo/public/appcast.xml 2>/dev/null || \
+          cp appcast.xml website-repo/static/appcast.xml 2>/dev/null || \
+          cp appcast.xml website-repo/src/pages/appcast.xml 2>/dev/null || \
+          cp appcast.xml website-repo/appcast.xml
           cd website-repo
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
