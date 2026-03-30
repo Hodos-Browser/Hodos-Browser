@@ -290,6 +290,7 @@ jobs:
           tar -xf Sparkle.tar.xz -C sparkle-extract
           ls -la sparkle-extract/
           # Copy framework to expected location
+          mkdir -p external
           cp -r sparkle-extract/Sparkle.framework external/Sparkle.framework
           echo "Sparkle 2 framework installed:"
           ls -la external/Sparkle.framework/
