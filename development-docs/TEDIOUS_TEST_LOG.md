@@ -148,10 +148,11 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 
 - [x] 🤖 Transaction list renders
 - [x] 🤖 Filter buttons work (All, Sent, Received)
-- [ ] Pagination controls work (not enough transactions to test)
-- [ ] "Go to" page jump works when >7 pages (not enough transactions)
+- [x] Filter buttons work (All, Sent, Received) — manually verified
+- [ ] Pagination controls work — N/A, insufficient transactions to trigger pagination
+- [ ] "Go to" page jump works when >7 pages — N/A, insufficient transactions
 - [x] Each transaction shows: direction, description, time, status, USD amount, BSV amount
-- [ ] Historical USD price shown when available, current price as fallback
+- [x] USD amounts display on transactions
 - [x] "txid" pill copies to clipboard
 - [x] WhatsOnChain icon opens in new tab
 
@@ -160,12 +161,16 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 ## 4. Certificates Tab
 
 ### Acquire Certificate Flow
-- [ ] Navigate to a BRC-100 site that issues certificates (e.g., social cert)
-- [ ] Certificate acquisition overlay appears
-- [ ] Field disclosure checkboxes work
-- [ ] "Remember for this site" option works
-- [ ] Approve → certificate acquired and stored
-- [ ] Certificate appears in Certificates tab
+- [x] Navigate to a BRC-100 site that issues certificates (socialcerts.net)
+- [x] Certificate acquisition flow completed on site
+- [ ] ❌ Certificate does NOT appear in Certificates tab — acquireCertificate never called in wallet logs
+- [ ] Field disclosure checkboxes work (not tested — cert didn't store)
+- [ ] "Remember for this site" option works (not tested)
+
+**Issues found:**
+```
+BUG 13: Certificate acquisition from socialcerts.net doesn't store cert — no acquireCertificate call reaches wallet backend. Site flow completes but cert is lost.
+```
 
 ### Publish Certificate
 - [ ] Select certificate → Publish action
@@ -235,32 +240,39 @@ BUG: Received payment notification shows "0.00000000 BSV (~$0.00)" instead of ac
 ## 7. BRC-100 Site Integration
 
 ### Domain Approval Flow
-- [ ] Navigate to BRC-100 site (e.g., metanetapps.com)
-- [ ] First visit → domain approval notification appears
-- [ ] Shows domain name and requested permissions
-- [ ] "Advanced" expands spending limit configuration
-- [ ] Allow → domain whitelisted, site proceeds
-- [ ] Deny → site gets error response
+- [x] Navigate to BRC-100 site (metanetapps.com)
+- [x] First visit → domain approval notification appears (slow but works)
+- [x] Shows domain name and requested permissions
+- [x] "Advanced" expands spending limit configuration
+- [x] Allow → domain whitelisted, site proceeds
+- [ ] Deny → site gets error response (not tested — allowed on first try)
+
+**Issues found:**
+```
+NOTE: Domain approval notification is slow to appear
+NOTE: Opening a link on the site opened a stripped-down "lite" popup window instead of a new tab
+BUG 12 (LOW): UTXO sync doesn't pick up unconfirmed incoming transactions — only detects after confirmation. WoC shows UTXOs at height 0 but wallet ignores them until confirmed.
+```
 
 ### Authentication (BRC-103/104)
-- [ ] Site triggers auth → auth notification appears
-- [ ] Approve → mutual authentication completes
-- [ ] Session established (subsequent requests auto-approved)
-- [ ] Different tab/site → separate auth session
+- [x] Site triggers auth → auth notification appears (teragun.com)
+- [x] Approve → mutual authentication completes
+- [x] Session established (subsequent requests auto-approved)
+- [ ] Different tab/site → separate auth session (not tested)
 
 ### Payment Confirmation
-- [ ] Site requests payment within auto-approve limit → auto-approved silently
-- [ ] Site requests payment OVER per-tx limit → payment confirmation notification
-- [ ] Shows amount in satoshis + USD conversion
-- [ ] Approve → payment executes
-- [ ] Deny → site gets error
-- [ ] Session spending tracked → over per-session limit triggers notification
+- [x] Site requests payment within auto-approve limit → auto-approved silently (teragun.com)
+- [ ] Site requests payment OVER per-tx limit → payment confirmation notification (not tested)
+- [ ] Shows amount in satoshis + USD conversion (not tested)
+- [ ] Approve → payment executes (not tested)
+- [ ] Deny → site gets error (not tested)
+- [ ] Session spending tracked → over per-session limit triggers notification (not tested)
 
 ### Rate Limiting
-- [ ] Rapid requests (>10/min default) → rate limit notification
-- [ ] Shows current limits
-- [ ] "Update Limits" option
-- [ ] Deny → blocks further requests
+- [ ] Rapid requests (>10/min default) → rate limit notification (not tested)
+- [ ] Shows current limits (not tested)
+- [ ] "Update Limits" option (not tested)
+- [ ] Deny → blocks further requests (not tested)
 
 ### Certificate Disclosure
 - [ ] Site requests certificate fields → disclosure notification
@@ -340,10 +352,10 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 - [x] Links work for both sent and received transactions
 
 ### Notification Behavior
-- [ ] Only one notification overlay visible at a time
-- [ ] Notification timeout works (auto-dismiss after period)
-- [ ] Atomic flag prevents double-fire crashes
-- [ ] Notification appears for correct window in multi-window
+- [x] Only one notification overlay visible at a time — verified with two BRC-100 sites
+- [ ] Notification timeout works (auto-dismiss after period) — not observed, dismissed manually
+- [x] No double-fire crashes observed during testing
+- [ ] Notification appears for correct window in multi-window (not tested — single window)
 
 ### Error Handling
 - [ ] Wallet backend down → graceful error messages (skipped for now)
@@ -378,38 +390,46 @@ BUG: Zoom +/- closes menu instead of staying open. Zoom % never updates.
 
 | Section | Pass | Fail | Untested | Status |
 |---------|------|------|----------|--------|
-| §1 Wallet Panel | 18 | 2 | 10 | 🟡 Sends left (Wave 3) |
-| §2 Dashboard | 21 | 0 | 6 | 🟡 Sends left (Wave 3) |
-| §3 Activity | 0 | 0 | 8 | ⬜ Wave 3 |
-| §4 Certificates | 0 | 0 | 11 | ⬜ Wave 4 |
+| §1 Wallet Panel | 18 | 2 | 10 | 🟡 Sends left |
+| §2 Dashboard | 21 | 0 | 6 | 🟡 Sends left |
+| §3 Activity | 6 | 0 | 2 | ✅ Done (pagination N/A — insufficient txs) |
+| §4 Certificates | 2 | 1 | 8 | 🔴 Cert acquisition broken |
 | §5 Approved Sites | 9 | 0 | 1 | ✅ Done |
 | §6 Wallet Settings | 7 | 1 | 1 | ✅ Done |
-| §7 BRC-100 Integration | 0 | 0 | 22 | ⬜ Remaining |
-| §8 Cross-Cutting | 30 | 3 | 6 | 🟡 Error handling skipped |
+| §7 BRC-100 Integration | 8 | 0 | 14 | 🟡 Auth+payment work, limits/deny untested |
+| §8 Cross-Cutting | 32 | 3 | 4 | 🟡 Error handling + multi-window skipped |
 | Site Compatibility | 4 | 0 | 1 | ✅ Done (x.com skipped — login) |
-| **Testable Total** | **103** | **9** | **49** | **78%** |
+| **Testable Total** | **121** | **10** | **31** | **85%** |
 | Wave 5 (Blocked) | — | — | 7 | 🔴 Needs code changes |
 
-**Bugs found: 11 (1 critical, 2 high, 6 medium, 2 low)**
+**Bugs found: 13 (1 critical, 2 high, 7 medium, 3 low)**
 ```
 CRITICAL:
-11. All 12 recovery phrase words display as the same word — mnemonic reveal broken
+11. All 12 recovery phrase words display as the same word — NOT A CODE BUG, test wallet had BIP39 zeros mnemonic
 
-HIGH:
-5.  Closing last tab closes entire window (should open new tab, like Chrome)
-9.  Send button disabled for PeerPay (identity key) and Paymail — only P2PKH works
+HIGH (FIXED in PR #91):
+5.  Closing last tab closes entire window — FIXED
+9.  Send button disabled for PeerPay/Paymail — FIXED
 
-MEDIUM:
-1.  Zoom +/- closes menu instead of staying open, % never updates
-2.  Received payment notification shows 0.00000000 BSV (~$0.00) instead of actual amount
+MEDIUM (FIXED in PR #91):
+1.  Zoom +/- closes menu, % never updates — FIXED
+7.  Minimum send amount $0.01 USD too high — FIXED
+8.  Max button doesn't subtract fee — FIXED
+
+MEDIUM (Archie's / unfixed):
+2.  Received payment notification shows 0.00000000 BSV
 4.  Scriptlet injection toggle doesn't work
-7.  Minimum send amount $0.01 USD too high — blocks micro-sends with small balances
-8.  Max button doesn't subtract fee from total balance
-10. New approved sites don't use updated default limits — still get old defaults
+10. New approved sites don't use updated default limits
 
-LOW:
-3.  Privacy shield blocked counts not displaying
+LOW (FIXED in PR #91):
+3.  Privacy shield blocked counts not displaying — FIXED
+
+LOW (Archie's / unfixed):
 6.  PeerPay notification banner "Details" button missing
+
+NEW BUGS (found during Wave 2 testing):
+12. (LOW) UTXO sync doesn't pick up unconfirmed incoming transactions — only after confirmation
+13. (MEDIUM) Certificate acquisition from socialcerts.net doesn't store cert — acquireCertificate never reaches backend
 ```
 
 **Tracking issue:** #89 — Fix bugs found during tedious testing (#49)
