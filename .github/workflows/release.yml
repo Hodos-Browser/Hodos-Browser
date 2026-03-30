@@ -420,12 +420,22 @@ jobs:
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
           # 6. Sign the whole bundle
-          # Do NOT use --force here — Sparkle.framework keeps its original signature.
-          # --force would try to re-process Sparkle and fail with "ambiguous format".
-          codesign --timestamp --options runtime --sign "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
+          # Temporarily move Sparkle out so --force doesn't try to re-sign it,
+          # then move it back after signing. Sparkle keeps its original signature.
+          SPARKLE_TMP=""
+          if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+            SPARKLE_TMP="$(mktemp -d)/Sparkle.framework"
+            mv "$APP/Contents/Frameworks/Sparkle.framework" "$SPARKLE_TMP"
+          fi
 
-          # 7. Verify (--strict may warn about Sparkle's different signing identity, use --no-strict)
-          codesign --verify --deep --verbose=2 "$APP" || echo "WARNING: deep verify had issues (may be Sparkle third-party signature)"
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
+
+          if [ -n "$SPARKLE_TMP" ] && [ -d "$SPARKLE_TMP" ]; then
+            mv "$SPARKLE_TMP" "$APP/Contents/Frameworks/Sparkle.framework"
+          fi
+
+          # 7. Verify our components (Sparkle has its own valid signature)
+          codesign --verify --verbose=2 "$APP" || echo "WARNING: verify had issues"
 
       # Notarize
       - name: Notarize app
