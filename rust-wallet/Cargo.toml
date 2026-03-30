@@ -33,7 +33,7 @@ env_logger = "0.11"
 # Crypto libraries (self-contained, no external wallet-core dependency)
 secp256k1 = { version = "0.28", features = ["rand-std"] }
 sha2 = "0.10"
-ripemd = "0.1"
+ripemd = "0.2"
 bs58 = "0.5"
 hmac = "0.12"
 pbkdf2 = "0.12"
