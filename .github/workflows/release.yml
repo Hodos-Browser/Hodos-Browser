@@ -345,9 +345,10 @@ jobs:
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
           # Copy Sparkle.framework into app bundle Frameworks/
+          # MUST use ditto (not cp -r) to preserve macOS framework symlink structure
           if [ -d "external/Sparkle.framework" ]; then
-            cp -r external/Sparkle.framework "$APP/Frameworks/"
-            echo "Sparkle.framework copied to app bundle"
+            ditto external/Sparkle.framework "$APP/Frameworks/Sparkle.framework"
+            echo "Sparkle.framework copied to app bundle (via ditto)"
           fi
 
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
