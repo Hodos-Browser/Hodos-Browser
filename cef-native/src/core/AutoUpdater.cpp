@@ -115,17 +115,11 @@ void AutoUpdater::Initialize(const std::string& version, const std::string& appc
         "OND9tLAqt6+ph7cMG0xx2hqryPrlk7g=\n"
         "-----END PUBLIC KEY-----";
 
-    // TODO: Enable DSA signature verification once CI signs installers.
-    // For now, skip setting the key so WinSparkle accepts unsigned updates.
-    // When ready, uncomment the block below and add signing to release.yml.
-    /*
     if (win_sparkle_set_dsa_pub_pem(DSA_PUB_KEY)) {
         LogInfo("DSA public key set successfully");
     } else {
-        LogInfo("WARNING: Failed to set DSA public key");
+        LogInfo("WARNING: Failed to set DSA public key — signature verification disabled");
     }
-    */
-    LogInfo("DSA signature verification disabled (unsigned updates accepted)");
 
     // Start WinSparkle (non-blocking)
     win_sparkle_init();
