@@ -3052,7 +3052,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     {
         auto& settings = SettingsManager::GetInstance();
         bool autoCheck = settings.GetBrowserSettings().autoUpdateEnabled;
-        std::string appVersion = "0.2.0-beta.2"; // TODO: derive from build system
+        std::string appVersion = APP_VERSION; // Injected by CMake via -DAPP_VERSION=
         std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
 
         auto& updater = AutoUpdater::GetInstance();

@@ -43,6 +43,13 @@ project(HodosBrowserShell)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# App version — passed from CI via -DAPP_VERSION=X.Y.Z or defaults to dev
+if(NOT DEFINED APP_VERSION)
+    set(APP_VERSION "0.2.0-dev")
+endif()
+add_definitions(-DAPP_VERSION="${APP_VERSION}")
+message(STATUS "App version: ${APP_VERSION}")
+
 # macOS-specific settings
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version")
