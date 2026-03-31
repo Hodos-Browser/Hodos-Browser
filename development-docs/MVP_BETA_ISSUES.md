@@ -35,6 +35,14 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 - Add optional "Delete browsing data?" checkbox in uninstaller (default unchecked, like Chrome)
 - Reduce log verbosity for release builds (currently writes debug-level logs)
 
+### B-4: Header scrollbar when dragging between monitors (P2)
+**Reported:** 2026-03-31
+**Description:** Dragging the browser window to a monitor with a different size/DPI causes a scrollbar to appear in the header (tab bar + toolbar). Maximizing on the new monitor fixes it.
+**Impact:** Minor — most users will maximize instinctively. Only affects multi-monitor setups with different resolutions.
+**Root cause:** `WM_DPICHANGED` is not handled in `cef_browser_shell.cpp` WndProc. When dragging between monitors, Windows sends `WM_DPICHANGED` with a suggested new rect, but the browser ignores it. The header HWND keeps its old dimensions until `WM_SIZE` fires (on maximize/manual resize). `GetHeaderHeightPx()` in `LayoutHelpers.h` uses `GetDpiForWindow()` which returns the correct DPI, but it's only called during `WM_SIZE`.
+**Fix area:** Add `WM_DPICHANGED` handler in `cef_browser_shell.cpp` that calls `SetWindowPos` with the suggested rect from `lParam`, then triggers the same resize logic as `WM_SIZE`.
+**Deferred to:** Post-MVP
+
 ---
 
 ## Fixed Issues

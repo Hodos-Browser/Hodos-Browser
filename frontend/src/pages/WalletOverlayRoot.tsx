@@ -28,6 +28,10 @@ const WalletOverlayRoot: React.FC = () => {
     document.body.style.margin = '0';
     document.body.style.overflow = 'hidden';
     document.body.style.background = '#0a0a0b';
+    document.body.style.height = '100%';
+    document.documentElement.style.height = '100%';
+    const root = document.getElementById('root');
+    if (root) root.style.height = '100%';
   }, []);
 
   const handleTabChange = useCallback((tabId: number) => {

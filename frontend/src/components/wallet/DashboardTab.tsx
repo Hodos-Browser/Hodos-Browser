@@ -408,19 +408,24 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               onClick={handleBackupNow}
               disabled={backingUp}
               style={{
-                background: backupStatus === 'success' ? '#4caf50' : backupStatus === 'error' ? '#c62828' : '#a67c00',
-                border: 'none',
-                color: '#111',
+                background: 'transparent',
+                border: backupStatus === 'success' ? '2px solid #2e7d32' : backupStatus === 'error' ? '2px solid #c62828' : '2px solid #a67c00',
+                color: '#fff',
                 fontSize: '12px',
                 fontWeight: 600,
                 cursor: backingUp ? 'default' : 'pointer',
                 padding: '4px 12px',
-                borderRadius: '4px',
-                transition: 'background 0.15s',
+                borderRadius: '6px',
+                transition: 'border-color 0.15s, box-shadow 0.15s',
                 opacity: backingUp ? 0.6 : 1,
+                boxShadow: backupStatus === 'success'
+                  ? 'inset 0 -2px 10px rgba(46, 125, 50, 0.2), 0 0 8px rgba(46, 125, 50, 0.1)'
+                  : backupStatus === 'error'
+                  ? 'inset 0 -2px 10px rgba(198, 40, 40, 0.2), 0 0 8px rgba(198, 40, 40, 0.1)'
+                  : 'inset 0 -2px 10px rgba(166, 124, 0, 0.15), 0 0 8px rgba(166, 124, 0, 0.08)',
               }}
-              onMouseEnter={e => { if (!backingUp) (e.target as HTMLElement).style.background = backupStatus === 'success' ? '#66bb6a' : backupStatus === 'error' ? '#e53935' : '#c49b30'; }}
-              onMouseLeave={e => { (e.target as HTMLElement).style.background = backupStatus === 'success' ? '#4caf50' : backupStatus === 'error' ? '#c62828' : '#a67c00'; }}
+              onMouseEnter={e => { if (!backingUp) (e.target as HTMLElement).style.boxShadow = 'inset 0 -6px 20px rgba(166, 124, 0, 0.3), 0 0 20px rgba(166, 124, 0, 0.2)'; }}
+              onMouseLeave={e => { (e.target as HTMLElement).style.boxShadow = 'inset 0 -2px 10px rgba(166, 124, 0, 0.15), 0 0 8px rgba(166, 124, 0, 0.08)'; }}
             >
               {backingUp ? 'Backing up...' : backupStatus === 'success' ? 'Backed up' : backupStatus === 'error' ? 'Backup failed' : 'Backup on Chain'}
             </button>

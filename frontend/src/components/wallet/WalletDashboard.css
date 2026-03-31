@@ -3,22 +3,22 @@
    Dark theme with gold accents (Hodos branding)
    ============================================= */
 
-/* CSS Variables */
+/* CSS Variables — aligned to token system */
 :root {
-  --wd-sidebar-bg: #111827;
-  --wd-sidebar-hover: #1f2937;
-  --wd-sidebar-active-bg: #1a1a2e;
-  --wd-content-bg: #0f1117;
+  --wd-sidebar-bg: #0a0a0b;
+  --wd-sidebar-hover: #1a1d23;
+  --wd-sidebar-active-bg: #1a1d23;
+  --wd-content-bg: #0a0a0b;
   --wd-card-bg: #1a1d23;
-  --wd-card-border: #2a2d35;
+  --wd-card-border: #363640;
   --wd-gold: #a67c00;
   --wd-gold-dim: rgba(166, 124, 0, 0.15);
-  --wd-text-primary: #f0f0f0;
-  --wd-text-secondary: #9ca3af;
+  --wd-text-primary: #ffffff;
+  --wd-text-secondary: #b0b7c3;
   --wd-text-muted: #6b7280;
   --wd-success: #2e7d32;
   --wd-error: #c62828;
-  --wd-divider: #2a2d35;
+  --wd-divider: #363640;
 }
 
 /* ---- Root Layout ---- */
@@ -130,9 +130,9 @@
 }
 
 .wd-icon-button {
-  background: none;
-  border: 1px solid var(--wd-divider);
-  color: var(--wd-text-secondary);
+  background: transparent;
+  border: 2px solid #6a6a75;
+  color: var(--wd-text-primary);
   width: 36px;
   height: 36px;
   border-radius: 8px;
@@ -145,9 +145,8 @@
 }
 
 .wd-icon-button:hover {
-  background: var(--wd-sidebar-hover);
-  color: var(--wd-text-primary);
-  border-color: var(--wd-text-muted);
+  border-color: #8a8a95;
+  box-shadow: inset 0 -4px 14px rgba(255, 255, 255, 0.08), 0 0 12px rgba(255, 255, 255, 0.04);
 }
 
 .wd-icon-button:active {
@@ -300,7 +299,7 @@
 
 /* Receive Section */
 .wd-receive-card {
-  background: var(--wd-card-bg);
+  background: linear-gradient(135deg, #000000 0%, #1a1a2e 100%);
   border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
@@ -430,19 +429,21 @@
 }
 
 .wd-receive-generate {
-  background: none;
-  border: 1px solid var(--wd-gold);
-  color: var(--wd-gold);
+  background: transparent;
+  border: 2px solid var(--wd-gold);
+  color: #fff;
   padding: 5px 12px;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
+  box-shadow: inset 0 -2px 10px rgba(166, 124, 0, 0.15), 0 0 8px rgba(166, 124, 0, 0.08);
 }
 
 .wd-receive-generate:hover:not(:disabled) {
-  background: var(--wd-gold-dim);
+  border-color: #dfbd69;
+  box-shadow: inset 0 -6px 20px rgba(166, 124, 0, 0.3), 0 0 20px rgba(166, 124, 0, 0.2);
 }
 
 .wd-receive-generate:disabled {
@@ -490,19 +491,21 @@
 }
 
 .wd-copy-btn {
-  background: var(--wd-gold);
-  border: none;
-  color: #000;
+  background: transparent;
+  border: 2px solid var(--wd-gold);
+  color: #fff;
   padding: 6px 14px;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: inset 0 -2px 10px rgba(166, 124, 0, 0.15), 0 0 8px rgba(166, 124, 0, 0.08);
   transition: all 0.15s ease;
 }
 
 .wd-copy-btn:hover {
-  opacity: 0.9;
+  border-color: #dfbd69;
+  box-shadow: inset 0 -6px 20px rgba(166, 124, 0, 0.3), 0 0 20px rgba(166, 124, 0, 0.2);
 }
 
 .wd-copy-btn:active {
@@ -516,7 +519,7 @@
 
 /* Recent Activity */
 .wd-recent-card {
-  background: var(--wd-card-bg);
+  background: linear-gradient(135deg, #000000 0%, #1a1a2e 100%);
   border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
@@ -716,7 +719,7 @@
 
 /* Send Form Card (right column) */
 .wd-send-card {
-  background: var(--wd-card-bg);
+  background: linear-gradient(135deg, #000000 0%, #1a1a2e 100%);
   border: 1px solid var(--wd-gold);
   border-radius: 12px;
   padding: 20px;
@@ -769,35 +772,38 @@
 }
 
 .wd-send-card .submit-button {
-  background: var(--wd-gold);
-  border: none;
-  color: #000;
+  background: transparent;
+  border: 2.5px solid #a67c00;
+  color: #fff;
   padding: 12px 20px;
   font-size: 14px;
   font-weight: 700;
   border-radius: 8px;
+  box-shadow: inset 0 -2px 12px rgba(166, 124, 0, 0.2), 0 0 12px rgba(166, 124, 0, 0.1);
 }
 
 .wd-send-card .submit-button:hover:not(:disabled) {
-  background: #c99700;
+  border-color: #dfbd69;
+  box-shadow: inset 0 -8px 24px rgba(166, 124, 0, 0.35), 0 0 24px rgba(166, 124, 0, 0.25);
 }
 
 .wd-send-card .submit-button:disabled {
-  background: var(--wd-text-muted);
-  color: #333;
+  opacity: 0.35;
 }
 
 .wd-send-card .max-button {
-  background: rgba(166, 124, 0, 0.2);
-  border: 1px solid var(--wd-gold);
-  color: var(--wd-gold);
+  background: transparent;
+  border: 2px solid #a67c00;
+  color: #fff;
   font-size: 11px;
   padding: 10px 12px;
   border-radius: 6px;
+  box-shadow: inset 0 -2px 10px rgba(166, 124, 0, 0.15), 0 0 8px rgba(166, 124, 0, 0.08);
 }
 
 .wd-send-card .max-button:hover:not(:disabled) {
-  background: rgba(166, 124, 0, 0.35);
+  border-color: #dfbd69;
+  box-shadow: inset 0 -6px 20px rgba(166, 124, 0, 0.3), 0 0 20px rgba(166, 124, 0, 0.2);
 }
 
 .wd-send-card .field-hint {
