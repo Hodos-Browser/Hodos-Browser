@@ -348,61 +348,7 @@
   background: rgba(211, 47, 47, 0.1);
 }
 
-.max-button {
-  padding: 14px 16px;
-  background: var(--wallet-gold-accent);
-  border: 2px solid var(--wallet-primary);
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--wallet-text-dark);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.max-button:hover:not(:disabled) {
-  background: var(--wallet-text-light);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-.max-button:active:not(:disabled) {
-  transform: scale(0.97);
-  box-shadow: none;
-}
-
-.max-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.submit-button {
-  padding: 16px 32px;
-  background: var(--wallet-primary);
-  border: 2px solid var(--wallet-gold-accent);
-  border-radius: 10px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--wallet-text-light);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  width: 100%;
-  box-shadow: 0 2px 8px var(--wallet-shadow);
-}
-
-.submit-button:hover:not(:disabled) {
-  background: var(--wallet-primary-hover);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-.submit-button:active:not(:disabled) {
-  transform: scale(0.97);
-  box-shadow: none;
-}
+/* max-button and submit-button styles are in TransactionComponents.css */
 
 .submit-button:disabled {
   background: #9ca3af;
@@ -781,11 +727,14 @@
    ======================================== */
 
 .wallet-panel-light {
-  background: #1a1d23;
-  border: 1px solid #2a2d35;
+  background:
+    radial-gradient(ellipse 90% 80% at 50% 50%, rgba(255, 255, 255, 0.05) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 30% at 50% 85%, rgba(166, 124, 0, 0.08) 0%, transparent 60%),
+    #0a0a0b;
+  border: 2px solid #a67c00;
   border-radius: 12px;
   box-shadow:
-    0 0 0 1px rgba(42, 45, 53, 0.6),
+    0 0 12px rgba(166, 124, 0, 0.1),
     0 0 8px 3px rgba(0, 0, 0, 0.3);
   padding: 16px;
   width: 340px;
@@ -794,7 +743,7 @@
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   position: relative;
   cursor: default;
-  color: #f0f0f0;
+  color: #ffffff;
 }
 
 /* Close Button */
@@ -828,11 +777,14 @@
 
 /* Balance Display - Light */
 .balance-display-light {
-  background: linear-gradient(135deg, var(--wallet-primary) 0%, var(--wallet-primary-hover) 100%);
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 45%, rgba(255, 255, 255, 0.10) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 40% at 50% 80%, rgba(166, 124, 0, 0.12) 0%, transparent 60%),
+    #1a1d23;
   border-radius: 10px;
   padding: 14px;
   margin-bottom: 12px;
-  color: var(--wallet-text-light);
+  color: #ffffff;
 }
 
 .balance-header-light {
@@ -955,41 +907,24 @@
 /* Action Buttons - Light */
 .wallet-actions-light {
   display: flex;
+  flex-direction: column;
   gap: 10px;
   margin-bottom: 12px;
 }
 
-/* Identity Key Buttons — same size as Send/Receive, silver style */
-.wallet-button-light.identity-copy-button-light {
-  background: var(--wallet-primary);
-  color: #9ca3af;
-  border: 2px solid #9ca3af;
+.wallet-actions-row {
+  display: flex;
+  gap: 10px;
 }
 
-.wallet-button-light.identity-copy-button-light:hover {
-  background: #9ca3af;
-  color: #000;
-  font-weight: 700;
+/* Let HodosButton handle all styling — just set flex sizing */
+.wallet-button-light {
+  flex: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 
-.wallet-button-light.identity-copy-button-light.copied {
-  background: #2e7d32;
-  border-color: #2e7d32;
-  color: #fff;
-}
-
-.wallet-button-light.identity-show-button-light {
-  background: var(--wallet-primary);
-  color: #9ca3af;
-  border: 2px solid #9ca3af;
-}
-
-.wallet-button-light.identity-show-button-light:hover {
-  background: #9ca3af;
-  color: #000;
-  font-weight: 700;
-}
-
+/* Identity key / receive expanded display */
 .identity-key-display-light {
   margin-top: 8px;
   margin-bottom: 12px;
@@ -998,9 +933,9 @@
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  background: var(--wallet-primary, #000);
-  border-radius: 4px;
-  border: 1px solid var(--wallet-border, #333);
+  background: #141416;
+  border-radius: 8px;
+  border: 1px solid #363640;
   overflow-x: hidden;
 }
 
@@ -1011,76 +946,13 @@
 }
 
 .identity-key-display-light code {
-  font-family: 'Courier New', monospace;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   font-size: 14px;
-  color: #9ca3af;
+  color: #b0b7c3;
   word-break: break-all;
   overflow-wrap: break-word;
   user-select: all;
   text-align: center;
-}
-
-.wallet-button-light {
-  flex: 1;
-  padding: 10px 16px;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-
-.receive-button-light {
-  background: var(--wallet-primary);
-  color: var(--wallet-text-light);
-  border: 2px solid var(--wallet-gold-accent);
-}
-
-.receive-button-light:hover:not(:disabled) {
-  background: var(--wallet-gold-accent);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-.receive-button-light:active:not(:disabled) {
-  transform: scale(0.97);
-  box-shadow: none;
-}
-
-.receive-button-light:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.receive-button-light.clicked {
-  background: var(--wallet-gold-accent);
-  color: var(--wallet-text-dark);
-  transform: scale(0.97);
-}
-
-.send-button-light {
-  background: var(--wallet-primary);
-  color: var(--wallet-text-light);
-  border: 2px solid var(--wallet-gold-accent);
-}
-
-.send-button-light:hover {
-  background: var(--wallet-gold-accent);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-.send-button-light:active {
-  transform: scale(0.97);
-  box-shadow: none;
-}
-
-.send-button-light.active {
-  background: var(--wallet-primary);
-  color: var(--wallet-text-light);
-  border-color: var(--wallet-gold-accent);
 }
 
 /* Dynamic Content Area - Light */

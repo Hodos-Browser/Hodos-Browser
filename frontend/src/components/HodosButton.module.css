@@ -41,35 +41,43 @@
   border-radius: 6px;
 }
 
-/* Primary */
+/* Primary — solid gold border + gold glow pool */
 .primary {
-  background: #a67c00;
-  color: #0f1117;
+  background: transparent;
+  color: #fff;
+  border: 2.5px solid #a67c00;
+  box-shadow: inset 0 -2px 12px rgba(166, 124, 0, 0.2), 0 0 12px rgba(166, 124, 0, 0.1);
 }
 
 .primary:hover:not(:disabled) {
-  background: #bf9000;
+  color: #fff;
+  border-color: #dfbd69;
+  box-shadow: inset 0 -8px 24px rgba(166, 124, 0, 0.35), 0 0 24px rgba(166, 124, 0, 0.25);
 }
 
 .primary:active:not(:disabled) {
-  background: #8a6800;
+  color: #fff;
+  border-color: #a67c00;
+  box-shadow: inset 0 -4px 16px rgba(166, 124, 0, 0.25), 0 0 8px rgba(166, 124, 0, 0.1);
 }
 
-/* Secondary */
+/* Secondary — silver border + silver glow pool */
 .secondary {
   background: transparent;
-  color: #e5e7eb;
-  border: 1px solid #2a2d35;
+  color: #ffffff;
+  border: 2.5px solid #6a6a75;
 }
 
 .secondary:hover:not(:disabled) {
-  background: #1f2937;
-  border-color: #3a3f4b;
+  color: #fff;
+  border-color: #8a8a95;
+  box-shadow: inset 0 -6px 20px rgba(255, 255, 255, 0.1), 0 0 16px rgba(255, 255, 255, 0.06);
 }
 
 .secondary:active:not(:disabled) {
-  background: #161b26;
-  border-color: #2a2d35;
+  color: #ffffff;
+  border-color: #7a7a85;
+  box-shadow: inset 0 -3px 12px rgba(255, 255, 255, 0.06);
 }
 
 /* Danger */
@@ -89,23 +97,23 @@
 /* Ghost */
 .ghost {
   background: transparent;
-  color: #9ca3af;
+  color: #b0b7c3;
 }
 
 .ghost:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.06);
-  color: #e5e7eb;
+  color: #ffffff;
 }
 
 .ghost:active:not(:disabled) {
   background: rgba(255, 255, 255, 0.03);
-  color: #e5e7eb;
+  color: #ffffff;
 }
 
 /* Icon */
 .icon {
   background: transparent;
-  color: #9ca3af;
+  color: #b0b7c3;
   border-radius: 6px;
   padding: 0;
 }
@@ -125,12 +133,12 @@
 
 .icon:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.08);
-  color: #e5e7eb;
+  color: #ffffff;
 }
 
 .icon:active:not(:disabled) {
   background: rgba(255, 255, 255, 0.04);
-  color: #e5e7eb;
+  color: #ffffff;
 }
 
 /* Loading */

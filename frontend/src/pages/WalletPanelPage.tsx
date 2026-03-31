@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import WalletPanel from '../components/WalletPanel';
 import { HodosButton } from '../components/HodosButton';
+import { tokens } from '../theme/tokens';
 
 // Reusable 4-digit PIN input (4 boxes, password-masked, numeric-only)
 function PinInput({
@@ -65,14 +66,14 @@ function PinInput({
             fontSize: '24px',
             fontWeight: 700,
             borderRadius: '8px',
-            border: `2px solid ${d ? '#a67c00' : '#2a2d35'}`,
-            background: '#111827',
-            color: '#f0f0f0',
+            border: `2px solid ${d ? tokens.gold : tokens.borderDefault}`,
+            background: tokens.bgElevated,
+            color: tokens.textPrimary,
             outline: 'none',
             transition: 'border-color 0.15s',
           }}
-          onFocus={e => { e.target.style.borderColor = '#a67c00'; }}
-          onBlur={e => { e.target.style.borderColor = d ? '#a67c00' : '#2a2d35'; }}
+          onFocus={e => { e.target.style.borderColor = tokens.gold; }}
+          onBlur={e => { e.target.style.borderColor = d ? tokens.gold : tokens.borderDefault; }}
         />
       ))}
     </div>
@@ -702,20 +703,20 @@ export default function WalletPanelPage() {
   const renderPinCreate = () => (
     <>
       <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F512;</div>
-      <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Create a PIN</h3>
-      <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 24px' }}>
+      <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Create a PIN</h3>
+      <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 24px' }}>
         Choose a 4-digit PIN to protect your wallet. You'll need this PIN to view your mnemonic or perform sensitive operations.
       </p>
 
       {pinError && (
-        <p style={{ color: '#c62828', fontSize: '12px', margin: '0 0 12px', fontWeight: 600 }}>
+        <p style={{ color: tokens.error, fontSize: '12px', margin: '0 0 12px', fontWeight: 600 }}>
           {pinError}
         </p>
       )}
 
       <PinInput key="pin-create" digits={pinDigits} onChange={handlePinDigitsChange} />
 
-      <p style={{ color: '#6b7280', fontSize: '11px', margin: '16px 0 0', fontStyle: 'italic' }}>
+      <p style={{ color: tokens.textMuted, fontSize: '11px', margin: '16px 0 0', fontStyle: 'italic' }}>
         Your wallet will unlock automatically when you start the browser. The PIN is used to encrypt your keys and for sensitive operations.
       </p>
 
@@ -737,15 +738,15 @@ export default function WalletPanelPage() {
   const renderPinConfirm = () => (
     <>
       <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F512;</div>
-      <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Confirm your PIN</h3>
-      <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 24px' }}>
+      <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Confirm your PIN</h3>
+      <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 24px' }}>
         Enter the same 4-digit PIN again to confirm.
       </p>
 
       <PinInput key="pin-confirm" digits={confirmPinDigits} onChange={handleConfirmPinDigitsChange} />
 
       {pinError && (
-        <p style={{ color: '#c62828', fontSize: '12px', margin: '12px 0 0', fontWeight: 600 }}>
+        <p style={{ color: tokens.error, fontSize: '12px', margin: '12px 0 0', fontWeight: 600 }}>
           {pinError}
         </p>
       )}
@@ -770,22 +771,22 @@ export default function WalletPanelPage() {
 
   const renderNoWallet = () => (
     <div style={{
-      background: '#1a1d23',
+      background: tokens.bgSurface,
       borderRadius: '12px',
       width: '380px',
       maxHeight: '80vh',
       overflow: 'auto',
-      border: '2px solid #a67c00',
+      border: `2px solid ${tokens.gold}`,
       cursor: 'default',
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      fontFamily: tokens.fontUi,
     }} onClick={e => { console.log('[WalletPanel] renderNoWallet container clicked'); e.stopPropagation(); }}>
       {/* Header */}
       <div style={{
         background: '#000000',
-        color: '#f5f5f5',
+        color: tokens.textPrimary,
         padding: '12px 24px',
         borderRadius: '12px 12px 0 0',
-        borderBottom: '2px solid #a67c00',
+        borderBottom: `2px solid ${tokens.gold}`,
         display: 'flex',
         alignItems: 'center',
         gap: '12px',
@@ -794,43 +795,47 @@ export default function WalletPanelPage() {
       </div>
 
       {/* Content */}
-      <div style={{ padding: '32px 24px', textAlign: 'center' }}>
+      <div style={{
+        padding: '32px 24px',
+        textAlign: 'center',
+        background: `radial-gradient(ellipse 80% 60% at 50% 50%, rgba(255, 255, 255, 0.06) 0%, transparent 70%), ${tokens.bgSurface}`,
+      }}>
         {pinStep === 'create' ? renderPinCreate()
         : pinStep === 'confirm' ? renderPinConfirm()
         : recoveryResult ? (
           /* Recovery success */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Wallet Recovered</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 16px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Wallet Recovered</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
               Your wallet has been restored from on-chain backup.
             </p>
 
             <div style={{
-              background: '#111827',
-              border: '2px solid #2a2d35',
+              background: tokens.bgElevated,
+              border: `2px solid ${tokens.borderDefault}`,
               borderRadius: '8px',
               padding: '16px',
               marginBottom: '16px',
               textAlign: 'left',
             }}>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Addresses:</strong> {recoveryResult.addresses}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Transactions:</strong> {recoveryResult.transactions}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Outputs:</strong> {recoveryResult.spendable_utxos} spendable
               </div>
               {recoveryResult.certificates > 0 && (
-                <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+                <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                   <strong>Tokens / Certificates:</strong> {recoveryResult.certificates}
                 </div>
               )}
-              <div style={{ fontSize: '13px', color: '#f0f0f0' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary }}>
                 <strong>Balance:</strong> {(recoveryResult.total_balance / 100_000_000).toFixed(8)} BSV
-                <span style={{ color: '#6b7280', marginLeft: '8px' }}>
+                <span style={{ color: tokens.textMuted, marginLeft: '8px' }}>
                   ({recoveryResult.total_balance.toLocaleString()} sats)
                 </span>
               </div>
@@ -848,8 +853,8 @@ export default function WalletPanelPage() {
           /* Recovery input form */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F50D;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Recover Wallet</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 16px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Recover Wallet</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
               Enter your 12-word mnemonic phrase. You can paste all 12 words into any box.
             </p>
 
@@ -868,9 +873,9 @@ export default function WalletPanelPage() {
                     top: '50%',
                     transform: 'translateY(-50%)',
                     fontSize: '10px',
-                    color: '#6b7280',
+                    color: tokens.textMuted,
                     pointerEvents: 'none',
-                    fontFamily: 'monospace',
+                    fontFamily: tokens.fontMono,
                   }}>
                     {i + 1}.
                   </span>
@@ -887,17 +892,17 @@ export default function WalletPanelPage() {
                       width: '100%',
                       padding: '10px 8px 10px 28px',
                       borderRadius: '6px',
-                      border: `2px solid ${word ? '#a67c00' : '#2a2d35'}`,
-                      background: '#111827',
-                      fontFamily: 'monospace',
+                      border: `2px solid ${word ? tokens.gold : tokens.borderDefault}`,
+                      background: tokens.bgElevated,
+                      fontFamily: tokens.fontMono,
                       fontSize: '13px',
-                      color: '#f0f0f0',
+                      color: tokens.textPrimary,
                       boxSizing: 'border-box',
                       outline: 'none',
                       transition: 'border-color 0.15s',
                     }}
-                    onFocus={e => { e.target.style.borderColor = '#a67c00'; }}
-                    onBlur={e => { e.target.style.borderColor = word ? '#a67c00' : '#2a2d35'; }}
+                    onFocus={e => { e.target.style.borderColor = tokens.gold; }}
+                    onBlur={e => { e.target.style.borderColor = word ? tokens.gold : tokens.borderDefault; }}
                   />
                 </div>
               ))}
@@ -905,7 +910,7 @@ export default function WalletPanelPage() {
 
             {recoveryError && (
               <p style={{
-                color: '#c62828',
+                color: tokens.error,
                 fontSize: '12px',
                 margin: '0 0 12px',
                 textAlign: 'left',
@@ -916,17 +921,17 @@ export default function WalletPanelPage() {
 
             {recovering && (
               <div style={{
-                background: '#111827',
-                border: '2px solid #2a2d35',
+                background: tokens.bgElevated,
+                border: `2px solid ${tokens.borderDefault}`,
                 borderRadius: '8px',
                 padding: '12px 16px',
                 marginBottom: '12px',
                 textAlign: 'left',
               }}>
-                <p style={{ color: '#f0f0f0', fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
+                <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
                   Searching for on-chain backup...
                 </p>
-                <p style={{ color: '#6b7280', fontSize: '12px', margin: 0 }}>
+                <p style={{ color: tokens.textMuted, fontSize: '12px', margin: 0 }}>
                   Looking up your wallet backup on the blockchain and restoring data.
                   This usually takes 10-30 seconds.
                 </p>
@@ -961,29 +966,29 @@ export default function WalletPanelPage() {
           /* Import success */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Wallet Restored</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 16px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Wallet Restored</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
               Your wallet has been restored from the backup file.
             </p>
 
             <div style={{
-              background: '#111827',
-              border: '2px solid #2a2d35',
+              background: tokens.bgElevated,
+              border: `2px solid ${tokens.borderDefault}`,
               borderRadius: '8px',
               padding: '16px',
               marginBottom: '16px',
               textAlign: 'left',
             }}>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Addresses:</strong> {importResult.addresses}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Transactions:</strong> {importResult.transactions}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Outputs:</strong> {importResult.outputs}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary }}>
                 <strong>Certificates:</strong> {importResult.certificates}
               </div>
             </div>
@@ -1000,15 +1005,15 @@ export default function WalletPanelPage() {
           /* Import from backup form */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F4E5;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Import from Backup</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 12px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Import from Backup</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 12px' }}>
               Select your .hodos-wallet backup file to restore your wallet.
             </p>
 
             {/* File input */}
             <div style={{
-              background: '#111827',
-              border: `2px solid ${importFile ? '#a67c00' : '#2a2d35'}`,
+              background: tokens.bgElevated,
+              border: `2px solid ${importFile ? tokens.gold : tokens.borderDefault}`,
               borderRadius: '8px',
               padding: '12px',
               marginBottom: '12px',
@@ -1021,13 +1026,13 @@ export default function WalletPanelPage() {
                 disabled={importing}
                 style={{
                   fontSize: '13px',
-                  color: '#f0f0f0',
+                  color: tokens.textPrimary,
                   width: '100%',
                   cursor: 'pointer',
                 }}
               />
               {importFile && (
-                <p style={{ fontSize: '11px', color: '#a67c00', margin: '8px 0 0', fontWeight: 600 }}>
+                <p style={{ fontSize: '11px', color: tokens.gold, margin: '8px 0 0', fontWeight: 600 }}>
                   Valid backup file loaded
                 </p>
               )}
@@ -1044,10 +1049,10 @@ export default function WalletPanelPage() {
                 width: '100%',
                 padding: '10px 12px',
                 borderRadius: '6px',
-                border: '2px solid #2a2d35',
-                background: '#111827',
+                border: `2px solid ${tokens.borderDefault}`,
+                background: tokens.bgElevated,
                 fontSize: '13px',
-                color: '#f0f0f0',
+                color: tokens.textPrimary,
                 boxSizing: 'border-box',
                 marginBottom: importError ? '8px' : '12px',
                 outline: 'none',
@@ -1056,7 +1061,7 @@ export default function WalletPanelPage() {
 
             {importError && (
               <p style={{
-                color: '#c62828',
+                color: tokens.error,
                 fontSize: '12px',
                 margin: '0 0 12px',
                 textAlign: 'left',
@@ -1067,14 +1072,14 @@ export default function WalletPanelPage() {
 
             {importing && (
               <div style={{
-                background: '#111827',
-                border: '2px solid #2a2d35',
+                background: tokens.bgElevated,
+                border: `2px solid ${tokens.borderDefault}`,
                 borderRadius: '8px',
                 padding: '12px 16px',
                 marginBottom: '12px',
                 textAlign: 'left',
               }}>
-                <p style={{ color: '#f0f0f0', fontSize: '13px', fontWeight: 600, margin: 0 }}>
+                <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: 0 }}>
                   Importing wallet data...
                 </p>
               </div>
@@ -1110,34 +1115,34 @@ export default function WalletPanelPage() {
           /* Centbee migration success */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Centbee Migration Complete</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 16px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Centbee Migration Complete</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
               {centbeeResult.message}
             </p>
 
             <div style={{
-              background: '#111827',
-              border: '2px solid #2a2d35',
+              background: tokens.bgElevated,
+              border: `2px solid ${tokens.borderDefault}`,
               borderRadius: '8px',
               padding: '16px',
               marginBottom: '16px',
               textAlign: 'left',
             }}>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>UTXOs found:</strong> {centbeeResult.utxos_found}
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Original balance:</strong> {(centbeeResult.total_balance / 100_000_000).toFixed(8)} BSV
-                <span style={{ color: '#6b7280', marginLeft: '8px' }}>
+                <span style={{ color: tokens.textMuted, marginLeft: '8px' }}>
                   ({centbeeResult.total_balance.toLocaleString()} sats)
                 </span>
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', marginBottom: '8px' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
                 <strong>Fees:</strong> {centbeeResult.total_fees.toLocaleString()} sats
               </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0' }}>
+              <div style={{ fontSize: '13px', color: tokens.textPrimary }}>
                 <strong>BRC-42 balance:</strong> {(centbeeResult.brc42_balance / 100_000_000).toFixed(8)} BSV
-                <span style={{ color: '#6b7280', marginLeft: '8px' }}>
+                <span style={{ color: tokens.textMuted, marginLeft: '8px' }}>
                   ({centbeeResult.brc42_balance.toLocaleString()} sats)
                 </span>
               </div>
@@ -1152,10 +1157,10 @@ export default function WalletPanelPage() {
               marginBottom: '16px',
               textAlign: 'left',
             }}>
-              <p style={{ color: '#a67c00', fontSize: '12px', fontWeight: 700, margin: '0 0 6px' }}>
+              <p style={{ color: tokens.gold, fontSize: '12px', fontWeight: 700, margin: '0 0 6px' }}>
                 Migration Notice
               </p>
-              <p style={{ color: '#9ca3af', fontSize: '12px', margin: 0, lineHeight: '1.5' }}>
+              <p style={{ color: tokens.textSecondary, fontSize: '12px', margin: 0, lineHeight: '1.5' }}>
                 Your wallet has been migrated to BRC-42 derivation. Your mnemonic is the same &mdash; only the address derivation scheme changed.
               </p>
             </div>
@@ -1172,8 +1177,8 @@ export default function WalletPanelPage() {
           /* Centbee recovery form */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F4F1;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Recover from Centbee</h3>
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 12px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Recover from Centbee</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 12px' }}>
               Enter your Centbee mnemonic and PIN. Your funds will be swept from Centbee addresses to BRC-42.
             </p>
 
@@ -1192,9 +1197,9 @@ export default function WalletPanelPage() {
                     top: '50%',
                     transform: 'translateY(-50%)',
                     fontSize: '10px',
-                    color: '#6b7280',
+                    color: tokens.textMuted,
                     pointerEvents: 'none',
-                    fontFamily: 'monospace',
+                    fontFamily: tokens.fontMono,
                   }}>
                     {i + 1}.
                   </span>
@@ -1211,34 +1216,34 @@ export default function WalletPanelPage() {
                       width: '100%',
                       padding: '10px 8px 10px 28px',
                       borderRadius: '6px',
-                      border: `2px solid ${word ? '#a67c00' : '#2a2d35'}`,
-                      background: '#111827',
-                      fontFamily: 'monospace',
+                      border: `2px solid ${word ? tokens.gold : tokens.borderDefault}`,
+                      background: tokens.bgElevated,
+                      fontFamily: tokens.fontMono,
                       fontSize: '13px',
-                      color: '#f0f0f0',
+                      color: tokens.textPrimary,
                       boxSizing: 'border-box',
                       outline: 'none',
                       transition: 'border-color 0.15s',
                     }}
-                    onFocus={e => { e.target.style.borderColor = '#a67c00'; }}
-                    onBlur={e => { e.target.style.borderColor = word ? '#a67c00' : '#2a2d35'; }}
+                    onFocus={e => { e.target.style.borderColor = tokens.gold; }}
+                    onBlur={e => { e.target.style.borderColor = word ? tokens.gold : tokens.borderDefault; }}
                   />
                 </div>
               ))}
             </div>
 
             {/* Centbee PIN */}
-            <p style={{ color: '#f0f0f0', fontSize: '13px', fontWeight: 600, margin: '0 0 8px', textAlign: 'left' }}>
+            <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: '0 0 8px', textAlign: 'left' }}>
               Centbee PIN
             </p>
             <PinInput digits={centbeePinDigits} onChange={d => { setCentbeePinDigits(d); setCentbeeError(null); }} disabled={centbeeRecovering} />
-            <p style={{ color: '#6b7280', fontSize: '11px', margin: '8px 0 12px', fontStyle: 'italic' }}>
+            <p style={{ color: tokens.textMuted, fontSize: '11px', margin: '8px 0 12px', fontStyle: 'italic' }}>
               This is the PIN you set in Centbee — it's needed to derive your addresses.
             </p>
 
             {centbeeError && (
               <p style={{
-                color: '#c62828',
+                color: tokens.error,
                 fontSize: '12px',
                 margin: '0 0 12px',
                 textAlign: 'left',
@@ -1249,17 +1254,17 @@ export default function WalletPanelPage() {
 
             {centbeeRecovering && centbeeProgress && (
               <div style={{
-                background: '#111827',
-                border: '2px solid #2a2d35',
+                background: tokens.bgElevated,
+                border: `2px solid ${tokens.borderDefault}`,
                 borderRadius: '8px',
                 padding: '12px 16px',
                 marginBottom: '12px',
                 textAlign: 'left',
               }}>
-                <p style={{ color: '#f0f0f0', fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
+                <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
                   {centbeeProgress}
                 </p>
-                <p style={{ color: '#6b7280', fontSize: '12px', margin: 0 }}>
+                <p style={{ color: tokens.textMuted, fontSize: '12px', margin: 0 }}>
                   This may take a minute. Scanning addresses and sweeping funds to your new wallet.
                 </p>
               </div>
@@ -1294,8 +1299,8 @@ export default function WalletPanelPage() {
           /* Default: Create + Recover + Import + Centbee buttons */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F512;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>No Wallet Found</h3>
-            <p style={{ color: '#9ca3af', fontSize: '14px', margin: '0 0 24px' }}>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>No Wallet Found</h3>
+            <p style={{ color: tokens.textSecondary, fontSize: '14px', margin: '0 0 24px' }}>
               Create a new wallet to get started with Bitcoin SV.
             </p>
 
@@ -1340,7 +1345,7 @@ export default function WalletPanelPage() {
           /* Mnemonic backup (after create) */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x26A0;&#xFE0F;</div>
-            <h3 style={{ margin: '0 0 8px', color: '#f0f0f0', fontSize: '18px' }}>Back Up Your Mnemonic</h3>
+            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Back Up Your Mnemonic</h3>
 
             <div style={{
               background: 'rgba(166, 124, 0, 0.15)',
@@ -1353,33 +1358,33 @@ export default function WalletPanelPage() {
               <p style={{ color: '#e65100', fontSize: '12px', fontWeight: 700, margin: '0 0 6px' }}>
                 Your mnemonic is your private key
               </p>
-              <ul style={{ color: '#9ca3af', fontSize: '12px', margin: 0, paddingLeft: '18px', lineHeight: '1.6' }}>
+              <ul style={{ color: tokens.textSecondary, fontSize: '12px', margin: 0, paddingLeft: '18px', lineHeight: '1.6' }}>
                 <li><strong>Keep it secret.</strong> Anyone with these words can access your coins and identity.</li>
                 <li><strong>Keep it safe.</strong> If you lose this mnemonic and something goes wrong, there is no way to recover your wallet.</li>
               </ul>
             </div>
 
-            <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 12px' }}>
+            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 12px' }}>
               Write down these 12 words in order and store them somewhere safe.
             </p>
 
             <div style={{
-              background: '#111827',
-              border: '2px solid #2a2d35',
+              background: tokens.bgElevated,
+              border: `2px solid ${tokens.borderDefault}`,
               borderRadius: '8px',
               padding: '16px',
               marginBottom: '16px',
-              fontFamily: 'monospace',
+              fontFamily: tokens.fontMono,
               fontSize: '14px',
               lineHeight: '1.8',
-              color: '#f0f0f0',
+              color: tokens.textPrimary,
               wordBreak: 'break-word',
               userSelect: 'text',
               textAlign: 'left',
             }}>
               {mnemonic.split(' ').map((word, i) => (
                 <span key={i} style={{ display: 'inline-block', marginRight: '4px' }}>
-                  <span style={{ color: '#6b7280', fontSize: '11px' }}>{i + 1}.</span> {word}
+                  <span style={{ color: tokens.textMuted, fontSize: '11px' }}>{i + 1}.</span> {word}
                   {i < 11 ? ' ' : ''}
                 </span>
               ))}
@@ -1399,7 +1404,7 @@ export default function WalletPanelPage() {
               justifyContent: 'center',
               gap: '8px',
               fontSize: '13px',
-              color: '#f0f0f0',
+              color: tokens.textPrimary,
               marginBottom: '16px',
               cursor: 'pointer',
             }}>
@@ -1407,7 +1412,7 @@ export default function WalletPanelPage() {
                 type="checkbox"
                 checked={backedUp}
                 onChange={e => setBackedUp(e.target.checked)}
-                style={{ width: '16px', height: '16px', accentColor: '#a67c00' }}
+                style={{ width: '16px', height: '16px', accentColor: tokens.gold }}
               />
               I have backed up my mnemonic
             </label>
@@ -1488,7 +1493,7 @@ export default function WalletPanelPage() {
 
   const renderLocked = () => (
     <div style={{
-      background: '#1a1d23',
+      background: tokens.bgSurface,
       borderRadius: '12px',
       width: '380px',
       padding: '32px 24px',
@@ -1497,23 +1502,23 @@ export default function WalletPanelPage() {
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>
       <div style={{ fontSize: '32px', marginBottom: '8px' }}>&#x1F512;</div>
-      <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: '#f0f0f0' }}>Wallet Locked</h3>
-      <p style={{ color: '#9ca3af', fontSize: '13px', margin: '0 0 20px 0', lineHeight: '1.4' }}>
+      <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: tokens.textPrimary }}>Wallet Locked</h3>
+      <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 20px 0', lineHeight: '1.4' }}>
         Auto-unlock was unavailable. Enter your PIN to unlock.
       </p>
       <PinInput digits={unlockPinDigits} onChange={setUnlockPinDigits} disabled={unlocking} />
       {unlockError && (
-        <p style={{ color: '#b91c1c', fontSize: '13px', marginTop: '12px' }}>{unlockError}</p>
+        <p style={{ color: tokens.error, fontSize: '13px', marginTop: '12px' }}>{unlockError}</p>
       )}
       {unlocking && (
-        <p style={{ color: '#9ca3af', fontSize: '13px', marginTop: '12px' }}>Unlocking...</p>
+        <p style={{ color: tokens.textSecondary, fontSize: '13px', marginTop: '12px' }}>Unlocking...</p>
       )}
     </div>
   );
 
   const renderLoading = () => (
     <div style={{
-      background: '#1a1d23',
+      background: tokens.bgSurface,
       borderRadius: '12px',
       width: '380px',
       padding: '48px 24px',
@@ -1522,7 +1527,7 @@ export default function WalletPanelPage() {
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }} onClick={e => e.stopPropagation()}>
       <div style={{ fontSize: '32px', marginBottom: '16px', animation: 'spin 1s linear infinite' }}>&#x23F3;</div>
-      <p style={{ color: '#f0f0f0', fontSize: '14px', margin: 0 }}>Connecting to wallet...</p>
+      <p style={{ color: tokens.textPrimary, fontSize: '14px', margin: 0 }}>Connecting to wallet...</p>
     </div>
   );
 

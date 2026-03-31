@@ -31,8 +31,6 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [showReceiveAddress, setShowReceiveAddress] = useState(false);
   const [addressCopiedMessage, setAddressCopiedMessage] = useState<string | null>(null);
 
-  // State for button click animations
-  const [clickedButtons, setClickedButtons] = useState<Set<string>>(new Set());
   const [copyAgainClicked, setCopyAgainClicked] = useState(false);
   const [copyLinkClicked, setCopyLinkClicked] = useState(false);
 
@@ -203,12 +201,39 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       .catch(() => {});
   };
 
+  const handleReceiveBrc100 = async () => {
+    // Clear other display states
+    setShowSendForm(false);
+    setShowReceiveAddress(false);
+    setTransactionResult(null);
+    setAddressCopiedMessage(null);
+
+    // Toggle — if already showing, hide
+    if (showIdentityKey) {
+      setShowIdentityKey(false);
+      return;
+    }
+
+    // Show the identity key and auto-copy
+    setShowIdentityKey(true);
+    if (identityKey) {
+      try {
+        await navigator.clipboard.writeText(identityKey);
+        setIdentityKeyCopied(true);
+        setTimeout(() => setIdentityKeyCopied(false), 3000);
+      } catch {
+        // Fallback — key is shown, user can manually copy
+      }
+    }
+  };
+
   const handleSendClick = () => {
     // Clear all other display states first
     setShowReceiveAddress(false);
     setAddressCopiedMessage(null);
     setTransactionResult(null);
     setShowIdentityKey(false);
+    setIdentityKeyCopied(false);
 
     // Toggle send form
     setShowSendForm(!showSendForm);
@@ -217,12 +242,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const handleReceiveClick = async () => {
     console.log('Receive button clicked');
 
-    // Immediately show visual feedback - keep clicked state until operation completes
-    setClickedButtons(prev => new Set(prev).add('receive'));
-
     // Clear all other display states first
     setShowSendForm(false);
     setTransactionResult(null);
+    setShowIdentityKey(false);
+    setIdentityKeyCopied(false);
 
     try {
       // Generate address from identity
@@ -240,14 +264,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       console.error('Failed to generate address:', error);
       setAddressCopiedMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
-      // Remove clicked state after operation completes (with small delay for visual feedback)
-      setTimeout(() => {
-        setClickedButtons(prev => {
-          const newSet = new Set(prev);
-          newSet.delete('receive');
-          return newSet;
-        });
-      }, 200);
+      // Operation complete
     }
   };
 
@@ -458,62 +475,68 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       )}
 
-      {/* Identity Key Section */}
-      {identityKey && (
-        <div className="identity-key-section-light">
-          <div className="identity-key-actions-light">
-            <HodosButton
-              variant="secondary"
-              size="small"
-              className={`identity-key-copy-button-light ${identityKeyCopied ? 'copied' : ''}`}
-              onClick={handleCopyIdentityKey}
-            >
-              {identityKeyCopied ? 'Copied!' : 'Copy Identity Key'}
-            </HodosButton>
-            <HodosButton
-              variant="ghost"
-              size="small"
-              className="identity-key-show-button-light"
-              onClick={() => setShowIdentityKey(!showIdentityKey)}
-            >
-              {showIdentityKey ? 'Hide' : 'Show'}
-            </HodosButton>
-          </div>
-          {showIdentityKey && (
-            <div className="identity-key-display-light">
-              <code>{identityKey}</code>
-              <div className="identity-key-qr-light">
-                <QRCodeSVG
-                  value={identityKey}
-                  size={96}
-                  level="M"
-                  bgColor="#ffffff"
-                  fgColor="#000000"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Action Buttons */}
+      {/* Action Buttons — two Receive side-by-side, full-width Send below */}
       <div className="wallet-actions-light">
-        <HodosButton
-          variant="secondary"
-          className={`wallet-button-light receive-button-light ${clickedButtons.has('receive') || isGenerating ? 'clicked' : ''}`}
-          onClick={handleReceiveClick}
-          disabled={isGenerating}
-        >
-          {isGenerating ? 'Generating...' : 'Receive'}
-        </HodosButton>
+        <div className="wallet-actions-row">
+          <HodosButton
+            variant="secondary"
+            className="wallet-button-light"
+            onClick={handleReceiveClick}
+            disabled={isGenerating}
+          >
+            {isGenerating ? 'Generating...' : 'Receive Legacy'}
+          </HodosButton>
+          <HodosButton
+            variant="secondary"
+            className="wallet-button-light"
+            onClick={handleReceiveBrc100}
+          >
+            Receive BRC-100
+          </HodosButton>
+        </div>
         <HodosButton
           variant="primary"
-          className={`wallet-button-light send-button-light ${showSendForm ? 'active' : ''}`}
+          className="wallet-button-light"
           onClick={handleSendClick}
         >
           {showSendForm ? 'Close' : 'Send'}
         </HodosButton>
       </div>
+
+      {/* BRC-100 Identity Key Display (expanded) */}
+      {showIdentityKey && identityKey && (
+        <div className="identity-key-display-light">
+          <p style={{ color: '#b0b7c3', fontSize: '13px', margin: '0 0 8px' }}>
+            {identityKeyCopied ? 'Identity key copied to clipboard!' : 'Your BRC-100 identity key:'}
+          </p>
+          <code>{identityKey}</code>
+          <div className="identity-key-qr-light">
+            <QRCodeSVG
+              value={identityKey}
+              size={128}
+              level="M"
+              bgColor="#ffffff"
+              fgColor="#000000"
+            />
+          </div>
+          <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+            <HodosButton
+              variant="secondary"
+              size="small"
+              onClick={handleCopyIdentityKey}
+            >
+              {identityKeyCopied ? 'Copied!' : 'Copy Again'}
+            </HodosButton>
+            <HodosButton
+              variant="ghost"
+              size="small"
+              onClick={() => setShowIdentityKey(false)}
+            >
+              Close
+            </HodosButton>
+          </div>
+        </div>
+      )}
 
       {/* Dynamic Content Area */}
       <div className="dynamic-content-area-light">
