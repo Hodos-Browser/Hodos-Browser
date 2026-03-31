@@ -656,9 +656,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
+                RECT wpClientRect;
+                GetClientRect(hwnd, &wpClientRect);
+                POINT wpClientBR = { wpClientRect.right, wpClientRect.bottom };
+                ClientToScreen(hwnd, &wpClientBR);
                 int wpWidth = 400;
-                int wpHeight = mainRect.bottom - hdrRect.bottom;
-                int wpX = mainRect.right - wpWidth;
+                int wpHeight = wpClientBR.y - hdrRect.bottom;
+                int wpX = wpClientBR.x - wpWidth;
                 int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     wpX, wpY, wpWidth, wpHeight,
@@ -876,9 +880,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
+                RECT wpClientRect;
+                GetClientRect(hwnd, &wpClientRect);
+                POINT wpClientBR = { wpClientRect.right, wpClientRect.bottom };
+                ClientToScreen(hwnd, &wpClientBR);
                 int wpWidth = 400;
-                int wpHeight = mainRect.bottom - hdrRect.bottom;
-                int wpX = mainRect.right - wpWidth;
+                int wpHeight = wpClientBR.y - hdrRect.bottom;
+                int wpX = wpClientBR.x - wpWidth;
                 int wpY = hdrRect.bottom;
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     wpX, wpY, wpWidth, wpHeight,
@@ -887,6 +895,11 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
                 if (wallet_browser) {
                     wallet_browser->GetHost()->WasResized();
+                    // Push updated dimensions to React
+                    std::string js = "window.postMessage({type:'wallet_resize',panelHeight:" +
+                        std::to_string(wpHeight) + ",panelWidth:" +
+                        std::to_string(wpWidth) + "},'*');";
+                    wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
                 }
             }
 

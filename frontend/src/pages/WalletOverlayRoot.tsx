@@ -27,7 +27,7 @@ const WalletOverlayRoot: React.FC = () => {
     document.title = 'Hodos Wallet';
     document.body.style.margin = '0';
     document.body.style.overflow = 'hidden';
-    document.body.style.background = '#0f1117';
+    document.body.style.background = '#0a0a0b';
   }, []);
 
   const handleTabChange = useCallback((tabId: number) => {

@@ -20,6 +20,7 @@ interface SyncStatusData {
 
 interface WalletPanelProps {
   onClose?: () => void;
+  maxHeight?: number | null;
 }
 
 export default function WalletPanel({ onClose }: WalletPanelProps) {
@@ -541,20 +542,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       {/* Dynamic Content Area */}
       <div className="dynamic-content-area-light">
         {showSendForm && (
-          <>
-            <TransactionForm
-              onTransactionCreated={handleSendSubmit}
-              balance={balance}
-              bsvPrice={bsvPrice}
-            />
-            <button
-              className="submit-button"
-              onClick={handleSendClick}
-              style={{ margin: '10px 14px 14px', width: 'calc(100% - 28px)' }}
-            >
-              Close
-            </button>
-          </>
+          <TransactionForm
+            onTransactionCreated={handleSendSubmit}
+            balance={balance}
+            bsvPrice={bsvPrice}
+          />
         )}
 
         {showReceiveAddress && (

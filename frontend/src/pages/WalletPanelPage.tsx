@@ -81,11 +81,28 @@ function PinInput({
 }
 
 export default function WalletPanelPage() {
+  const [, setPanelHeight] = useState<number | null>(null);
+
   useEffect(() => {
     document.body.style.margin = '0';
     document.body.style.overflow = 'hidden';
     document.body.style.background = 'transparent';
     document.documentElement.style.background = 'transparent';
+  }, []);
+
+  // Listen for HWND dimensions from C++ (on show and on resize)
+  // Set a CSS variable so .wallet-panel-light can use it for max-height
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'wallet_shown' || e.data?.type === 'wallet_resize') {
+        if (e.data.panelHeight > 0) {
+          setPanelHeight(e.data.panelHeight);
+          document.documentElement.style.setProperty('--wallet-hwnd-height', `${e.data.panelHeight}px`);
+        }
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
   }, []);
 
   // Read icon position from URL param (physical pixels, passed from toolbar click)

@@ -694,9 +694,17 @@ void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRigh
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
+    // Use client area to avoid window frame offsets
+    RECT clientRect;
+    GetClientRect(g_hwnd, &clientRect);
+    POINT clientTopLeft = { clientRect.left, clientRect.top };
+    POINT clientBottomRight = { clientRect.right, clientRect.bottom };
+    ClientToScreen(g_hwnd, &clientTopLeft);
+    ClientToScreen(g_hwnd, &clientBottomRight);
+
     int panelWidth = 400;
-    int panelHeight = mainRect.bottom - headerRect.bottom;
-    int overlayX = mainRect.right - panelWidth;
+    int panelHeight = clientBottomRight.y - headerRect.bottom;
+    int overlayX = clientBottomRight.x - panelWidth;
     int overlayY = headerRect.bottom;
 
     LOG_INFO_APP("Wallet panel initial position: (" + std::to_string(overlayX) + ", " +
@@ -828,10 +836,17 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
 
-    // Calculate position — right-side panel, full height below header
+    // Calculate position using client area to avoid window frame offsets
+    RECT clientRect;
+    GetClientRect(posHwnd, &clientRect);
+    POINT clientTopLeft = { clientRect.left, clientRect.top };
+    POINT clientBottomRight = { clientRect.right, clientRect.bottom };
+    ClientToScreen(posHwnd, &clientTopLeft);
+    ClientToScreen(posHwnd, &clientBottomRight);
+
     int panelWidth = 400;
-    int panelHeight = mainRect.bottom - headerRect.bottom;
-    int overlayX = mainRect.right - panelWidth;
+    int panelHeight = clientBottomRight.y - headerRect.bottom;
+    int overlayX = clientBottomRight.x - panelWidth;
     int overlayY = headerRect.bottom;
 
     // Retarget overlay handler's window_id so IPC routes to the requesting window
@@ -875,7 +890,9 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         extern int g_peerpay_amount;
         std::string js = "window.postMessage({type:'wallet_shown',ppc:" +
             std::to_string(g_peerpay_count) + ",ppa:" +
-            std::to_string(g_peerpay_amount) + "},'*');";
+            std::to_string(g_peerpay_amount) + ",panelHeight:" +
+            std::to_string(panelHeight) + ",panelWidth:" +
+            std::to_string(panelWidth) + "},'*');";
         wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
     }
     // The flag is only set at CREATION time (before React loads).
