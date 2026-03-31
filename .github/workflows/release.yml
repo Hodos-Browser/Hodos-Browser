@@ -169,6 +169,32 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
       
+      # Sign installer with DSA for WinSparkle auto-update verification
+      - name: DSA sign installer for WinSparkle
+        shell: bash
+        env:
+          DSA_PRIVATE_KEY: ${{ secrets.WINSPARKLE_DSA_PRIVATE_KEY }}
+        id: dsa_sign
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          INSTALLER="dist/HodosBrowser-${VERSION}-setup.exe"
+
+          if [ -z "$DSA_PRIVATE_KEY" ]; then
+            echo "WARNING: WINSPARKLE_DSA_PRIVATE_KEY not set — skipping DSA signing"
+            echo "DSA_SIGNATURE=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Write DSA private key to temp file
+          echo "$DSA_PRIVATE_KEY" > /tmp/dsa_priv.pem
+
+          # Sign: SHA1 hash of file, then DSA sign, then base64 encode
+          DSA_SIG=$(openssl dgst -sha1 -sign /tmp/dsa_priv.pem "$INSTALLER" | openssl enc -base64 -A)
+          rm /tmp/dsa_priv.pem
+
+          echo "DSA signature: ${DSA_SIG:0:20}..."
+          echo "DSA_SIGNATURE=$DSA_SIG" >> $GITHUB_OUTPUT
+
       # Upload for publish job
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
@@ -176,13 +202,30 @@ jobs:
           name: windows-installer
           path: dist/*.exe
           if-no-files-found: error
-      
+
       - name: Upload Windows portable zip
         uses: actions/upload-artifact@v7
         with:
           name: windows-portable
           path: dist/*.zip
           if-no-files-found: error
+
+      - name: Upload DSA signature
+        shell: bash
+        run: |
+          SIG="${{ steps.dsa_sign.outputs.DSA_SIGNATURE }}"
+          if [ -n "$SIG" ]; then
+            echo "$SIG" > dist/dsa_signature.txt
+            echo "DSA signature saved to artifact"
+          else
+            echo "No DSA signature to upload"
+            echo "" > dist/dsa_signature.txt
+          fi
+      - name: Upload DSA signature artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-dsa-signature
+          path: dist/dsa_signature.txt
 
   # ============================================================
   # MACOS BUILD
@@ -528,13 +571,23 @@ jobs:
           WIN_SIZE=${WIN_SIZE:-0}
           MAC_SIZE=${MAC_SIZE:-0}
 
-          python3 scripts/generate-appcast.py \
-            --version "$VERSION" \
-            --windows-url "${REPO_URL}/HodosBrowser-${VERSION}-setup.exe" \
-            --windows-size "$WIN_SIZE" \
-            --macos-url "${REPO_URL}/HodosBrowser-${VERSION}.dmg" \
-            --macos-size "$MAC_SIZE" \
-            --output appcast.xml
+          # Read DSA signature if available
+          WIN_SIG=$(cat artifacts/windows-dsa-signature/dsa_signature.txt 2>/dev/null || echo "")
+
+          APPCAST_ARGS="--version $VERSION"
+          APPCAST_ARGS="$APPCAST_ARGS --windows-url ${REPO_URL}/HodosBrowser-${VERSION}-setup.exe"
+          APPCAST_ARGS="$APPCAST_ARGS --windows-size $WIN_SIZE"
+          APPCAST_ARGS="$APPCAST_ARGS --macos-url ${REPO_URL}/HodosBrowser-${VERSION}.dmg"
+          APPCAST_ARGS="$APPCAST_ARGS --macos-size $MAC_SIZE"
+          APPCAST_ARGS="$APPCAST_ARGS --output appcast.xml"
+          if [ -n "$WIN_SIG" ]; then
+            APPCAST_ARGS="$APPCAST_ARGS --windows-signature $WIN_SIG"
+            echo "Windows DSA signature included in appcast"
+          else
+            echo "WARNING: No Windows DSA signature found"
+          fi
+
+          python3 scripts/generate-appcast.py $APPCAST_ARGS
 
           cat appcast.xml
           cp appcast.xml artifacts/appcast.xml || true
