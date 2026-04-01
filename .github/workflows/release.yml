@@ -121,7 +121,7 @@ jobs:
         shell: pwsh
         run: |
           cd cef-native
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DAPP_VERSION="${{ steps.version.outputs.VERSION }}"
       
       # Run the existing build script (created by your dev)
       - name: Build with release script
@@ -171,24 +171,30 @@ jobs:
       
       # Sign installer with DSA for WinSparkle auto-update verification
       - name: DSA sign installer for WinSparkle
-        if: ${{ secrets.WINSPARKLE_DSA_PRIVATE_KEY != '' }}
         shell: bash
         env:
           DSA_PRIVATE_KEY: ${{ secrets.WINSPARKLE_DSA_PRIVATE_KEY }}
+        id: dsa_sign
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           INSTALLER="dist/HodosBrowser-${VERSION}-setup.exe"
 
+          if [ -z "$DSA_PRIVATE_KEY" ]; then
+            echo "WARNING: WINSPARKLE_DSA_PRIVATE_KEY not set — skipping DSA signing"
+            echo "DSA_SIGNATURE=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Write DSA private key to temp file
           echo "$DSA_PRIVATE_KEY" > /tmp/dsa_priv.pem
 
-          # Sign: SHA1 hash of file, then DSA sign, then base64 encode
-          DSA_SIG=$(openssl dgst -sha1 -sign /tmp/dsa_priv.pem "$INSTALLER" | openssl enc -base64 -A)
+          # Sign using WinSparkle's exact method (double SHA1): sha1 binary hash, then DSA sign that hash
+          # This matches WinSparkle-0.8.1/bin/sign_update.bat
+          DSA_SIG=$(openssl dgst -sha1 -binary < "$INSTALLER" | openssl dgst -sha1 -sign /tmp/dsa_priv.pem | openssl enc -base64 -A)
           rm /tmp/dsa_priv.pem
 
           echo "DSA signature: ${DSA_SIG:0:20}..."
           echo "DSA_SIGNATURE=$DSA_SIG" >> $GITHUB_OUTPUT
-        id: dsa_sign
 
       # Upload for publish job
       - name: Upload Windows installer
@@ -206,17 +212,21 @@ jobs:
           if-no-files-found: error
 
       - name: Upload DSA signature
-        if: steps.dsa_sign.outputs.DSA_SIGNATURE != ''
         shell: bash
         run: |
-          echo "${{ steps.dsa_sign.outputs.DSA_SIGNATURE }}" > dist/dsa_signature.txt
+          SIG="${{ steps.dsa_sign.outputs.DSA_SIGNATURE }}"
+          if [ -n "$SIG" ]; then
+            echo "$SIG" > dist/dsa_signature.txt
+            echo "DSA signature saved to artifact"
+          else
+            echo "No DSA signature to upload"
+            echo "" > dist/dsa_signature.txt
+          fi
       - name: Upload DSA signature artifact
-        if: steps.dsa_sign.outputs.DSA_SIGNATURE != ''
         uses: actions/upload-artifact@v7
         with:
           name: windows-dsa-signature
           path: dist/dsa_signature.txt
-          if-no-files-found: warn
 
   # ============================================================
   # MACOS BUILD
@@ -333,7 +343,7 @@ jobs:
       - name: Configure and build CEF shell
         run: |
           cd cef-native
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="${{ steps.version.outputs.VERSION }}"
           cmake --build build --config Release
 
           cd build/bin
