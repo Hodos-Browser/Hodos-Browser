@@ -1988,13 +1988,28 @@ pub async fn wallet_delete(
 ) -> HttpResponse {
     log::info!("🗑️ /wallet/delete called");
 
-    // 1. Check wallet exists (lock scope — release before async backup)
+    // 1. Check wallet exists + no pending transactions (lock scope — release before async backup)
     {
         let db = state.database.lock().unwrap();
         use crate::database::WalletRepository;
         let wallet_repo = WalletRepository::new(db.connection());
         if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) == false {
             return HttpResponse::NotFound().json(serde_json::json!({"error": "No wallet exists"}));
+        }
+
+        // Block delete while transactions are still settling. A backup taken now could
+        // capture ghost outputs from txs that never make it on-chain.
+        let pending_count: i64 = db.connection().query_row(
+            "SELECT COUNT(*) FROM transactions WHERE status IN ('nosend', 'sending')",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        if pending_count > 0 {
+            log::warn!("   ⚠️  {} pending transaction(s) — blocking delete until settled", pending_count);
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!("{} transaction(s) are still being broadcast. Please wait a moment and try again.", pending_count),
+                "pending_transactions": pending_count
+            }));
         }
     }
 

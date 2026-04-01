@@ -19,8 +19,10 @@ const MAX_BATCH: usize = 20;
 /// Timeout for transactions WE broadcast (unproven/sending) - 6 hours
 const UNPROVEN_TIMEOUT_SECS: i64 = 6 * 60 * 60;
 
-/// Timeout for transactions the APP broadcasts (nosend) - 48 hours
-const NOSEND_TIMEOUT_SECS: i64 = 48 * 60 * 60;
+/// Timeout for transactions the APP broadcasts (nosend) - 10 minutes
+/// Apps broadcast immediately after receiving the Atomic BEEF from createAction.
+/// If the tx isn't on ARC or WoC within 10 minutes, the broadcast likely failed.
+const NOSEND_TIMEOUT_SECS: i64 = 10 * 60;
 
 /// After this many seconds in mempool, cross-verify with WhatsOnChain
 const MEMPOOL_VERIFY_THRESHOLD_SECS: i64 = 30 * 60;
@@ -96,6 +98,19 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             reconcile_proven_tx(state, txid, proven_tx.proven_tx_id, proven_tx.height);
             confirmed_count += 1;
             continue;
+        }
+
+        // For nosend txs older than 60s: the app should have broadcast by now.
+        // Check WoC directly — if not found, the app's broadcast likely failed.
+        // This catches ARC 409 DeadlineExceeded failures where the app thinks it
+        // broadcast but the tx never actually made it to miners.
+        if is_nosend && tx_info.age_secs > 60 && tx_info.age_secs < timeout_secs {
+            let woc_confirmed = try_whatsonchain_confirmation(state, client, txid).await;
+            if let Some(count) = woc_confirmed {
+                confirmed_count += count;
+                continue;
+            }
+            // Not on WoC yet — still check ARC below (it might be in mempool)
         }
 
         // Query ARC for status

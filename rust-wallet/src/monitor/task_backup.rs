@@ -39,6 +39,19 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         if balance < MIN_BACKUP_BALANCE_SATS {
             return Ok(()); // Insufficient funds
         }
+
+        // Don't backup while transactions are still settling (nosend/sending/unproven).
+        // A backup taken during this window could capture ghost outputs from txs that
+        // never make it on-chain, leading to corrupt recovery state.
+        let pending_count: i64 = db.connection().query_row(
+            "SELECT COUNT(*) FROM transactions WHERE status IN ('nosend', 'sending', 'unproven')",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        if pending_count > 0 {
+            info!("💾 TaskBackup: ⏳ {} pending transaction(s) — deferring backup until settled", pending_count);
+            return Ok(());
+        }
     } // DB lock dropped
 
     // Call the backup endpoint via HTTP.
