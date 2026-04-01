@@ -365,12 +365,12 @@ const CertificatesTab: React.FC = () => {
           <table className="wd-cert-table">
             <thead>
               <tr>
-                <th>Type</th>
-                <th>Identity</th>
-                <th>Certifier</th>
-                <th>Status</th>
-                <th>Issued</th>
-                <th style={{ width: '80px' }}>Actions</th>
+                <th style={{ width: '15%' }}>Type</th>
+                <th style={{ width: '18%' }}>Identity</th>
+                <th style={{ width: '18%' }}>Certifier</th>
+                <th style={{ width: '12%' }}>Status</th>
+                <th style={{ width: '15%' }}>Issued</th>
+                <th style={{ width: '22%' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -391,28 +391,28 @@ const CertificatesTab: React.FC = () => {
                     <td>{getPublishStatusBadge(cert)}</td>
                     <td style={{ fontSize: '12px', color: '#9ca3af' }}>{formatDate(cert.created_at)}</td>
                     <td>
-                      <div style={{ display: 'flex', gap: '4px' }}>
-                        {/* Publish/Unpublish button */}
+                      <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-start' }}>
+                        {/* Publish/Unpublish */}
                         {cert.publish_status === 'published' ? (
                           <button
                             title="Make private"
                             onClick={(e) => { e.stopPropagation(); handleUnpublish(cert); }}
                             disabled={publishingCert === cert.serial_number}
                             style={{
-                              background: publishingCert === cert.serial_number ? 'rgba(234,179,8,0.1)' : 'none',
+                              background: 'none',
                               border: 'none',
                               cursor: publishingCert === cert.serial_number ? 'default' : 'pointer',
-                              color: publishingCert === cert.serial_number ? '#eab308' : '#eab308',
-                              fontSize: publishingCert === cert.serial_number ? '11px' : '13px',
-                              padding: '4px 6px',
-                              borderRadius: '4px',
-                              opacity: publishingCert === cert.serial_number ? 0.8 : 1,
+                              color: '#a67c00',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              padding: '2px 0',
+                              opacity: publishingCert === cert.serial_number ? 0.6 : 1,
                               whiteSpace: 'nowrap',
                             }}
-                            onMouseOver={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'rgba(234,179,8,0.1)'; }}
-                            onMouseOut={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'none'; }}
+                            onMouseOver={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                            onMouseOut={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
                           >
-                            {publishingCert === cert.serial_number ? 'Unpublishing...' : '🔒'}
+                            {publishingCert === cert.serial_number ? 'Unpublishing...' : 'Unpublish'}
                           </button>
                         ) : (
                           <button
@@ -420,23 +420,23 @@ const CertificatesTab: React.FC = () => {
                             onClick={(e) => { e.stopPropagation(); handlePublish(cert); }}
                             disabled={publishingCert === cert.serial_number}
                             style={{
-                              background: publishingCert === cert.serial_number ? 'rgba(34,197,94,0.1)' : 'none',
+                              background: 'none',
                               border: 'none',
                               cursor: publishingCert === cert.serial_number ? 'default' : 'pointer',
-                              color: publishingCert === cert.serial_number ? '#22c55e' : '#22c55e',
-                              fontSize: publishingCert === cert.serial_number ? '11px' : '13px',
-                              padding: '4px 6px',
-                              borderRadius: '4px',
-                              opacity: publishingCert === cert.serial_number ? 0.8 : 1,
+                              color: '#a67c00',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              padding: '2px 0',
+                              opacity: publishingCert === cert.serial_number ? 0.6 : 1,
                               whiteSpace: 'nowrap',
                             }}
-                            onMouseOver={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'rgba(34,197,94,0.1)'; }}
-                            onMouseOut={(e) => { if (publishingCert !== cert.serial_number) e.currentTarget.style.background = 'none'; }}
+                            onMouseOver={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                            onMouseOut={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
                           >
-                            {publishingCert === cert.serial_number ? 'Publishing...' : '🌐'}
+                            {publishingCert === cert.serial_number ? 'Publishing...' : 'Publish'}
                           </button>
                         )}
-                        {/* Delete button */}
+                        {/* Delete */}
                         <button
                           title="Delete certificate"
                           onClick={(e) => { e.stopPropagation(); setDeleteTarget(cert); }}
@@ -444,15 +444,16 @@ const CertificatesTab: React.FC = () => {
                             background: 'none',
                             border: 'none',
                             cursor: 'pointer',
-                            color: '#ef4444',
-                            fontSize: '14px',
-                            padding: '4px 6px',
-                            borderRadius: '4px',
+                            color: '#c62828',
+                            fontSize: '12px',
+                            fontWeight: 700,
+                            padding: '2px 0',
+                            whiteSpace: 'nowrap',
                           }}
-                          onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}
-                          onMouseOut={(e) => (e.currentTarget.style.background = 'none')}
+                          onMouseOver={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                          onMouseOut={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
                         >
-                          🗑
+                          Delete
                         </button>
                       </div>
                     </td>

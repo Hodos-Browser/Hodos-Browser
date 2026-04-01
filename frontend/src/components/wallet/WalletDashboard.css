@@ -159,6 +159,7 @@
   overflow-x: hidden;
   padding: 16px 24px;
   box-sizing: border-box;
+  background: linear-gradient(135deg, transparent 0%, rgba(255, 255, 255, 0.04) 60%, rgba(255, 255, 255, 0.08) 100%);
 }
 
 /* ---- Dashboard Tab ---- */

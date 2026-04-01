@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { HodosButton } from '../HodosButton';
 
 interface TokenOutput {
   outputId: number;
@@ -20,8 +21,6 @@ const formatDate = (timestamp: number) => {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 };
 
-const truncateTxid = (txid: string) =>
-  txid.length > 16 ? `${txid.slice(0, 8)}...${txid.slice(-8)}` : txid;
 
 const TokensTab: React.FC = () => {
   const [tokens, setTokens] = useState<TokenOutput[]>([]);
@@ -150,21 +149,27 @@ const TokensTab: React.FC = () => {
                       {formatDate(token.createdAt)}
                     </div>
                     {token.txid && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span style={{ fontSize: '10px', color: '#6b7280', fontFamily: 'monospace' }}>
-                          {truncateTxid(token.txid)}:{token.vout}
-                        </span>
-                        <button
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <HodosButton
+                          variant="ghost"
+                          size="small"
+                          className="wd-txid-pill wd-txid-pill-sm"
+                          onClick={() => {
+                            navigator.clipboard.writeText(token.txid!).catch(() => {});
+                          }}
+                          title={token.txid}
+                        >
+                          txid
+                        </HodosButton>
+                        <HodosButton
+                          variant="icon"
+                          size="small"
+                          className="wd-woc-btn"
                           onClick={() => openOnWoC(token.txid!)}
                           title="View on WhatsOnChain"
-                          style={{
-                            background: 'none', border: 'none', cursor: 'pointer',
-                            color: '#a67c00', fontSize: '11px', padding: '0 2px',
-                            textDecoration: 'underline',
-                          }}
                         >
-                          WoC &#x2197;
-                        </button>
+                          <img src="/whatsonchain.png" alt="WoC" width="14" height="14" />
+                        </HodosButton>
                       </div>
                     )}
                   </div>
