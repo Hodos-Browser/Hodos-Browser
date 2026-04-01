@@ -55,25 +55,6 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 **macOS notes:** macOS handles DPI changes automatically via `NSWindow` `backingScaleFactor`. No fix needed.
 **Sprint:** 3 (before B-1)
 
-### B-5: Cloudflare bot detection blocks WhatsOnChain (P1) — IN PROGRESS
-**Reported:** 2026-04-01
-**Description:** Cloudflare "check the box" challenge on whatsOnChain.com — user can never pass it. CEF source rebuild (March 2026, proprietary codecs) temporarily fixed it, but it has returned.
-**Impact:** Users cannot access WhatsOnChain or other Cloudflare-protected BSV sites.
-**Root cause (confirmed):** Cumulative bot signals from privacy features — not TLS/H2 fingerprint drift. Six signals triggered Cloudflare: (1) `navigator.plugins = []` (empty = headless indicator), (2) fingerprint farbling on Cloudflare challenge pages themselves, (3) scriptlet injection breaking Cloudflare's JS verification, (4) no `navigator.webdriver = false`, (5) no `window.chrome` object, (6) `window.hodosBrowser` exposed to all pages.
-**Fix (Tier 1 + 2 applied 2026-04-01):**
-- Added `challenges.cloudflare.com` + `cf-turnstile.com` to fingerprint bypass list (`FingerprintProtection.h`)
-- Added Cloudflare exceptions to `hodos-unbreak.txt` (scriptlet + cosmetic + script network)
-- Fixed `navigator.plugins` to return realistic Chrome 136 plugin list (5 PDF plugins)
-- Added `navigator.webdriver = false` explicitly
-- Injected `window.chrome` stub on external pages
-- Restricted `window.hodosBrowser` to internal pages only (external pages get only BRC-100 + cefMessage)
-- Bumped adblock CONFIG_VERSION 6→7
-**Reference:** `development-docs/cloudflare-bot-bypass-strategy.md`
-**Key files:** `FingerprintProtection.h`, `FingerprintScript.h`, `hodos-unbreak.txt`, `simple_render_process_handler.cpp`, `engine.rs`
-**macOS notes:** Same CEF code — all JS fixes apply cross-platform.
-**Testing needed:** whatsOnChain.com, browser-compat.turnstile.workers.dev, browserleaks.com/javascript, creepjs.com
-**Sprint:** 5
-
 ### B-6: Second instance shows "profile locked" error instead of opening new window (P1)
 **Reported:** 2026-04-01
 **Description:** Launching a second browser instance shows "Profile is already in use" error dialog and exits. Users expect a new window to open (like Chrome/Firefox).
@@ -123,6 +104,11 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 **Fix:** Added new `browser.autoUpdateNotifications` setting (default `false`). Two toggles in Settings > About: "Check for updates automatically" (existing, default ON) and "Update notifications" (new, default OFF — suppresses periodic WinSparkle dialogs). WinSparkle auto-check only runs when both are enabled. Manual "Check for updates" button always works regardless.
 **Files changed:** `SettingsManager.h`, `SettingsManager.cpp`, `cef_browser_shell.cpp` (Initialize), `simple_handler.cpp` (settings_set), `AboutSettings.tsx`, `useSettings.ts`
 
+### B-5: Cloudflare bot detection blocks WhatsOnChain — FIXED (2026-04-01)
+**Root cause:** Cumulative bot signals from privacy features — not TLS/H2 fingerprint drift. Six signals triggered Cloudflare: (1) `navigator.plugins = []` (empty = headless indicator), (2) fingerprint farbling on Cloudflare challenge pages themselves, (3) scriptlet injection breaking Cloudflare's JS verification, (4) no `navigator.webdriver = false`, (5) no `window.chrome` object, (6) `window.hodosBrowser` exposed to all pages.
+**Fix:** Added Cloudflare domains (`challenges.cloudflare.com`, `cf-turnstile.com`) to fingerprint bypass list and `hodos-unbreak.txt`. Fixed `navigator.plugins` to return realistic Chrome 136 plugin array (5 PDF plugins). Set `navigator.webdriver = false`. Injected `window.chrome` stub on external pages. Restricted `window.hodosBrowser` to internal pages only (external pages get only BRC-100 + cefMessage). Bumped adblock CONFIG_VERSION 6→7.
+**Files changed:** `FingerprintProtection.h`, `FingerprintScript.h`, `hodos-unbreak.txt`, `simple_render_process_handler.cpp`, `engine.rs`
+
 ### B-9: Taskbar icon dark background — FIXED (2026-04-01)
 **Fix:** Replaced `cef-native/hodos.ico` with gold-on-black version (multi-resolution: 16/32/48/256px). Copy saved to `frontend/public/hodos.ico` and branding folder. No code changes — icon embedded via `hodos.rc` at build time.
 **Files changed:** `cef-native/hodos.ico` (asset replacement)
@@ -137,7 +123,7 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 | 2 | B-2 (expanded) | MEDIUM | Startup/shutdown performance |
 | 3 | B-4, B-1 | HIGH | Window management (frameless) |
 | 4 | B-6, B-3 | MED-HIGH | Instance management + installer |
-| 5 | B-5 | HIGH UNCERTAINTY | Cloudflare investigation |
+| 5 | B-5 | ~~HIGH UNCERTAINTY~~ DONE | Cloudflare — fixed 2026-04-01 |
 
 See full implementation plan: `/home/archboldmatt/.claude/plans/polished-sniffing-engelbart.md`
 

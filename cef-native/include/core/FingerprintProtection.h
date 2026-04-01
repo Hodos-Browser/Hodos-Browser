@@ -196,27 +196,22 @@ public:
         for (size_t i = 0; i < domain.size(); i++) {
             lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(domain[i])));
         }
-        // Check against known auth domains + reCAPTCHA/resource domains.
-        // Fingerprint farbling (canvas noise, WebGL spoofing) breaks bot
-        // detection / anti-fraud checks on these domains.
+        // CAPTCHA / bot challenge domains where even subtle canvas farbling
+        // can interfere with verification. Auth, banking, e-commerce, and
+        // social domains are NOT listed here — the farbling is subtle enough
+        // (Brave-style LSB pixel noise, no hardware spoofing) that it does
+        // not trigger their anti-fraud systems.
         static const char* authDomains[] = {
-            "accounts.google.com",
-            "myaccount.google.com",
-            "www.google.com",       // reCAPTCHA challenge page
-            "www.gstatic.com",      // reCAPTCHA JS/assets
-            "ssl.gstatic.com",      // Google login page static assets
-            "login.microsoftonline.com",
-            "login.live.com",
-            "login.microsoft.com",
-            "appleid.apple.com",
-            "github.com",
-            "www.facebook.com",
-            "discord.com",
-            "x.com",
-            "twitter.com",
-            "socialcert.net",       // BRC-52 certificate issuer (OAuth redirect)
-            "challenges.cloudflare.com",  // Cloudflare managed challenge / Turnstile
-            "cf-turnstile.com",           // Cloudflare Turnstile widget domain
+            // --- Bot detection / CAPTCHA services ---
+            "challenges.cloudflare.com",  // Cloudflare managed challenge
+            "cf-turnstile.com",           // Cloudflare Turnstile widget
+            "www.google.com",             // reCAPTCHA challenge page
+            "www.gstatic.com",            // reCAPTCHA JS/assets
+            "recaptcha.net",              // reCAPTCHA alternate domain
+            "www.recaptcha.net",          // reCAPTCHA alternate domain
+            "hcaptcha.com",               // hCaptcha
+            "js.hcaptcha.com",            // hCaptcha JS
+            "newassets.hcaptcha.com",     // hCaptcha assets
         };
         for (const auto& auth : authDomains) {
             if (lower == auth) return true;
