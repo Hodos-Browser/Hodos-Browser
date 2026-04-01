@@ -57,21 +57,7 @@ Items identified during MVP beta fix sprints (2026-04-01) that need macOS-specif
 
 ---
 
-## 4. Deferred Overlay Creation (from B-2 Sprint 2, Part C — may or may not be implemented on Windows)
-
-**Context:** Windows Sprint 2 may defer overlay HWND pre-creation to after `ShowWindow` for faster startup. If implemented:
-
-**macOS equivalent:**
-- Overlay creation in `cef_browser_shell_mac.mm` follows similar pre-creation pattern at startup
-- Same deferral approach: move to after window display via `dispatch_after` on main queue
-- All overlay show handlers should already check existence and create on demand — verify this
-- Test: click every overlay icon within 1s of startup — each should appear (possibly with brief delay)
-
-**Risk:** macOS NSPanel creation and `makeKeyAndOrderFront` have different timing characteristics than Windows `CreateWindowEx`. Test thoroughly.
-
----
-
-## 5. Right-Click Paste (from B-8 Sprint 1) — Verify macOS Behavior
+## 4. Right-Click Paste (from B-8 Sprint 1) — Verify macOS Behavior
 
 **Windows fix:** Paste in non-tab browsers (address bar) uses Win32 `OpenClipboard`/`GetClipboardData` to read clipboard natively, then injects text via JS. This was needed because `document.execCommand('paste')` is blocked and `navigator.clipboard.readText()` triggers a permission prompt.
 

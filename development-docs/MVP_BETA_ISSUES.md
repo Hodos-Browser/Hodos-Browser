@@ -55,15 +55,23 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 **macOS notes:** macOS handles DPI changes automatically via `NSWindow` `backingScaleFactor`. No fix needed.
 **Sprint:** 3 (before B-1)
 
-### B-5: Cloudflare bot detection blocks WhatsOnChain (P1)
+### B-5: Cloudflare bot detection blocks WhatsOnChain (P1) — IN PROGRESS
 **Reported:** 2026-04-01
 **Description:** Cloudflare "check the box" challenge on whatsOnChain.com — user can never pass it. CEF source rebuild (March 2026, proprietary codecs) temporarily fixed it, but it has returned.
 **Impact:** Users cannot access WhatsOnChain or other Cloudflare-protected BSV sites.
-**Likely root cause:** TLS/HTTP2 fingerprint drift — Cloudflare updated detection or CEF's fingerprints diverged from retail Chrome. Also missing JS environment signals: `window.chrome` not injected, `navigator.webdriver` not set to `false`.
-**Fix approach:** Investigation-first. Step 1: Diagnose via ja4er.com, tls.browserleaks.com, creepjs. Step 2: Try JS fixes (inject `navigator.webdriver=false`, minimal `window.chrome` object). Step 3: If JS insufficient, TLS layer requires CEF source rebuild.
+**Root cause (confirmed):** Cumulative bot signals from privacy features — not TLS/H2 fingerprint drift. Six signals triggered Cloudflare: (1) `navigator.plugins = []` (empty = headless indicator), (2) fingerprint farbling on Cloudflare challenge pages themselves, (3) scriptlet injection breaking Cloudflare's JS verification, (4) no `navigator.webdriver = false`, (5) no `window.chrome` object, (6) `window.hodosBrowser` exposed to all pages.
+**Fix (Tier 1 + 2 applied 2026-04-01):**
+- Added `challenges.cloudflare.com` + `cf-turnstile.com` to fingerprint bypass list (`FingerprintProtection.h`)
+- Added Cloudflare exceptions to `hodos-unbreak.txt` (scriptlet + cosmetic + script network)
+- Fixed `navigator.plugins` to return realistic Chrome 136 plugin list (5 PDF plugins)
+- Added `navigator.webdriver = false` explicitly
+- Injected `window.chrome` stub on external pages
+- Restricted `window.hodosBrowser` to internal pages only (external pages get only BRC-100 + cefMessage)
+- Bumped adblock CONFIG_VERSION 6→7
 **Reference:** `development-docs/cloudflare-bot-bypass-strategy.md`
-**Key files:** `simple_render_process_handler.cpp` (OnContextCreated), `FingerprintScript.h`
-**macOS notes:** Same CEF/TLS fingerprint — identical issue. JS fixes apply cross-platform.
+**Key files:** `FingerprintProtection.h`, `FingerprintScript.h`, `hodos-unbreak.txt`, `simple_render_process_handler.cpp`, `engine.rs`
+**macOS notes:** Same CEF code — all JS fixes apply cross-platform.
+**Testing needed:** whatsOnChain.com, browser-compat.turnstile.workers.dev, browserleaks.com/javascript, creepjs.com
 **Sprint:** 5
 
 ### B-6: Second instance shows "profile locked" error instead of opening new window (P1)

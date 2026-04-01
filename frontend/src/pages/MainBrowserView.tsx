@@ -75,33 +75,37 @@ const MainBrowserView: React.FC = () => {
     // Runs once on mount — if wallet.db was deleted, clears the stale cache before
     // the user ever opens the wallet panel.
     useEffect(() => {
-        fetch('http://127.0.0.1:31301/wallet/status')
-            .then(r => r.json())
-            .then(data => {
-                if (data.exists) {
-                    localStorage.setItem('hodos_wallet_exists', 'true');
-                    // Fetch and cache identity key for wallet panel
-                    fetch('http://127.0.0.1:31301/getPublicKey', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ identityKey: true }),
-                    })
-                        .then(r => r.json())
-                        .then(keyData => {
-                            if (keyData.publicKey) {
-                                localStorage.setItem('hodos_identity_key', keyData.publicKey);
-                            }
+        // Defer wallet status cache warm — not needed for initial render
+        const id = setTimeout(() => {
+            fetch('http://127.0.0.1:31301/wallet/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.exists) {
+                        localStorage.setItem('hodos_wallet_exists', 'true');
+                        // Fetch and cache identity key for wallet panel
+                        fetch('http://127.0.0.1:31301/getPublicKey', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ identityKey: true }),
                         })
-                        .catch(() => {});
-                } else {
-                    localStorage.removeItem('hodos_wallet_exists');
-                    localStorage.removeItem('hodos_identity_key');
-                }
-                localStorage.removeItem('hodos_wallet_locked');
-            })
-            .catch(() => {
-                // Server not reachable — leave cache as-is (overlay will retry)
-            });
+                            .then(r => r.json())
+                            .then(keyData => {
+                                if (keyData.publicKey) {
+                                    localStorage.setItem('hodos_identity_key', keyData.publicKey);
+                                }
+                            })
+                            .catch(() => {});
+                    } else {
+                        localStorage.removeItem('hodos_wallet_exists');
+                        localStorage.removeItem('hodos_identity_key');
+                    }
+                    localStorage.removeItem('hodos_wallet_locked');
+                })
+                .catch(() => {
+                    // Server not reachable — leave cache as-is (overlay will retry)
+                });
+        }, 0);
+        return () => clearTimeout(id);
     }, []);
 
     // Load search engine setting from C++ backend
@@ -193,31 +197,34 @@ const MainBrowserView: React.FC = () => {
 
     // Poll /wallet/peerpay/status every 10s + listen for IPC dismiss events
     useEffect(() => {
-        const checkPeerpayStatus = async () => {
-            try {
-                const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/status');
-                if (resp.ok) {
-                    const data = await resp.json();
-                    if (data.unread_count > 0) {
-                        setHasUnreadPayments(true);
-                        setUnreadPaymentCount(data.unread_count);
-                        setUnreadPaymentAmount(data.unread_amount || 0);
-                        setHasFailedPayments((data.failure_count || 0) > 0);
-                    } else {
-                        setHasUnreadPayments(false);
-                        setHasFailedPayments(false);
-                        setUnreadPaymentCount(0);
-                        setUnreadPaymentAmount(0);
+        // Defer PeerPay polling — not needed for initial render
+        const deferredId = setTimeout(() => {
+            const checkPeerpayStatus = async () => {
+                try {
+                    const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/status');
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        if (data.unread_count > 0) {
+                            setHasUnreadPayments(true);
+                            setUnreadPaymentCount(data.unread_count);
+                            setUnreadPaymentAmount(data.unread_amount || 0);
+                            setHasFailedPayments((data.failure_count || 0) > 0);
+                        } else {
+                            setHasUnreadPayments(false);
+                            setHasFailedPayments(false);
+                            setUnreadPaymentCount(0);
+                            setUnreadPaymentAmount(0);
+                        }
                     }
+                } catch {
+                    // Wallet server not running — ignore
                 }
-            } catch {
-                // Wallet server not running — ignore
-            }
-        };
-        // Initial check after short delay (let wallet server start)
-        const initialTimer = setTimeout(checkPeerpayStatus, 5000);
-        // Periodic check every 10s (trivial indexed DB query, negligible cost)
-        const interval = setInterval(checkPeerpayStatus, 10000);
+            };
+            // Initial check after short delay (let wallet server start)
+            initialTimerRef.current = setTimeout(checkPeerpayStatus, 5000);
+            // Periodic check every 10s (trivial indexed DB query, negligible cost)
+            intervalRef.current = setInterval(checkPeerpayStatus, 10000);
+        }, 2000);
 
         const handlePaymentDismissed = (event: MessageEvent) => {
             if (event.data?.type === 'wallet_payment_dismissed') {
@@ -228,9 +235,14 @@ const MainBrowserView: React.FC = () => {
             }
         };
         window.addEventListener('message', handlePaymentDismissed);
+
+        const initialTimerRef = { current: null as ReturnType<typeof setTimeout> | null };
+        const intervalRef = { current: null as ReturnType<typeof setInterval> | null };
+
         return () => {
-            clearTimeout(initialTimer);
-            clearInterval(interval);
+            clearTimeout(deferredId);
+            if (initialTimerRef.current) clearTimeout(initialTimerRef.current);
+            if (intervalRef.current) clearInterval(intervalRef.current);
             window.removeEventListener('message', handlePaymentDismissed);
         };
     }, []);
@@ -341,9 +353,13 @@ const MainBrowserView: React.FC = () => {
 
     // Check adblock site toggle when domain changes
     useEffect(() => {
-        if (currentDomain) {
-            checkSiteAdblock(currentDomain);
-        }
+        // Defer site adblock check — not needed for initial render
+        const id = setTimeout(() => {
+            if (currentDomain) {
+                checkSiteAdblock(currentDomain);
+            }
+        }, 0);
+        return () => clearTimeout(id);
     }, [currentDomain, checkSiteAdblock]);
 
     // Derive security state from active tab
@@ -365,15 +381,21 @@ const MainBrowserView: React.FC = () => {
         return 'none';
     }, [address, activeTab?.hasCertError]);
 
-    // Poll for blocked count + site adblock status every 3 seconds
+    // Poll for blocked count + site adblock status every 10 seconds (deferred)
     React.useEffect(() => {
-        fetchBlockedCount();
-        if (currentDomain) checkSiteAdblock(currentDomain);
-        const interval = setInterval(() => {
+        const deferredId = setTimeout(() => {
             fetchBlockedCount();
             if (currentDomain) checkSiteAdblock(currentDomain);
-        }, 10000);
-        return () => clearInterval(interval);
+            intervalRef.current = setInterval(() => {
+                fetchBlockedCount();
+                if (currentDomain) checkSiteAdblock(currentDomain);
+            }, 10000);
+        }, 1000);
+        const intervalRef = { current: null as ReturnType<typeof setInterval> | null };
+        return () => {
+            clearTimeout(deferredId);
+            if (intervalRef.current) clearInterval(intervalRef.current);
+        };
     }, [fetchBlockedCount, checkSiteAdblock, currentDomain]);
 
     // Sync address bar with active tab's URL

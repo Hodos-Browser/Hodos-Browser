@@ -439,11 +439,55 @@ void ShutdownApplication() {
     // Step 0b: Clear browsing data if "clear on exit" is enabled (PS3)
     ClearBrowsingDataOnExit();
 
-    // Step 0c: Stop child servers (to prevent orphaned processes)
-    LOG_INFO("🔄 Stopping wallet server...");
-    StopWalletServer();
-    LOG_INFO("🔄 Stopping adblock engine...");
-    StopAdblockServer();
+    // Step 0c: Mute ALL browsers immediately to stop audio
+    LOG_INFO("🔇 Muting all browsers...");
+    {
+        std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+        for (Tab* tab : allTabs) {
+            if (tab && tab->browser) {
+                tab->browser->GetHost()->SetAudioMuted(true);
+            }
+        }
+        std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
+        const std::string muteRoles[] = {
+            "header", "webview", "wallet_panel", "overlay", "settings",
+            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
+        };
+        for (BrowserWindow* bw : allWindows) {
+            if (!bw) continue;
+            for (const auto& role : muteRoles) {
+                CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(role);
+                if (b) b->GetHost()->SetAudioMuted(true);
+            }
+        }
+    }
+
+    // Step 0d: Close wallet-facing overlay browsers first (they talk to wallet server)
+    LOG_INFO("🔄 Closing wallet-facing overlays...");
+    {
+        std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
+        for (BrowserWindow* bw : allWindows) {
+            if (!bw) continue;
+            for (const auto& role : {"wallet", "backup", "brc100auth", "wallet_panel"}) {
+                CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(std::string(role));
+                if (b) {
+                    LOG_INFO("🔄 Closing wallet-facing browser: " + std::string(role) + " (window " + std::to_string(bw->window_id) + ")");
+                    b->GetHost()->CloseBrowser(true);
+                }
+            }
+        }
+    }
+
+    // Step 0e: Stop child servers in parallel (saves ~5s vs sequential)
+    LOG_INFO("🔄 Stopping wallet + adblock servers in parallel...");
+    {
+        std::thread walletThread(StopWalletServer);
+        std::thread adblockThread(StopAdblockServer);
+        walletThread.join();
+        adblockThread.join();
+    }
+    LOG_INFO("🔄 Both servers stopped.");
 
     // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
     // Using CloseBrowser(true) = force close, skips beforeunload handlers.
@@ -463,6 +507,7 @@ void ShutdownApplication() {
     }
 
     // 1b: Close all overlay and window browsers via BrowserWindow refs
+    // (wallet-facing overlays already closed in step 0d, but CloseBrowser(true) is safe to call twice)
     {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         const std::string roles[] = {
@@ -517,6 +562,12 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Destroying notification overlay window...");
         DestroyWindow(g_notification_overlay_hwnd);
         g_notification_overlay_hwnd = nullptr;
+    }
+
+    if (g_settings_menu_overlay_hwnd && IsWindow(g_settings_menu_overlay_hwnd)) {
+        LOG_INFO("🔄 Destroying settings menu overlay window...");
+        DestroyWindow(g_settings_menu_overlay_hwnd);
+        g_settings_menu_overlay_hwnd = nullptr;
     }
 
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
