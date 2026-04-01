@@ -61,7 +61,7 @@ const META_JSON: &str = "meta.json";
 
 /// Configuration version — bump this when filter list URLs, features, or scriptlet
 /// loading changes. Forces engine.dat rebuild on next startup.
-const CONFIG_VERSION: u32 = 6; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL, v4 = +hodos-unbreak, v5 = +entity-aware blocking, v6 = $generichide suppresses P1 CSS
+const CONFIG_VERSION: u32 = 7; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL, v4 = +hodos-unbreak, v5 = +entity-aware blocking, v6 = $generichide suppresses P1 CSS, v7 = +Cloudflare challenge exceptions
 
 /// Hodos Browser compatibility exception list (embedded at compile time).
 /// Contains #@#+js() blanket exceptions for auth domains where scriptlet injection breaks login.

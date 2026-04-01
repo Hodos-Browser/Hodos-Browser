@@ -215,6 +215,8 @@ public:
             "x.com",
             "twitter.com",
             "socialcert.net",       // BRC-52 certificate issuer (OAuth redirect)
+            "challenges.cloudflare.com",  // Cloudflare managed challenge / Turnstile
+            "cf-turnstile.com",           // Cloudflare Turnstile widget domain
         };
         for (const auto& auth : authDomains) {
             if (lower == auth) return true;

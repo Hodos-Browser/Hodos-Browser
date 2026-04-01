@@ -108,8 +108,40 @@ static const char* FINGERPRINT_PROTECTION_SCRIPT = R"JS(
         enumerable: true, configurable: true
     });
 
+    // === Navigator Plugins (realistic Chrome 136 set) ===
+    // Real Chrome exposes 5 PDF-related plugins. Empty array is a bot signal.
+    var fakePluginData = [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+    ];
+    // Build a PluginArray-like object with indexed access, named access, and correct length
+    var fakePluginArray = {length: fakePluginData.length};
+    for (var pi = 0; pi < fakePluginData.length; pi++) {
+        var fp = {
+            name: fakePluginData[pi].name,
+            filename: fakePluginData[pi].filename,
+            description: fakePluginData[pi].description,
+            length: 1
+        };
+        fakePluginArray[pi] = fp;
+        fakePluginArray[fakePluginData[pi].name] = fp;
+    }
+    fakePluginArray.item = function(i) { return this[i] || null; };
+    fakePluginArray.namedItem = function(n) { return this[n] || null; };
+    fakePluginArray.refresh = function() {};
+    Object.setPrototypeOf(fakePluginArray, PluginArray.prototype);
     Object.defineProperty(navigator, 'plugins', {
-        get: function() { return []; },
+        get: function() { return fakePluginArray; },
+        enumerable: true, configurable: true
+    });
+
+    // === navigator.webdriver ===
+    // Explicitly set to false — absence or true triggers bot detection.
+    Object.defineProperty(navigator, 'webdriver', {
+        get: function() { return false; },
         enumerable: true, configurable: true
     });
 

@@ -629,10 +629,37 @@ void SimpleRenderProcessHandler::OnContextCreated(
         } // end !fpDisabled
     }
 
+    // Inject window.chrome stub on external pages so bot detection sees a real Chrome signal.
+    // Injected separately from fingerprint script so it works even when FP protection is disabled.
+    bool isExternalPage = !url.empty() &&
+        url.find("127.0.0.1") == std::string::npos &&
+        url.find("localhost") == std::string::npos;
+    if (isExternalPage) {
+        std::string chromeStub = R"JS(
+(function() {
+    'use strict';
+    if (typeof window.chrome === 'undefined') {
+        window.chrome = {
+            runtime: {
+                connect: function() { return {}; },
+                sendMessage: function() {},
+                onMessage: { addListener: function() {}, removeListener: function() {} },
+                id: undefined
+            },
+            loadTimes: function() { return {}; },
+            csi: function() { return {}; }
+        };
+    }
+})();
+)JS";
+        frame->ExecuteJavaScript(chromeStub, url, 0);
+    }
+
     // Check if this is an overlay browser (any browser that's not the main root browser)
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
     bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
     bool isOmniboxOverlay = (url.find("/omnibox") != std::string::npos);
+    bool isInternalPage = (url.find("127.0.0.1:5137") != std::string::npos);
 
     if (isOverlayBrowser) {
         LOG_DEBUG_RENDER("🎯 OVERLAY BROWSER V8 CONTEXT CREATED!");
@@ -645,9 +672,14 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     CefRefPtr<CefV8Value> global = context->GetGlobal();
 
-    // Create the hodosBrowser object
+    // Create the hodosBrowser object — available on all pages for BRC-100 protocol.
+    // On external pages, only expose brc100 sub-object to minimize fingerprint surface.
     CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
     global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
+
+    // Identity, navigation, address, history, overlay APIs — internal pages only.
+    // External pages get only BRC-100 + cefMessage (injected below).
+    if (isInternalPage || isOverlayBrowser) {
 
     // Create the identity object inside hodosBrowser
     CefRefPtr<CefV8Value> identityObject = CefV8Value::CreateObject(nullptr, nullptr);
@@ -792,6 +824,8 @@ void SimpleRenderProcessHandler::OnContextCreated(
         V8_PROPERTY_ATTRIBUTE_NONE);
 
     LOG_DEBUG_RENDER("📚 History object created with " + std::to_string(7) + " functions");
+
+    } // end isInternalPage || isOverlayBrowser — external pages only get BRC-100 + cefMessage
 
     // Create the cefMessage object for process communication
     CefRefPtr<CefV8Value> cefMessageObject = CefV8Value::CreateObject(nullptr, nullptr);

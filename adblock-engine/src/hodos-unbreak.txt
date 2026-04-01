@@ -122,3 +122,17 @@ stripe.com#@#+js()
 
 amazon.com#@#+js()
 @@||amazon.com^$generichide
+
+! =====================================================================
+! Bot Detection / Challenge Domains — scriptlet + cosmetic exceptions
+! Cloudflare managed challenges, Turnstile, and similar bot detection
+! services break when fetch/XHR proxies or cosmetic hiding are active.
+! =====================================================================
+
+! --- Cloudflare ---
+challenges.cloudflare.com#@#+js()
+@@||challenges.cloudflare.com^$generichide
+cf-turnstile.com#@#+js()
+@@||cf-turnstile.com^$generichide
+@@||static.cloudflareinsights.com^$script
+@@||cdnjs.cloudflare.com^$script
