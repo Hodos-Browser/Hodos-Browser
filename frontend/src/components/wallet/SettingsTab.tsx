@@ -31,11 +31,11 @@ const SettingsTab: React.FC = () => {
 
   // Delete wallet
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleteInput, setDeleteInput] = useState('');
   const [deletePin, setDeletePin] = useState('');
   const [deleteStep, setDeleteStep] = useState(1);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteResult, setDeleteResult] = useState<{ backupTxid?: string; backupFailed?: string } | null>(null);
   const [balance, setBalance] = useState(0);
 
   const fetchSettings = useCallback(async () => {
@@ -192,19 +192,19 @@ const SettingsTab: React.FC = () => {
       setDeleting(true);
       setDeleteError(null);
 
-      // Verify PIN first
+      // Verify PIN — 409 "already unlocked" is fine (user already authenticated)
       const unlockRes = await fetch('http://127.0.0.1:31301/wallet/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: deletePin }),
       });
-      if (!unlockRes.ok) {
+      if (!unlockRes.ok && unlockRes.status !== 409) {
         const unlockData = await unlockRes.json();
         setDeleteError(unlockData.error || 'Invalid PIN');
         return;
       }
 
-      // Delete wallet
+      // Delete wallet (backend attempts on-chain backup before deleting)
       const res = await fetch('http://127.0.0.1:31301/wallet/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -215,8 +215,17 @@ const SettingsTab: React.FC = () => {
         setDeleteError(data.error || 'Delete failed');
         return;
       }
-      // Close wallet overlay on success
-      window.close();
+
+      // Clear localStorage so header browser knows wallet is gone
+      localStorage.removeItem('hodos_wallet_exists');
+      localStorage.removeItem('hodos_identity_key');
+
+      // Show completion screen with backup status
+      setDeleteResult({
+        backupTxid: data.backup_txid,
+        backupFailed: data.backup_failed,
+      });
+      setDeleteStep(3);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
@@ -418,14 +427,14 @@ const SettingsTab: React.FC = () => {
         <div className="wd-section-title" style={{ color: '#ef5350' }}>Danger Zone</div>
         <div className="wd-section-desc">Permanently delete your wallet and all data</div>
 
-        {balance > 0 && (
-          <div className="wd-balance-warning">
-            You still have {(balance / 100000000).toFixed(8)} BSV in your wallet. Transfer your funds before deleting.
+        {balance > 0 && !showDeleteConfirm && (
+          <div className="wd-alert" style={{ background: 'rgba(239, 83, 80, 0.1)', border: '1px solid rgba(239, 83, 80, 0.3)', borderRadius: '8px', padding: '12px', marginBottom: '12px', fontSize: '13px', color: '#ccc', lineHeight: '1.5' }}>
+            Your wallet has <strong style={{ color: '#ef5350' }}>{(balance / 100000000).toFixed(8)} BSV</strong>. An on-chain backup will be attempted before deletion so you can recover your wallet and funds through the Hodos recovery system using your mnemonic phrase.
           </div>
         )}
 
         {!showDeleteConfirm ? (
-          <HodosButton variant="danger" onClick={() => { setShowDeleteConfirm(true); setDeleteStep(1); setDeleteInput(''); setDeletePin(''); setDeleteError(null); }}>
+          <HodosButton variant="danger" onClick={() => { setShowDeleteConfirm(true); setDeleteStep(1); setDeletePin(''); setDeleteError(null); setDeleteResult(null); }}>
             Delete Wallet
           </HodosButton>
         ) : (
@@ -435,34 +444,13 @@ const SettingsTab: React.FC = () => {
             {deleteStep === 1 && (
               <>
                 <div style={{ fontSize: '14px', color: '#ef5350', marginBottom: '8px' }}>
-                  This will permanently delete your wallet. Type <strong>DELETE</strong> to confirm.
+                  This will permanently delete your wallet. Enter your PIN to confirm.
                 </div>
-                <input
-                  type="text"
-                  value={deleteInput}
-                  onChange={(e) => setDeleteInput(e.target.value)}
-                  placeholder="Type DELETE"
-                />
-                <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                  <HodosButton
-                    variant="danger"
-                    disabled={deleteInput !== 'DELETE'}
-                    onClick={() => setDeleteStep(2)}
-                  >
-                    Continue
-                  </HodosButton>
-                  <HodosButton variant="secondary" onClick={() => setShowDeleteConfirm(false)}>
-                    Cancel
-                  </HodosButton>
-                </div>
-              </>
-            )}
-
-            {deleteStep === 2 && (
-              <>
-                <div style={{ fontSize: '14px', color: '#ef5350', marginBottom: '8px' }}>
-                  Enter your PIN to verify ownership.
-                </div>
+                {balance > 0 && (
+                  <div style={{ fontSize: '13px', color: '#aaa', marginBottom: '12px', lineHeight: '1.5' }}>
+                    An on-chain backup will be saved before deletion. You can recover your wallet and remaining funds using your mnemonic phrase through the Hodos recovery system.
+                  </div>
+                )}
                 <input
                   type="password"
                   value={deletePin}
@@ -475,7 +463,7 @@ const SettingsTab: React.FC = () => {
                     variant="danger"
                     disabled={!deletePin}
                     loading={deleting}
-                    loadingText="Deleting..."
+                    loadingText="Backing up & deleting..."
                     onClick={handleDeleteWallet}
                   >
                     Delete Wallet Permanently
@@ -485,6 +473,37 @@ const SettingsTab: React.FC = () => {
                   </HodosButton>
                 </div>
               </>
+            )}
+
+            {deleteStep === 3 && deleteResult && (
+              <div style={{ textAlign: 'center', padding: '16px 0' }}>
+                <div style={{ fontSize: '18px', color: '#4caf50', marginBottom: '16px' }}>
+                  Wallet Deleted
+                </div>
+                {deleteResult.backupTxid && deleteResult.backupTxid !== 'already_current' && (
+                  <div style={{ fontSize: '13px', color: '#aaa', marginBottom: '12px', lineHeight: '1.5' }}>
+                    On-chain backup saved successfully.<br />
+                    <span style={{ color: '#888', fontSize: '12px', wordBreak: 'break-all' }}>
+                      Backup txid: {deleteResult.backupTxid}
+                    </span><br />
+                    You can recover your wallet and funds using your mnemonic phrase.
+                  </div>
+                )}
+                {deleteResult.backupTxid === 'already_current' && (
+                  <div style={{ fontSize: '13px', color: '#aaa', marginBottom: '12px', lineHeight: '1.5' }}>
+                    On-chain backup is already up to date.<br />
+                    You can recover your wallet and funds using your mnemonic phrase.
+                  </div>
+                )}
+                {deleteResult.backupFailed && (
+                  <div style={{ fontSize: '13px', color: '#ef5350', marginBottom: '12px', lineHeight: '1.5' }}>
+                    {deleteResult.backupFailed}
+                  </div>
+                )}
+                <HodosButton variant="secondary" onClick={() => window.close()}>
+                  Done
+                </HodosButton>
+              </div>
             )}
           </div>
         )}

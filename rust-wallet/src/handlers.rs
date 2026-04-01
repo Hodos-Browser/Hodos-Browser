@@ -1988,10 +1988,9 @@ pub async fn wallet_delete(
 ) -> HttpResponse {
     log::info!("🗑️ /wallet/delete called");
 
-    let mut db = state.database.lock().unwrap();
-
-    // 1. Check wallet exists
+    // 1. Check wallet exists (lock scope — release before async backup)
     {
+        let db = state.database.lock().unwrap();
         use crate::database::WalletRepository;
         let wallet_repo = WalletRepository::new(db.connection());
         if wallet_repo.get_primary_wallet().map(|o| o.is_some()).unwrap_or(false) == false {
@@ -1999,69 +1998,84 @@ pub async fn wallet_delete(
         }
     }
 
-    // 2. Safety check: refuse if wallet has funds
-    {
-        let conn = db.connection();
-        let has_funds: bool = conn.query_row(
-            "SELECT COALESCE(SUM(satoshis), 0) FROM outputs WHERE spendable = 1",
-            [],
-            |row| {
-                let total: i64 = row.get(0)?;
-                Ok(total > 0)
-            }
-        ).unwrap_or(false);
-
-        if has_funds {
-            log::warn!("   ⚠️  Refusing to delete wallet with spendable funds");
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "Cannot delete a wallet that has funds. Send your coins elsewhere first."
+    // 2. Attempt on-chain backup before deleting data.
+    //    do_onchain_backup manages its own DB locks internally.
+    //    - Broadcast success or "skipped" (unchanged) → proceed with delete
+    //    - Insufficient funds → warn user but allow delete (can't backup with no sats)
+    //    - Broadcast failure (network/miner rejection) → BLOCK delete (data would be lost)
+    let (backup_result, backup_error) = match do_onchain_backup(&state).await {
+        Ok(txid) => {
+            log::info!("   ✅ Pre-delete on-chain backup accepted by miner: {}", txid);
+            (Some(txid), None)
+        }
+        Err(e) if e.contains("skipped") => {
+            log::info!("   ⏭️  Pre-delete backup skipped (unchanged): {}", e);
+            (Some("already_current".to_string()), None)
+        }
+        Err(e) if e.contains("Insufficient funds") || e.contains("Wallet locked") || e.contains("no wallet") => {
+            // Can't backup (no funds or wallet not unlocked) — allow delete with warning
+            log::warn!("   ⚠️  On-chain backup not possible: {} (allowing delete)", e);
+            (None, Some(format!("On-chain backup could not be created: {}. If you have your mnemonic, you can still recover your wallet.", e)))
+        }
+        Err(e) => {
+            // Broadcast or network failure — block delete to prevent data loss
+            log::error!("   ❌ On-chain backup failed: {} — blocking delete", e);
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": format!("Cannot delete: on-chain backup failed ({}). Please try again later.", e),
+                "backup_failed": true
             }));
         }
-    }
+    };
 
-    // 3. Delete all rows from every table in FK-safe order (children before parents)
-    let delete_order = [
-        "peerpay_received",
-        "cert_field_permissions",
-        "domain_permissions",
-        "monitor_events",
-        "sync_states",
-        "settings",
-        "commissions",
-        "tx_labels_map",
-        "tx_labels",
-        "output_tag_map",
-        "output_tags",
-        "certificate_fields",
-        "certificates",
-        "output_baskets",
-        "outputs",
-        "proven_tx_reqs",
-        "transactions",
-        "proven_txs",
-        "derived_key_cache",
-        "users",
-        "relay_messages",
-        "messages",
-        "transaction_outputs",
-        "transaction_inputs",
-        "block_headers",
-        "parent_transactions",
-        "addresses",
-        "wallets",
-    ];
+    // 3. Drop all data tables and recreate fresh schema.
+    //    This is more reliable than DELETE FROM — it resets auto-increment counters,
+    //    eliminates FK constraint issues, and guarantees a truly fresh DB state
+    //    identical to first launch. The DB mutex is held for the entire operation;
+    //    Monitor tasks use try_lock() and will skip their cycle.
+    let mut db = state.database.lock().unwrap();
 
     {
         let conn = db.connection();
-        for table in &delete_order {
-            if let Err(e) = conn.execute(&format!("DELETE FROM {}", table), []) {
-                // Some tables may have been dropped in migrations — that's fine
-                log::debug!("   Skipping {}: {}", table, e);
+
+        // Disable FK checks during drop (tables reference each other)
+        let _ = conn.execute("PRAGMA foreign_keys = OFF", []);
+
+        // Get all user tables (excluding schema_version and sqlite internals)
+        let table_names: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_version' AND name NOT LIKE 'sqlite_%'"
+            ).unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        for table in &table_names {
+            if let Err(e) = conn.execute(&format!("DROP TABLE IF EXISTS \"{}\"", table), []) {
+                log::debug!("   Skipping drop {}: {}", table, e);
             }
         }
+
+        // Reset auto-increment counters
+        let _ = conn.execute("DELETE FROM sqlite_sequence", []);
+
+        // Reset schema version so migrate() recreates everything
+        let _ = conn.execute("DELETE FROM schema_version", []);
+
+        // Re-enable FK checks
+        let _ = conn.execute("PRAGMA foreign_keys = ON", []);
     }
 
-    log::info!("   ✅ All wallet data deleted");
+    // Re-run migrations to recreate all tables with fresh schema
+    if let Err(e) = db.migrate() {
+        log::error!("   ❌ Failed to recreate schema after delete: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Wallet deleted but schema recreation failed: {}", e)
+        }));
+    }
+
+    log::info!("   ✅ All wallet data deleted, fresh schema recreated");
 
     // 4. Clear cached mnemonic from memory
     db.clear_cached_mnemonic();
@@ -2070,10 +2084,19 @@ pub async fn wallet_delete(
     drop(db);
     state.balance_cache.invalidate();
 
-    HttpResponse::Ok().json(serde_json::json!({
+    // 6. Return success with backup status so the frontend can inform the user
+    let mut response = serde_json::json!({
         "success": true,
         "message": "Wallet deleted successfully"
-    }))
+    });
+    if let Some(txid) = backup_result {
+        response["backup_txid"] = serde_json::Value::String(txid);
+    }
+    if let Some(err) = backup_error {
+        response["backup_failed"] = serde_json::Value::String(err);
+    }
+
+    HttpResponse::Ok().json(response)
 }
 
 // Unlock a PIN-protected wallet (one-time per session)
@@ -7643,6 +7666,29 @@ pub(crate) async fn broadcast_transaction(
                             log::warn!("   ⚠️ ARC BEEF validation failed: {}", e);
                             break; // Fall through to raw tx broadcasters
                         }
+                        // ARC timeout — check WoC to see if the tx actually made it on-chain.
+                        // ARC may have processed it but timed out responding to us.
+                        if e.contains("ARC timeout/error (409)") {
+                            if let Some(expected_txid) = txid_for_cache {
+                                log::info!("   🔍 ARC timed out — checking WoC for tx {}", &expected_txid[..expected_txid.len().min(16)]);
+                                let check_url = format!(
+                                    "https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex",
+                                    expected_txid
+                                );
+                                if let Ok(resp) = client.get(&check_url).send().await {
+                                    if resp.status().is_success() {
+                                        let body = resp.text().await.unwrap_or_default();
+                                        if !body.is_empty() && body.len() > 10 {
+                                            // WoC has the tx — it DID make it on-chain despite ARC timeout
+                                            let msg = format!("ARC timed out but tx confirmed on-chain: {}", expected_txid);
+                                            log::info!("   ✅ {}", msg);
+                                            return Ok(msg);
+                                        }
+                                    }
+                                    log::info!("   ℹ️  Tx not found on WoC — ARC genuinely failed");
+                                }
+                            }
+                        }
                         // Transient error — retry with backoff
                         if arc_attempt < MAX_BROADCAST_ATTEMPTS {
                             log::info!("   🔄 ARC attempt {}/{} failed (transient), retrying in {}ms...",
@@ -7985,11 +8031,30 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
             Ok(arc_response)
         }
         409 => {
-            // Already known - treat as success
+            // 409 can mean "already known" (success) OR a timeout/generic error.
+            // Distinguish by checking if ARC returned a real txid and no error indicators.
+            // A genuine "already known" has: txid present, no "DeadlineExceeded", no "could not be processed"
             let txid = arc_response.txid.as_deref().unwrap_or("unknown");
-            let tx_status = arc_response.tx_status.as_deref().unwrap_or("ALREADY_KNOWN");
-            log::info!("   ℹ️  ARC: Transaction already known: txid={}, status={}", txid, tx_status);
-            Ok(arc_response)
+            let tx_status = arc_response.tx_status.as_deref().unwrap_or("");
+            let extra_info = arc_response.extra_info.as_deref().unwrap_or("");
+            let detail = arc_response.detail.as_deref().unwrap_or("");
+
+            let is_timeout = extra_info.contains("DeadlineExceeded")
+                || extra_info.contains("context deadline exceeded");
+            let is_generic_error = detail.contains("could not be processed")
+                || arc_response.title.as_deref() == Some("Generic error");
+            let has_real_txid = txid != "unknown" && !txid.is_empty() && txid != "null";
+
+            if is_timeout || (is_generic_error && !has_real_txid) {
+                // Timeout or generic error — NOT a confirmed acceptance
+                log::error!("   ❌ ARC 409 is NOT 'already known' — timeout/error: extra_info={}, detail={}", extra_info, detail);
+                Err(format!("ARC timeout/error (409): {} — {}", detail, extra_info))
+            } else {
+                // Genuine "already known" — treat as success
+                let tx_status = if tx_status.is_empty() { "ALREADY_KNOWN" } else { tx_status };
+                log::info!("   ℹ️  ARC: Transaction already known: txid={}, status={}", txid, tx_status);
+                Ok(arc_response)
+            }
         }
         460..=469 => {
             // BEEF-specific validation errors
@@ -12264,8 +12329,18 @@ pub async fn wallet_recover_onchain(
             }
         }
     } else {
-        // No on-chain backup found — this mnemonic has never backed up a Hodos wallet
-        log::info!("   ❌ No on-chain backup found for this mnemonic");
+        // No on-chain backup found — clean up the wallet we just created at Step 4
+        log::info!("   ❌ No on-chain backup found for this mnemonic — rolling back wallet creation");
+        {
+            let mut db = state.database.lock().unwrap();
+            let conn = db.connection();
+            let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+            let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+            let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+            let _ = conn.execute("DELETE FROM wallets WHERE id = ?1", rusqlite::params![wallet_id]);
+            db.clear_cached_mnemonic();
+            log::info!("   🧹 Rolled back wallet id={}, user id={}", wallet_id, user_id);
+        }
         return HttpResponse::Ok().json(serde_json::json!({
             "success": false,
             "error": "No Hodos wallet backup found for this mnemonic. If this is a new wallet, use Create New instead.",

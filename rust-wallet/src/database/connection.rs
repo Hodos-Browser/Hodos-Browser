@@ -757,7 +757,7 @@ impl WalletDatabase {
     ///
     /// Checks current schema version and applies any pending migrations.
     /// Consolidated: single V1 creates the full target schema.
-    fn migrate(&self) -> Result<()> {
+    pub fn migrate(&self) -> Result<()> {
         info!("   Starting migration process...");
         use crate::database::migrations;
 
