@@ -482,6 +482,8 @@ export default function WalletPanelPage() {
 
   const handleRecoveryComplete = () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
+    // Clear stale balance cache so wallet panel fetches fresh balance from backend
+    localStorage.removeItem('hodos:wallet:balance');
     cacheIdentityKey();
 
     setRecoveryResult(null);

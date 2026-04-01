@@ -216,9 +216,11 @@ const SettingsTab: React.FC = () => {
         return;
       }
 
-      // Clear localStorage so header browser knows wallet is gone
+      // Clear localStorage so header browser and wallet panel show clean state
       localStorage.removeItem('hodos_wallet_exists');
       localStorage.removeItem('hodos_identity_key');
+      localStorage.removeItem('hodos:wallet:balance');
+      localStorage.removeItem('hodos:wallet:bsvPrice');
 
       // Show completion screen with backup status
       setDeleteResult({
@@ -422,9 +424,9 @@ const SettingsTab: React.FC = () => {
         )}
       </div>
 
-      {/* Danger Zone - Delete Wallet */}
+      {/* Delete Wallet */}
       <div className="wd-settings-section danger">
-        <div className="wd-section-title" style={{ color: '#ef5350' }}>Danger Zone</div>
+        <div className="wd-section-title" style={{ color: '#ef5350' }}>Delete Wallet</div>
         <div className="wd-section-desc">Permanently delete your wallet and all data</div>
 
         {balance > 0 && !showDeleteConfirm && (
