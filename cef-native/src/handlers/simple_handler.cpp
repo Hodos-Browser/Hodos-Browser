@@ -2441,7 +2441,15 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Auto-update settings
         else if (key == "browser.autoUpdateEnabled") {
             settings.SetAutoUpdateEnabled(value == "true");
-            AutoUpdater::GetInstance().SetAutoCheckEnabled(value == "true");
+            // Auto-check only active when both autoUpdate and notifications are on
+            bool notifications = settings.GetBrowserSettings().autoUpdateNotifications;
+            AutoUpdater::GetInstance().SetAutoCheckEnabled((value == "true") && notifications);
+        }
+        else if (key == "browser.autoUpdateNotifications") {
+            settings.SetAutoUpdateNotifications(value == "true");
+            // Auto-check only active when both autoUpdate and notifications are on
+            bool autoUpdate = settings.GetBrowserSettings().autoUpdateEnabled;
+            AutoUpdater::GetInstance().SetAutoCheckEnabled(autoUpdate && (value == "true"));
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }
@@ -6460,7 +6468,16 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
     bool isTab = (role_.find("tab_") == 0);
 
     if (!isTab) {
-        // For header, overlays, etc. — just show Inspect
+        // Check if right-clicking an editable field (address bar, overlay inputs)
+        cef_context_menu_type_flags_t flags = static_cast<cef_context_menu_type_flags_t>(params->GetTypeFlags());
+        if (flags & CM_TYPEFLAG_EDITABLE) {
+            model->AddItem(MENU_ID_CUSTOM_CUT, "Cut");
+            model->AddItem(MENU_ID_CUSTOM_COPY, "Copy");
+            model->AddItem(MENU_ID_CUSTOM_PASTE, "Paste");
+            model->AddSeparator();
+            model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
+            model->AddSeparator();
+        }
         model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
         return;
     }
@@ -6739,15 +6756,89 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
         return true;
     }
     if (command_id == MENU_ID_CUSTOM_CUT) {
-        frame->ExecuteJavaScript("document.execCommand('cut')", frame->GetURL(), 0);
+        // Use modern Clipboard API with execCommand fallback
+        frame->ExecuteJavaScript(
+            "(function(){"
+            "  var el = document.activeElement;"
+            "  if (el && el.selectionStart !== undefined) {"
+            "    var s = el.selectionStart, e = el.selectionEnd;"
+            "    var text = el.value.substring(s, e);"
+            "    navigator.clipboard.writeText(text).then(function(){"
+            "      el.value = el.value.substring(0,s) + el.value.substring(e);"
+            "      el.selectionStart = el.selectionEnd = s;"
+            "      el.dispatchEvent(new Event('input', {bubbles:true}));"
+            "    });"
+            "  } else { document.execCommand('cut'); }"
+            "})()", frame->GetURL(), 0);
         return true;
     }
     if (command_id == MENU_ID_CUSTOM_COPY) {
-        frame->ExecuteJavaScript("document.execCommand('copy')", frame->GetURL(), 0);
+        // Use modern Clipboard API with execCommand fallback
+        frame->ExecuteJavaScript(
+            "(function(){"
+            "  var el = document.activeElement;"
+            "  if (el && el.selectionStart !== undefined) {"
+            "    var text = el.value.substring(el.selectionStart, el.selectionEnd);"
+            "    navigator.clipboard.writeText(text);"
+            "  } else { document.execCommand('copy'); }"
+            "})()", frame->GetURL(), 0);
         return true;
     }
     if (command_id == MENU_ID_CUSTOM_PASTE) {
-        frame->ExecuteJavaScript("document.execCommand('paste')", frame->GetURL(), 0);
+        // Read clipboard text natively via Win32/macOS API, then inject into focused element.
+        // This avoids navigator.clipboard.readText() which triggers a permission prompt,
+        // and document.execCommand('paste') which is blocked in non-tab browsers.
+        std::string clipText;
+#ifdef _WIN32
+        if (OpenClipboard(nullptr)) {
+            HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+            if (hData) {
+                wchar_t* pText = static_cast<wchar_t*>(GlobalLock(hData));
+                if (pText) {
+                    // Convert wide string to UTF-8
+                    int len = WideCharToMultiByte(CP_UTF8, 0, pText, -1, nullptr, 0, nullptr, nullptr);
+                    if (len > 0) {
+                        clipText.resize(len - 1);
+                        WideCharToMultiByte(CP_UTF8, 0, pText, -1, &clipText[0], len, nullptr, nullptr);
+                    }
+                    GlobalUnlock(hData);
+                }
+            }
+            CloseClipboard();
+        }
+#elif defined(__APPLE__)
+        // macOS: use pbpaste
+        FILE* pipe = popen("pbpaste", "r");
+        if (pipe) {
+            char buf[4096];
+            while (fgets(buf, sizeof(buf), pipe)) clipText += buf;
+            pclose(pipe);
+        }
+#endif
+        if (!clipText.empty()) {
+            // Escape for JS string literal (backslash, quotes, newlines)
+            std::string escaped;
+            for (char c : clipText) {
+                if (c == '\\') escaped += "\\\\";
+                else if (c == '\'') escaped += "\\'";
+                else if (c == '\n') escaped += "\\n";
+                else if (c == '\r') escaped += "\\r";
+                else escaped += c;
+            }
+            frame->ExecuteJavaScript(
+                "(function(){"
+                "  var el = document.activeElement;"
+                "  var text = '" + escaped + "';"
+                "  if (el && el.selectionStart !== undefined) {"
+                "    var s = el.selectionStart, e = el.selectionEnd;"
+                "    el.value = el.value.substring(0,s) + text + el.value.substring(e);"
+                "    el.selectionStart = el.selectionEnd = s + text.length;"
+                "    el.dispatchEvent(new Event('input', {bubbles:true}));"
+                "  } else if (el && el.isContentEditable) {"
+                "    document.execCommand('insertText', false, text);"
+                "  }"
+                "})()", frame->GetURL(), 0);
+        }
         return true;
     }
     if (command_id == MENU_ID_CUSTOM_DELETE) {

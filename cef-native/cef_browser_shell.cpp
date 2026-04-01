@@ -3064,7 +3064,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // WinSparkle will check for updates in the background if auto-check is enabled.
     {
         auto& settings = SettingsManager::GetInstance();
-        bool autoCheck = settings.GetBrowserSettings().autoUpdateEnabled;
+        auto browserSettings = settings.GetBrowserSettings();
+        bool autoCheck = browserSettings.autoUpdateEnabled;
+        bool notifications = browserSettings.autoUpdateNotifications;
         std::string appVersion = APP_VERSION; // Injected by CMake via -DAPP_VERSION=
         std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
 
@@ -3077,8 +3079,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                 PostMessage(g_hwnd, WM_CLOSE, 0, 0);
             }
         });
-        updater.Initialize(appVersion, appcastUrl, autoCheck);
-        LOG_INFO("Auto-updater initialized (version=" + appVersion + ", autoCheck=" + std::string(autoCheck ? "true" : "false") + ")");
+        // Auto-check only runs with periodic dialog notifications if both flags are on.
+        // When notifications OFF (default), WinSparkle is initialized but won't show
+        // periodic dialogs — user can still manually check via Settings > About.
+        updater.Initialize(appVersion, appcastUrl, autoCheck && notifications);
+        LOG_INFO("Auto-updater initialized (version=" + appVersion +
+                 ", autoCheck=" + std::string(autoCheck ? "true" : "false") +
+                 ", notifications=" + std::string(notifications ? "true" : "false") + ")");
     }
 
     CefRunMessageLoop();

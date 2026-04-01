@@ -261,6 +261,14 @@ void SettingsManager::SetAutoUpdateEnabled(bool enabled) {
     Save();
 }
 
+void SettingsManager::SetAutoUpdateNotifications(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        browser_.autoUpdateNotifications = enabled;
+    }
+    Save();
+}
+
 // Privacy settings setters
 void SettingsManager::SetAdBlockEnabled(bool enabled) {
     {

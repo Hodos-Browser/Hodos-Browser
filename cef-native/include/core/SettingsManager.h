@@ -14,6 +14,7 @@ struct BrowserSettings {
     bool restoreSessionOnStart = false;
     bool askWhereToSave = true;
     bool autoUpdateEnabled = true;  // Check for updates automatically on startup
+    bool autoUpdateNotifications = false;  // Show dialog when update found (off = silent)
 };
 
 // Privacy settings (ad blocking, tracking, etc.)
@@ -38,7 +39,8 @@ struct WalletSettings {
 // JSON serialization
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
     homepage, searchEngine, zoomLevel, showBookmarkBar,
-    downloadsPath, restoreSessionOnStart, askWhereToSave, autoUpdateEnabled)
+    downloadsPath, restoreSessionOnStart, askWhereToSave, autoUpdateEnabled,
+    autoUpdateNotifications)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
@@ -78,6 +80,7 @@ public:
     void SetRestoreSessionOnStart(bool restore);
     void SetAskWhereToSave(bool ask);
     void SetAutoUpdateEnabled(bool enabled);
+    void SetAutoUpdateNotifications(bool enabled);
 
     // Privacy settings
     void SetAdBlockEnabled(bool enabled);
