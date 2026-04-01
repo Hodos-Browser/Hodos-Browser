@@ -11246,13 +11246,13 @@ pub async fn do_onchain_backup(
             !is_prev_pushdrop && !is_prev_marker
         };
         // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
-        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(1)
+        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(state.current_user_id)
             .unwrap_or_default()
             .iter()
             .filter(exclude_prev_backup)
             .map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
-        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(1)
+        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(state.current_user_id)
             .unwrap_or_default()
             .iter()
             .filter(exclude_prev_backup)

@@ -916,6 +916,9 @@ async fn acquire_certificate_direct(
     let master_privkey_for_keyring =
         crate::database::helpers::get_master_private_key_from_db(&db).ok();
 
+    // Ensure certificate has the current user's ID
+    certificate.user_id = Some(state.current_user_id);
+
     // Store certificate in database
     match cert_repo.insert_certificate_with_fields(&mut certificate) {
         Ok(certificate_id) => {
@@ -4362,13 +4365,13 @@ async fn unpublish_certificate_core(
             !(o.txid.as_deref() == Some(publish_txid) && o.vout == publish_vout as i32)
         };
         // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
-        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(1)
+        let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(state.current_user_id)
             .unwrap_or_default()
             .iter()
             .filter(exclude_pushdrop)
             .map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
-        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(1)
+        let all_utxos: Vec<_> = output_repo.get_spendable_by_user(state.current_user_id)
             .map_err(|e| format!("Failed to get UTXOs: {}", e))?
             .iter()
             .filter(exclude_pushdrop)
