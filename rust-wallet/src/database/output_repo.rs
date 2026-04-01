@@ -81,6 +81,7 @@ impl<'a> OutputRepository<'a> {
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
+               AND o.derivation_prefix IS NOT NULL
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
              ORDER BY o.satoshis DESC"
         )?;
@@ -128,6 +129,7 @@ impl<'a> OutputRepository<'a> {
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status = 'completed' OR o.transaction_id IS NULL)
+               AND o.derivation_prefix IS NOT NULL
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
              ORDER BY o.satoshis DESC"
         )?;
