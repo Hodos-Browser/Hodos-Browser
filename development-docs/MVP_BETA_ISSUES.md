@@ -106,7 +106,24 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 
 ### B-5: Cloudflare bot detection blocks WhatsOnChain — FIXED (2026-04-01)
 **Root cause:** Cumulative bot signals from privacy features — not TLS/H2 fingerprint drift. Six signals triggered Cloudflare: (1) `navigator.plugins = []` (empty = headless indicator), (2) fingerprint farbling on Cloudflare challenge pages themselves, (3) scriptlet injection breaking Cloudflare's JS verification, (4) no `navigator.webdriver = false`, (5) no `window.chrome` object, (6) `window.hodosBrowser` exposed to all pages.
-**Fix:** Added Cloudflare domains (`challenges.cloudflare.com`, `cf-turnstile.com`) to fingerprint bypass list and `hodos-unbreak.txt`. Fixed `navigator.plugins` to return realistic Chrome 136 plugin array (5 PDF plugins). Set `navigator.webdriver = false`. Injected `window.chrome` stub on external pages. Restricted `window.hodosBrowser` to internal pages only (external pages get only BRC-100 + cefMessage). Bumped adblock CONFIG_VERSION 6→7.
+**Fix (two commits):**
+- *Commit 1 — Bot signal fixes:*
+  - Added `challenges.cloudflare.com` + `cf-turnstile.com` to fingerprint bypass list (`FingerprintProtection.h`)
+  - Added Cloudflare exceptions to `hodos-unbreak.txt` (scriptlet `#@#+js()` + cosmetic `$generichide` + script network exceptions for `static.cloudflareinsights.com`, `cdnjs.cloudflare.com`)
+  - Fixed `navigator.plugins` from empty `[]` to realistic Chrome 136 plugin array (5 PDF plugins with `PluginArray.prototype`, indexed + named access)
+  - Set `navigator.webdriver = false` explicitly
+  - Injected `window.chrome` stub on external pages (runtime, loadTimes, csi)
+  - Restricted `window.hodosBrowser` to internal pages only (external pages get only BRC-100 + cefMessage)
+  - Bumped adblock CONFIG_VERSION 6→7
+- *Commit 2 — Brave-style subtle farbling refactor:*
+  - Removed `navigator.hardwareConcurrency` override (was random 2-8 — cross-referenced by anti-fraud against real CPU performance)
+  - Removed `navigator.deviceMemory` override (was hardcoded 8GB — inconsistent with real RAM)
+  - Removed WebGL `getParameter` vendor/renderer spoofing (was hardcoded NVIDIA string — mismatched real GPU extensions)
+  - Reduced canvas/WebGL pixel farble rate from 10% to 3% (subtler, less detectable)
+  - Shrunk fingerprint bypass list from 37 to 9 domains — only CAPTCHA/challenge services (Cloudflare, reCAPTCHA, hCaptcha). Auth, banking, e-commerce no longer need bypass with subtle farbling.
+  - Design principle: Brave-style "imperceptible perturbation" — small LSB noise on high-entropy APIs (canvas, WebGL pixels, audio), no hardware value spoofing that creates detectable inconsistencies.
+**Verified:** Cloudflare Turnstile security check passes. WhatsOnChain loads without challenge loop.
+**Note:** Cloudflare tester reports CEF 136 as "unsupported" (requires Chrome 144+) but the security check still passes. CEF upgrade tracked separately.
 **Files changed:** `FingerprintProtection.h`, `FingerprintScript.h`, `hodos-unbreak.txt`, `simple_render_process_handler.cpp`, `engine.rs`
 
 ### B-9: Taskbar icon dark background — FIXED (2026-04-01)
