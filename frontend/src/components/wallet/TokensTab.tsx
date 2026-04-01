@@ -82,14 +82,14 @@ const TokensTab: React.FC = () => {
       {tokens.length === 0 ? (
         <div className="wd-empty-state" style={{ textAlign: 'center', padding: '40px 20px' }}>
           <div style={{ fontSize: '36px', marginBottom: '12px', opacity: 0.4 }}>&#x2B21;</div>
-          <div style={{ color: '#9ca3af', fontSize: '14px', fontWeight: 500 }}>No tokens found</div>
+          <div style={{ color: '#b0b7c3', fontSize: '14px', fontWeight: 500 }}>No tokens found</div>
           <div style={{ color: '#6b7280', fontSize: '12px', marginTop: '6px' }}>
             Tokens created by apps you interact with will appear here.
           </div>
         </div>
       ) : (
         <>
-          <div style={{ color: '#9ca3af', fontSize: '12px', marginBottom: '12px' }}>
+          <div style={{ color: '#b0b7c3', fontSize: '12px', marginBottom: '12px' }}>
             {tokens.length} token{tokens.length !== 1 ? 's' : ''} across {basketNames.length} app{basketNames.length !== 1 ? 's' : ''}
           </div>
 
@@ -99,10 +99,10 @@ const TokensTab: React.FC = () => {
               <div style={{
                 display: 'flex', alignItems: 'center', gap: '8px',
                 marginBottom: '8px', paddingBottom: '4px',
-                borderBottom: '1px solid #2d2d2d',
+                borderBottom: '1px solid #363640',
               }}>
                 <span style={{ fontSize: '16px' }}>&#x2B21;</span>
-                <span style={{ fontSize: '13px', fontWeight: 600, color: '#e5e7eb' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: '#ffffff' }}>
                   {formatBasketName(basket)}
                 </span>
                 <span style={{ fontSize: '11px', color: '#6b7280' }}>
@@ -113,15 +113,20 @@ const TokensTab: React.FC = () => {
               {/* Token cards */}
               {grouped[basket].map((token) => (
                 <div key={`${token.txid}-${token.vout}`} style={{
-                  background: '#1a1a1a',
-                  border: '1px solid #2d2d2d',
-                  borderRadius: '8px',
-                  padding: '10px 14px',
+                  background: '#1a1d23',
+                  border: '1px solid #363640',
+                  borderRadius: '6px',
+                  padding: '12px 14px',
                   marginBottom: '6px',
-                }}>
+                  cursor: 'pointer',
+                  transition: 'background 0.15s, border-color 0.15s',
+                }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = '#1e2128'; e.currentTarget.style.borderColor = '#6b7280'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = '#1a1d23'; e.currentTarget.style.borderColor = '#363640'; }}
+                >
                   {/* Top row: description + satoshis */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px' }}>
-                    <div style={{ fontSize: '13px', color: '#e5e7eb', fontWeight: 500 }}>
+                    <div style={{ fontSize: '13px', color: '#ffffff', fontWeight: 500 }}>
                       {token.description || 'Token output'}
                     </div>
                     <div style={{ fontSize: '12px', color: '#a67c00', fontWeight: 600, whiteSpace: 'nowrap', marginLeft: '12px' }}>
@@ -134,7 +139,7 @@ const TokensTab: React.FC = () => {
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginBottom: '6px' }}>
                       {token.tags.map((tag) => (
                         <span key={tag} style={{
-                          fontSize: '10px', color: '#e5e7eb', background: '#374151',
+                          fontSize: '10px', color: '#ffffff', background: '#363640',
                           borderRadius: '4px', padding: '1px 6px',
                         }}>
                           {tag}

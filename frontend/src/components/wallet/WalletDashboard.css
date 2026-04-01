@@ -1289,18 +1289,20 @@
   color: var(--wd-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--wd-divider);
+  border-bottom: 1px solid var(--wd-card-border);
 }
 
 .wd-cert-table td {
   padding: 12px 14px;
   font-size: 13px;
   color: var(--wd-text-primary);
-  border-bottom: 1px solid var(--wd-divider);
+  border-bottom: 1px solid var(--wd-card-border);
+  background: var(--wd-card-bg);
 }
 
 .wd-cert-table tr:hover td {
-  background: rgba(0, 0, 0, 0.15);
+  background: #1e2128;
+  border-color: var(--wd-text-muted);
 }
 
 .wd-cert-hash {
@@ -1684,7 +1686,12 @@
 
 .wd-approved-sites .MuiTableCell-root {
   color: var(--wd-text-primary) !important;
-  border-bottom-color: var(--wd-divider) !important;
+  border-bottom-color: var(--wd-card-border) !important;
+  background: var(--wd-card-bg) !important;
+}
+
+.wd-approved-sites .MuiTableRow-root:hover .MuiTableCell-root {
+  background: #1e2128 !important;
 }
 
 .wd-approved-sites .MuiTableCell-head {
