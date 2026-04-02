@@ -67,15 +67,28 @@ Second instance starts
 │   └── ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY → Another instance owns the pipe
 │       ├── Connect to pipe as client
 │       ├── Send command: {"action": "new_window", "url": "...", "args": [...]}
-│       ├── Wait for ACK (with 5-second timeout)
-│       └── Exit cleanly (no error dialog)
+│       ├── Read response (5-second timeout)
+│       ├── Response = {"status": "ok"} → exit cleanly (first instance creates window)
+│       ├── Response = {"status": "shutting_down"} → RETRY LOOP:
+│       │   ├── Wait 1 second
+│       │   ├── Try CreateNamedPipe again (maybe old instance exited)
+│       │   │   ├── SUCCESS → I'm the new first instance, continue normal startup
+│       │   │   └── BUSY → connect as client again, send command, read response
+│       │   └── Repeat up to 10 times (10s max)
+│       └── All retries failed → try AcquireProfileLock() → if fails, show error dialog
 │
 First instance (pipe server thread)
 ├── Background thread: ConnectNamedPipe() → ReadFile() → parse JSON
-├── Post to UI thread: WindowManager::CreateFullWindow()
-├── If URL provided: TabManager::CreateTab(url, ...)
-├── SetForegroundWindow() to bring existing window forward
-└── Write ACK back to pipe → DisconnectNamedPipe() → loop
+├── Check g_shutting_down flag:
+│   ├── TRUE → respond {"status": "shutting_down"} → DisconnectNamedPipe() → loop
+│   └── FALSE → PostMessage(g_hwnd, WM_APP+1, ...) to UI thread
+│              → respond {"status": "ok"} → DisconnectNamedPipe() → loop
+│
+ShutdownApplication():
+├── Set g_shutting_down = true (atomic)
+├── ... existing shutdown sequence ...
+├── ReleaseProfileLock()
+└── Process exits → pipe auto-cleaned by OS
 ```
 
 ### Implementation Plan

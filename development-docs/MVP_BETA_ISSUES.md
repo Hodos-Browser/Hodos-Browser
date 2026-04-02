@@ -103,12 +103,21 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
   - `SetForegroundWindow(GetPrimaryWindow()->hwnd)` + `FlashWindow()` fallback to bring window to front.
   - **PostMessage target:** Use `WindowManager::GetInstance().GetPrimaryWindow()->hwnd` for `PostMessage` target — `g_hwnd` is valid since it tracks the current primary, but using explicit lookup is safer.
 - *Step 4 — Keep ProfileLock unchanged* — pipe handles instance forwarding, lock handles data integrity. Two separate concerns.
+- *Step 5 — Graceful shutdown handoff:*
+  - Problem: Shutdown takes 3-5s after window hides (server shutdown, CefShutdown). Profile lock held until process exits. User relaunches during this window → "profile locked" error.
+  - Add `g_shutting_down` atomic bool flag. Set to `true` at start of `ShutdownApplication()`.
+  - Pipe server checks `g_shutting_down` before processing commands. If true → respond with `{"status":"shutting_down"}` instead of creating window.
+  - Client receives "shutting_down" → enters retry loop: wait 1s, try pipe again. Up to 10 retries (10s total).
+  - After first instance fully exits, pipe disappears → client's `CreateNamedPipe(FILE_FLAG_FIRST_PIPE_INSTANCE)` succeeds → client becomes new server, starts normally.
+  - Fallback: If 10 retries exhausted, try `AcquireProfileLock()` directly. If still locked, show error dialog (existing behavior). This is a 10+ second shutdown which shouldn't happen normally.
+  - Result: User relaunches immediately after closing → sees brief startup delay (1-3s while old process finishes), then new window appears. No error dialog.
 **Key risks:**
 - **CEF subprocess confusion**: CEF spawns renderer/GPU/utility subprocesses that call `WinMain()`. Pipe check MUST go after `CefExecuteProcess()` which returns early for subprocesses (already at line 2732). This is the #1 gotcha.
 - **Pipe hijacking**: Mitigated by `FILE_FLAG_FIRST_PIPE_INSTANCE` (atomic, only first creator succeeds).
 - **Race condition (two instances simultaneously)**: `FILE_FLAG_FIRST_PIPE_INSTANCE` is atomic — only one wins. Loser becomes client.
 - **Stale pipe after crash**: Windows auto-cleans named pipes on process exit. No stale pipe risk.
 - **`SetForegroundWindow` restrictions**: Windows limits which processes can steal focus. Client calls `AllowSetForegroundWindow(serverPid)` before sending pipe message. Fallback: `FlashWindow()` to flash taskbar.
+- **Relaunch during shutdown**: Handled by Step 5 — pipe server responds "shutting_down", client retries until old process exits.
 **Dependencies (must be done first):**
 - **Sprint 3 (B-1 frameless):** Window style changes in `CreateFullWindow()`. B-6's new windows inherit frameless automatically.
 - **Primary window transfer (WINDOW_CLOSE_PRIMARY_TRANSFER.md, done 2026-04-02):** `g_hwnd` and primary window are now dynamic — `GetWindow(0)` replaced with `GetPrimaryWindow()` across 34 call sites. B-6 must use `GetPrimaryWindow()` not `GetWindow(0)` for PostMessage target, SetForegroundWindow, and any window lookups. The pipe listener's `PostMessage(g_hwnd, ...)` is safe because `g_hwnd` tracks the current primary after transfer, but code should be explicit about this assumption.
