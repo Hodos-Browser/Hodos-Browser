@@ -1654,7 +1654,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 BrowserWindow* new_bw = WindowManager::GetInstance().CreateFullWindow(false);
                 if (new_bw) {
                     // Position the new window at the drop point (offset so title bar is near cursor)
-                    SetWindowPos(new_bw->hwnd, nullptr, screen_x - 100, screen_y - 50,
+                    SetWindowPos(new_bw->hwnd, nullptr, screen_x - 100, screen_y - 20,
                                  0, 0, SWP_NOSIZE | SWP_NOZORDER);
                     TabManager::GetInstance().MoveTabToWindow(tab_id, new_bw->window_id);
                 }
@@ -2307,7 +2307,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                     SWP_FRAMECHANGED);
             } else {
                 // Exit fullscreen
-                SetWindowLong(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+                SetWindowLong(g_hwnd, GWL_STYLE, WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE);
                 SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
@@ -2333,6 +2333,34 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         return true;
     }
+
+    // Frameless window control IPC handlers
+#ifdef _WIN32
+    if (message_name == "window_minimize" || message_name == "window_maximize" ||
+        message_name == "window_close" || message_name == "window_start_drag") {
+        // Resolve the correct HWND for multi-window support
+        HWND target = nullptr;
+        BrowserWindow* ownerBw = WindowManager::GetInstance().GetWindow(window_id_);
+        if (ownerBw) target = ownerBw->hwnd;
+
+        if (target) {
+            if (message_name == "window_minimize") {
+                ShowWindow(target, SW_MINIMIZE);
+            } else if (message_name == "window_maximize") {
+                if (IsZoomed(target))
+                    ShowWindow(target, SW_RESTORE);
+                else
+                    ShowWindow(target, SW_MAXIMIZE);
+            } else if (message_name == "window_close") {
+                PostMessage(target, WM_CLOSE, 0, 0);
+            } else if (message_name == "window_start_drag") {
+                ReleaseCapture();
+                SendMessage(target, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+        }
+        return true;
+    }
+#endif
 
     // Dedicated settings close — bypasses role_ check, works from any browser process
     if (message_name == "settings_close") {

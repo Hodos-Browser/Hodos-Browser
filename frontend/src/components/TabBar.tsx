@@ -1,6 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Tooltip, CircularProgress, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import RemoveIcon from '@mui/icons-material/Remove';
+import CropSquareIcon from '@mui/icons-material/CropSquare';
+import CloseIcon from '@mui/icons-material/Close';
 import { HodosButton } from './HodosButton';
 import type { Tab } from '../types/TabTypes';
 import { tokens } from '../theme/tokens';
@@ -230,6 +233,18 @@ export const TabBar: React.FC<TabBarProps> = ({
 
   return (
     <Box
+      onMouseDown={(e: React.MouseEvent) => {
+        // Drag window from empty tab bar space (not on tabs or buttons)
+        if (e.target === e.currentTarget && e.button === 0) {
+          window.cefMessage?.send('window_start_drag', []);
+        }
+      }}
+      onDoubleClick={(e: React.MouseEvent) => {
+        // Double-click empty tab bar space to maximize/restore
+        if (e.target === e.currentTarget) {
+          window.cefMessage?.send('window_maximize', []);
+        }
+      }}
       sx={{
         display: 'flex',
         alignItems: 'center',
@@ -375,6 +390,43 @@ export const TabBar: React.FC<TabBarProps> = ({
           <AddIcon sx={{ fontSize: 18 }} />
         </HodosButton>
       </Tooltip>
+
+      {/* Spacer pushes window controls to far right */}
+      <Box sx={{ flex: 1, minWidth: 8 }} />
+
+      {/* Window Control Buttons — frameless window */}
+      <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0, mr: '-6px' }}>
+        <HodosButton
+          variant="icon"
+          size="small"
+          onClick={() => window.cefMessage?.send('window_minimize', [])}
+          aria-label="Minimize"
+          title="Minimize"
+          style={{ borderRadius: 0, width: 46, height: 42 }}
+        >
+          <RemoveIcon sx={{ fontSize: 16 }} />
+        </HodosButton>
+        <HodosButton
+          variant="icon"
+          size="small"
+          onClick={() => window.cefMessage?.send('window_maximize', [])}
+          aria-label="Maximize"
+          title="Maximize"
+          style={{ borderRadius: 0, width: 46, height: 42 }}
+        >
+          <CropSquareIcon sx={{ fontSize: 14 }} />
+        </HodosButton>
+        <HodosButton
+          variant="icon"
+          size="small"
+          onClick={() => window.cefMessage?.send('window_close', [])}
+          aria-label="Close"
+          title="Close"
+          style={{ borderRadius: 0, width: 46, height: 42 }}
+        >
+          <CloseIcon sx={{ fontSize: 16 }} />
+        </HodosButton>
+      </Box>
     </Box>
   );
 };

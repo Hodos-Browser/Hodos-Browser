@@ -8,6 +8,9 @@
 #include "include/cef_browser.h"
 #include "include/cef_request_context.h"
 #include <algorithm>
+#ifdef _WIN32
+#include <dwmapi.h>
+#endif
 
 #define LOG_INFO_WM(msg) Logger::Log(msg, 1, 2)
 #define LOG_ERROR_WM(msg) Logger::Log(msg, 3, 2)
@@ -145,7 +148,7 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     // --- Create main shell HWND ---
     // Re-use the same window class registered in WinMain ("HodosBrowserWndClass")
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+        WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE | WS_CLIPCHILDREN,
         winX, winY, winW, winH, nullptr, nullptr, g_hInstance, nullptr);
 
     if (!hwnd) {
@@ -154,12 +157,17 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
         return nullptr;
     }
 
+    // Enable DWM invisible resize borders (same as primary window in cef_browser_shell.cpp)
+    MARGINS dwmMargins = {0, 0, 0, 1};
+    DwmExtendFrameIntoClientArea(hwnd, &dwmMargins);
+
     // Store BrowserWindow* in HWND user data so ShellWindowProc can find it
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(bw));
 
-    // --- Create header child HWND ---
+    // --- Create header child HWND (inset by resize border for frameless hit-testing) ---
+    const int rb = 5; // must match ShellWindowProc WM_NCHITTEST/WM_SIZE
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD | WS_VISIBLE, 0, 0, winW, shellHeight, hwnd, nullptr, g_hInstance, nullptr);
+        WS_CHILD | WS_VISIBLE, rb, rb, winW - 2 * rb, shellHeight, hwnd, nullptr, g_hInstance, nullptr);
 
     bw->hwnd = hwnd;
     bw->header_hwnd = header_hwnd;

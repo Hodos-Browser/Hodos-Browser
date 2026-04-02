@@ -22,4 +22,11 @@ inline int GetHeaderHeightPxSystem() {
     return MulDiv(HEADER_CSS_HEIGHT, dpi, 96);
 }
 
+// Scale a CSS pixel value to physical pixels for the given window's DPI.
+// Use for overlay panel sizes (e.g., ScalePx(380, hwnd) on a 150% monitor → 570).
+inline int ScalePx(int cssPx, HWND hwnd) {
+    UINT dpi = GetDpiForWindow(hwnd);
+    return MulDiv(cssPx, dpi, 96);
+}
+
 #endif // _WIN32

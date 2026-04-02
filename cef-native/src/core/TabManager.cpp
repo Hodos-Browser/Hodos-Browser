@@ -432,8 +432,9 @@ bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_in
         }
         if (replacement != -1) {
             SwitchToTab(replacement);
+        } else {
+            active_tab_per_window_.erase(source_window_id);
         }
-        active_tab_per_window_.erase(source_window_id);
     }
 
     // 5. Switch to the moved tab in the target window (show it, hide others)

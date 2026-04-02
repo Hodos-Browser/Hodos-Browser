@@ -48,6 +48,7 @@
 #pragma comment(lib, "imm32.lib")
 #include <algorithm>  // For std::max
 #include <windowsx.h>
+#include <dwmapi.h>
 #include <filesystem>
 #include <iostream>
 #include <fstream>
@@ -195,18 +196,20 @@ void HandleFullscreenChange(bool fullscreen) {
         if (g_header_hwnd && IsWindow(g_header_hwnd)) {
             ShowWindow(g_header_hwnd, SW_SHOW);
         }
-        // Restore normal layout (same as WM_SIZE)
+        // Restore normal layout with resize border inset (same as WM_SIZE)
+        const int rb = 5; // resize border — must match WM_NCHITTEST/WM_SIZE
         int shellHeight = GetHeaderHeightPx(g_hwnd);
-        int webviewHeight = height - shellHeight;
+        int contentWidth = width - 2 * rb;
+        int webviewHeight = height - shellHeight - 2 * rb;
 
         if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-            SetWindowPos(g_header_hwnd, nullptr, 0, 0, width, shellHeight,
+            SetWindowPos(g_header_hwnd, nullptr, rb, rb, contentWidth, shellHeight,
                 SWP_NOZORDER | SWP_NOACTIVATE);
             CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
             if (header_browser) {
                 HWND header_cef_hwnd = header_browser->GetHost()->GetWindowHandle();
                 if (header_cef_hwnd && IsWindow(header_cef_hwnd)) {
-                    SetWindowPos(header_cef_hwnd, nullptr, 0, 0, width, shellHeight,
+                    SetWindowPos(header_cef_hwnd, nullptr, 0, 0, contentWidth, shellHeight,
                         SWP_NOZORDER | SWP_NOACTIVATE);
                     header_browser->GetHost()->WasResized();
                 }
@@ -216,12 +219,12 @@ void HandleFullscreenChange(bool fullscreen) {
         std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
         for (Tab* tab : tabs) {
             if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
-                SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                SetWindowPos(tab->hwnd, nullptr, rb, rb + shellHeight, contentWidth, webviewHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
                 if (tab->browser) {
                     HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
                     if (cef_hwnd && IsWindow(cef_hwnd)) {
-                        SetWindowPos(cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                        SetWindowPos(cef_hwnd, nullptr, 0, 0, contentWidth, webviewHeight,
                                     SWP_NOZORDER | SWP_NOACTIVATE);
                         tab->browser->GetHost()->WasResized();
                     }
@@ -781,9 +784,14 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
 
+            // Resize border for frameless window — child windows are inset to expose
+            // the parent window at edges for WM_NCHITTEST resize detection.
+            const int rb = 5; // must match WM_NCHITTEST border constant
+
             // Fixed header height, DPI-scaled (tab bar 42px + toolbar 53px + 1px buffer = 96 CSS px)
             int shellHeight = GetHeaderHeightPx(hwnd);
-            int webviewHeight = height - shellHeight;
+            int contentWidth = width - 2 * rb;
+            int webviewHeight = height - shellHeight - 2 * rb; // rb at top and bottom
 
             LOG_DEBUG("🔄 Main window resized: " + std::to_string(width) + "x" + std::to_string(height));
 
@@ -791,9 +799,9 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             BrowserWindow* bw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
             HWND thisHeaderHwnd = bw ? bw->header_hwnd : g_header_hwnd;
 
-            // Resize header window
+            // Resize header window (inset on all sides for resize border)
             if (thisHeaderHwnd && IsWindow(thisHeaderHwnd)) {
-                SetWindowPos(thisHeaderHwnd, nullptr, 0, 0, width, shellHeight,
+                SetWindowPos(thisHeaderHwnd, nullptr, rb, rb, contentWidth, shellHeight,
                     SWP_NOZORDER | SWP_NOACTIVATE);
 
                 // Resize the CEF browser in the header window
@@ -801,7 +809,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (header_browser) {
                     HWND header_cef_hwnd = header_browser->GetHost()->GetWindowHandle();
                     if (header_cef_hwnd && IsWindow(header_cef_hwnd)) {
-                        SetWindowPos(header_cef_hwnd, nullptr, 0, 0, width, shellHeight,
+                        SetWindowPos(header_cef_hwnd, nullptr, 0, 0, contentWidth, shellHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
                         header_browser->GetHost()->WasResized();
                     }
@@ -810,7 +818,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             // Resize webview window (legacy - will be removed when fully migrated to tabs)
             if (g_webview_hwnd && IsWindow(g_webview_hwnd)) {
-                SetWindowPos(g_webview_hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                SetWindowPos(g_webview_hwnd, nullptr, rb, rb + shellHeight, contentWidth, webviewHeight,
                     SWP_NOZORDER | SWP_NOACTIVATE);
 
                 // Resize the CEF browser in the webview window
@@ -818,7 +826,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (webview_browser) {
                     HWND webview_cef_hwnd = webview_browser->GetHost()->GetWindowHandle();
                     if (webview_cef_hwnd && IsWindow(webview_cef_hwnd)) {
-                        SetWindowPos(webview_cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                        SetWindowPos(webview_cef_hwnd, nullptr, 0, 0, contentWidth, webviewHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
                         webview_browser->GetHost()->WasResized();
                     }
@@ -830,15 +838,15 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
             for (Tab* tab : tabs) {
                 if (tab && tab->window_id == thisWindowId && tab->hwnd && IsWindow(tab->hwnd)) {
-                    // Position tab window below header
-                    SetWindowPos(tab->hwnd, nullptr, 0, shellHeight, width, webviewHeight,
+                    // Position tab window below header, inset all sides
+                    SetWindowPos(tab->hwnd, nullptr, rb, rb + shellHeight, contentWidth, webviewHeight,
                                 SWP_NOZORDER | SWP_NOACTIVATE);
 
-                    // Resize tab's CEF browser
+                    // Resize tab's CEF browser (fills its parent tab HWND)
                     if (tab->browser) {
                         HWND cef_hwnd = tab->browser->GetHost()->GetWindowHandle();
                         if (cef_hwnd && IsWindow(cef_hwnd)) {
-                            SetWindowPos(cef_hwnd, nullptr, 0, 0, width, webviewHeight,
+                            SetWindowPos(cef_hwnd, nullptr, 0, 0, contentWidth, webviewHeight,
                                         SWP_NOZORDER | SWP_NOACTIVATE);
                             tab->browser->GetHost()->WasResized();
                         }
@@ -1113,6 +1121,86 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 CefQuitMessageLoop();
             }
             break;
+
+#ifdef _WIN32
+        case WM_NCCALCSIZE: {
+            if (wParam == TRUE) {
+                // Return 0 to make entire window = client area (frameless, no title bar)
+                return 0;
+            }
+            break;
+        }
+
+        case WM_NCACTIVATE: {
+            // Prevent Windows from drawing the non-client border on focus change.
+            // DefWindowProc redraws the border to show active/inactive state — skip it.
+            return TRUE;
+        }
+
+        case WM_NCHITTEST: {
+            // Resize borders for frameless window. Child windows are inset by RESIZE_BORDER
+            // pixels, exposing the parent window at the edges for hit-testing.
+            const int border = 5;
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            bool top = pt.y < border;
+            bool bottom = pt.y >= rc.bottom - border;
+            bool left = pt.x < border;
+            bool right = pt.x >= rc.right - border;
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            return HTCLIENT;
+        }
+
+        case WM_DPICHANGED: {
+            // Accept Windows' suggested rect when dragging between monitors with different DPI.
+            // SetWindowPos triggers WM_SIZE which recalculates header/tab layout via GetHeaderHeightPx().
+            RECT* suggested = reinterpret_cast<RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr,
+                suggested->left, suggested->top,
+                suggested->right - suggested->left,
+                suggested->bottom - suggested->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+
+            // Notify all CEF browsers in this window that screen info changed,
+            // so they re-render at the new DPI scale factor.
+            BrowserWindow* dpiBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            CefRefPtr<CefBrowser> hdrBrowser = dpiBw ? dpiBw->header_browser : SimpleHandler::GetHeaderBrowser();
+            if (hdrBrowser) {
+                hdrBrowser->GetHost()->NotifyScreenInfoChanged();
+            }
+            int dpiWinId = dpiBw ? dpiBw->window_id : 0;
+            std::vector<Tab*> dpiTabs = TabManager::GetInstance().GetAllTabs();
+            for (Tab* tab : dpiTabs) {
+                if (tab && tab->window_id == dpiWinId && tab->browser) {
+                    tab->browser->GetHost()->NotifyScreenInfoChanged();
+                }
+            }
+
+            // Notify overlay browsers (primary window only)
+            if (dpiWinId == 0) {
+                auto notifyOverlay = [](CefRefPtr<CefBrowser> b) {
+                    if (b) b->GetHost()->NotifyScreenInfoChanged();
+                };
+                notifyOverlay(SimpleHandler::GetSettingsBrowser());
+                notifyOverlay(SimpleHandler::GetWalletPanelBrowser());
+                notifyOverlay(SimpleHandler::GetOmniboxBrowser());
+                notifyOverlay(SimpleHandler::GetCookiePanelBrowser());
+                notifyOverlay(SimpleHandler::GetDownloadPanelBrowser());
+                notifyOverlay(SimpleHandler::GetProfilePanelBrowser());
+                notifyOverlay(SimpleHandler::GetMenuBrowser());
+            }
+            return 0;
+        }
+#endif
     }
 
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -2722,6 +2810,11 @@ void StopAdblockServer() {
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_hInstance = hInstance;
 
+    // Enable Per-Monitor DPI V2 awareness. Must be called before any window creation.
+    // This ensures WM_DPICHANGED fires when dragging between monitors with different DPI,
+    // and CEF browsers render at the correct scale factor for each monitor.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     // Create the primary BrowserWindow (window 0) in WindowManager.
     // This must happen before any code that accesses MAIN_WINDOW().
     WindowManager::GetInstance().CreateWindowRecord();  // returns 0
@@ -2991,16 +3084,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
 
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
 
+    // Enable DWM invisible resize borders outside the window bounds.
+    // The {0,0,0,1} margin tells DWM this window has a frame, enabling
+    // compositor-level resize hit-testing that works even with child HWNDs covering the client area.
+    MARGINS dwmMargins = {0, 0, 0, 1};
+    DwmExtendFrameIntoClientArea(hwnd, &dwmMargins);
+
+    const int rb = 5; // resize border inset — must match ShellWindowProc WM_NCHITTEST/WM_SIZE
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD | WS_VISIBLE, 0, 0, width, shellHeight, hwnd, nullptr, hInstance, nullptr);
+        WS_CHILD | WS_VISIBLE, rb, rb, width - 2 * rb, shellHeight, hwnd, nullptr, hInstance, nullptr);
 
     // OLD: Single webview window - NO LONGER USED WITH TAB SYSTEM
     // Kept for compatibility but made invisible (tabs now handle content display)
     HWND webview_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD, 0, shellHeight, width, webviewHeight, hwnd, nullptr, hInstance, nullptr);
+        WS_CHILD, rb, rb + shellHeight, width - 2 * rb, webviewHeight - 2 * rb, hwnd, nullptr, hInstance, nullptr);
     // Note: Removed WS_VISIBLE - this window was blocking input to tabs!
 
     // 🌍 Assign to globals + sync to BrowserWindow 0
