@@ -5402,8 +5402,42 @@ pub(crate) async fn create_action_internal(
                             log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", deleted_count);
                         }
 
-                        // CRITICAL: Restore input outputs that were reserved for this transaction.
-                        // Since broadcast failed, these coins were never spent on-chain.
+                        // Check if this is a double-spend / missing-inputs error.
+                        // If so, the inputs ARE spent on-chain — do NOT restore them.
+                        // Mark them as external-spend so the wallet picks different UTXOs next time.
+                        let error_lower = e.to_string().to_lowercase();
+                        let is_double_spend = error_lower.contains("double spend")
+                            || error_lower.contains("double-spend")
+                            || error_lower.contains("txn-mempool-conflict")
+                            || error_lower.contains("missing inputs")
+                            || error_lower.contains("missingorspent");
+
+                        if is_double_spend {
+                            // Mark inputs as externally spent — they're gone on-chain.
+                            // Use spending_description='double-spend-detected' so the
+                            // restore_spent_by_txid below won't match them.
+                            let marked = db.connection().execute(
+                                "UPDATE outputs SET spending_description = 'double-spend-detected'
+                                 WHERE spending_description = ?1 AND spendable = 0",
+                                rusqlite::params![&final_txid],
+                            ).unwrap_or(0);
+                            // Also check placeholder
+                            let marked2 = if let Some(ref placeholder) = reservation_placeholder {
+                                db.connection().execute(
+                                    "UPDATE outputs SET spending_description = 'double-spend-detected'
+                                     WHERE spending_description = ?1 AND spendable = 0",
+                                    rusqlite::params![placeholder],
+                                ).unwrap_or(0)
+                            } else { 0 };
+                            if marked + marked2 > 0 {
+                                log::warn!("   ⚠️  Double-spend detected: marked {} input(s) as externally spent \
+                                            (will NOT restore — they're spent on-chain)", marked + marked2);
+                            }
+                        }
+
+                        // Restore input outputs that were reserved for this transaction.
+                        // If double-spend was detected above, the spending_description was
+                        // changed to 'double-spend-detected', so this restore won't match them.
                         match output_repo.restore_spent_by_txid(&final_txid) {
                             Ok(count) if count > 0 => {
                                 log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
@@ -7325,50 +7359,30 @@ pub async fn process_action(
 
         let broadcast_result = broadcast_transaction(&raw_tx, Some(&state.database), Some(&txid)).await;
 
-        // Handle "Missing inputs" error by checking UTXOs and marking them as spent
+        // Handle double-spend / missing-inputs errors by marking inputs as externally spent.
+        // This prevents the wallet from repeatedly picking the same dead UTXOs.
         if let Err(ref e) = broadcast_result {
             let error_str = e.to_string().to_lowercase();
-            if error_str.contains("missing inputs") {
-                log::warn!("   ⚠️  Received 'Missing inputs' error - checking which UTXOs are spent...");
+            let is_double_spend = error_str.contains("double spend")
+                || error_str.contains("double-spend")
+                || error_str.contains("txn-mempool-conflict")
+                || error_str.contains("missing inputs")
+                || error_str.contains("missingorspent");
 
-                // Check each input UTXO to see if it's spent on-chain
-                let mut spent_utxos = Vec::new();
+            if is_double_spend && !input_utxos.is_empty() {
+                log::warn!("   ⚠️  Double-spend/missing-inputs detected — marking {} input(s) as externally spent",
+                           input_utxos.len());
+
+                let db = state.database.lock().unwrap();
                 for utxo in &input_utxos {
-                    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
-                    let client = reqwest::Client::new();
-                    match client.get(&url).send().await {
-                        Ok(response) => {
-                            if response.status() == 404 {
-                                log::warn!("      ⚠️  UTXO {}:{} returned 404 - likely SPENT", utxo.txid, utxo.vout);
-                                spent_utxos.push((utxo.txid.clone(), utxo.vout));
-                            } else if response.status().is_success() {
-                                if let Ok(json) = response.json::<serde_json::Value>().await {
-                                    if let Some(spent) = json.get("spent").and_then(|v| v.as_bool()) {
-                                        if spent {
-                                            log::warn!("      ⚠️  UTXO {}:{} is SPENT on-chain", utxo.txid, utxo.vout);
-                                            spent_utxos.push((utxo.txid.clone(), utxo.vout));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Ignore API errors
-                        }
-                    }
+                    let _ = db.connection().execute(
+                        "UPDATE outputs SET spendable = 0, spending_description = 'double-spend-detected'
+                         WHERE txid = ?1 AND vout = ?2 AND spendable = 0",
+                        rusqlite::params![&utxo.txid, utxo.vout],
+                    );
                 }
-
-                // Mark spent outputs in database
-                if !spent_utxos.is_empty() {
-                    log::info!("   🔄 Marking {} output(s) as spent in database...", spent_utxos.len());
-                    let db = state.database.lock().unwrap();
-                    let output_repo = crate::database::OutputRepository::new(db.connection());
-                    for (txid, vout) in &spent_utxos {
-                        let _ = output_repo.mark_spent(txid, *vout, "unknown");
-                        log::info!("      ✅ Marked {}:{} as spent", txid, vout);
-                    }
-                    drop(db);
-                }
+                drop(db);
+                state.balance_cache.invalidate();
             }
         }
 
@@ -11542,101 +11556,17 @@ pub async fn do_onchain_backup(
     };
     log::info!("   📝 Backup tx: {} ({} bytes)", txid, raw_tx_hex.len() / 2);
 
-    // Step 10: Store signed tx + create DB records
+    // Step 10: Cache signed tx for BEEF ancestry (needed before broadcast)
     let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
     {
         let db = state.database.lock().unwrap();
-        // Cache signed tx for BEEF ancestry
         let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
         let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
     }
 
-    // Create transaction record
-    let tx_record_id: Option<i64> = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        let db = state.database.lock().unwrap();
-        match db.connection().execute(
-            "INSERT OR IGNORE INTO transactions (
-                user_id, txid, status, reference_number,
-                description, raw_tx, is_outgoing, satoshis,
-                created_at, updated_at
-            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
-            rusqlite::params![
-                1i64, txid,
-                format!("backup-{}", &txid[..8]),
-                "On-chain wallet backup",
-                raw_tx_bytes,
-                estimated_fee, // Actual cost — only the mining fee (token + marker recovered on next backup)
-                now, now,
-            ],
-        ) {
-            Ok(rows) if rows > 0 => Some(db.connection().last_insert_rowid()),
-            _ => None,
-        }
-    };
-
-    // Record backup outputs
-    {
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-        let basket_repo = crate::database::BasketRepository::new(db.connection());
-        let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
-        let locking_script_hex = hex::encode(&locking_script_bytes);
-
-        // Output 0: PushDrop backup
-        let _ = output_repo.insert_output(
-            1, &txid, 0,
-            backup_output_sats, &locking_script_hex,
-            backup_basket_id,
-            Some("1-wallet-backup"), Some("1"),
-            None, None, false,
-        );
-
-        // Output 1: P2PKH marker (for on-chain discovery)
-        let marker_script_hex = hex::encode(&marker_script);
-        let _ = output_repo.insert_output(
-            1, &txid, 1,
-            marker_sats, &marker_script_hex,
-            backup_basket_id,
-            Some("1-wallet-backup"), Some("marker"),
-            None, None, false,
-        );
-
-        // Output 2: Change (if exists)
-        if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
-            let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
-            let _ = output_repo.insert_output(
-                1, &txid, 2,
-                change_amount, script_hex,
-                default_basket_id,
-                Some("2-receive address"), Some(&addr_idx.to_string()),
-                None, None, true,
-            );
-        }
-        // Link outputs to transaction
-        if let Some(tx_id) = tx_record_id {
-            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
-        }
-    }
-
-    // No commission for wallet backups — service fee waived
-
-    // Update input reservations from placeholder to real txid
-    {
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
-    }
-
-    // Create proven_tx_req for proof tracking
-    {
-        let db = state.database.lock().unwrap();
-        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
-        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
-    }
-
-    // Step 11: Build BEEF and broadcast
+    // Step 11: Build BEEF and broadcast BEFORE creating DB records.
+    // This prevents ghost outputs if the process is killed mid-backup —
+    // only the placeholder reservation remains, which is cleaned up at startup.
     let beef_bytes = {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -11680,27 +11610,125 @@ pub async fn do_onchain_backup(
         match beef.to_bytes() {
             Ok(b) => b,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, &txid).await;
+                rollback_backup(&state, &placeholder_txid, "").await;
                 return Err(format!("BEEF serialization failed: {}", e));
             }
         }
     };
     log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
 
-    // Broadcast
+    // Broadcast — if this fails, only the placeholder reservation exists (no ghost outputs)
     let beef_hex = hex::encode(&beef_bytes);
     match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
-            let db = state.database.lock().unwrap();
-            let tx_repo = crate::database::TransactionRepository::new(db.connection());
-            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
         }
         Err(e) => {
-            log::error!("   ❌ Backup broadcast failed: {} — rolling back", e);
-            rollback_backup(&state, &placeholder_txid, &txid).await;
+            log::error!("   ❌ Backup broadcast failed: {} — rolling back placeholder", e);
+
+            // If double-spend/missing-inputs, the inputs are spent on-chain.
+            // Mark them so rollback_backup won't restore them.
+            let error_lower = e.to_lowercase();
+            let is_double_spend = error_lower.contains("double spend")
+                || error_lower.contains("double-spend")
+                || error_lower.contains("txn-mempool-conflict")
+                || error_lower.contains("missing inputs")
+                || error_lower.contains("missingorspent");
+            if is_double_spend {
+                let db = state.database.lock().unwrap();
+                let marked = db.connection().execute(
+                    "UPDATE outputs SET spending_description = 'double-spend-detected'
+                     WHERE spending_description = ?1 AND spendable = 0",
+                    rusqlite::params![&placeholder_txid],
+                ).unwrap_or(0);
+                if marked > 0 {
+                    log::warn!("   ⚠️  Double-spend detected: marked {} backup input(s) as externally spent", marked);
+                }
+                drop(db);
+            }
+
+            rollback_backup(&state, &placeholder_txid, "").await;
             return Err(format!("Broadcast failed: {}", e));
         }
+    }
+
+    // Step 12: Broadcast succeeded — NOW create DB records in a single lock scope.
+    // If the process dies here, the tx is on-chain but DB doesn't know — TaskUnFail
+    // will recover it within 6 hours, and /wallet/sync will discover the change output.
+    let tx_record_id: Option<i64>;
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+
+        // Create transaction record (status: unproven — already broadcast)
+        tx_record_id = match db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, is_outgoing, satoshis,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'unproven', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            rusqlite::params![
+                1i64, txid,
+                format!("backup-{}", &txid[..8]),
+                "On-chain wallet backup",
+                raw_tx_bytes,
+                estimated_fee,
+                now, now,
+            ],
+        ) {
+            Ok(rows) if rows > 0 => Some(db.connection().last_insert_rowid()),
+            _ => None,
+        };
+
+        // Record backup outputs
+        let output_repo = OutputRepository::new(db.connection());
+        let basket_repo = crate::database::BasketRepository::new(db.connection());
+        let backup_basket_id = basket_repo.find_or_insert("wallet-backup", 1).ok();
+        let locking_script_hex = hex::encode(&locking_script_bytes);
+
+        // Output 0: PushDrop backup
+        let _ = output_repo.insert_output(
+            1, &txid, 0,
+            backup_output_sats, &locking_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("1"),
+            None, None, false,
+        );
+
+        // Output 1: P2PKH marker (for on-chain discovery)
+        let marker_script_hex = hex::encode(&marker_script);
+        let _ = output_repo.insert_output(
+            1, &txid, 1,
+            marker_sats, &marker_script_hex,
+            backup_basket_id,
+            Some("1-wallet-backup"), Some("marker"),
+            None, None, false,
+        );
+
+        // Output 2: Change (if exists)
+        if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
+            let default_basket_id = basket_repo.find_or_insert("default", 1).ok();
+            let _ = output_repo.insert_output(
+                1, &txid, 2,
+                change_amount, script_hex,
+                default_basket_id,
+                Some("2-receive address"), Some(&addr_idx.to_string()),
+                None, None, true,
+            );
+        }
+
+        // Link outputs to transaction
+        if let Some(tx_id) = tx_record_id {
+            let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
+        }
+
+        // Update input reservations from placeholder to real txid
+        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+
+        // Create proven_tx_req for proof tracking
+        let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+        let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
     }
 
     state.balance_cache.invalidate();

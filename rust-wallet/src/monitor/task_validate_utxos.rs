@@ -22,9 +22,10 @@ use std::collections::HashMap;
 use crate::AppState;
 use crate::database::{AddressRepository, OutputRepository, WalletRepository};
 
-/// Grace period: don't invalidate outputs newer than 2 minutes
-/// (shorter than TaskSyncPending's 10 min because this task targets known stale data)
-const VALIDATE_GRACE_PERIOD_SECS: i64 = 120;
+/// Grace period: don't invalidate outputs newer than 5 minutes.
+/// Longer than before to avoid marking valid outputs as stale when
+/// broadcast propagation is slow or API caches are stale.
+const VALIDATE_GRACE_PERIOD_SECS: i64 = 300;
 
 /// Maximum addresses to validate per cycle (rate limiting for WoC API)
 const MAX_ADDRESSES_PER_CYCLE: usize = 50;
@@ -136,10 +137,40 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let output_repo = OutputRepository::new(db.connection());
 
+        // Build set of addresses that have in-flight (sending/unsigned) transactions.
+        // Don't reconcile these — the outputs may not have propagated to the API yet.
+        let inflight_addresses: std::collections::HashSet<i32> = {
+            let mut stmt = db.connection().prepare(
+                "SELECT DISTINCT o.derivation_suffix
+                 FROM outputs o
+                 INNER JOIN transactions t ON o.transaction_id = t.id
+                 WHERE t.status IN ('sending', 'unsigned', 'unprocessed')
+                   AND o.derivation_suffix IS NOT NULL"
+            ).unwrap_or_else(|_| db.connection().prepare("SELECT 1 WHERE 0").unwrap());
+            stmt.query_map([], |row| {
+                let suffix: String = row.get(0)?;
+                Ok(suffix.parse::<i32>().unwrap_or(-999))
+            }).ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        };
+
         for addr in &addresses_to_check {
+            // Skip addresses with in-flight transactions
+            if inflight_addresses.contains(&addr.index) {
+                continue;
+            }
+
             let addr_utxos = api_utxo_map.get(&addr.index)
                 .cloned()
                 .unwrap_or_default();
+
+            // Safety: never reconcile against an empty API response.
+            // An empty response for an address we KNOW has spendable outputs
+            // likely means the API returned an error or the address format is wrong.
+            if addr_utxos.is_empty() {
+                continue;
+            }
 
             let derivation_suffix = addr.index.to_string();
 

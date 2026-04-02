@@ -109,7 +109,11 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                     }
                     "REJECTED" | "DOUBLE_SPEND_ATTEMPTED" => {
                         info!("   ❌ {} rejected by ARC ({}) — marking failed", short_txid, status);
-                        cleanup_failed_sending(state, &txid, *tx_id);
+                        if status == "DOUBLE_SPEND_ATTEMPTED" {
+                            cleanup_failed_sending_double_spend(state, &txid, *tx_id);
+                        } else {
+                            cleanup_failed_sending(state, &txid, *tx_id);
+                        }
                         failed += 1;
                         continue;
                     }
@@ -155,7 +159,16 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             Err(e) => {
                 if is_permanent_error(&e) {
                     warn!("   ❌ Permanent broadcast failure for {}: {}", short_txid, e);
-                    cleanup_failed_sending(state, &txid, *tx_id);
+                    let error_lower = e.to_lowercase();
+                    let is_ds = error_lower.contains("double spend")
+                        || error_lower.contains("double-spend")
+                        || error_lower.contains("missing inputs")
+                        || error_lower.contains("missingorspent");
+                    if is_ds {
+                        cleanup_failed_sending_double_spend(state, &txid, *tx_id);
+                    } else {
+                        cleanup_failed_sending(state, &txid, *tx_id);
+                    }
                     failed += 1;
                 } else {
                     // Transient error — leave as 'sending', will retry on next tick
@@ -207,6 +220,18 @@ fn promote_to_unproven(state: &web::Data<AppState>, txid: &str) {
 /// Same sequence as the broadcast failure handler in handlers.rs:
 /// mark failed → delete ghost outputs → restore inputs → invalidate cache
 fn cleanup_failed_sending(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
+    cleanup_failed_sending_impl(state, txid, tx_id, false);
+}
+
+/// Cleanup variant that knows inputs are double-spent (spent on-chain).
+/// When `is_double_spend` is true, marks inputs as externally spent instead
+/// of restoring them as spendable — prevents the wallet from re-selecting
+/// the same dead UTXOs.
+fn cleanup_failed_sending_double_spend(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
+    cleanup_failed_sending_impl(state, txid, tx_id, true);
+}
+
+fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i64, is_double_spend: bool) {
     if let Ok(db) = state.database.lock() {
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
@@ -238,19 +263,32 @@ fn cleanup_failed_sending(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
             _ => {}
         }
 
-        // 3. Restore input outputs that were reserved for this tx
-        match output_repo.restore_spent_by_txid(txid) {
-            Ok(count) if count > 0 => {
-                info!("   ♻️ Restored {} input(s) from failed tx {}", count, short_txid);
+        // 3. Handle inputs based on whether this is a double-spend
+        if is_double_spend {
+            // Inputs ARE spent on-chain — mark as externally spent, do NOT restore.
+            let marked = conn.execute(
+                "UPDATE outputs SET spending_description = 'double-spend-detected'
+                 WHERE spending_description = ?1 AND spendable = 0",
+                rusqlite::params![txid],
+            ).unwrap_or(0);
+            if marked > 0 {
+                warn!("   ⚠️ Double-spend: marked {} input(s) as externally spent for {}", marked, short_txid);
             }
-            Err(e) => {
-                warn!("   ⚠️ Failed to restore inputs for {}: {}", short_txid, e);
-            }
-            _ => {
-                // Fallback: try restore_by_spending_description
-                if let Ok(count) = output_repo.restore_by_spending_description(txid) {
-                    if count > 0 {
-                        info!("   ♻️ Restored {} input(s) via spending_description from tx {}", count, short_txid);
+        } else {
+            // Normal failure — restore inputs as spendable
+            match output_repo.restore_spent_by_txid(txid) {
+                Ok(count) if count > 0 => {
+                    info!("   ♻️ Restored {} input(s) from failed tx {}", count, short_txid);
+                }
+                Err(e) => {
+                    warn!("   ⚠️ Failed to restore inputs for {}: {}", short_txid, e);
+                }
+                _ => {
+                    // Fallback: try restore_by_spending_description
+                    if let Ok(count) = output_repo.restore_by_spending_description(txid) {
+                        if count > 0 {
+                            info!("   ♻️ Restored {} input(s) via spending_description from tx {}", count, short_txid);
+                        }
                     }
                 }
             }

@@ -244,13 +244,19 @@ export default function WalletPanelPage() {
       if (e.data?.type === 'wallet_hidden') {
         console.log('[WalletPanel] wallet_hidden — resetting UI state');
         setShowRecoveryInput(false);
+        setRecoveryWords(Array(12).fill(''));
+        setRecoveryError(null);
+        setRecoveryResult(null);
         setShowImportForm(false);
         setShowCentbeeRecovery(false);
+        setCentbeeWords(Array(12).fill(''));
+        setCentbeePinDigits(['', '', '', '']);
+        setCentbeeError(null);
+        setCentbeeProgress(null);
+        setCentbeeResult(null);
         setMnemonic(null);
         setPinStep(null);
         setPendingAction(null);
-        setRecoveryError(null);
-        setRecoveryResult(null);
       }
     };
     // Keep-alive: re-fetch wallet status when overlay is shown again
@@ -280,6 +286,16 @@ export default function WalletPanelPage() {
   }, []);
 
   const handleClose = () => {
+    // Reset all setup/recovery form state so reopening the panel is clean
+    setShowRecoveryInput(false);
+    setRecoveryWords(Array(12).fill(''));
+    setShowCentbeeRecovery(false);
+    setCentbeeWords(Array(12).fill(''));
+    setCentbeePinDigits(['', '', '', '']);
+    setCentbeeError(null);
+    setCentbeeProgress(null);
+    setCentbeeResult(null);
+
     if (window.hodosBrowser?.overlay?.close) {
       window.hodosBrowser.overlay.close();
     } else if (window.cefMessage?.send) {
@@ -1352,13 +1368,7 @@ export default function WalletPanelPage() {
               Recover from Centbee
             </HodosButton>
 
-            <HodosButton
-              variant="secondary"
-              onClick={() => setShowImportForm(true)}
-              style={{ width: '100%' }}
-            >
-              Import from Backup File
-            </HodosButton>
+            {/* Import from Backup File — hidden for now, backend still supports it */}
           </>
         ) : (
           /* Mnemonic backup (after create) */

@@ -63,7 +63,7 @@ impl Default for TaskSchedule {
             purge: 3600,              // 1 hour
             sync_pending: 30,         // 30 seconds
             check_peerpay: 60,        // 1 minute
-            validate_utxos: 600,      // 10 minutes
+            validate_utxos: 1800,     // 30 minutes
             backup: 10800,            // 3 hours (180 minutes) — significant events trigger sooner via backup_check_needed flag
         }
     }
@@ -264,14 +264,19 @@ impl Monitor {
                 }
             }
 
-            // TaskValidateUtxos — DISABLED
-            // Removed: was too aggressive, marking valid outputs as stale.
-            // TaskSyncPending handles ongoing UTXO reconciliation for pending addresses.
-            // The BSV SDK/wallet-toolbox does not have an equivalent background validator.
-            // If we re-enable in the future, it needs to:
-            // - Only validate P2PKH outputs (skip PushDrop/token outputs)
-            // - Only act on 200 responses (never on API errors/404s)
-            // - Have a much longer grace period
+            // TaskValidateUtxos — Re-enabled with safety guards:
+            // - Only validates P2PKH outputs (skips PushDrop/token/backup)
+            // - Skips addresses with in-flight (sending/unsigned) transactions
+            // - Never reconciles against empty API responses
+            // - 5-minute grace period for new outputs
+            // - 30-minute interval (not 10)
+            if now - last_validate_utxos >= self.schedule.validate_utxos {
+                last_validate_utxos = now;
+                if let Err(e) = task_validate_utxos::run(&self.state).await {
+                    warn!("   ⚠️ TaskValidateUtxos failed: {}", e);
+                    self.log_event("TaskValidateUtxos:error", Some(&e));
+                }
+            }
         }
 
         info!("🛑 Monitor stopped");

@@ -374,55 +374,7 @@ const SettingsTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Export Backup */}
-      <div className="wd-settings-section">
-        <div className="wd-section-title">Export Backup</div>
-        <div className="wd-section-desc">Download an encrypted backup of your wallet</div>
-
-        {exportSuccess ? (
-          <div className="wd-alert success">Backup downloaded successfully!</div>
-        ) : !showExportForm ? (
-          <HodosButton variant="secondary" onClick={() => setShowExportForm(true)}>
-            Export Wallet Backup
-          </HodosButton>
-        ) : (
-          <div className="wd-export-form">
-            <input
-              type="password"
-              placeholder="Password (min 8 characters)"
-              value={exportPassword}
-              onChange={(e) => { setExportPassword(e.target.value); setExportError(null); }}
-              disabled={exporting}
-            />
-            <input
-              type="password"
-              placeholder="Confirm password"
-              value={exportConfirm}
-              onChange={(e) => { setExportConfirm(e.target.value); setExportError(null); }}
-              disabled={exporting}
-            />
-            {exportError && <div className="wd-alert error">{exportError}</div>}
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <HodosButton
-                variant="primary"
-                onClick={handleExportBackup}
-                disabled={exportPassword.length < 8}
-                loading={exporting}
-                loadingText="Encrypting..."
-              >
-                Download Backup
-              </HodosButton>
-              <HodosButton
-                variant="secondary"
-                onClick={() => { setShowExportForm(false); setExportPassword(''); setExportConfirm(''); setExportError(null); }}
-                disabled={exporting}
-              >
-                Cancel
-              </HodosButton>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Export Backup — hidden for now, backend still supports /wallet/export */}
 
       {/* Delete Wallet */}
       <div className="wd-settings-section danger">

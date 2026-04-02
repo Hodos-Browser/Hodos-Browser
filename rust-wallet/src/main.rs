@@ -287,6 +287,48 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
+
+                // Clean up interrupted backup transactions.
+                // If a backup tx was created but the process was killed before broadcast
+                // completed, ghost outputs and stale reservations may remain.
+                // With the post-broadcast output creation fix, only the placeholder
+                // reservation should remain (handled above). This catches legacy cases
+                // where outputs were created before broadcast.
+                {
+                    use database::OutputRepository;
+                    use database::TransactionRepository;
+                    let conn = db.connection();
+
+                    let mut stmt = conn.prepare(
+                        "SELECT id, txid FROM transactions \
+                         WHERE status = 'sending' AND description = 'On-chain wallet backup'"
+                    ).ok();
+                    if let Some(ref mut stmt) = stmt {
+                        let stuck_backups: Vec<(i64, String)> = stmt.query_map([], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                        }).ok()
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                            .unwrap_or_default();
+
+                        if !stuck_backups.is_empty() {
+                            let output_repo = OutputRepository::new(conn);
+                            let tx_repo = TransactionRepository::new(conn);
+                            for (_tx_id, txid) in &stuck_backups {
+                                // Standard ghost cleanup: mark failed, delete outputs, restore inputs
+                                let _ = tx_repo.set_transaction_status(
+                                    txid,
+                                    crate::action_storage::TransactionStatus::Failed,
+                                );
+                                let deleted = output_repo.delete_by_txid(txid).unwrap_or(0);
+                                let restored = output_repo.restore_by_spending_description(txid).unwrap_or(0);
+                                println!(
+                                    "🧹 Cleaned up stuck backup tx {}: deleted {} ghost output(s), restored {} input(s)",
+                                    &txid[..16.min(txid.len())], deleted, restored
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             // Get default user ID for AppState (multi-user foundation, Phase 3)

@@ -181,6 +181,12 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
         return nullptr;
     }
 
+    // Set window icon explicitly (preserves 32-bit RGBA alpha for rounded corners)
+    HICON hIconLarge = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+    HICON hIconSmall = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    if (hIconLarge) SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconLarge);
+    if (hIconSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+
     // Enable DWM invisible resize borders (same as primary window in cef_browser_shell.cpp)
     MARGINS dwmMargins = {0, 0, 0, 1};
     DwmExtendFrameIntoClientArea(hwnd, &dwmMargins);
