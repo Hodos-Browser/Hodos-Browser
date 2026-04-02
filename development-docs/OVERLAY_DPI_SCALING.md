@@ -1,4 +1,4 @@
-# Overlay DPI Scaling — Post-MVP Task
+# Overlay DPI Scaling — IMPLEMENTED (2026-04-02)
 
 ## Problem
 
@@ -39,7 +39,9 @@ All overlay DPI changes were reverted. Overlays use hardcoded CSS pixel sizes an
 - `WM_DPICHANGED` handler with `NotifyScreenInfoChanged()` on all browsers — header and tab content scale correctly
 - `ScalePx()` helper remains in `LayoutHelpers.h` for future use
 
-## Correct Fix (Future Implementation)
+## Fix Applied (2026-04-02)
+
+All three layers were changed simultaneously to keep the coordinate pipeline synchronized:
 
 A complete fix requires changes at three layers:
 

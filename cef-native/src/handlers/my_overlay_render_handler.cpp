@@ -125,14 +125,20 @@ MyOverlayRenderHandler::~MyOverlayRenderHandler() {
 
 void MyOverlayRenderHandler::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
 #ifdef _WIN32
-    // Query actual HWND dimensions for correct rendering after resize
+    // Return logical (CSS) pixels — CEF multiplies by device_scale_factor for the
+    // actual render buffer size. GetClientRect returns physical pixels, so we divide
+    // by the DPI scale factor to get the logical viewport CEF expects.
     if (hwnd_) {
         RECT clientRect;
         if (GetClientRect(hwnd_, &clientRect)) {
-            int w = clientRect.right - clientRect.left;
-            int h = clientRect.bottom - clientRect.top;
-            if (w > 0 && h > 0) {
-                rect = CefRect(0, 0, w, h);
+            int physW = clientRect.right - clientRect.left;
+            int physH = clientRect.bottom - clientRect.top;
+            if (physW > 0 && physH > 0) {
+                UINT dpi = GetDpiForWindow(hwnd_);
+                float scale = static_cast<float>(dpi) / 96.0f;
+                int logW = static_cast<int>(physW / scale);
+                int logH = static_cast<int>(physH / scale);
+                rect = CefRect(0, 0, logW, logH);
                 return;
             }
         }
@@ -203,7 +209,12 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
     }
 
     POINT* ptWinPos = nullptr;  // Use HWND's current position
-    SIZE sizeWin = {width_, height_};
+    // Use HWND physical dimensions for UpdateLayeredWindow, which operates in
+    // physical pixels. At high DPI the CEF buffer matches the HWND physical size.
+    RECT ulwRect;
+    GetClientRect(hwnd_, &ulwRect);
+    SIZE sizeWin = { ulwRect.right > 0 ? ulwRect.right : width_,
+                     ulwRect.bottom > 0 ? ulwRect.bottom : height_ };
     POINT ptSrc = {0, 0};
 
     BLENDFUNCTION blend = {};
@@ -291,8 +302,12 @@ bool MyOverlayRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int v
     RECT windowRect;
     GetWindowRect(hwnd_, &windowRect);
 
-    screenX = windowRect.left + viewX;
-    screenY = windowRect.top + viewY;
+    // viewX/viewY are in logical (CSS) pixels. Screen coordinates are physical.
+    // Scale logical to physical before adding to the window's physical origin.
+    UINT dpi = GetDpiForWindow(hwnd_);
+    float scale = static_cast<float>(dpi) / 96.0f;
+    screenX = windowRect.left + static_cast<int>(viewX * scale);
+    screenY = windowRect.top + static_cast<int>(viewY * scale);
     return true;
 
 #elif defined(__APPLE__)
@@ -316,7 +331,12 @@ bool MyOverlayRenderHandler::GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScr
     RECT windowRect;
     GetWindowRect(hwnd_, &windowRect);
 
-    screen_info.device_scale_factor = 1.0f;
+    // Report actual DPI scale factor so CEF renders at the monitor's native resolution.
+    // This works with ScalePx()-sized HWNDs: CEF renders at logicalSize * scaleFactor
+    // which equals the HWND's physical size.
+    UINT dpi = GetDpiForWindow(hwnd_);
+    float scale = static_cast<float>(dpi) / 96.0f;
+    screen_info.device_scale_factor = scale;
     screen_info.depth = 32;
     screen_info.depth_per_component = 8;
     screen_info.is_monochrome = false;

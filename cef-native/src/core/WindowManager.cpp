@@ -113,6 +113,30 @@ int WindowManager::GetActiveWindowId() const {
     return active_window_id_;
 }
 
+void WindowManager::SetPrimaryWindowId(int id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    primary_window_id_ = id;
+}
+
+int WindowManager::GetPrimaryWindowId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return primary_window_id_;
+}
+
+BrowserWindow* WindowManager::GetPrimaryWindow() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = windows_.find(primary_window_id_);
+    return (it != windows_.end()) ? it->second.get() : nullptr;
+}
+
+int WindowManager::GetNextWindowId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, win] : windows_) {
+        if (id != primary_window_id_) return id;
+    }
+    return primary_window_id_; // fallback: only one window
+}
+
 #ifdef _WIN32
 
 // Forward declarations for WndProcs (defined in cef_browser_shell.cpp)

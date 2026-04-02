@@ -43,6 +43,15 @@ public:
     void SetActiveWindowId(int id);
     int GetActiveWindowId() const;
 
+    // Primary window tracking — the window that owns overlay HWNDs.
+    // Initially window 0; transfers when the primary window closes.
+    void SetPrimaryWindowId(int id);
+    int GetPrimaryWindowId() const;
+    BrowserWindow* GetPrimaryWindow();
+    // Returns the lowest existing window ID that is not the current primary.
+    // Used to select the transfer target when the primary window closes.
+    int GetNextWindowId() const;
+
 #ifdef _WIN32
     // Create a full new top-level browser window (Phase 2: multi-window).
     // Creates HWND, header browser, pre-created overlays, and an initial NTP tab.
@@ -61,6 +70,7 @@ private:
 
     std::unordered_map<int, std::unique_ptr<BrowserWindow>> windows_;
     int active_window_id_ = 0;
+    int primary_window_id_ = 0;
     int next_window_id_ = 0;
     mutable std::mutex mutex_;
 };

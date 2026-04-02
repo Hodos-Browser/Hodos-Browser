@@ -549,7 +549,7 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
     g_settings_icon_right_offset = iconRightOffset;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->settings_icon_right_offset = g_settings_icon_right_offset;
 
     // Get main window and header dimensions for positioning
@@ -560,15 +560,15 @@ void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRight
     GetWindowRect(g_header_hwnd, &headerRect);
 
     // Right-side popup panel, right edge aligned under the icon
-    int panelWidth = 450;
-    int panelHeight = 450;
+    int panelWidth = ScalePx(450, g_hwnd);
+    int panelHeight = ScalePx(450, g_hwnd);
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
 
     // Clamp so panel doesn't extend below or outside main window
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200; // minimum usable height
+        if (panelHeight < ScalePx(200, g_hwnd)) panelHeight = ScalePx(200, g_hwnd); // minimum usable height
     }
 
     LOG_DEBUG_APP("⚙️ Settings panel position: (" + std::to_string(overlayX) + ", " + std::to_string(overlayY)
@@ -673,7 +673,7 @@ void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRigh
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->wallet_icon_right_offset = g_wallet_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
@@ -702,7 +702,7 @@ void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRigh
     ClientToScreen(g_hwnd, &clientTopLeft);
     ClientToScreen(g_hwnd, &clientBottomRight);
 
-    int panelWidth = 400;
+    int panelWidth = ScalePx(400, g_hwnd);
     int panelHeight = clientBottomRight.y - headerRect.bottom;
     int overlayX = clientBottomRight.x - panelWidth;
     int overlayY = headerRect.bottom;
@@ -817,7 +817,7 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->wallet_icon_right_offset = g_wallet_icon_right_offset;
 
     LOG_INFO_APP("ShowWalletOverlay with iconRightOffset=" + std::to_string(g_wallet_icon_right_offset));
@@ -844,7 +844,7 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     ClientToScreen(posHwnd, &clientTopLeft);
     ClientToScreen(posHwnd, &clientBottomRight);
 
-    int panelWidth = 400;
+    int panelWidth = ScalePx(400, posHwnd);
     int panelHeight = clientBottomRight.y - headerRect.bottom;
     int overlayX = clientBottomRight.x - panelWidth;
     int overlayY = headerRect.bottom;
@@ -864,9 +864,6 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
             SetWindowLongPtr(g_wallet_overlay_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(walletOwnerWin));
         }
 
-        // Compositor stays warm (we skip WasHidden(true) on hide), so just
-        // notify of any size change and the next paint is immediate.
-        wallet_browser->GetHost()->WasResized();
     }
 
     // Position and show with SWP_NOACTIVATE first — no focus dance yet
@@ -877,6 +874,14 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Re-query DPI AFTER SetWindowPos so GetDpiForWindow returns the new monitor's DPI.
+    // Must come after positioning or CEF gets the old monitor's scale factor.
+    if (wallet_browser) {
+        wallet_browser->GetHost()->NotifyScreenInfoChanged();
+        wallet_browser->GetHost()->WasResized();
+        wallet_browser->GetHost()->Invalidate(PET_VIEW);
+    }
 
     // Single focus transfer — SetForegroundWindow handles both activation and focus
     SetForegroundWindow(g_wallet_overlay_hwnd);
@@ -981,7 +986,7 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     g_backup_overlay_hwnd = backup_hwnd;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->backup_overlay_hwnd = g_backup_overlay_hwnd;
 
     std::ofstream debugLog3("debug_output.log", std::ios::app);
@@ -1073,7 +1078,7 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
     g_brc100_auth_overlay_hwnd = auth_hwnd;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->brc100_auth_overlay_hwnd = g_brc100_auth_overlay_hwnd;
 
     std::ofstream debugLog3("debug_output.log", std::ios::app);
@@ -1178,7 +1183,8 @@ void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, con
             existing->GetMainFrame()->ExecuteJavaScript(js, "", 0);
         }
 
-        // Notify CEF of potential resize
+        // Re-query DPI + notify CEF of potential resize
+        existing->GetHost()->NotifyScreenInfoChanged();
         existing->GetHost()->WasResized();
 
         // Ensure mouse input enabled
@@ -1227,7 +1233,7 @@ void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, con
     g_notification_overlay_hwnd = notif_hwnd;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->notification_overlay_hwnd = g_notification_overlay_hwnd;
 
     // Windowless CEF browser with render handler
@@ -1291,13 +1297,13 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     int mainWidth = mainRect.right - mainRect.left;
 
     // Small dropdown dimensions
-    int menuWidth = 200;
-    int menuHeight = 120;
+    int menuWidth = ScalePx(200, g_hwnd);
+    int menuHeight = ScalePx(120, g_hwnd);
 
     // Position below toolbar (below both wallet and settings icons)
     // Tab bar = 40px, Toolbar = 54px, total header = 94px
-    int menuX = mainRect.left + mainWidth - menuWidth - 10; // 10px from right edge
-    int menuY = mainRect.top + 100; // Below header + small gap (94px header + 6px gap)
+    int menuX = mainRect.left + mainWidth - menuWidth - ScalePx(10, g_hwnd); // 10px from right edge
+    int menuY = mainRect.top + ScalePx(100, g_hwnd); // Below header + small gap (94px header + 6px gap)
 
     LOG_INFO_APP("📋 Creating menu at position: (" + std::to_string(menuX) + ", " + std::to_string(menuY) + ")");
 
@@ -1323,7 +1329,7 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     g_settings_menu_overlay_hwnd = menu_hwnd;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->settings_menu_overlay_hwnd = g_settings_menu_overlay_hwnd;
 
     LOG_INFO_APP("✅ Settings menu HWND created: " + std::to_string(reinterpret_cast<intptr_t>(menu_hwnd)));
@@ -1387,10 +1393,10 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     // Tab bar height: 40px, Toolbar height: 54px (total 94px)
     // Address bar left offset: 8px padding + (3 buttons * 34px) + (3 gaps * 6px) = 128px
     // Address bar right offset: similar for 3 right buttons = ~128px from right edge
-    int overlayX = mainRect.left + 160;
-    int overlayY = headerRect.top + 104;  // Flush below toolbar
-    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 350;  // Max height, will be dynamically adjusted by content later
+    int overlayX = mainRect.left + ScalePx(160, g_hwnd);
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);  // Flush below toolbar
+    int overlayWidth = (headerRect.right - headerRect.left) - ScalePx(152, g_hwnd) - ScalePx(152, g_hwnd);
+    int overlayHeight = ScalePx(350, g_hwnd);  // Max height, will be dynamically adjusted by content later
 
     LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(overlayWidth) + "x" +
@@ -1425,7 +1431,7 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     g_omnibox_overlay_hwnd = omnibox_hwnd;
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->omnibox_overlay_hwnd = g_omnibox_overlay_hwnd;
 
     LOG_INFO_APP("✅ Omnibox overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(omnibox_hwnd)) +
@@ -1472,7 +1478,7 @@ void ShowOmniboxOverlay(BrowserWindow* targetWin) {
     // Install global mouse hook for click-outside detection
     extern HHOOK g_omnibox_mouse_hook;
     extern LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (!g_omnibox_mouse_hook) {
         g_omnibox_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, OmniboxMouseHookProc, nullptr, 0);
         if (mainWin) mainWin->omnibox_mouse_hook = g_omnibox_mouse_hook;
@@ -1493,10 +1499,10 @@ void ShowOmniboxOverlay(BrowserWindow* targetWin) {
     RECT headerRect;
     GetWindowRect(posHeader, &headerRect);
 
-    int overlayX = mainRect.left + 160;
-    int overlayY = headerRect.top + 104;
-    int overlayWidth = (headerRect.right - headerRect.left) - 152 - 152;
-    int overlayHeight = 350;
+    int overlayX = mainRect.left + ScalePx(160, posHwnd);
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
+    int overlayWidth = (headerRect.right - headerRect.left) - ScalePx(152, posHwnd) - ScalePx(152, posHwnd);
+    int overlayHeight = ScalePx(350, posHwnd);
 
     // Force position and show with SWP_NOACTIVATE
     SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
@@ -1519,6 +1525,7 @@ void ShowOmniboxOverlay(BrowserWindow* targetWin) {
 
         // Clear any persistent focus states by executing blur on active element
         if (omnibox_browser->GetMainFrame()) {
+            omnibox_browser->GetHost()->NotifyScreenInfoChanged();
             omnibox_browser->GetHost()->WasResized();
             omnibox_browser->GetHost()->Invalidate(PET_VIEW);
 
@@ -1592,7 +1599,7 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->cookie_icon_right_offset = g_cookie_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
@@ -1611,14 +1618,14 @@ void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ico
     GetWindowRect(g_header_hwnd, &headerRect);
 
     // Calculate position - right side panel, right edge aligned under icon
-    int panelWidth = 450;
-    int panelHeight = 370;  // Fits all shield panel content without scrollbar
+    int panelWidth = ScalePx(450, g_hwnd);
+    int panelHeight = ScalePx(370, g_hwnd);  // Fits all shield panel content without scrollbar
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
     // Clamp to main window bottom
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, g_hwnd)) panelHeight = ScalePx(200, g_hwnd);
     }
 
     LOG_INFO_APP("🍪 Creating cookie panel overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -1723,7 +1730,7 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->cookie_icon_right_offset = g_cookie_icon_right_offset;
 
     LOG_INFO_APP("Showing cookie panel overlay with iconRightOffset=" + std::to_string(g_cookie_icon_right_offset));
@@ -1751,14 +1758,14 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     GetWindowRect(posHwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
-    int panelWidth = 450;
-    int panelHeight = 370;  // Fits all shield panel content without scrollbar
+    int panelWidth = ScalePx(450, posHwnd);
+    int panelHeight = ScalePx(370, posHwnd);  // Fits all shield panel content without scrollbar
     int overlayX = headerRect.right - g_cookie_icon_right_offset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
     // Clamp to main window bottom
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, posHwnd)) panelHeight = ScalePx(200, posHwnd);
     }
 
     // Force position and show with SWP_NOACTIVATE
@@ -1780,8 +1787,9 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
             LOG_INFO_APP("🍪 Retargeted cookie panel handler to window " + std::to_string(targetWindowId));
         }
 
-        // Trigger render update
+        // Re-query DPI + trigger render update
         if (cookie_browser->GetHost()) {
+            cookie_browser->GetHost()->NotifyScreenInfoChanged();
             cookie_browser->GetHost()->WasResized();
             cookie_browser->GetHost()->Invalidate(PET_VIEW);
             LOG_INFO_APP("🍪 Triggered render update for cookie panel browser");
@@ -1849,7 +1857,7 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->download_icon_right_offset = g_download_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
@@ -1871,14 +1879,14 @@ void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int i
     GetWindowRect(g_header_hwnd, &headerRect);
 
     // Calculate position - right side panel, right edge aligned under icon
-    int panelWidth = 380;
-    int panelHeight = 400;
+    int panelWidth = ScalePx(380, g_hwnd);
+    int panelHeight = ScalePx(400, g_hwnd);
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
     // Clamp to main window bottom
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, g_hwnd)) panelHeight = ScalePx(200, g_hwnd);
     }
 
     LOG_INFO_APP("Creating download panel overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -1983,7 +1991,7 @@ void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->download_icon_right_offset = g_download_icon_right_offset;
 
     LOG_INFO_APP("Showing download panel overlay with iconRightOffset=" + std::to_string(g_download_icon_right_offset));
@@ -2013,14 +2021,14 @@ void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     GetWindowRect(posHwnd, &mainRect);
 
     // Calculate position - right edge aligned under icon
-    int panelWidth = 380;
-    int panelHeight = 400;
+    int panelWidth = ScalePx(380, posHwnd);
+    int panelHeight = ScalePx(400, posHwnd);
     int overlayX = headerRect.right - g_download_icon_right_offset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
     // Clamp to main window bottom
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, posHwnd)) panelHeight = ScalePx(200, posHwnd);
     }
 
     // Force position and show with SWP_NOACTIVATE
@@ -2041,8 +2049,9 @@ void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
             handler->SetWindowId(targetWindowId);
         }
 
-        // Trigger render update
+        // Re-query DPI + trigger render update
         if (dl_browser->GetHost()) {
+            dl_browser->GetHost()->NotifyScreenInfoChanged();
             dl_browser->GetHost()->WasResized();
             dl_browser->GetHost()->Invalidate(PET_VIEW);
         }
@@ -2108,7 +2117,7 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->menu_icon_right_offset = g_menu_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
@@ -2130,14 +2139,14 @@ void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightO
     GetWindowRect(g_header_hwnd, &headerRect);
 
     // Calculate position — right-aligned under three-dot icon
-    int panelWidth = 280;
-    int panelHeight = 450;
+    int panelWidth = ScalePx(280, g_hwnd);
+    int panelHeight = ScalePx(450, g_hwnd);
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
     // Clamp to main window bottom
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, g_hwnd)) panelHeight = ScalePx(200, g_hwnd);
     }
 
     LOG_INFO_APP("Creating menu overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -2234,7 +2243,7 @@ void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->menu_icon_right_offset = g_menu_icon_right_offset;
 
     LOG_INFO_APP("Showing menu overlay");
@@ -2258,13 +2267,13 @@ void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
 
-    int panelWidth = 280;
-    int panelHeight = 450;
+    int panelWidth = ScalePx(280, posHwnd);
+    int panelHeight = ScalePx(450, posHwnd);
     int overlayX = headerRect.right - g_menu_icon_right_offset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
     if (overlayY + panelHeight > mainRect.bottom) {
         panelHeight = mainRect.bottom - overlayY;
-        if (panelHeight < 200) panelHeight = 200;
+        if (panelHeight < ScalePx(200, posHwnd)) panelHeight = ScalePx(200, posHwnd);
     }
 
     SetWindowPos(g_menu_overlay_hwnd, HWND_TOPMOST,
@@ -2284,6 +2293,7 @@ void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         }
 
         if (menu_browser->GetHost()) {
+            menu_browser->GetHost()->NotifyScreenInfoChanged();
             menu_browser->GetHost()->WasResized();
             menu_browser->GetHost()->Invalidate(PET_VIEW);
         }
@@ -2340,7 +2350,7 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
     }
 
     // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
 
     // Keep-alive check: if HWND already exists, conditionally show it
@@ -2362,14 +2372,14 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
     GetWindowRect(g_header_hwnd, &headerRect);
 
     // Calculate position - larger panel for profile management UI
-    int panelWidth = 380;   // Wide enough for profile list + create form
-    int panelHeight = 380;  // Reduced from 500 to match actual content height
+    int panelWidth = ScalePx(380, g_hwnd);   // Wide enough for profile list + create form
+    int panelHeight = ScalePx(380, g_hwnd);  // Reduced from 500 to match actual content height
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
     // Clamp to main window bottom with margin
-    if (overlayY + panelHeight > mainRect.bottom - 20) {
-        panelHeight = mainRect.bottom - overlayY - 20;
-        if (panelHeight < 280) panelHeight = 280;
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, g_hwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, g_hwnd);
+        if (panelHeight < ScalePx(280, g_hwnd)) panelHeight = ScalePx(280, g_hwnd);
     }
 
     LOG_INFO_APP("Creating profile panel overlay at position: (" + std::to_string(overlayX) + ", " +
@@ -2459,7 +2469,7 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         g_profile_icon_right_offset = iconRightOffset;
     }
 
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->profile_icon_right_offset = g_profile_icon_right_offset;
 
     LOG_INFO_APP("Showing profile panel overlay");
@@ -2477,14 +2487,14 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     RECT mainRect;
     GetWindowRect(posHwnd, &mainRect);
 
-    int panelWidth = 380;
-    int panelHeight = 380;
+    int panelWidth = ScalePx(380, posHwnd);
+    int panelHeight = ScalePx(380, posHwnd);
     int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
-    int overlayY = headerRect.top + 104;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
 
-    if (overlayY + panelHeight > mainRect.bottom - 20) {
-        panelHeight = mainRect.bottom - overlayY - 20;
-        if (panelHeight < 280) panelHeight = 280;
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, posHwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, posHwnd);
+        if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
     }
 
     // Retarget handler before showing
@@ -2495,8 +2505,6 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         if (handler) {
             handler->SetWindowId(targetWindowId);
         }
-        // Warm compositor — just notify size change, no WasHidden cycle
-        profile_browser->GetHost()->WasResized();
     }
 
     // Position with SWP_NOACTIVATE first, then single SetForegroundWindow
@@ -2506,6 +2514,13 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
 
     LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Re-query DPI AFTER SetWindowPos so GetDpiForWindow returns the correct monitor's DPI
+    if (profile_browser) {
+        profile_browser->GetHost()->NotifyScreenInfoChanged();
+        profile_browser->GetHost()->WasResized();
+        profile_browser->GetHost()->Invalidate(PET_VIEW);
+    }
 
     // Single focus transfer
     SetForegroundWindow(g_profile_panel_overlay_hwnd);

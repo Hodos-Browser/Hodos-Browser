@@ -1,4 +1,4 @@
-# Primary Window Close — Transfer to Surviving Window
+# Primary Window Close — Transfer to Surviving Window (IMPLEMENTED 2026-04-02)
 
 ## Problem
 

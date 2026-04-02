@@ -462,10 +462,60 @@ std::vector<HistoryEntry> HistoryManager::GetTopSites(int limit) {
         return entries;
     }
 
+    // Firefox-inspired frecency algorithm:
+    // - Score each visit by recency bucket (recent visits worth more)
+    // - Sum scores per URL, then deduplicate by domain (best URL per domain wins)
+    // - Filter out search result pages, internal URLs, and new tab pages
+    //
+    // Recency buckets (based on Firefox):
+    //   Last 4 days:  weight 1.0
+    //   Last 14 days: weight 0.7
+    //   Last 31 days: weight 0.5
+    //   Last 90 days: weight 0.3
+    //   Older:        weight 0.1
+    //
+    // We fetch more candidates than needed (5x limit) to allow for domain dedup.
+
+    int64_t now = GetCurrentChromiumTime();
+    // Time thresholds in Chromium microseconds
+    int64_t four_days    = now - (4LL  * 24 * 3600 * 1000000LL);
+    int64_t fourteen_days = now - (14LL * 24 * 3600 * 1000000LL);
+    int64_t thirty_one_days = now - (31LL * 24 * 3600 * 1000000LL);
+    int64_t ninety_days  = now - (90LL * 24 * 3600 * 1000000LL);
+
+    // Score each URL using visit-level recency buckets, filter noise URLs in SQL.
+    // We exclude:
+    //   - Search result pages (google.com/search, duckduckgo.com/?q=)
+    //   - Internal browser pages (127.0.0.1, localhost, hodos://, chrome://)
+    //   - New tab / blank pages
     const char* sql = R"(
-        SELECT id, url, title, visit_count, last_visit_time, 0, 0
-        FROM urls WHERE hidden = 0 AND visit_count > 0
-        ORDER BY visit_count DESC, last_visit_time DESC LIMIT ?
+        SELECT u.id, u.url, u.title, u.visit_count, u.last_visit_time,
+            SUM(
+                CASE
+                    WHEN v.visit_time >= ? THEN 1.0
+                    WHEN v.visit_time >= ? THEN 0.7
+                    WHEN v.visit_time >= ? THEN 0.5
+                    WHEN v.visit_time >= ? THEN 0.3
+                    ELSE 0.1
+                END
+            ) AS frecency_score
+        FROM urls u
+        INNER JOIN visits v ON v.url = u.id
+        WHERE u.hidden = 0
+          AND u.visit_count > 0
+          AND u.url NOT LIKE '%://127.0.0.1%'
+          AND u.url NOT LIKE '%://localhost%'
+          AND u.url NOT LIKE 'hodos://%'
+          AND u.url NOT LIKE 'chrome://%'
+          AND u.url NOT LIKE 'about:%'
+          AND u.url NOT LIKE '%://www.google.com/search?%'
+          AND u.url NOT LIKE '%://google.com/search?%'
+          AND u.url NOT LIKE '%://duckduckgo.com/?q=%'
+          AND u.url NOT LIKE '%://duckduckgo.com/%&q=%'
+          AND u.url NOT LIKE '%://www.bing.com/search?%'
+        GROUP BY u.id
+        ORDER BY frecency_score DESC
+        LIMIT ?
     )";
 
     sqlite3_stmt* stmt;
@@ -476,29 +526,94 @@ std::vector<HistoryEntry> HistoryManager::GetTopSites(int limit) {
         return entries;
     }
 
-    sqlite3_bind_int(stmt, 1, limit);
+    // Bind recency bucket thresholds
+    sqlite3_bind_int64(stmt, 1, four_days);
+    sqlite3_bind_int64(stmt, 2, fourteen_days);
+    sqlite3_bind_int64(stmt, 3, thirty_one_days);
+    sqlite3_bind_int64(stmt, 4, ninety_days);
+    // Fetch extra candidates for domain dedup (5x requested limit)
+    sqlite3_bind_int(stmt, 5, limit * 5);
+
+    // Collect all candidates with their scores
+    struct ScoredEntry {
+        HistoryEntry entry;
+        double score;
+    };
+    std::vector<ScoredEntry> candidates;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        HistoryEntry entry;
-        entry.id = sqlite3_column_int64(stmt, 0);
+        ScoredEntry scored;
+        scored.entry.id = sqlite3_column_int64(stmt, 0);
 
         const unsigned char* url_text = sqlite3_column_text(stmt, 1);
-        entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
+        scored.entry.url = url_text ? reinterpret_cast<const char*>(url_text) : "";
 
         const unsigned char* title_text = sqlite3_column_text(stmt, 2);
-        entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
+        scored.entry.title = title_text ? reinterpret_cast<const char*>(title_text) : "";
 
-        entry.visit_count = sqlite3_column_int(stmt, 3);
-        entry.last_visit_time = sqlite3_column_int64(stmt, 4);
-        entry.visit_time = entry.last_visit_time;
-        entry.transition = 0;
+        scored.entry.visit_count = sqlite3_column_int(stmt, 3);
+        scored.entry.last_visit_time = sqlite3_column_int64(stmt, 4);
+        scored.entry.visit_time = scored.entry.last_visit_time;
+        scored.entry.transition = 0;
+        scored.score = sqlite3_column_double(stmt, 5);
 
-        entries.push_back(entry);
+        candidates.push_back(scored);
     }
 
     sqlite3_finalize(stmt);
 
-    LOG_INFO_HISTORY("📊 GetTopSites returned " + std::to_string(entries.size()) + " entries");
+    // Domain-level deduplication: keep only the highest-scored URL per domain.
+    // Strips "www." prefix so www.github.com and github.com are treated as same domain.
+    std::unordered_map<std::string, size_t> domain_best; // domain -> index in candidates
+
+    for (size_t i = 0; i < candidates.size(); i++) {
+        std::string domain = extractDomain(candidates[i].entry.url);
+
+        // Strip "www." prefix for dedup
+        if (domain.size() > 4 && domain.substr(0, 4) == "www.") {
+            domain = domain.substr(4);
+        }
+
+        // Strip port number for dedup (e.g. "example.com:8080" -> "example.com")
+        size_t colon_pos = domain.find(':');
+        if (colon_pos != std::string::npos) {
+            domain = domain.substr(0, colon_pos);
+        }
+
+        if (domain.empty()) continue;
+
+        auto it = domain_best.find(domain);
+        if (it == domain_best.end()) {
+            domain_best[domain] = i;
+        } else {
+            // Keep the one with higher score
+            if (candidates[i].score > candidates[it->second].score) {
+                it->second = i;
+            }
+        }
+    }
+
+    // Collect deduplicated entries, sorted by score
+    std::vector<ScoredEntry> deduped;
+    deduped.reserve(domain_best.size());
+    for (const auto& pair : domain_best) {
+        deduped.push_back(candidates[pair.second]);
+    }
+
+    std::sort(deduped.begin(), deduped.end(),
+        [](const ScoredEntry& a, const ScoredEntry& b) {
+            return a.score > b.score;
+        });
+
+    // Take top N
+    int count = std::min(static_cast<int>(deduped.size()), limit);
+    for (int i = 0; i < count; i++) {
+        entries.push_back(deduped[i].entry);
+    }
+
+    LOG_INFO_HISTORY("📊 GetTopSites: " + std::to_string(candidates.size()) + " candidates -> "
+        + std::to_string(domain_best.size()) + " domains -> "
+        + std::to_string(entries.size()) + " tiles returned");
     return entries;
 }
 

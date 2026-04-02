@@ -145,6 +145,17 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     setFormData(prev => ({ ...prev, recipient: suggestion.value }));
     setShowDropdown(false);
     setSuggestions([]);
+
+    // Immediately resolve unverified paymails (skip 500ms debounce)
+    if (suggestion.unverified && PAYMAIL_REGEX.test(suggestion.value)) {
+      setIsResolvingPaymail(true);
+      setPaymailInfo(null);
+      fetch(`http://127.0.0.1:31301/wallet/paymail/resolve?address=${encodeURIComponent(suggestion.value)}`)
+        .then(r => r.json())
+        .then(data => setPaymailInfo(data))
+        .catch(() => setPaymailInfo({ valid: false }))
+        .finally(() => setIsResolvingPaymail(false));
+    }
   }, []);
 
   const handleRecipientKeyDown = useCallback((e: React.KeyboardEvent) => {

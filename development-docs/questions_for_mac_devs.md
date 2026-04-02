@@ -68,6 +68,50 @@ Items identified during MVP beta fix sprints (2026-04-01) that need macOS-specif
 
 ---
 
+## 5. Single-Instance Forwarding — macOS Delegate Methods (from B-6 Sprint 4)
+
+**Windows fix:** Named pipe (`\\.\pipe\hodos-browser-{profileId}`) for single-instance forwarding. Second instance connects to pipe, sends "new_window" command, first instance calls `CreateFullWindow()`.
+
+**macOS current state:** No single-instance handling at all. `cef_browser_shell_mac.mm` does NOT implement:
+- `applicationShouldHandleReopen:hasVisibleWindows:` — fires when user clicks dock icon while app is already running
+- `application:openURLs:` — fires when a URL scheme (`hodos://`) or file association opens while app is running
+
+Both are standard `NSApplicationDelegate` methods. Without them, macOS behaves the same as Windows — second instance hits profile lock and shows error alert.
+
+**What to implement:**
+- Add `applicationShouldHandleReopen:hasVisibleWindows:` to the app delegate in `cef_browser_shell_mac.mm`
+  - If `hasVisibleWindows == YES`: bring frontmost window to front (`[window makeKeyAndOrderFront:nil]`)
+  - If `hasVisibleWindows == NO`: call macOS equivalent of `CreateFullWindow()` to create a new window
+  - Return `NO` (we handled it ourselves)
+- Add `application:openURLs:` to handle URL forwarding
+  - Parse URL, create new tab in frontmost window via `TabManager::CreateTab(url, ...)`
+- Consider `application:openFile:` for file associations (`.html`, `.pdf`)
+
+**This is simpler than the Windows named pipe approach** — macOS provides the delegate callbacks natively. No IPC plumbing needed.
+
+**Risk notes:**
+- These delegate methods fire on the main thread — safe to call `WindowManager`/`TabManager` directly (unlike Windows where pipe listener runs on background thread and must `PostMessage`)
+- Verify the app delegate class in `cef_browser_shell_mac.mm` — it may be a `CefAppDelegate` or custom class. The delegate methods must be added to whatever class is set as `NSApp.delegate`.
+- `applicationShouldHandleReopen` does NOT fire on first launch — only on reactivation. No conflict with normal startup.
+
+---
+
+## 6. Fingerprint Protection — Verify Subtle Farbling on macOS (from B-5 Sprint 5)
+
+**Windows fix (reference):** Refactored fingerprint protection to Brave-style subtle farbling:
+- Removed `navigator.hardwareConcurrency`, `navigator.deviceMemory`, and WebGL vendor/renderer spoofing
+- Reduced canvas/WebGL farble rate from 10% to 3%
+- Added `navigator.plugins` (Chrome 136 realistic list), `navigator.webdriver = false`
+- Injected `window.chrome` stub on external pages
+- Restricted `window.hodosBrowser` to internal pages (external get BRC-100 + cefMessage only)
+
+**macOS:** All JS changes are in cross-platform files (`FingerprintScript.h`, `FingerprintProtection.h`, `simple_render_process_handler.cpp`) — they apply automatically. However:
+- **Verify:** `FingerprintProtection::GenerateSessionToken()` uses `SecRandomCopyBytes` on macOS (line ~55 in `FingerprintProtection.h`). Confirm this path works and produces good entropy.
+- **Verify:** `window.chrome` stub injection — macOS CEF may already provide a `window.chrome` object (Chromium-based). If so, the `typeof window.chrome === 'undefined'` guard prevents double-injection. Just verify it doesn't conflict.
+- **Test:** Visit `whatsOnChain.com` in macOS build — Cloudflare challenge should pass.
+
+---
+
 ## Reference Files
 
 | File | Purpose |

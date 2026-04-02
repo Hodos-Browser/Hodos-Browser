@@ -40,11 +40,36 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 **Reported:** 2026-03-24 (v0.1.0-beta.1)
 **Description:** After uninstall, `AppData\Local\Programs\HodosBrowser` still exists with leftover runtime files (debug.log, debug_output.log, startup_log.txt, test_debug.log). This causes reinstall to fail — user had to manually delete the folder before installing again.
 **Impact:** Blocks reinstall/upgrade flow. Beta testers will hit this.
-**Fix area:** `installer/hodos-browser.iss`:
-- Add `[UninstallDelete]` section to remove known runtime files (logs, CEF cache)
-- Add `[InstallDelete]` to clean stale files on upgrade/reinstall
-- Add optional "Delete browsing data?" checkbox in uninstaller (default unchecked, like Chrome)
-- Reduce log verbosity for release builds (currently writes debug-level logs)
+**Root cause:** Installer (`hodos-browser.iss`) has NO `[UninstallDelete]` section. Runtime-generated files are not tracked by Inno Setup's uninstall log.
+**Implementation plan:**
+- *Part 1 — Always delete (logs in install dir):*
+  - `[UninstallDelete]`: `{app}\debug.log`, `{app}\debug_output.log`, `{app}\startup_log.txt`, `{app}\test_debug.log`, `{app}\*.log`
+  - `[InstallDelete]`: Same log files (clean stale files on upgrade/reinstall)
+- *Part 2 — Check if browser is running:*
+  - Add `[Code]` section: `InitializeUninstall()` checks for `HodosBrowserShell.exe` via tasklist. Prompt user to close. Option to force-kill after confirmation.
+- *Part 3 — Optional "Delete browsing data?" checkbox:*
+  - Default: UNCHECKED (preserve data, like Chrome)
+  - If checked: delete `{userappdata}\HodosBrowser\Default\` (cache, history, bookmarks, settings, cookies)
+  - Delete per-profile dirs too: `{userappdata}\HodosBrowser\Profile_*`
+  - Delete `{userappdata}\HodosBrowser\profiles.json`
+  - **NEVER auto-delete wallet data** (`{userappdata}\HodosBrowser\wallet\wallet.db`). If "delete data" is checked, show EXTRA warning: "Your wallet may contain funds. This cannot be undone."
+  - Clean WinSparkle registry: `HKCU\Software\Marston Enterprises\Hodos Browser\`
+- *Part 4 — Reduce log verbosity:*
+  - Set `log_severity = LOGSEVERITY_WARNING` in release builds (`cef_browser_shell.cpp:2754`)
+  - Consider removing or conditionalizing `startup_log.txt` writes in `simple_app.cpp`
+**Complete runtime file inventory:**
+  - Install dir: `debug_output.log`, `debug.log`, `startup_log.txt`, `test_debug.log`
+  - `%APPDATA%\HodosBrowser\profiles.json`
+  - `%APPDATA%\HodosBrowser\Default\`: `settings.json`, `bookmarks.db`, `cookie_blocks.db`, `HodosHistory`, `adblock_settings.json`, `fingerprint_settings.json`, `session.json`, `profile.lock`, `cache/` (CEF), `Default/` (CEF cookies/localStorage)
+  - `%APPDATA%\HodosBrowser\wallet\wallet.db` — **CRITICAL: private keys, NEVER auto-delete**
+  - Same structure repeated for each `Profile_N/`
+**Key risks:**
+- **Accidentally deleting wallet** (CRITICAL): wallet path must NEVER appear in `[UninstallDelete]`. Separate explicit prompt with "funds may be lost" warning.
+- **Uninstall while browser running**: Locked files prevent deletion, leaves partial state. Mitigated by running-process check in `[Code]`.
+- **Multi-profile cleanup**: Must enumerate all `Profile_N` directories, not just Default.
+**Key file:** `installer/hodos-browser.iss`
+**macOS notes:** macOS uses drag-to-trash uninstall. `~/Library/Application Support/HodosBrowser/` persists (standard macOS behavior). No equivalent issue.
+**Sprint:** 4
 
 ### B-4: Header scrollbar when dragging between monitors (P2 → P1)
 **Reported:** 2026-03-31 | **Promoted:** 2026-04-01 (grouped with B-1 — same WndProc code)
@@ -59,10 +84,31 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 **Reported:** 2026-04-01
 **Description:** Launching a second browser instance shows "Profile is already in use" error dialog and exits. Users expect a new window to open (like Chrome/Firefox).
 **Impact:** Confusing UX — users can't open new windows by double-clicking the app.
-**Root cause:** `AcquireProfileLock()` in `cef_browser_shell.cpp:2727` uses OS-level exclusive file lock. This exists because CEF's cache directory can't be shared between processes (SQLite corruption). Multi-window within the same process already works (tab tear-off).
-**Fix approach:** Single-instance forwarding via named pipe. First instance creates `\\.\pipe\hodos-browser-{profileId}` listener. Second instance connects, sends "new_window" command, exits. First instance calls `WindowManager::CreateFullWindow()`.
-**Key files:** `cef_browser_shell.cpp`, `ProfileLock.cpp/.h`, `WindowManager.cpp`
-**macOS notes:** Needs `applicationShouldHandleReopen:hasVisibleWindows:` and `application:openURLs:` delegate methods — currently not implemented.
+**Root cause:** `AcquireProfileLock()` in `cef_browser_shell.cpp:2778` uses OS-level exclusive file lock (`FILE_FLAG_DELETE_ON_CLOSE` on Windows, `flock()` on macOS). Profile lock prevents SQLite corruption from concurrent CEF cache access. Multi-window within same process already works via `WindowManager::CreateFullWindow()`.
+**Fix approach:** Named pipe single-instance forwarding. Keep ProfileLock for data integrity (separate concern).
+**Implementation plan:**
+- *Step 1 — New `SingleInstance.h/.cpp`:*
+  - `TryAcquireInstance(profileId)` → tries `CreateNamedPipe("\\.\pipe\hodos-browser-{profileId}", FILE_FLAG_FIRST_PIPE_INSTANCE)`. Returns true if first instance (becomes server), false if another instance owns pipe.
+  - `SendToRunningInstance(profileId, json)` → connects as client, sends `{"action":"new_window","url":"..."}`, waits 5s for ACK, exits.
+  - `StartListenerThread()` → background thread: `ConnectNamedPipe()` → `ReadFile()` → parse JSON → `PostMessage(g_hwnd, WM_APP+1, ...)` → loop.
+- *Step 2 — Integrate in `cef_browser_shell.cpp`:*
+  - AFTER `CefExecuteProcess()` (line 2732) — CEF subprocesses return here, only browser process continues.
+  - BEFORE `AcquireProfileLock()` (line 2778) — try pipe first.
+  - Flow: `TryAcquireInstance()` → if false → `SendToRunningInstance()` → exit cleanly (no error dialog). If true → continue to `AcquireProfileLock()` → start pipe listener thread.
+- *Step 3 — Handle `WM_APP+1` in `ShellWindowProc`:*
+  - Call `WindowManager::CreateFullWindow()` (same as tab tear-off path).
+  - If URL provided, `TabManager::CreateTab(url, ...)` in the new window.
+  - `SetForegroundWindow()` + `FlashWindow()` fallback to bring window to front.
+- *Step 4 — Keep ProfileLock unchanged* — pipe handles instance forwarding, lock handles data integrity. Two separate concerns.
+**Key risks:**
+- **CEF subprocess confusion**: CEF spawns renderer/GPU/utility subprocesses that call `WinMain()`. Pipe check MUST go after `CefExecuteProcess()` which returns early for subprocesses (already at line 2732). This is the #1 gotcha.
+- **Pipe hijacking**: Mitigated by `FILE_FLAG_FIRST_PIPE_INSTANCE` (atomic, only first creator succeeds).
+- **Race condition (two instances simultaneously)**: `FILE_FLAG_FIRST_PIPE_INSTANCE` is atomic — only one wins. Loser becomes client.
+- **Stale pipe after crash**: Windows auto-cleans named pipes on process exit. No stale pipe risk.
+- **`SetForegroundWindow` restrictions**: Windows limits which processes can steal focus. Client calls `AllowSetForegroundWindow(serverPid)` before sending pipe message. Fallback: `FlashWindow()` to flash taskbar.
+**Sprint 3 dependency:** Sprint 3 (B-1 frameless) changes window style in `CreateFullWindow()`. B-6's new windows inherit the frameless style automatically — no special handling needed. Sprint 3 must be done BEFORE Sprint 4.
+**Key files:** `cef_browser_shell.cpp` (startup flow, WndProc), NEW `SingleInstance.h/.cpp`, `ProfileLock.cpp/.h` (unchanged), `WindowManager.cpp` (unchanged — `CreateFullWindow()` already works)
+**macOS notes:** Named pipes don't exist on macOS. Use `applicationShouldHandleReopen:hasVisibleWindows:` NSApplicationDelegate method (fires when user clicks dock icon while app is running). Also implement `application:openURLs:` for URL scheme forwarding. Neither is currently implemented in `cef_browser_shell_mac.mm`. Simpler than Windows — just call macOS equivalent of `CreateFullWindow()` from delegate.
 **Sprint:** 4
 
 ### B-8: Right-click paste missing in address bar (P1)

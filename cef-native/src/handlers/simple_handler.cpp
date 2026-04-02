@@ -349,51 +349,51 @@ CefRefPtr<CefBrowser> SimpleHandler::cookie_panel_browser_ = nullptr;
 // Static getters — redirect to WindowManager window 0 for backwards compatibility.
 // Cross-browser IPC within a handler should use GetOwnerWindow() instead.
 CefRefPtr<CefBrowser> SimpleHandler::GetOverlayBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->overlay_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetHeaderBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->header_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetWebviewBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->webview_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetWalletPanelBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->wallet_panel_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->settings_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetWalletBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->wallet_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->backup_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->brc100_auth_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetNotificationBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->notification_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetSettingsMenuBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->settings_menu_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetOmniboxBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->omnibox_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetCookiePanelBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->cookie_panel_browser : nullptr;
 }
 
@@ -421,15 +421,15 @@ CefRefPtr<CefJSDialogHandler> SimpleHandler::GetJSDialogHandler() {
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->download_panel_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->profile_panel_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetMenuBrowser() {
-    auto* win = WindowManager::GetInstance().GetWindow(0);
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->menu_browser : nullptr;
 }
 
@@ -1939,6 +1939,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (cp_args->GetSize() > 0) {
             try { iconRightOffset = std::stoi(cp_args->GetString(0).ToString()); } catch(...) {}
         }
+#ifdef _WIN32
+        // React sends CSS pixels — scale to physical pixels for Win32 positioning
+        extern HWND g_hwnd;
+        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+#endif
         if (cp_args->GetSize() > 1) {
             shieldDomain = cp_args->GetString(1).ToString();
         }
@@ -2098,6 +2103,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (pp_args->GetSize() > 0) {
             try { iconRightOffset = std::stoi(pp_args->GetString(0).ToString()); } catch(...) {}
         }
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+#endif
 
 #ifdef _WIN32
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
@@ -2161,6 +2170,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (menu_args->GetSize() > 0) {
             try { iconRightOffset = std::stoi(menu_args->GetString(0).ToString()); } catch(...) {}
         }
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+#endif
 
 #ifdef _WIN32
         extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
@@ -4173,6 +4186,11 @@ bool SimpleHandler::OnProcessMessageReceived(
                 idx++;
             }
         }
+#ifdef _WIN32
+        // React sends CSS pixels — scale to physical pixels for Win32 positioning
+        extern HWND g_hwnd;
+        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+#endif
         LOG_DEBUG_BROWSER("Toggle wallet panel with iconRightOffset=" + std::to_string(iconRightOffset) +
             " peerpayCount=" + std::to_string(peerpayCount) + " peerpayAmount=" + std::to_string(peerpayAmount));
 
@@ -5549,6 +5567,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (dp_args->GetSize() > 0) {
             try { iconRightOffset = std::stoi(dp_args->GetString(0).ToString()); } catch(...) {}
         }
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+#endif
 
 #ifdef _WIN32
         extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);

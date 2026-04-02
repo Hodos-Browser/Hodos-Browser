@@ -637,6 +637,134 @@ void ShutdownApplication() {
     LOG_INFO("✅ ShutdownApplication complete — waiting for browsers to close...");
 }
 
+// Hide all visible overlay HWNDs (keep-alive pattern — don't destroy).
+// Used during primary window transfer to prevent visual glitches.
+void HideAllOverlays() {
+    // Use existing Hide functions for keep-alive overlays (they unhook mouse hooks too)
+    extern void HideOmniboxOverlay();
+    extern void HideCookiePanelOverlay();
+    extern void HideDownloadPanelOverlay();
+    extern void HideMenuOverlay();
+    extern void HideProfilePanelOverlay();
+
+    if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd))
+        HideOmniboxOverlay();
+    if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd))
+        HideCookiePanelOverlay();
+    if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd))
+        HideDownloadPanelOverlay();
+    if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd) && IsWindowVisible(g_menu_overlay_hwnd))
+        HideMenuOverlay();
+    if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd) && IsWindowVisible(g_profile_panel_overlay_hwnd))
+        HideProfilePanelOverlay();
+
+    // Non-keep-alive overlays: just hide (they'll be repositioned on next show)
+    if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
+        if (g_settings_mouse_hook) { UnhookWindowsHookEx(g_settings_mouse_hook); g_settings_mouse_hook = nullptr; }
+        ShowWindow(g_settings_overlay_hwnd, SW_HIDE);
+    }
+    if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd))
+        ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
+    if (g_backup_overlay_hwnd && IsWindow(g_backup_overlay_hwnd) && IsWindowVisible(g_backup_overlay_hwnd))
+        ShowWindow(g_backup_overlay_hwnd, SW_HIDE);
+    if (g_brc100_auth_overlay_hwnd && IsWindow(g_brc100_auth_overlay_hwnd) && IsWindowVisible(g_brc100_auth_overlay_hwnd))
+        ShowWindow(g_brc100_auth_overlay_hwnd, SW_HIDE);
+    if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd) && IsWindowVisible(g_notification_overlay_hwnd))
+        ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+    if (g_settings_menu_overlay_hwnd && IsWindow(g_settings_menu_overlay_hwnd) && IsWindowVisible(g_settings_menu_overlay_hwnd))
+        ShowWindow(g_settings_menu_overlay_hwnd, SW_HIDE);
+}
+
+// Transfer the "primary window" role from the current primary to a surviving window.
+// Called when the primary window's WM_CLOSE fires but other windows still exist.
+// After transfer, overlays will reposition relative to the new g_hwnd on next show.
+void TransferPrimaryWindow(int newPrimaryId) {
+    int oldPrimaryId = WindowManager::GetInstance().GetPrimaryWindowId();
+    BrowserWindow* oldWin = WindowManager::GetInstance().GetWindow(oldPrimaryId);
+    BrowserWindow* newWin = WindowManager::GetInstance().GetWindow(newPrimaryId);
+    if (!newWin) {
+        LOG_ERROR("TransferPrimaryWindow: window " + std::to_string(newPrimaryId) + " not found");
+        return;
+    }
+
+    LOG_INFO("Transferring primary window role from " + std::to_string(oldPrimaryId) +
+             " to " + std::to_string(newPrimaryId));
+
+    // 1. Hide all overlays — they'll reposition on next show via the new g_hwnd
+    HideAllOverlays();
+
+    // 2. Transfer overlay browser refs and HWNDs from old to new BrowserWindow.
+    //    This is critical: ShutdownApplication iterates BrowserWindow refs to close
+    //    browsers. Without transfer, overlay browsers become orphaned and the process
+    //    never exits (browser_handler_map_ never empties).
+    if (oldWin) {
+        // Transfer overlay HWNDs
+        newWin->settings_overlay_hwnd = oldWin->settings_overlay_hwnd;
+        newWin->wallet_overlay_hwnd = oldWin->wallet_overlay_hwnd;
+        newWin->backup_overlay_hwnd = oldWin->backup_overlay_hwnd;
+        newWin->brc100_auth_overlay_hwnd = oldWin->brc100_auth_overlay_hwnd;
+        newWin->notification_overlay_hwnd = oldWin->notification_overlay_hwnd;
+        newWin->settings_menu_overlay_hwnd = oldWin->settings_menu_overlay_hwnd;
+        newWin->omnibox_overlay_hwnd = oldWin->omnibox_overlay_hwnd;
+        newWin->cookie_panel_overlay_hwnd = oldWin->cookie_panel_overlay_hwnd;
+        newWin->download_panel_overlay_hwnd = oldWin->download_panel_overlay_hwnd;
+        newWin->profile_panel_overlay_hwnd = oldWin->profile_panel_overlay_hwnd;
+        newWin->menu_overlay_hwnd = oldWin->menu_overlay_hwnd;
+
+        // Null out old window's overlay HWNDs so they aren't double-freed
+        oldWin->settings_overlay_hwnd = nullptr;
+        oldWin->wallet_overlay_hwnd = nullptr;
+        oldWin->backup_overlay_hwnd = nullptr;
+        oldWin->brc100_auth_overlay_hwnd = nullptr;
+        oldWin->notification_overlay_hwnd = nullptr;
+        oldWin->settings_menu_overlay_hwnd = nullptr;
+        oldWin->omnibox_overlay_hwnd = nullptr;
+        oldWin->cookie_panel_overlay_hwnd = nullptr;
+        oldWin->download_panel_overlay_hwnd = nullptr;
+        oldWin->profile_panel_overlay_hwnd = nullptr;
+        oldWin->menu_overlay_hwnd = nullptr;
+
+        // Transfer overlay browser refs
+        const std::string overlayRoles[] = {
+            "wallet_panel", "overlay", "settings", "wallet", "backup",
+            "brc100auth", "notification", "settings_menu", "omnibox",
+            "cookiepanel", "downloadpanel", "profilepanel", "menu"
+        };
+        for (const auto& role : overlayRoles) {
+            CefRefPtr<CefBrowser> b = oldWin->GetBrowserForRole(role);
+            if (b) {
+                newWin->SetBrowserForRole(role, b);
+                oldWin->ClearBrowserForRole(role);
+
+                // Update overlay handler's window_id so IPC routes correctly
+                SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(b->GetIdentifier());
+                if (handler) {
+                    handler->SetWindowId(newPrimaryId);
+                }
+            }
+        }
+
+        // Transfer icon offsets
+        newWin->settings_icon_right_offset = oldWin->settings_icon_right_offset;
+        newWin->cookie_icon_right_offset = oldWin->cookie_icon_right_offset;
+        newWin->download_icon_right_offset = oldWin->download_icon_right_offset;
+        newWin->profile_icon_right_offset = oldWin->profile_icon_right_offset;
+        newWin->wallet_icon_right_offset = oldWin->wallet_icon_right_offset;
+        newWin->menu_icon_right_offset = oldWin->menu_icon_right_offset;
+    }
+
+    // 3. Reassign global HWNDs to the new primary window
+    g_hwnd = newWin->hwnd;
+    g_header_hwnd = newWin->header_hwnd;
+    g_webview_hwnd = nullptr;  // legacy, unused
+
+    // 4. Update WindowManager's primary window ID
+    WindowManager::GetInstance().SetPrimaryWindowId(newPrimaryId);
+
+    LOG_INFO("Primary window transferred to window " + std::to_string(newPrimaryId) +
+             " (hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(g_hwnd)) + ")");
+}
+
 LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_MOVE: {
@@ -651,7 +779,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             // Overlays only exist on the primary window (window 0).
             // Skip overlay repositioning for secondary windows.
             BrowserWindow* moveBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-            if (moveBw && moveBw->window_id != 0) {
+            if (moveBw && moveBw->window_id != WindowManager::GetInstance().GetPrimaryWindowId()) {
                 break;  // Secondary window — no overlays to reposition
             }
 
@@ -659,13 +787,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
                 RECT headerRect;
                 GetWindowRect(g_header_hwnd, &headerRect);
-                int panelWidth = 450;
-                int panelHeight = 450;
+                int panelWidth = ScalePx(450, hwnd);
+                int panelHeight = ScalePx(450, hwnd);
                 int overlayX = headerRect.right - g_settings_icon_right_offset - panelWidth;
-                int overlayY = headerRect.top + 104;
+                int overlayY = headerRect.top + ScalePx(104, hwnd);
                 if (overlayY + panelHeight > mainRect.bottom) {
                     panelHeight = mainRect.bottom - overlayY;
-                    if (panelHeight < 200) panelHeight = 200;
+                    if (panelHeight < ScalePx(200, hwnd)) panelHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_settings_overlay_hwnd, HWND_TOPMOST,
                     overlayX, overlayY, panelWidth, panelHeight,
@@ -676,13 +804,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_cookie_panel_overlay_hwnd && IsWindow(g_cookie_panel_overlay_hwnd) && IsWindowVisible(g_cookie_panel_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
-                int cpWidth = 450;
-                int cpHeight = 520;
+                int cpWidth = ScalePx(450, hwnd);
+                int cpHeight = ScalePx(370, hwnd);
                 int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
-                int cpY = hdrRect.top + 104;
+                int cpY = hdrRect.top + ScalePx(104, hwnd);
                 if (cpY + cpHeight > mainRect.bottom) {
                     cpHeight = mainRect.bottom - cpY;
-                    if (cpHeight < 200) cpHeight = 200;
+                    if (cpHeight < ScalePx(200, hwnd)) cpHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
                     cpX, cpY, cpWidth, cpHeight,
@@ -693,13 +821,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
-                int dpWidth = 380;
-                int dpHeight = 400;
+                int dpWidth = ScalePx(380, hwnd);
+                int dpHeight = ScalePx(400, hwnd);
                 int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
-                int dpY = hdrRect.top + 104;
+                int dpY = hdrRect.top + ScalePx(104, hwnd);
                 if (dpY + dpHeight > mainRect.bottom) {
                     dpHeight = mainRect.bottom - dpY;
-                    if (dpHeight < 200) dpHeight = 200;
+                    if (dpHeight < ScalePx(200, hwnd)) dpHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
                     dpX, dpY, dpWidth, dpHeight,
@@ -714,7 +842,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetClientRect(hwnd, &wpClientRect);
                 POINT wpClientBR = { wpClientRect.right, wpClientRect.bottom };
                 ClientToScreen(hwnd, &wpClientBR);
-                int wpWidth = 400;
+                int wpWidth = ScalePx(400, hwnd);
                 int wpHeight = wpClientBR.y - hdrRect.bottom;
                 int wpX = wpClientBR.x - wpWidth;
                 int wpY = hdrRect.bottom;
@@ -856,7 +984,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             // Overlays only exist on the primary window (window 0).
             // Skip overlay repositioning for secondary windows.
-            if (bw && bw->window_id != 0) {
+            if (bw && bw->window_id != WindowManager::GetInstance().GetPrimaryWindowId()) {
                 return 0;
             }
 
@@ -869,13 +997,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
                 RECT headerRect;
                 GetWindowRect(g_header_hwnd, &headerRect);
-                int panelWidth = 450;
-                int panelHeight = 450;
+                int panelWidth = ScalePx(450, hwnd);
+                int panelHeight = ScalePx(450, hwnd);
                 int overlayX = headerRect.right - g_settings_icon_right_offset - panelWidth;
-                int overlayY = headerRect.top + 104;
+                int overlayY = headerRect.top + ScalePx(104, hwnd);
                 if (overlayY + panelHeight > mainRect.bottom) {
                     panelHeight = mainRect.bottom - overlayY;
-                    if (panelHeight < 200) panelHeight = 200;
+                    if (panelHeight < ScalePx(200, hwnd)) panelHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_settings_overlay_hwnd, HWND_TOPMOST,
                     overlayX, overlayY, panelWidth, panelHeight,
@@ -893,13 +1021,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 RECT mainWinRect;
                 GetWindowRect(g_hwnd, &mainWinRect);
-                int cpWidth = 450;
-                int cpHeight = 520;
+                int cpWidth = ScalePx(450, hwnd);
+                int cpHeight = ScalePx(370, hwnd);
                 int cpX = hdrRect.right - g_cookie_icon_right_offset - cpWidth;
-                int cpY = hdrRect.top + 104;
+                int cpY = hdrRect.top + ScalePx(104, hwnd);
                 if (cpY + cpHeight > mainWinRect.bottom) {
                     cpHeight = mainWinRect.bottom - cpY;
-                    if (cpHeight < 200) cpHeight = 200;
+                    if (cpHeight < ScalePx(200, hwnd)) cpHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
                     cpX, cpY, cpWidth, cpHeight,
@@ -917,13 +1045,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 RECT dlMainRect;
                 GetWindowRect(g_hwnd, &dlMainRect);
-                int dpWidth = 380;
-                int dpHeight = 400;
+                int dpWidth = ScalePx(380, hwnd);
+                int dpHeight = ScalePx(400, hwnd);
                 int dpX = hdrRect.right - g_download_icon_right_offset - dpWidth;
-                int dpY = hdrRect.top + 104;
+                int dpY = hdrRect.top + ScalePx(104, hwnd);
                 if (dpY + dpHeight > dlMainRect.bottom) {
                     dpHeight = dlMainRect.bottom - dpY;
-                    if (dpHeight < 200) dpHeight = 200;
+                    if (dpHeight < ScalePx(200, hwnd)) dpHeight = ScalePx(200, hwnd);
                 }
                 SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
                     dpX, dpY, dpWidth, dpHeight,
@@ -943,7 +1071,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 GetClientRect(hwnd, &wpClientRect);
                 POINT wpClientBR = { wpClientRect.right, wpClientRect.bottom };
                 ClientToScreen(hwnd, &wpClientBR);
-                int wpWidth = 400;
+                int wpWidth = ScalePx(400, hwnd);
                 int wpHeight = wpClientBR.y - hdrRect.bottom;
                 int wpX = wpClientBR.x - wpWidth;
                 int wpY = hdrRect.bottom;
@@ -1026,7 +1154,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_ACTIVATEAPP: {
             // Only the primary window manages overlay dismissal on focus loss
             BrowserWindow* activeBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-            if (activeBw && activeBw->window_id != 0) break;
+            if (activeBw && activeBw->window_id != WindowManager::GetInstance().GetPrimaryWindowId()) break;
 
             // wParam is TRUE if app is being activated, FALSE if deactivated
             if (!wParam) {
@@ -1069,46 +1197,55 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             // Determine which BrowserWindow this HWND belongs to
             BrowserWindow* bw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
             int wid = bw ? bw->window_id : 0;
+            int primaryId = WindowManager::GetInstance().GetPrimaryWindowId();
+            int windowCount = WindowManager::GetInstance().GetWindowCount();
 
-            if (wid == 0 || WindowManager::GetInstance().GetWindowCount() <= 1) {
-                // Primary window or last window — full graceful shutdown
-                LOG_INFO("🛑 Last/primary window received WM_CLOSE - starting graceful shutdown...");
+            if (windowCount <= 1) {
+                // Last window — full graceful shutdown
+                LOG_INFO("🛑 Last window received WM_CLOSE - starting graceful shutdown...");
                 g_app_shutting_down = true;
-                // Hide the window immediately so it feels responsive
                 ShowWindow(hwnd, SW_HIDE);
                 ShutdownApplication();
-                // DO NOT PostQuitMessage here — CEF needs the message loop alive
-                // to process CloseBrowser callbacks. OnBeforeClose will call
-                // PostQuitMessage when all browsers have actually closed.
-            } else {
-                // Secondary window — close only this window's tabs and clean up
-                LOG_INFO("🛑 Window " + std::to_string(wid) + " received WM_CLOSE - closing window...");
+            } else if (wid == primaryId) {
+                // Primary window closing but other windows survive — transfer primary role
+                int nextWid = WindowManager::GetInstance().GetNextWindowId();
+                LOG_INFO("🛑 Primary window " + std::to_string(wid) + " closing - transferring to window " + std::to_string(nextWid));
+                TransferPrimaryWindow(nextWid);
 
-                // Close tabs belonging to this window
+                // Now close this window like a secondary
                 std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
                 for (Tab* tab : allTabs) {
                     if (tab && tab->window_id == wid) {
                         TabManager::GetInstance().CloseTab(tab->id);
                     }
                 }
-
-                // Close header browser
                 if (bw->header_browser) {
                     bw->header_browser->GetHost()->CloseBrowser(false);
                 }
-
-                // Destroy header HWND
                 if (bw->header_hwnd && IsWindow(bw->header_hwnd)) {
                     DestroyWindow(bw->header_hwnd);
                 }
-
-                // Remove from WindowManager
                 WindowManager::GetInstance().RemoveWindow(wid);
-
-                // Destroy the shell window
                 DestroyWindow(hwnd);
+                SimpleHandler::NotifyTabListChanged();
+            } else {
+                // Secondary window — close only this window's tabs and clean up
+                LOG_INFO("🛑 Window " + std::to_string(wid) + " received WM_CLOSE - closing window...");
 
-                // Notify remaining windows of tab list change
+                std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+                for (Tab* tab : allTabs) {
+                    if (tab && tab->window_id == wid) {
+                        TabManager::GetInstance().CloseTab(tab->id);
+                    }
+                }
+                if (bw->header_browser) {
+                    bw->header_browser->GetHost()->CloseBrowser(false);
+                }
+                if (bw->header_hwnd && IsWindow(bw->header_hwnd)) {
+                    DestroyWindow(bw->header_hwnd);
+                }
+                WindowManager::GetInstance().RemoveWindow(wid);
+                DestroyWindow(hwnd);
                 SimpleHandler::NotifyTabListChanged();
             }
             return 0;
@@ -1185,10 +1322,16 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
-            // Notify overlay browsers (primary window only)
-            if (dpiWinId == 0) {
+            // Notify overlay browsers (primary window only).
+            // NotifyScreenInfoChanged triggers GetScreenInfo re-query (new device_scale_factor).
+            // WasResized triggers GetViewRect re-query (new logical viewport at new DPI).
+            // The WM_SIZE handler above already repositions/resizes visible overlay HWNDs.
+            if (dpiWinId == WindowManager::GetInstance().GetPrimaryWindowId()) {
                 auto notifyOverlay = [](CefRefPtr<CefBrowser> b) {
-                    if (b) b->GetHost()->NotifyScreenInfoChanged();
+                    if (b) {
+                        b->GetHost()->NotifyScreenInfoChanged();
+                        b->GetHost()->WasResized();
+                    }
                 };
                 notifyOverlay(SimpleHandler::GetSettingsBrowser());
                 notifyOverlay(SimpleHandler::GetWalletPanelBrowser());
@@ -3109,7 +3252,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     g_webview_hwnd = webview_hwnd;
 
     // Mirror into BrowserWindow 0 for WindowManager-based lookups
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetWindow(0);
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) {
         mainWin->hwnd = hwnd;
         mainWin->header_hwnd = header_hwnd;
