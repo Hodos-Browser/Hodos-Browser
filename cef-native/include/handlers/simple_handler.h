@@ -75,6 +75,10 @@ public:
     static void NotifyTabListChanged();  // Notify ALL windows' frontends of tab list changes
     static void NotifyWindowTabListChanged(int window_id);  // Notify ONE window's frontend only
 
+    // Force-close any browsers still in the handler map. Safety net for leaked
+    // browsers (e.g. notification overlays from torn-off windows) during shutdown.
+    static void ForceCloseRemainingBrowsers();
+
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
 

@@ -37,6 +37,7 @@
 #include "include/core/FingerprintProtection.h"
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
+#include "include/core/SingleInstance.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
 #include "include/core/AutoUpdater.h"
@@ -431,7 +432,22 @@ void ClearBrowsingDataOnExit() {
 
 // Graceful shutdown function
 void ShutdownApplication() {
+    // Guard against double-entry. OnTabBrowserClosed posts WM_CLOSE when no tabs
+    // remain, which can re-trigger ShutdownApplication while the first call is
+    // still closing browsers. The second call would find nothing to close but
+    // would prevent CefRunMessageLoop from exiting cleanly.
+    static bool s_shutdown_started = false;
+    if (s_shutdown_started) {
+        LOG_WARNING("🛑 ShutdownApplication already in progress — skipping duplicate call");
+        return;
+    }
+    s_shutdown_started = true;
+
     LOG_INFO("🛑 Starting graceful application shutdown...");
+
+    // B-6: Signal the single-instance pipe listener to respond "shutting_down"
+    // to any new clients that connect during the shutdown window.
+    SingleInstance::SetShuttingDown();
 
     // Step 0: Clean up auto-updater (cancels any pending operations)
     AutoUpdater::GetInstance().Cleanup();
@@ -629,6 +645,15 @@ void ShutdownApplication() {
         DestroyWindow(g_menu_overlay_hwnd);
         g_menu_overlay_hwnd = nullptr;
     }
+
+    // B-6: Stop the single-instance pipe listener thread now, inside ShutdownApplication.
+    SingleInstance::StopListenerThread();
+
+    // Safety net: force-close any browsers that ShutdownApplication didn't reach.
+    // This catches leaked notification overlays from torn-off/B-6 windows whose
+    // browser refs aren't tracked in the primary BrowserWindow's overlay slots.
+    // Without this, browser_handler_map_ never empties and CefQuitMessageLoop never fires.
+    SimpleHandler::ForceCloseRemainingBrowsers();
 
     // Step 3: DO NOT destroy main shell window here.
     // The message loop must keep running so CEF can process CloseBrowser callbacks.
@@ -1247,6 +1272,35 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 WindowManager::GetInstance().RemoveWindow(wid);
                 DestroyWindow(hwnd);
                 SimpleHandler::NotifyTabListChanged();
+            }
+            return 0;
+        }
+
+        case WM_SINGLE_INSTANCE_NEW_WINDOW: {
+            // B-6: Second instance requested a new window via named pipe.
+            // lParam = heap-allocated std::string* (URL or empty). Must delete.
+            std::string* urlPtr = reinterpret_cast<std::string*>(lParam);
+            std::string url = urlPtr ? *urlPtr : "";
+            delete urlPtr;
+
+            LOG_INFO("SingleInstance: Creating new window" +
+                     (url.empty() ? "" : " with URL: " + url));
+
+            BrowserWindow* primary = WindowManager::GetInstance().GetPrimaryWindow();
+            BrowserWindow* newWin = WindowManager::GetInstance().CreateFullWindow(true);
+
+            if (newWin && !url.empty()) {
+                // Navigate the initial tab to the requested URL.
+                Tab* activeTab = TabManager::GetInstance().GetActiveTabForWindow(newWin->window_id);
+                if (activeTab && activeTab->browser) {
+                    activeTab->browser->GetMainFrame()->LoadURL(url);
+                }
+            }
+
+            // Bring the NEW window to the foreground.
+            if (newWin && newWin->hwnd && IsWindow(newWin->hwnd)) {
+                SetForegroundWindow(newWin->hwnd);
+                BringWindowToTop(newWin->hwnd);
             }
             return 0;
         }
@@ -3009,6 +3063,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Get profile-specific data directory
     std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
     LOG_INFO("Profile data path: " + profile_cache);
+
+    // B-6: Single-instance check — forward to running instance instead of error dialog.
+    // Must be AFTER CefExecuteProcess (line 2968) so CEF subprocesses aren't affected,
+    // and AFTER profile ID parsing so we use the correct pipe name.
+    if (!SingleInstance::TryAcquireInstance(profileId)) {
+        // Another instance owns this profile's pipe. Forward command to it.
+        // Parse URL from command line if present (e.g., launched from file association).
+        std::string launchUrl;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            for (int i = 1; i < argc; i++) {
+                std::wstring arg(argv[i]);
+                // Skip flags (--profile=, etc.)
+                if (arg.size() > 0 && arg[0] != L'-') {
+                    // Convert wide string URL to narrow
+                    int len = WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                    if (len > 0) {
+                        std::string narrow(len - 1, '\0');
+                        WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, &narrow[0], len, nullptr, nullptr);
+                        launchUrl = narrow;
+                    }
+                    break;
+                }
+            }
+            LocalFree(argv);
+        }
+
+        if (SingleInstance::SendToRunningInstance(profileId, launchUrl)) {
+            // Running instance acknowledged — exit cleanly (no error dialog).
+            LOG_INFO("SingleInstance: Forwarded to running instance, exiting");
+            return 0;
+        }
+        // SendToRunningInstance returned false — old instance exited during shutdown,
+        // and we became the new first instance. Continue normal startup.
+        LOG_INFO("SingleInstance: Became new first instance after shutdown handoff");
+    }
+
+    // B-6: Start the pipe listener thread EARLY so second instances can connect
+    // immediately. The listener will respond "not_ready" until g_hwnd is set.
+    SingleInstance::StartListenerThread(profileId);
 
     // Acquire exclusive lock on profile directory (prevents SQLite corruption)
     if (!AcquireProfileLock(profile_cache)) {

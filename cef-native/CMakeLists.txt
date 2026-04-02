@@ -140,6 +140,7 @@ set(SOURCES
     src/core/CookieBlockManager.cpp
     src/core/BookmarkManager.cpp
     src/core/ProfileLock.cpp
+    src/core/SingleInstance.cpp
     src/core/SyncHttpClient.cpp
 )
 
@@ -231,6 +232,8 @@ elseif(WIN32)
         src/core/SettingsManager.cpp
         include/core/ProfileLock.h
         src/core/ProfileLock.cpp
+        include/core/SingleInstance.h
+        src/core/SingleInstance.cpp
         include/core/ProfileImporter.h
         src/core/ProfileImporter.cpp
         include/core/LayoutHelpers.h

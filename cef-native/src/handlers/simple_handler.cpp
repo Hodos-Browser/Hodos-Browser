@@ -498,6 +498,46 @@ void SimpleHandler::NotifyWindowTabListChanged(int window_id) {
     SendTabListToWindow(bw);
 }
 
+void SimpleHandler::ForceCloseRemainingBrowsers() {
+    if (browser_handler_map_.empty()) return;
+
+    LOG_INFO_BROWSER("🧹 Force-closing " + std::to_string(browser_handler_map_.size()) +
+                     " leaked browser(s) during shutdown");
+
+    // Collect browser IDs first (CloseBrowser triggers OnBeforeClose which modifies the map).
+    std::vector<std::pair<int, SimpleHandler*>> entries(
+        browser_handler_map_.begin(), browser_handler_map_.end());
+
+    for (auto& [browserId, handler] : entries) {
+        if (handler) {
+            // Find the CefBrowser ref from the BrowserWindow overlay refs or the handler itself.
+            // The handler's role tells us what it is.
+            BrowserWindow* bw = handler->GetOwnerWindow();
+            if (bw) {
+                CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(handler->role_);
+                if (b) {
+                    b->GetHost()->CloseBrowser(true);
+                    continue;
+                }
+            }
+        }
+        // Fallback: if we can't find the browser ref through the handler,
+        // just erase it from the map so shutdown can proceed.
+        browser_handler_map_.erase(browserId);
+    }
+
+    // If map is still not empty after force-close attempts, clear it and quit.
+    if (!browser_handler_map_.empty()) {
+        LOG_WARNING_BROWSER("🧹 " + std::to_string(browser_handler_map_.size()) +
+                            " browser(s) could not be force-closed — clearing map for shutdown");
+        browser_handler_map_.clear();
+        extern bool g_app_shutting_down;
+        if (g_app_shutting_down) {
+            CefQuitMessageLoop();
+        }
+    }
+}
+
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) {
     CEF_REQUIRE_UI_THREAD();
 
