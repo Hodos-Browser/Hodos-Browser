@@ -31,7 +31,7 @@
       }
     </style>
   </head>
-  <body style="background:#1a1a1a">
+  <body style="background:#1a1a1a;margin:0;overflow:hidden">
     <div id="splash">
       <img src="/Hodos_Gold_Icon.svg" alt="" />
     </div>
@@ -40,6 +40,13 @@
       if (window.location.pathname !== '/' && window.location.pathname !== '') {
         document.getElementById('splash').remove();
         document.body.style.background = 'transparent';
+      }
+      // Block Ctrl+mousewheel zoom on the header browser (browser chrome should
+      // never zoom — only web content tabs zoom, like Chrome/Brave).
+      if (window.location.pathname === '/' || window.location.pathname === '') {
+        document.addEventListener('wheel', function(e) {
+          if (e.ctrlKey) { e.preventDefault(); }
+        }, { passive: false });
       }
     </script>
     <div id="root"></div>

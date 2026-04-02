@@ -44,6 +44,9 @@
 #include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 #include <windows.h>
 #include <imm.h>      // For IME message handling (ISC_SHOWUICOMPOSITIONWINDOW)
 #pragma comment(lib, "imm32.lib")
@@ -56,6 +59,7 @@
 #include <chrono>
 #include <iomanip>
 #include <thread>
+#include <atomic>
 #include <sstream>
 
 HWND g_hwnd = nullptr;
@@ -118,11 +122,13 @@ bool g_window_shown = false;
 
 // Wallet server process management
 PROCESS_INFORMATION g_walletServerProcess = {};
-bool g_walletServerRunning = false;
+std::atomic<bool> g_walletServerRunning{false};
 HANDLE g_walletJobObject = nullptr;  // Job object: auto-kills child when parent exits
+static bool g_walletProcessLaunched = false;  // Set by LaunchWalletProcess
 
-// Forward declarations for wallet server management
-void StartWalletServer();
+// Forward declarations for wallet server management (two-phase startup)
+void LaunchWalletProcess();   // Phase 1: CreateProcess only (non-blocking)
+void WaitForWalletHealth();   // Phase 2: Poll /health with exponential backoff
 void StopWalletServer();
 
 // Forward declaration for wallet overlay keep-alive (defined in simple_app.cpp)
@@ -130,11 +136,13 @@ void HideWalletOverlay();
 
 // Adblock server process management
 PROCESS_INFORMATION g_adblockServerProcess = {};
-bool g_adblockServerRunning = false;
+std::atomic<bool> g_adblockServerRunning{false};
 HANDLE g_adblockJobObject = nullptr;
+static bool g_adblockProcessLaunched = false;  // Set by LaunchAdblockProcess
 
-// Forward declarations for adblock server management
-void StartAdblockServer();
+// Forward declarations for adblock server management (two-phase startup)
+void LaunchAdblockProcess();   // Phase 1: CreateProcess only (non-blocking)
+void WaitForAdblockHealth();   // Phase 2: Poll /health with exponential backoff
 void StopAdblockServer();
 
 // Convenience macros for easier logging
@@ -790,8 +798,27 @@ void TransferPrimaryWindow(int newPrimaryId) {
              " (hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(g_hwnd)) + ")");
 }
 
+// Flag: once the header browser has loaded React, stop painting the startup logo
+bool g_header_browser_loaded = false;
+
 LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_PAINT: {
+            // During startup, just paint the dark background. The window class brush
+            // handles this via DefWindowProc, but we handle it explicitly here to
+            // ensure a clean dark frame appears before CEF loads React content.
+            // The header child window (WS_CHILD) covers the top once React renders.
+            if (!g_header_browser_loaded) {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                HBRUSH bgBrush = CreateSolidBrush(RGB(26, 26, 26));
+                FillRect(hdc, &ps.rcPaint, bgBrush);
+                DeleteObject(bgBrush);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            break;
+        }
         case WM_MOVE: {
             // Handle window movement - move overlay windows with main window
             RECT mainRect;
@@ -2628,15 +2655,15 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 }
 
 // Lightweight health check — returns true if GET /health responds with "ok".
-// Uses a short 2-second timeout so it fails fast when nothing is listening.
-static bool QuickHealthCheck() {
+// Uses a short timeout so it fails fast when nothing is listening.
+// timeoutMs defaults to 500ms for polling; use 200ms for pre-launch "already running?" checks.
+static bool QuickHealthCheck(DWORD timeoutMs = 500) {
     HINTERNET hSession = WinHttpOpen(L"HodosBrowser/HealthCheck",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
 
-    // Set connect + receive timeouts to 2 seconds
-    DWORD timeout = 2000;
+    DWORD timeout = timeoutMs;
     WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
@@ -2707,9 +2734,45 @@ static bool SendShutdownRequest(int port) {
     return success;
 }
 
-void StartWalletServer() {
-    // First check if wallet server is already running (dev workflow: cargo run separately)
-    if (QuickHealthCheck()) {
+// Phase 1: Launch wallet process (non-blocking). Called early in startup so the
+// Rust server warms up during CefInitialize (which blocks for 2-5 seconds).
+// Fast TCP port probe — returns true if something is listening on localhost:port.
+// Uses raw Winsock with a tight timeout instead of WinHTTP (which ignores short timeouts).
+static bool IsPortListening(int port) {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) { WSACleanup(); return false; }
+
+    // Set non-blocking
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    connect(sock, (sockaddr*)&addr, sizeof(addr));
+
+    // Wait up to 100ms for connection
+    fd_set writeSet;
+    FD_ZERO(&writeSet);
+    FD_SET(sock, &writeSet);
+    timeval tv = {0, 100000};  // 100ms
+    int result = select(0, nullptr, &writeSet, nullptr, &tv);
+
+    closesocket(sock);
+    WSACleanup();
+    return (result > 0);
+}
+
+void LaunchWalletProcess() {
+    // Fast check if wallet server is already running (dev workflow: cargo run separately)
+    // Uses raw TCP probe (~1ms if listening, ~100ms max if not) instead of WinHTTP
+    // which ignores short timeouts on localhost.
+    if (IsPortListening(31301)) {
         LOG_INFO("Wallet server already running (dev mode) - skipping launch");
         g_walletServerRunning = true;
         return;
@@ -2776,17 +2839,33 @@ void StartWalletServer() {
         LOG_INFO("Wallet server assigned to job object (auto-kill on browser exit)");
     }
 
-    // Poll for health — max 10 attempts, 500ms apart (5 seconds total)
-    for (int i = 0; i < 10; i++) {
-        Sleep(500);
+    g_walletProcessLaunched = true;
+}
+
+// Phase 2: Poll for wallet health with exponential backoff.
+// Called in a background thread after CefInitialize. By this point the Rust
+// process has had a 2-5 second head start, so it's often healthy on first check.
+void WaitForWalletHealth() {
+    // If already running (dev mode detected in LaunchWalletProcess), skip polling
+    if (g_walletServerRunning) return;
+
+    // If process wasn't launched, nothing to wait for
+    if (!g_walletProcessLaunched) return;
+
+    // Exponential backoff: 50, 100, 200, 400, 800, 1600ms (total 3.15s vs old 5s)
+    int delays[] = {50, 100, 200, 400, 800, 1600};
+    int elapsed = 0;
+    for (int i = 0; i < 6; i++) {
+        Sleep(delays[i]);
+        elapsed += delays[i];
         if (QuickHealthCheck()) {
-            LOG_INFO("Wallet server is healthy after " + std::to_string((i + 1) * 500) + "ms");
+            LOG_INFO("Wallet server is healthy after " + std::to_string(elapsed) + "ms");
             g_walletServerRunning = true;
             return;
         }
     }
 
-    LOG_WARNING("Wallet server did not become healthy within 5 seconds - continuing anyway");
+    LOG_WARNING("Wallet server did not become healthy within ~3s - continuing anyway");
     g_walletServerRunning = true;  // Process was launched, just slow to start
 }
 
@@ -2837,13 +2916,14 @@ void StopWalletServer() {
 
 // Health check for adblock engine — checks GET /health on port 31302
 // Returns true if response contains "ready" (engine loaded and ready to check)
-static bool QuickAdblockHealthCheck() {
+// timeoutMs defaults to 500ms for polling; use 200ms for pre-launch checks.
+static bool QuickAdblockHealthCheck(DWORD timeoutMs = 500) {
     HINTERNET hSession = WinHttpOpen(L"HodosBrowser/AdblockCheck",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
 
-    DWORD timeout = 2000;
+    DWORD timeout = timeoutMs;
     WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
@@ -2879,10 +2959,11 @@ static bool QuickAdblockHealthCheck() {
     return ready;
 }
 
-// Start the adblock engine as a subprocess (non-critical — browser works without it)
-void StartAdblockServer() {
-    // Check if already running (dev mode: cargo run separately)
-    if (QuickAdblockHealthCheck()) {
+// Phase 1: Launch adblock engine process (non-blocking). Called early in startup
+// so the Rust engine warms up during CefInitialize.
+void LaunchAdblockProcess() {
+    // Fast check if adblock engine is already running (dev mode)
+    if (IsPortListening(31302)) {
         LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
         g_adblockServerRunning = true;
         return;
@@ -2949,12 +3030,26 @@ void StartAdblockServer() {
         LOG_INFO("Adblock engine assigned to job object (auto-kill on browser exit)");
     }
 
-    // Poll for health — max 6 attempts, 500ms apart (3 seconds total)
+    g_adblockProcessLaunched = true;
+}
+
+// Phase 2: Poll for adblock health with exponential backoff.
+void WaitForAdblockHealth() {
+    // If already running (dev mode detected in LaunchAdblockProcess), skip polling
+    if (g_adblockServerRunning) return;
+
+    // If process wasn't launched, nothing to wait for
+    if (!g_adblockProcessLaunched) return;
+
+    // Exponential backoff: 50, 100, 200, 400, 800ms (total 1.55s vs old 3s)
     // Shorter than wallet since adblock is non-critical
-    for (int i = 0; i < 6; i++) {
-        Sleep(500);
+    int delays[] = {50, 100, 200, 400, 800};
+    int elapsed = 0;
+    for (int i = 0; i < 5; i++) {
+        Sleep(delays[i]);
+        elapsed += delays[i];
         if (QuickAdblockHealthCheck()) {
-            LOG_INFO("Adblock engine ready after " + std::to_string((i + 1) * 500) + "ms");
+            LOG_INFO("Adblock engine ready after " + std::to_string(elapsed) + "ms");
             g_adblockServerRunning = true;
             return;
         }
@@ -3005,6 +3100,14 @@ void StopAdblockServer() {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    // ── Startup performance timer ──
+    auto t0 = std::chrono::steady_clock::now();
+    auto elapsed = [&t0]() -> std::string {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        return "[T+" + std::to_string(ms) + "ms] ";
+    };
+
     g_hInstance = hInstance;
 
     // Enable Per-Monitor DPI V2 awareness. Must be called before any window creation.
@@ -3024,6 +3127,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Initialize centralized logger FIRST
     Logger::Initialize(ProcessType::MAIN, "debug_output.log");
+    LOG_INFO(elapsed() + "STARTUP: Logger initialized");
 
     LOG_INFO("=== NEW SESSION STARTED ===");
     LOG_INFO("Shell starting...");
@@ -3058,7 +3162,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Parse --profile argument from command line
     std::string profileId = ProfileManager::ParseProfileArgument(GetCommandLineW());
     ProfileManager::GetInstance().SetCurrentProfileId(profileId);
-    LOG_INFO("Using profile: " + profileId);
+    LOG_INFO(elapsed() + "STARTUP: Profile parsed: " + profileId);
 
     // Get profile-specific data directory
     std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
@@ -3104,6 +3208,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // B-6: Start the pipe listener thread EARLY so second instances can connect
     // immediately. The listener will respond "not_ready" until g_hwnd is set.
     SingleInstance::StartListenerThread(profileId);
+    LOG_INFO(elapsed() + "STARTUP: SingleInstance check done");
 
     // Acquire exclusive lock on profile directory (prevents SQLite corruption)
     if (!AcquireProfileLock(profile_cache)) {
@@ -3114,18 +3219,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             MB_OK | MB_ICONERROR);
         return 1;
     }
-    LOG_INFO("Profile lock acquired");
+    LOG_INFO(elapsed() + "STARTUP: Profile lock acquired");
+
+    // Launch backend processes EARLY so they warm up during CefInitialize (2-5s).
+    // Phase 1 only: CreateProcess + job object, no health polling yet.
+    LOG_INFO(elapsed() + "STARTUP: Launching backend processes");
+    LaunchWalletProcess();
+    LaunchAdblockProcess();
 
     // Initialize SettingsManager with profile-specific path
     SettingsManager::GetInstance().Initialize(profile_cache);
-    LOG_INFO("Settings loaded for profile: " + profileId);
+    LOG_INFO(elapsed() + "STARTUP: Settings loaded for profile: " + profileId);
 
     // Initialize AdblockCache with profile path (loads per-site settings from JSON)
     AdblockCache::GetInstance().Initialize(profile_cache);
     // Sync global ad-block toggle from persisted settings
     AdblockCache::GetInstance().SetGlobalEnabled(
         SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
-    LOG_INFO("AdblockCache per-site settings loaded");
+    LOG_INFO(elapsed() + "STARTUP: AdblockCache settings loaded");
 
     // Sprint 12c: Initialize fingerprint protection session token
     FingerprintProtection::GetInstance().Initialize();
@@ -3198,6 +3309,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int shellHeight = GetHeaderHeightPxSystem();
     int webviewHeight = height - shellHeight;
 
+    LOG_INFO(elapsed() + "STARTUP: Registering window classes...");
     WNDCLASS wc = {}; wc.lpfnWndProc = ShellWindowProc; wc.hInstance = hInstance;
     wc.lpszClassName = L"HodosBrowserWndClass";
     wc.hbrBackground = CreateSolidBrush(RGB(26, 26, 26));
@@ -3321,9 +3433,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("Failed to register menu overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
+    LOG_INFO(elapsed() + "STARTUP: Creating main window...");
     HWND hwnd = CreateWindow(L"HodosBrowserWndClass", L"Hodos Browser",
         WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
+
+    // Set window icon explicitly (preserves 32-bit RGBA alpha for rounded corners)
+    HICON hIconLarge = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+    HICON hIconSmall = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    if (hIconLarge) SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconLarge);
+    if (hIconSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 
     // Enable DWM invisible resize borders outside the window bounds.
     // The {0,0,0,1} margin tells DWM this window has a frame, enabling
@@ -3357,23 +3476,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Store BrowserWindow* in HWND user data so ShellWindowProc can find it
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(mainWin));
 
-    // Don't show webview_hwnd - it's no longer used (tabs handle content now)
-    // ShowWindow(webview_hwnd, SW_SHOW); UpdateWindow(webview_hwnd);
+    // Show window immediately so user sees a dark-themed shell within ~100ms.
+    // The header_hwnd child and shell class brush are both RGB(26,26,26),
+    // so the window appears as a cohesive dark frame. CEF content replaces it
+    // once the header browser loads React.
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    g_window_shown = true;
 
-    LOG_DEBUG("Initializing CEF...");
+    // Pump pending window messages so the DWM compositor actually presents the
+    // window to screen BEFORE CefInitialize blocks the UI thread for 2-5 seconds.
+    // Without this, ShowWindow/UpdateWindow queue internally but the compositor
+    // never gets a chance to render until the blocking call returns.
+    {
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+    // Block until DWM has composited our frame to screen (~6-16ms).
+    // This guarantees the skeleton toolbar is visible before CefInitialize blocks.
+    DwmFlush();
+    LOG_INFO(elapsed() + "STARTUP: Window shown + DwmFlush complete");
+
+    LOG_INFO(elapsed() + "STARTUP: CefInitialize starting...");
     bool success = CefInitialize(main_args, settings, app, nullptr);
-    LOG_DEBUG("CefInitialize success: " + std::string(success ? "true" : "false"));
+    LOG_INFO(elapsed() + "STARTUP: CefInitialize done (success=" + std::string(success ? "true" : "false") + ")");
 
     if (!success) {
         ReleaseProfileLock();
         return 1;
     }
 
-    // P3 perf fix: parallelize DB initialization + backend server startup.
-    // Each SQLite DB opens its own file (no shared state). Backend daemons are
-    // independent processes. SettingsManager and AdblockCache are already initialized
-    // before CefInitialize (lines 2625-2637), so no ordering conflict.
-    LOG_INFO("Starting parallel initialization (3 DBs + 2 backend servers)...");
+    // Parallelize DB initialization. Backend processes were already launched
+    // before CefInitialize (LaunchWalletProcess/LaunchAdblockProcess), so they've
+    // had 2-5 seconds of head start. Health polling runs in detached threads.
+    LOG_INFO("Starting parallel initialization (3 DBs + 2 health checks)...");
     auto initStart = std::chrono::steady_clock::now();
 
     std::thread historyThread([&profile_cache]() {
@@ -3400,56 +3539,69 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         }
     });
 
+    // Phase 2: health polling in detached threads — don't block startup.
+    // The atomic g_walletServerRunning / g_adblockServerRunning flags are set
+    // when healthy. Callers handle the "not yet ready" case gracefully.
     std::thread walletThread([]() {
-        LOG_INFO("Starting wallet server...");
-        StartWalletServer();
+        LOG_INFO("Polling wallet server health...");
+        WaitForWalletHealth();
     });
 
     std::thread adblockThread([]() {
-        LOG_INFO("Starting adblock engine...");
-        StartAdblockServer();
+        LOG_INFO("Polling adblock engine health...");
+        WaitForAdblockHealth();
     });
 
+    // Join ONLY the fast DB threads (~100ms). Server health threads run independently.
     historyThread.join();
     cookieThread.join();
     bookmarkThread.join();
-    walletThread.join();
-    adblockThread.join();
+
+    // Detach server health threads — they set atomic flags when done
+    walletThread.detach();
+    adblockThread.detach();
 
     auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - initStart).count();
-    LOG_INFO("Parallel initialization complete in " + std::to_string(initMs) + "ms");
+    LOG_INFO(elapsed() + "STARTUP: DB init done in " + std::to_string(initMs) + "ms (server health in background)");
 
-    // 💡 Optionally pass handles to app instance
+    // Pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
 
-    // Pre-create panel overlays hidden so React is warm when user first clicks.
-    // This eliminates the first-open lag from subprocess spawn + React mount.
-    extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-    extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-    extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-    extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-    extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
-    CreateCookiePanelOverlay(g_hInstance, false, 100);
-    CreateDownloadPanelOverlay(g_hInstance, false, 100);
-    CreateProfilePanelOverlay(g_hInstance, false, 50);
-    CreateMenuOverlay(g_hInstance, false, 30);
-    CreateWalletOverlay(g_hInstance, false, 50);
-    LOG_INFO("Pre-created panel overlays (hidden) for warm startup");
-
-    // Safety timeout: force-show window after 5s if header browser hasn't loaded
+    // Safety timeout: ensure window is visible (should already be shown at creation).
+    // Kept as a defensive fallback in case early ShowWindow was somehow skipped.
     CefPostDelayedTask(TID_UI, base::BindOnce([]() {
         extern HWND g_hwnd;
         extern bool g_window_shown;
         if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
-            LOG_WARNING("Startup timeout - force-showing window after 5 seconds");
+            LOG_WARNING("Startup safety timeout - force-showing window");
             ShowWindow(g_hwnd, SW_SHOW);
             UpdateWindow(g_hwnd);
             g_window_shown = true;
         }
-    }), 5000);
+    }), 2000);
 
-    // Initialize auto-updater after all windows/overlays are created.
+    // Defer overlay pre-creation to after the message loop starts.
+    // Staggered at 500ms intervals so they don't compete with the header browser
+    // and initial tab creation for CPU/memory. Each overlay spawns a CEF subprocess
+    // and loads React, which takes ~300-500ms per overlay.
+    {
+        extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+
+        HINSTANCE hInst = g_hInstance;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateMenuOverlay(h, false, 30); }, hInst), 1000);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateWalletOverlay(h, false, 50); }, hInst), 1500);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateDownloadPanelOverlay(h, false, 100); }, hInst), 2000);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateCookiePanelOverlay(h, false, 100); }, hInst), 2500);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateProfilePanelOverlay(h, false, 50); }, hInst), 3000);
+        LOG_INFO(elapsed() + "STARTUP: Overlay creation deferred");
+    }
+
+    // Initialize auto-updater after windows are created.
     // WinSparkle will check for updates in the background if auto-check is enabled.
     {
         auto& settings = SettingsManager::GetInstance();
@@ -3477,6 +3629,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                  ", notifications=" + std::string(notifications ? "true" : "false") + ")");
     }
 
+    LOG_INFO(elapsed() + "STARTUP: Entering CefRunMessageLoop");
     CefRunMessageLoop();
 
     // All browsers have closed (OnBeforeClose posted quit message).

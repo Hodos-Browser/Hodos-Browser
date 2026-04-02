@@ -882,26 +882,20 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             extern void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser);
             InjectHodosBrowserAPI(browser);
         } else if (role_ == "header") {
-            // Show main window shortly after header load (smooth startup).
-            // Delay 150ms to give React time to mount and paint the toolbar,
-            // so the window appears with the header fully rendered.
-#ifdef _WIN32
+            // Window is already shown immediately at startup (dark shell).
+            // Header browser load means React is now rendered — stop drawing the
+            // branded loading icon and let normal window paint take over.
             {
-                extern bool g_window_shown;
-                if (!g_window_shown) {
-                    CefPostDelayedTask(TID_UI, base::BindOnce([]() {
-                        extern HWND g_hwnd;
-                        extern bool g_window_shown;
-                        if (!g_window_shown && g_hwnd && IsWindow(g_hwnd)) {
-                            ShowWindow(g_hwnd, SW_SHOW);
-                            UpdateWindow(g_hwnd);
-                            g_window_shown = true;
-                            Logger::Log("Main window shown - header browser rendered", 1, 2);
-                        }
-                    }), 150);
+                extern bool g_header_browser_loaded;
+                g_header_browser_loaded = true;
+                // Invalidate the main window so the loading icon stops being drawn
+                extern HWND g_hwnd;
+                if (g_hwnd && IsWindow(g_hwnd)) {
+                    InvalidateRect(g_hwnd, nullptr, TRUE);
                 }
             }
-#endif
+            Logger::Log("Header browser loaded - React content now visible", 1, 2);
+
             // Inject the hodosBrowser API into header browser (where React app runs)
             LOG_DEBUG_BROWSER("🔧 HEADER BROWSER LOADED - Injecting hodosBrowser API");
 
@@ -6249,6 +6243,25 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
     LOG_DEBUG_BROWSER("⌨️ OnPreKeyEvent [" + role_ + "] - type: " + std::to_string(event.type) +
                       ", key: " + std::to_string(event.windows_key_code) +
                       ", modifiers: " + std::to_string(event.modifiers));
+
+    // Block Ctrl+Plus/Minus/0 zoom on non-tab browsers (header, overlays).
+    // Only web content tabs should zoom — the header is browser chrome and must
+    // stay at a fixed size, just like Chrome/Brave's toolbar.
+    if (event.type == KEYEVENT_RAWKEYDOWN && role_.find("tab_") != 0) {
+        bool isCtrl = false;
+#ifdef __APPLE__
+        isCtrl = (event.modifiers & EVENTFLAG_COMMAND_DOWN) != 0;
+#else
+        isCtrl = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
+#endif
+        if (isCtrl) {
+            int key = event.windows_key_code;
+            // VK_OEM_PLUS (0xBB), VK_OEM_MINUS (0xBD), '0', numpad +/- (0x6B/0x6D)
+            if (key == 0xBB || key == 0xBD || key == '0' || key == 0x6B || key == 0x6D) {
+                return true;  // Consume — don't zoom the header/overlays
+            }
+        }
+    }
 
     // Handle DevTools keyboard shortcuts for all windows
     if (event.type == KEYEVENT_RAWKEYDOWN) {

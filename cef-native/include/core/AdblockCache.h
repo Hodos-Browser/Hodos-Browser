@@ -33,9 +33,9 @@
 #endif
 
 // ============================================================================
-// Global flag — set by cef_browser_shell.cpp StartAdblockServer()
+// Global flag — set by cef_browser_shell.cpp WaitForAdblockHealth()
 // ============================================================================
-extern bool g_adblockServerRunning;
+extern std::atomic<bool> g_adblockServerRunning;
 
 // ============================================================================
 // CEF Resource Type → adblock-rust resource type string

@@ -70,6 +70,11 @@ const MainBrowserView: React.FC = () => {
     // Keep localStorage balance/price cache warm for wallet overlay
     useBackgroundBalancePoller();
 
+    // Remove splash screen now that the header UI has mounted
+    useEffect(() => {
+        (window as any).removeSplash?.();
+    }, []);
+
     // Keep wallet-exists cache in sync so the overlay opens instantly with correct state.
     // Also fetch and cache the identity key so the wallet panel has it immediately.
     // Runs once on mount — if wallet.db was deleted, clears the stale cache before
