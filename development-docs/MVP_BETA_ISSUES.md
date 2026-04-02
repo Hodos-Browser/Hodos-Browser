@@ -90,15 +90,18 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 - *Step 1 — New `SingleInstance.h/.cpp`:*
   - `TryAcquireInstance(profileId)` → tries `CreateNamedPipe("\\.\pipe\hodos-browser-{profileId}", FILE_FLAG_FIRST_PIPE_INSTANCE)`. Returns true if first instance (becomes server), false if another instance owns pipe.
   - `SendToRunningInstance(profileId, json)` → connects as client, sends `{"action":"new_window","url":"..."}`, waits 5s for ACK, exits.
-  - `StartListenerThread()` → background thread: `ConnectNamedPipe()` → `ReadFile()` → parse JSON → `PostMessage(g_hwnd, WM_APP+1, ...)` → loop.
+  - `StartListenerThread()` → background thread: `ConnectNamedPipe()` → `ReadFile()` → parse JSON → post to UI thread → loop.
+  - **Thread safety:** Listener thread must NOT call `WindowManager` directly. Must use `PostMessage()` to marshal onto UI thread (same as tab tear-off pattern).
 - *Step 2 — Integrate in `cef_browser_shell.cpp`:*
   - AFTER `CefExecuteProcess()` (line 2732) — CEF subprocesses return here, only browser process continues.
   - BEFORE `AcquireProfileLock()` (line 2778) — try pipe first.
   - Flow: `TryAcquireInstance()` → if false → `SendToRunningInstance()` → exit cleanly (no error dialog). If true → continue to `AcquireProfileLock()` → start pipe listener thread.
 - *Step 3 — Handle `WM_APP+1` in `ShellWindowProc`:*
-  - Call `WindowManager::CreateFullWindow()` (same as tab tear-off path).
+  - Get primary window via `WindowManager::GetInstance().GetPrimaryWindow()` — **NOT `GetWindow(0)`** (primary window transfer means window 0 may no longer exist).
+  - Call `WindowManager::CreateFullWindow()` to create secondary window (overlays stay with primary — correct behavior, matches tab tear-off).
   - If URL provided, `TabManager::CreateTab(url, ...)` in the new window.
-  - `SetForegroundWindow()` + `FlashWindow()` fallback to bring window to front.
+  - `SetForegroundWindow(GetPrimaryWindow()->hwnd)` + `FlashWindow()` fallback to bring window to front.
+  - **PostMessage target:** Use `WindowManager::GetInstance().GetPrimaryWindow()->hwnd` for `PostMessage` target — `g_hwnd` is valid since it tracks the current primary, but using explicit lookup is safer.
 - *Step 4 — Keep ProfileLock unchanged* — pipe handles instance forwarding, lock handles data integrity. Two separate concerns.
 **Key risks:**
 - **CEF subprocess confusion**: CEF spawns renderer/GPU/utility subprocesses that call `WinMain()`. Pipe check MUST go after `CefExecuteProcess()` which returns early for subprocesses (already at line 2732). This is the #1 gotcha.
@@ -106,8 +109,11 @@ Issues discovered during beta testing. Priority: P0 = must fix before release, P
 - **Race condition (two instances simultaneously)**: `FILE_FLAG_FIRST_PIPE_INSTANCE` is atomic — only one wins. Loser becomes client.
 - **Stale pipe after crash**: Windows auto-cleans named pipes on process exit. No stale pipe risk.
 - **`SetForegroundWindow` restrictions**: Windows limits which processes can steal focus. Client calls `AllowSetForegroundWindow(serverPid)` before sending pipe message. Fallback: `FlashWindow()` to flash taskbar.
-**Sprint 3 dependency:** Sprint 3 (B-1 frameless) changes window style in `CreateFullWindow()`. B-6's new windows inherit the frameless style automatically — no special handling needed. Sprint 3 must be done BEFORE Sprint 4.
-**Key files:** `cef_browser_shell.cpp` (startup flow, WndProc), NEW `SingleInstance.h/.cpp`, `ProfileLock.cpp/.h` (unchanged), `WindowManager.cpp` (unchanged — `CreateFullWindow()` already works)
+**Dependencies (must be done first):**
+- **Sprint 3 (B-1 frameless):** Window style changes in `CreateFullWindow()`. B-6's new windows inherit frameless automatically.
+- **Primary window transfer (WINDOW_CLOSE_PRIMARY_TRANSFER.md, done 2026-04-02):** `g_hwnd` and primary window are now dynamic — `GetWindow(0)` replaced with `GetPrimaryWindow()` across 34 call sites. B-6 must use `GetPrimaryWindow()` not `GetWindow(0)` for PostMessage target, SetForegroundWindow, and any window lookups. The pipe listener's `PostMessage(g_hwnd, ...)` is safe because `g_hwnd` tracks the current primary after transfer, but code should be explicit about this assumption.
+- **Overlay ownership:** Overlays belong to primary window. New windows from B-6 pipe forwarding are secondary — they get their own tabs but no overlays (same as tab tear-off). This is correct. If the user closes the primary window while secondary exists, `TransferPrimaryWindow()` handles overlay migration automatically.
+**Key files:** `cef_browser_shell.cpp` (startup flow, ShellWindowProc WM_APP+1), NEW `SingleInstance.h/.cpp`, `ProfileLock.cpp/.h` (unchanged), `WindowManager.h/.cpp` (use `GetPrimaryWindow()`, `CreateFullWindow()`)
 **macOS notes:** Named pipes don't exist on macOS. Use `applicationShouldHandleReopen:hasVisibleWindows:` NSApplicationDelegate method (fires when user clicks dock icon while app is running). Also implement `application:openURLs:` for URL scheme forwarding. Neither is currently implemented in `cef_browser_shell_mac.mm`. Simpler than Windows — just call macOS equivalent of `CreateFullWindow()` from delegate.
 **Sprint:** 4
 

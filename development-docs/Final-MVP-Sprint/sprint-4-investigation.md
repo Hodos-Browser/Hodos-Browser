@@ -128,6 +128,39 @@ if (exit_code >= 0) return exit_code;  // This was a subprocess, exit
 
 This is already the pattern in `cef_browser_shell.cpp:2732` — `CefExecuteProcess()` returns >= 0 for subprocesses. The pipe check goes AFTER this line.
 
+### Critical Dependency: Primary Window Transfer (done 2026-04-02)
+
+The `WINDOW_CLOSE_PRIMARY_TRANSFER.md` implementation changes the multi-window architecture in ways that B-6 must account for:
+
+**What changed:**
+- `GetWindow(0)` replaced with `GetPrimaryWindow()` across 34 call sites
+- `g_hwnd` now points to whichever window is primary (not always window 0)
+- `TransferPrimaryWindow()` migrates overlays and global HWNDs when primary window closes
+- `primary_window_id_` is explicitly tracked in WindowManager
+
+**Impact on B-6:**
+
+1. **PostMessage target:** The pipe listener thread posts `PostMessage(g_hwnd, WM_APP+1, ...)`. Since `g_hwnd` now tracks the current primary (updated by `TransferPrimaryWindow()`), this is safe. But the WM_APP+1 handler should use `GetPrimaryWindow()` explicitly for any window lookups, not assume window 0.
+
+2. **SetForegroundWindow:** Must use `GetPrimaryWindow()->hwnd`, not `GetWindow(0)->hwnd`. After primary transfer, window 0 may not exist.
+
+3. **New windows are secondary:** `CreateFullWindow()` creates secondary windows. Overlays stay with the primary. This is correct — matches tab tear-off behavior. If the user later closes the primary, `TransferPrimaryWindow()` handles overlay migration automatically.
+
+4. **No new risk for B-6:** The primary transfer system is transparent to B-6. B-6 just calls `CreateFullWindow()` which creates a new window with the correct (frameless) style and a new tab. The primary/secondary distinction is handled by the existing WindowManager infrastructure.
+
+**Updated flow diagram:**
+```
+Pipe listener thread receives "new_window" command
+├── PostMessage(g_hwnd, WM_APP+1, url_data)  // g_hwnd = current primary
+│
+ShellWindowProc receives WM_APP+1
+├── BrowserWindow* primary = WindowManager::GetInstance().GetPrimaryWindow()
+├── BrowserWindow* newWin = WindowManager::GetInstance().CreateFullWindow(true)
+├── If url: TabManager::CreateTab(url, newWin->hwnd, ...)
+├── SetForegroundWindow(primary->hwnd)  // bring to front
+└── FlashWindow(primary->hwnd, TRUE)    // fallback if focus steal blocked
+```
+
 ---
 
 ## B-3: Uninstall Cleanup / Reinstall Failure
