@@ -79,10 +79,11 @@ impl<'a> OutputRepository<'a> {
                     o.script_length, o.script_offset, o.locking_script, o.created_at, o.updated_at
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
                AND o.derivation_prefix IS NOT NULL
-               AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
+               AND (o.basket_id IS NULL OR b.name = 'default')
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -127,10 +128,11 @@ impl<'a> OutputRepository<'a> {
                     o.script_length, o.script_offset, o.locking_script, o.created_at, o.updated_at
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status = 'completed' OR o.transaction_id IS NULL)
                AND o.derivation_prefix IS NOT NULL
-               AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
+               AND (o.basket_id IS NULL OR b.name = 'default')
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -453,13 +455,16 @@ impl<'a> OutputRepository<'a> {
         let locking_script = hex::decode(script_hex).ok();
 
         // Determine derivation prefix/suffix from address index
+        // Regular addresses (index >= 0): BRC-42 self-derivation
+        // Master address (index -1): master private key directly — spendable
+        // Backup address (index -3): backup marker — NOT spendable by regular sends
         let (derivation_prefix, derivation_suffix): (Option<&str>, Option<String>) = if address_index >= 0 {
             (Some("2-receive address"), Some(address_index.to_string()))
         } else if address_index == -1 {
-            (None, None)  // Master pubkey - no derivation
+            (Some("master"), Some("-1".to_string()))
         } else {
-            // Negative indices other than -1 are for custom derivation
-            // These need custom_instructions, handled separately
+            // Negative indices other than -1 (e.g., -3 backup marker)
+            // Leave as NULL — not spendable by regular sends
             (None, None)
         };
 

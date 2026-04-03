@@ -78,7 +78,12 @@ pub fn derive_key_for_output(
 
         // Case 2: Has prefix and suffix
         (Some(prefix), Some(suffix)) => {
-            // Case 2a: BIP32 legacy
+            // Case 2a: Master key (index -1, service fee address)
+            if prefix == "master" {
+                log::info!("   🔑 derive_key_for_output: master key (index {})", suffix);
+                return get_master_private_key_from_db(db);
+            }
+            // Case 2b: BIP32 legacy
             if prefix == "bip32" {
                 let index: u32 = suffix.parse().map_err(|e| rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),

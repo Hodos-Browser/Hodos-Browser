@@ -3,6 +3,7 @@ use actix_cors::Cors;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+mod arc_status;  // Centralized ARC miner response status classification
 mod json_storage;
 mod action_storage;  // NEW: Action storage module
 mod handlers;
@@ -327,6 +328,60 @@ async fn main() -> std::io::Result<()> {
                                 );
                             }
                         }
+                    }
+                }
+
+                // Restore backup outputs incorrectly marked stale by old adoption code
+                {
+                    let conn = db.connection();
+                    let restored = conn.execute(
+                        "UPDATE outputs SET spendable = 1, spending_description = NULL \
+                         WHERE spending_description = 'stale-backup'",
+                        [],
+                    ).unwrap_or(0);
+                    if restored > 0 {
+                        println!("🧹 Restored {} backup output(s) incorrectly marked stale", restored);
+                    }
+                }
+
+                // Fix certificates whose PushDrop token was consumed externally.
+                // If publish_status='published' but the token output is external-spend,
+                // the certificate can't be unpublished — reset to unpublished.
+                {
+                    let conn = db.connection();
+                    let fixed = conn.execute(
+                        "UPDATE certificates SET publish_status = 'unpublished', \
+                         publish_txid = NULL, publish_vout = NULL \
+                         WHERE publish_status = 'published' \
+                         AND publish_txid IS NOT NULL \
+                         AND EXISTS ( \
+                             SELECT 1 FROM outputs \
+                             WHERE outputs.txid = certificates.publish_txid \
+                             AND outputs.vout = certificates.publish_vout \
+                             AND outputs.spending_description = 'external-spend' \
+                         )",
+                        [],
+                    ).unwrap_or(0);
+                    if fixed > 0 {
+                        println!("🧹 Reset {} certificate(s) whose publish token was spent externally", fixed);
+                    }
+                }
+
+                // Fix master key outputs (index -1) that have NULL derivation.
+                // These are service fee outputs synced from chain before the
+                // derivation_prefix='master' fix. They need the prefix to be
+                // selectable for spending. Exclude 546-sat outputs (orphaned
+                // backup markers at index -3 that also have NULL derivation).
+                {
+                    let conn = db.connection();
+                    let fixed = conn.execute(
+                        "UPDATE outputs SET derivation_prefix = 'master', derivation_suffix = '-1' \
+                         WHERE derivation_prefix IS NULL AND derivation_suffix IS NULL \
+                         AND spendable = 1 AND satoshis != 546",
+                        [],
+                    ).unwrap_or(0);
+                    if fixed > 0 {
+                        println!("🧹 Tagged {} master-key output(s) with derivation prefix", fixed);
                     }
                 }
             }

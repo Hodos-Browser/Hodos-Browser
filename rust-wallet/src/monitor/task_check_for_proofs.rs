@@ -27,11 +27,7 @@ const NOSEND_TIMEOUT_SECS: i64 = 10 * 60;
 /// After this many seconds in mempool, cross-verify with WhatsOnChain
 const MEMPOOL_VERIFY_THRESHOLD_SECS: i64 = 30 * 60;
 
-/// Timeout for transactions stuck in orphan mempool - 2 hours
-/// Even though we fail immediately on orphan (like wallet-toolbox),
-/// TaskUnFail recovers false failures. This timeout is used as a
-/// secondary check for non-orphan cases.
-const ORPHAN_TIMEOUT_SECS: i64 = 2 * 60 * 60;
+// ORPHAN_TIMEOUT_SECS removed — orphan/stale txs now fail immediately
 
 struct PendingTxInfo {
     txid: String,
@@ -143,7 +139,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                     }
                     "SEEN_ON_NETWORK" | "ANNOUNCED_TO_NETWORK"
                     | "REQUESTED_BY_NETWORK" | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK"
-                    | "STORED" => {
+                    | "STORED" | "QUEUED" | "RECEIVED" => {
                         // In mempool — cross-verify with WhatsOnChain if old enough
                         if tx_info.age_secs > MEMPOOL_VERIFY_THRESHOLD_SECS {
                             if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
@@ -154,33 +150,26 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                         }
                     }
                     "SEEN_IN_ORPHAN_MEMPOOL" => {
-                        // Orphan mempool = ARC's node doesn't have the parent tx.
-                        // The tx may still be valid on other nodes/miners.
-                        //
-                        // Don't fail immediately — orphan txs often mine within minutes.
-                        // Wait at least 30 minutes before marking failed.
-                        let age_mins = tx_info.age_secs / 60;
-                        warn!("   ⚠️ {} in orphan mempool ({}m old)", &txid[..txid.len().min(16)], age_mins);
+                        // Orphan mempool = BEEF ancestry validation failure.
+                        // The orphan pool is a graveyard — ARC never re-processes.
+                        // Fail immediately so inputs are restored for re-broadcast.
+                        warn!("   ⚠️ {} in orphan mempool — failing immediately", &txid[..txid.len().min(16)]);
 
-                        // Quick check: is it already confirmed despite ARC's orphan status?
+                        // Quick check: already confirmed despite ARC's orphan status?
                         match try_whatsonchain_confirmation(state, client, txid).await {
                             Some(count) => {
-                                // Already mined — no need to fail
                                 confirmed_count += count;
                             }
                             None => {
-                                if age_mins >= 30 {
-                                    // Been orphan for 30+ minutes — likely a real problem
-                                    warn!("   ⏰ {} SEEN_IN_ORPHAN_MEMPOOL for {}m — marking FAILED with cleanup",
-                                          &txid[..txid.len().min(16)], age_mins);
-                                    mark_failed(state, txid);
-                                } else {
-                                    // Still fresh — give it time to propagate and mine
-                                    info!("   ⏳ {} in orphan mempool for {}m — waiting (will fail after 30m)",
-                                          &txid[..txid.len().min(16)], age_mins);
-                                }
+                                mark_failed(state, txid);
                             }
                         }
+                    }
+                    "MINED_IN_STALE_BLOCK" => {
+                        // Block was orphaned — tx may still be valid but needs re-broadcast.
+                        warn!("   ⚠️ {} was in a stale block — marking failed for re-broadcast",
+                              &txid[..txid.len().min(16)]);
+                        mark_failed(state, txid);
                     }
                     "DOUBLE_SPEND_ATTEMPTED" | "REJECTED" => {
                         warn!("   ⚠️ {} status: {} — marking failed", txid, status);

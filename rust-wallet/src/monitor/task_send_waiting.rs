@@ -101,10 +101,19 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                         recovered += 1;
                         continue;
                     }
-                    "SEEN_ON_NETWORK" | "SEEN_IN_ORPHAN_MEMPOOL" | "STORED" | "ANNOUNCED_TO_NETWORK" => {
+                    "SEEN_ON_NETWORK" | "STORED" | "ANNOUNCED_TO_NETWORK"
+                    | "QUEUED" | "RECEIVED" => {
                         info!("   ✅ {} already in mempool ({}) — promoting to unproven", short_txid, status);
                         promote_to_unproven(state, &txid);
                         recovered += 1;
+                        continue;
+                    }
+                    "SEEN_IN_ORPHAN_MEMPOOL" | "MINED_IN_STALE_BLOCK" => {
+                        // Orphan = BEEF validation failure, stale = block orphaned.
+                        // Inputs NOT spent on-chain — clean up for re-broadcast.
+                        warn!("   ⚠️ {} status {} — cleaning up for re-broadcast", short_txid, status);
+                        cleanup_failed_sending(state, &txid, *tx_id);
+                        failed += 1;
                         continue;
                     }
                     "REJECTED" | "DOUBLE_SPEND_ATTEMPTED" => {
@@ -159,12 +168,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             Err(e) => {
                 if is_permanent_error(&e) {
                     warn!("   ❌ Permanent broadcast failure for {}: {}", short_txid, e);
-                    let error_lower = e.to_lowercase();
-                    let is_ds = error_lower.contains("double spend")
-                        || error_lower.contains("double-spend")
-                        || error_lower.contains("missing inputs")
-                        || error_lower.contains("missingorspent");
-                    if is_ds {
+                    if crate::arc_status::is_double_spend_error(&e) {
                         cleanup_failed_sending_double_spend(state, &txid, *tx_id);
                     } else {
                         cleanup_failed_sending(state, &txid, *tx_id);
@@ -300,41 +304,9 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
 }
 
 /// Determine if a broadcast error is permanent (never retry) vs transient (worth retrying).
-///
-/// Permanent errors indicate the transaction itself is invalid:
-/// - Script verification failures (ERROR: 16)
-/// - Double-spend attempts
-/// - Missing inputs (UTXOs already spent)
-/// - Already-known txids (actually success — handled separately by ARC check)
-///
-/// Transient errors indicate network/server issues worth retrying:
-/// - Timeouts, connection refused, HTTP 500/502/503
+/// Delegates to the centralized arc_status module.
 fn is_permanent_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-
-    // Script verification failures
-    if lower.contains("error: 16") || lower.contains("mandatory-script-verify") {
-        return true;
-    }
-    // Double-spend / conflicting transaction
-    if lower.contains("double spend") || lower.contains("double-spend")
-        || lower.contains("txn-mempool-conflict") {
-        return true;
-    }
-    // Missing inputs (UTXOs already consumed)
-    if lower.contains("missing inputs") || lower.contains("missingorspent") {
-        return true;
-    }
-    // Transaction too large or dust outputs
-    if lower.contains("tx-size") || lower.contains("dust") {
-        return true;
-    }
-    // Non-standard / policy rejection
-    if lower.contains("non-mandatory-script-verify") || lower.contains("scriptpubkey") {
-        return true;
-    }
-
-    false
+    crate::arc_status::is_fatal_broadcast_error(error)
 }
 
 /// Get the best available hex for re-broadcasting a stuck transaction.

@@ -3,6 +3,7 @@
 //! This library provides the core wallet functionality for the Hodos Browser.
 //! The main binary is in main.rs, but this lib.rs exposes modules for testing.
 
+pub mod arc_status;
 pub mod crypto;
 pub mod certificate;
 pub mod database;

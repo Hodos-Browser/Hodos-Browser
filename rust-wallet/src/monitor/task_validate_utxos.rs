@@ -47,7 +47,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                AND txid IS NOT NULL
                AND derivation_prefix IS NOT NULL
                AND derivation_suffix IS NOT NULL
-               AND derivation_prefix IN ('2-receive address', 'bip32')"
+               AND derivation_prefix IN ('2-receive address', 'bip32', 'master')"
         ).map_err(|e| format!("Query prepare error: {}", e))?;
 
         let derivation_pairs: Vec<(String, String)> = stmt.query_map(

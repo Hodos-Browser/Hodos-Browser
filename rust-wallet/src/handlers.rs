@@ -5402,15 +5402,12 @@ pub(crate) async fn create_action_internal(
                             log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", deleted_count);
                         }
 
-                        // Check if this is a double-spend / missing-inputs error.
+                        // Check if this is a confirmed double-spend error.
                         // If so, the inputs ARE spent on-chain — do NOT restore them.
-                        // Mark them as external-spend so the wallet picks different UTXOs next time.
-                        let error_lower = e.to_string().to_lowercase();
-                        let is_double_spend = error_lower.contains("double spend")
-                            || error_lower.contains("double-spend")
-                            || error_lower.contains("txn-mempool-conflict")
-                            || error_lower.contains("missing inputs")
-                            || error_lower.contains("missingorspent");
+                        // "Missing inputs" is NOT included — could be BEEF validation failure
+                        // where inputs are still spendable. Safe default: restore inputs.
+                        // TaskUnFail/TaskValidateUtxos will catch genuine on-chain spends.
+                        let is_double_spend = crate::arc_status::is_double_spend_error(&e.to_string());
 
                         if is_double_spend {
                             // Mark inputs as externally spent — they're gone on-chain.
@@ -5725,11 +5722,17 @@ async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
         Ok(arc_resp) => {
             let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
             match status {
-                "MINED" | "SEEN_ON_NETWORK" | "SEEN_IN_ORPHAN_MEMPOOL"
+                "MINED" | "SEEN_ON_NETWORK"
                 | "ANNOUNCED_TO_NETWORK" | "REQUESTED_BY_NETWORK"
-                | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK" | "STORED" => {
+                | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK" | "STORED"
+                | "QUEUED" | "RECEIVED" => {
                     log::info!("   ✅ Transaction exists (ARC status: {})", status);
                     return Ok(true);
+                }
+                "SEEN_IN_ORPHAN_MEMPOOL" | "MINED_IN_STALE_BLOCK" => {
+                    // Orphan/stale = tx is NOT reliably on network
+                    log::warn!("   ⚠️  Transaction in {} — not reliably on network", status);
+                    return Ok(false);
                 }
                 _ => {
                     log::info!("   ⚠️  ARC returned status: {} - checking WhatsOnChain", status);
@@ -7483,32 +7486,9 @@ const MAX_BROADCAST_ATTEMPTS: u32 = 3;
 
 /// Classify whether a broadcast error is fatal (tx itself is invalid).
 /// Fatal errors mean no broadcaster will accept this tx — stop everything immediately.
+/// Delegates to the centralized arc_status module.
 fn is_fatal_broadcast_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-
-    // Script verification failures
-    if lower.contains("error: 16") || lower.contains("mandatory-script-verify") {
-        return true;
-    }
-    // Double-spend / conflicting transaction
-    if lower.contains("double spend") || lower.contains("double-spend")
-        || lower.contains("txn-mempool-conflict") {
-        return true;
-    }
-    // Missing inputs (UTXOs already consumed)
-    if lower.contains("missing inputs") || lower.contains("missingorspent") {
-        return true;
-    }
-    // Transaction too large or dust outputs
-    if lower.contains("tx-size") || lower.contains("dust") {
-        return true;
-    }
-    // Non-standard / policy rejection
-    if lower.contains("non-mandatory-script-verify") {
-        return true;
-    }
-
-    false
+    crate::arc_status::is_fatal_broadcast_error(error)
 }
 
 // Strategy:
@@ -7628,24 +7608,18 @@ pub(crate) async fn broadcast_transaction(
                             }
                         }
 
-                        // SEEN_IN_ORPHAN_MEMPOOL — tx IS in ARC's mempool, parent not yet found.
-                        // Retry a few times (parent may propagate), then treat as provisional success.
-                        // DO NOT fall through to raw tx broadcast — that strips BEEF ancestry and
-                        // guarantees "Missing inputs" for transactions with unconfirmed parents.
-                        // TaskCheckForProofs will monitor and clean up after 30 minutes if needed.
+                        // SEEN_IN_ORPHAN_MEMPOOL — ARC couldn't validate BEEF merkle proofs.
+                        // The orphan pool is a graveyard: ARC never re-processes these txs.
+                        // Inputs are NOT spent on-chain — safe to restore for re-broadcast.
+                        // Return Err so callers do proper cleanup (ghost output deletion + input restore).
+                        // Do NOT retry (won't help) or fall through to raw-tx (strips BEEF = guaranteed failure).
                         if status_str == "SEEN_IN_ORPHAN_MEMPOOL" {
-                            if arc_attempt < MAX_BROADCAST_ATTEMPTS {
-                                log::info!("   🔄 SEEN_IN_ORPHAN_MEMPOOL — retrying in {}ms...", arc_backoff_ms);
-                                tokio::time::sleep(std::time::Duration::from_millis(arc_backoff_ms)).await;
-                                arc_backoff_ms *= 2;
-                                continue;
-                            }
-                            // Transaction is in ARC's orphan pool — it may still confirm once
-                            // ARC receives the parent tx. Return success so callers don't
-                            // prematurely roll back (which causes DB desync if the tx later mines).
-                            let msg = format!("ARC accepted (orphan mempool): {} — monitoring for confirmation", arc_txid);
-                            log::warn!("   ⚠️ {}", msg);
-                            return Ok(msg);
+                            let msg = format!(
+                                "Transaction in orphan mempool: {} — BEEF ancestry invalid, inputs safe to restore",
+                                arc_txid
+                            );
+                            log::error!("   ❌ {}", msg);
+                            return Err(msg);
                         }
 
                         let msg = format!("ARC accepted: {} ({})", arc_txid, status_str);
@@ -8038,9 +8012,11 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
     let arc_response: ArcResponse = serde_json::from_str(&text)
         .map_err(|e| format!("ARC: Failed to parse response: {} - Body: {}", e, &text[..text.len().min(200)]))?;
 
-    // Check txStatus BEFORE HTTP status — ARC can return double-spend with any HTTP code
+    // Check txStatus BEFORE HTTP status — ARC can return error statuses with any HTTP code
     let tx_status = arc_response.tx_status.as_deref().unwrap_or("");
-    if tx_status == "DOUBLE_SPEND_ATTEMPTED" || tx_status == "REJECTED" {
+    if tx_status == "DOUBLE_SPEND_ATTEMPTED" || tx_status == "REJECTED"
+        || tx_status == "SEEN_IN_ORPHAN_MEMPOOL" || tx_status == "MINED_IN_STALE_BLOCK"
+    {
         let txid = arc_response.txid.as_deref().unwrap_or("unknown");
         let competing = arc_response.competing_txs.as_ref()
             .map(|v| v.join(", "))
@@ -8085,12 +8061,25 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
                 Ok(arc_response)
             }
         }
-        460..=469 => {
-            // BEEF-specific validation errors
+        460..=469 | 474 | 475 => {
+            // BEEF/tx validation errors (460-469: BEEF, 474: tx-size, 475: missing BUMP ancestors)
             let detail = arc_response.detail.unwrap_or_else(|| text.clone());
             let title = arc_response.title.unwrap_or_else(|| format!("BEEF Error {}", status.as_u16()));
-            log::error!("   ❌ ARC BEEF validation error {}: {} - {}", status.as_u16(), title, detail);
+            log::error!("   ❌ ARC BEEF/tx validation error {}: {} - {}", status.as_u16(), title, detail);
             Err(format!("ARC BEEF error {}: {} - {}", status.as_u16(), title, detail))
+        }
+        471 | 472 => {
+            // Frozen inputs (471: policy blacklist, 472: consensus blacklist)
+            // These inputs can NEVER be spent — permanent failure.
+            let detail = arc_response.detail.unwrap_or_else(|| text.clone());
+            log::error!("   ❌ ARC: Input Frozen ({}): {}", status.as_u16(), detail);
+            Err(format!("Input Frozen ({}): {}", status.as_u16(), detail))
+        }
+        473 => {
+            // Cumulative fee too low — could succeed with higher fee
+            let detail = arc_response.detail.unwrap_or_else(|| text.clone());
+            log::error!("   ❌ ARC: Cumulative fee too low (473): {}", detail);
+            Err(format!("ARC error 473: Cumulative fee too low — {}", detail))
         }
         _ => {
             // Other error
@@ -11067,6 +11056,55 @@ pub async fn wallet_backup_onchain(
     }
 }
 
+/// Adopt an on-chain backup tx as the previous backup to spend.
+/// Fetches the tx from WoC and extracts PushDrop (vout 0) and marker (vout 1) outputs.
+async fn adopt_onchain_backup(
+    client: &reqwest::Client,
+    chain_txid: &str,
+    previous_pushdrop: &mut Option<(String, u32, i64, String)>,
+    previous_marker: &mut Option<(String, u32, i64, String)>,
+) {
+    let tx_url = format!(
+        "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
+        chain_txid
+    );
+    let tx_data = match client.get(&tx_url).send().await {
+        Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to fetch on-chain backup tx {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
+            return;
+        }
+    };
+
+    if let Some(tx_data) = tx_data {
+        if let Some(vouts) = tx_data["vout"].as_array() {
+            // PushDrop is vout 0 (nonstandard script with encrypted backup data)
+            if let Some(vout0) = vouts.get(0) {
+                let sats = (vout0["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                let script_hex = vout0["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                if sats > 0 && !script_hex.is_empty() {
+                    *previous_pushdrop = Some((chain_txid.to_string(), 0, sats, script_hex));
+                    log::info!("   ✅ Adopted on-chain PushDrop: {} sats at {}:0", sats, &chain_txid[..16.min(chain_txid.len())]);
+                }
+            }
+            // Marker is vout 1 (P2PKH at backup address)
+            if let Some(vout1) = vouts.get(1) {
+                let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                if sats > 0 && !script_hex.is_empty() {
+                    *previous_marker = Some((chain_txid.to_string(), 1, sats, script_hex));
+                    log::info!("   ✅ Adopted on-chain marker: {} sats at {}:1", sats, &chain_txid[..16.min(chain_txid.len())]);
+                }
+            }
+        }
+    }
+
+    if previous_pushdrop.is_none() && previous_marker.is_none() {
+        log::warn!("   ⚠️  Could not adopt on-chain backup {} — treating as first backup",
+            &chain_txid[..16.min(chain_txid.len())]);
+    }
+}
+
 /// Core on-chain backup logic — used by both the HTTP handler and the monitor task.
 /// Returns Ok(txid) on success, Err(message) on failure.
 pub async fn do_onchain_backup(
@@ -11202,106 +11240,80 @@ pub async fn do_onchain_backup(
     };
 
     // Step 5c: Validate previous backup UTXOs actually exist on-chain.
-    // DB can be stale from wallet.db swaps, failed backups, or multi-device conflicts.
-    // Query the marker address on WoC — if the on-chain UTXO txid doesn't match
-    // what our DB thinks is the current backup, clear stale outputs and use the
-    // on-chain reality as the source of truth.
-    if previous_pushdrop.is_some() || previous_marker.is_some() {
-        let db_marker_txid = previous_marker.as_ref().map(|(txid, _, _, _)| txid.clone());
-        let onchain_marker = {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build().unwrap_or_else(|_| reqwest::Client::new());
-            let utxo_url = format!(
-                "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
-                backup_address
-            );
-            match client.get(&utxo_url).send().await {
-                Ok(resp) => {
-                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                    let utxos = body.get("result").and_then(|r| r.as_array())
-                        .or_else(|| body.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    utxos.first().and_then(|u| {
-                        u["tx_hash"].as_str().or(u["txid"].as_str()).map(|s| s.to_string())
-                    })
-                }
-                Err(_) => db_marker_txid.clone(), // On network error, trust DB
+    // Query the marker address on WoC to verify our DB's backup is the real one.
+    //
+    // Design invariant: there should only be ONE unspent backup on-chain.
+    // vout 0 = PushDrop (data), vout 1 = marker (discoverable), vout 2 = change.
+    // Only the next backup tx may spend vout 0 and vout 1.
+    {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build().unwrap_or_else(|_| reqwest::Client::new());
+        let utxo_url = format!(
+            "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
+            backup_address
+        );
+
+        // Fetch all unspent marker UTXOs at the backup address
+        let onchain_markers: Vec<(String, i64)> = match client.get(&utxo_url).send().await {
+            Ok(resp) => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let utxos = body.get("result").and_then(|r| r.as_array())
+                    .or_else(|| body.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                utxos.iter().filter_map(|u| {
+                    let txid = u["tx_hash"].as_str().or(u["txid"].as_str())?;
+                    let height = u["height"].as_i64().unwrap_or(0);
+                    Some((txid.to_string(), height))
+                }).collect()
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  WoC marker query failed: {} — trusting DB", e);
+                Vec::new() // On network error, trust DB as-is
             }
         };
 
-        let db_matches_chain = match (&db_marker_txid, &onchain_marker) {
-            (Some(db_txid), Some(chain_txid)) => db_txid == chain_txid,
-            (None, None) => true, // Both empty = consistent
-            _ => false,
-        };
+        if !onchain_markers.is_empty() {
+            log::info!("   📍 Found {} marker UTXO(s) at backup address", onchain_markers.len());
+        }
 
-        if !db_matches_chain {
-            log::warn!("   ⚠️  DB backup txid ({}) doesn't match on-chain ({})",
-                db_marker_txid.as_deref().unwrap_or("none"),
-                onchain_marker.as_deref().unwrap_or("none"));
-            log::info!("   🧹 Clearing stale DB outputs and adopting on-chain backup UTXOs...");
-            {
-                let db = state.database.lock().unwrap();
-                let _ = db.connection().execute(
-                    "UPDATE outputs SET spendable = 0, spending_description = 'stale-backup' \
-                     WHERE derivation_prefix = '1-wallet-backup' AND spendable = 1",
-                    [],
-                );
-            }
-            state.balance_cache.invalidate();
+        let db_backup_txid = previous_pushdrop.as_ref()
+            .or(previous_marker.as_ref())
+            .map(|(txid, _, _, _)| txid.clone());
 
-            // Adopt the on-chain UTXOs as previous backup outputs so we SPEND them
-            // instead of leaving orphans. Fetch all UTXOs at backup address.
-            previous_pushdrop = None;
-            previous_marker = None;
-            if let Some(ref chain_txid) = onchain_marker {
-                // The marker is at the backup address; PushDrop is at vout 0, marker at vout 1
-                // of the same transaction
-                log::info!("   🔄 Adopting on-chain backup tx {} as previous (will spend it)", chain_txid);
-
-                // Fetch the raw tx to get output values
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build().unwrap_or_else(|_| reqwest::Client::new());
-                let tx_url = format!(
-                    "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
-                    chain_txid
-                );
-                if let Ok(resp) = client.get(&tx_url).send().await {
-                    if let Ok(tx_data) = resp.json::<serde_json::Value>().await {
-                        if let Some(vouts) = tx_data["vout"].as_array() {
-                            // PushDrop is vout 0 (nonstandard script with data)
-                            if let Some(vout0) = vouts.get(0) {
-                                let sats = (vout0["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
-                                let script_hex = vout0["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
-                                if sats > 0 && !script_hex.is_empty() {
-                                    previous_pushdrop = Some((chain_txid.clone(), 0, sats, script_hex));
-                                    log::info!("   ✅ Adopted on-chain PushDrop: {} sats at {}:0", sats, chain_txid);
-                                }
-                            }
-                            // Marker is vout 1 (P2PKH at backup address)
-                            if let Some(vout1) = vouts.get(1) {
-                                let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
-                                let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
-                                if sats > 0 && !script_hex.is_empty() {
-                                    previous_marker = Some((chain_txid.clone(), 1, sats, script_hex));
-                                    log::info!("   ✅ Adopted on-chain marker: {} sats at {}:1", sats, chain_txid);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if previous_pushdrop.is_none() && previous_marker.is_none() {
-                    log::warn!("   ⚠️  Could not adopt on-chain UTXOs — treating as first backup");
-                }
+        if let Some(ref db_txid) = db_backup_txid {
+            // DB has a backup — verify it's still unspent on-chain
+            let db_marker_on_chain = onchain_markers.iter().any(|(txid, _)| txid == db_txid);
+            if db_marker_on_chain {
+                log::info!("   ✅ DB backup {} confirmed on-chain — using it", &db_txid[..16.min(db_txid.len())]);
+                // DB is correct, use previous_pushdrop and previous_marker as-is
+            } else if !onchain_markers.is_empty() {
+                // DB backup not found on-chain but other markers exist.
+                // Take the most recent marker (highest block height) and adopt it.
+                let (best_txid, best_height) = onchain_markers.iter()
+                    .max_by_key(|(_, h)| *h)
+                    .unwrap(); // safe: onchain_markers is not empty
+                log::warn!("   ⚠️  DB backup {} not found on-chain — adopting most recent: {} (block {})",
+                    &db_txid[..16.min(db_txid.len())], &best_txid[..16.min(best_txid.len())], best_height);
+                adopt_onchain_backup(&client, best_txid, &mut previous_pushdrop, &mut previous_marker).await;
             } else {
-                log::info!("   🆕 No on-chain backup found — treating as first backup");
+                // DB backup not found and no markers on-chain (WoC might have returned empty
+                // due to network error, or markers were all consumed). Trust DB.
+                log::warn!("   ⚠️  No markers found on-chain — trusting DB backup {}", &db_txid[..16.min(db_txid.len())]);
             }
         } else {
-            log::info!("   ✅ On-chain marker matches DB — previous backup UTXOs valid");
+            // No backup in DB — discovery mode (first backup or recovered wallet)
+            if !onchain_markers.is_empty() {
+                let (best_txid, best_height) = onchain_markers.iter()
+                    .max_by_key(|(_, h)| *h)
+                    .unwrap();
+                log::info!("   🔍 No backup in DB — adopting most recent on-chain marker: {} (block {})",
+                    &best_txid[..16.min(best_txid.len())], best_height);
+                adopt_onchain_backup(&client, best_txid, &mut previous_pushdrop, &mut previous_marker).await;
+            } else {
+                log::info!("   🆕 No previous backup found — first backup");
+            }
         }
     }
 
@@ -11732,20 +11744,6 @@ pub async fn do_onchain_backup(
     }
 
     state.balance_cache.invalidate();
-
-    // Clean up stale backup outputs — previous backups that were spent by this one.
-    // These hold large PushDrop locking scripts (30-40KB each) that bloat the DB and
-    // the on-chain backup payload. They're spendable=0 and will never be needed again.
-    {
-        let db = state.database.lock().unwrap();
-        match db.connection().execute(
-            "DELETE FROM outputs WHERE spending_description = 'stale-backup'",
-            [],
-        ) {
-            Ok(count) if count > 0 => log::info!("   🧹 Cleaned up {} stale backup output(s)", count),
-            _ => {}
-        }
-    }
 
     // Recompute hash AFTER the backup transaction has modified the DB.
     // This captures the post-backup state so the next trigger sees an accurate baseline.
