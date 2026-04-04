@@ -4702,7 +4702,7 @@ async fn unpublish_certificate_core(
     state.balance_cache.invalidate();
 
     // Submit spending tx to overlay and verify removal
-    {
+    let overlay_removed = {
         let overlay_result = match crate::beef::Beef::from_bytes(&beef_bytes).and_then(|b| b.to_v1_bytes()) {
             Ok(v1_bytes) => {
                 log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay", v1_bytes.len());
@@ -4716,33 +4716,63 @@ async fn unpublish_certificate_core(
 
         // STEAK response is ambiguous for removals (overlay-express sends response before
         // Phase 3 completes, so coinsRemoved may be absent). Verify via lookup instead.
-        match overlay_result {
-            Ok(true) => log::info!("   ✅ Overlay confirmed removal (outputsToAdmit or coinsRemoved present)"),
-            Ok(false) => log::info!("   ℹ️  Overlay STEAK ambiguous — verifying removal via lookup..."),
-            Err(e) => log::warn!("   ⚠️  Overlay submission error: {} — verifying via lookup...", e),
-        }
+        let overlay_confirmed = match overlay_result {
+            Ok(true) => {
+                log::info!("   ✅ Overlay confirmed removal (outputsToAdmit or coinsRemoved present)");
+                true
+            }
+            Ok(false) => {
+                log::info!("   ℹ️  Overlay STEAK ambiguous — verifying removal via lookup...");
+                false
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Overlay submission error: {} — verifying via lookup...", e);
+                false
+            }
+        };
 
         // Verify removal by querying the overlay for this certificate
         use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
         let serial_b64 = BASE64.encode(serial_bytes);
-        match crate::overlay::lookup_published_certificate(&serial_b64).await {
-            Ok(None) => log::info!("   ✅ Overlay lookup confirms token removed (not found)"),
-            Ok(Some(_)) => log::warn!("   ⚠️  Overlay lookup still returns the token — removal may be pending or failed"),
-            Err(e) => log::warn!("   ⚠️  Overlay lookup verification failed: {}", e),
-        }
-    }
+        let overlay_removed = if overlay_confirmed {
+            true
+        } else {
+            match crate::overlay::lookup_published_certificate(&serial_b64).await {
+                Ok(None) => {
+                    log::info!("   ✅ Overlay lookup confirms token removed (not found)");
+                    true
+                }
+                Ok(Some(_)) => {
+                    log::warn!("   ⚠️  Overlay lookup still returns the token — will retry in background");
+                    false
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Overlay lookup verification failed: {} — assuming pending", e);
+                    false
+                }
+            }
+        };
 
-    // Update certificate publish status
+        overlay_removed
+    };
+
+    // Update certificate publish status based on overlay result
+    let final_status = if overlay_removed { "unpublished" } else { "unpublished_pending_overlay" };
     {
         let db = state.database.lock().unwrap();
         let cert_repo = CertificateRepository::new(db.connection());
         let _ = cert_repo.update_publish_status(
             type_bytes, serial_bytes, certifier_bytes,
-            "unpublished", None, None,
+            final_status, None, None,
         );
     }
 
-    log::info!("   ✅ Certificate unpublished successfully");
+    if overlay_removed {
+        log::info!("   ✅ Certificate unpublished successfully (overlay confirmed)");
+    } else {
+        log::info!("   ⚠️  Certificate unpublished on-chain, overlay pending — background task will retry");
+    }
+
     Ok(txid)
 }
 
@@ -5102,15 +5132,15 @@ pub async fn cleanup_overlay_certificates(
             }
             _ => {
                 // Stale! Cert is on overlay but locally unpublished, missing, or unexpected status.
-                // Strategy: try DB spending tx first, then fall back to WoC lookup.
-                let (pub_txid_db, pub_vout_db) = match &local_info {
-                    Some((_, txid, vout)) => (txid.as_deref(), *vout),
-                    None => (None, None),
-                };
+                // Strategy: try DB spending tx first (using overlay publish_txid), then WoC.
 
-                // Try 1: Find spending tx in our DB
+                // Use overlay's publish_txid (from BEEF) — the DB's publish_txid is cleared on unpublish
+                let overlay_pub_txid = cert_output.publish_txid.as_deref();
+                let overlay_pub_vout = Some(cert_output.output_index as i32);
+
+                // Try 1: Find spending tx in our DB via outputs.spent_by
                 let db_result = try_resubmit_spending_tx(
-                    &state, &serial, pub_txid_db, pub_vout_db
+                    &state, &serial, overlay_pub_txid, overlay_pub_vout
                 ).await;
 
                 match db_result {
@@ -5295,18 +5325,35 @@ async fn try_cleanup_via_woc(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    // Step 0: Check our own DB for an existing spending tx (from previous cleanup).
+    // Step 0: Check our own DB for an existing spending tx.
+    // Try two methods: (a) outputs.spent_by for the PushDrop output, (b) description search.
     let existing_spending_tx = {
         let db = state.database.lock().unwrap();
-        let publish_txid_prefix = &publish_txid[..16.min(publish_txid.len())];
-        db.connection().query_row(
-            "SELECT txid, raw_tx, status FROM transactions
-             WHERE description LIKE '%' || ?1 || '%'
-             AND status != 'failed'
-             ORDER BY created_at DESC LIMIT 1",
-            rusqlite::params![publish_txid_prefix],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?)),
-        ).ok()
+
+        // Method A: Look up the PushDrop output and follow spent_by to the spending tx
+        let via_spent_by: Option<(String, Vec<u8>, String)> = db.connection().query_row(
+            "SELECT t.txid, t.raw_tx, t.status FROM outputs o
+             JOIN transactions t ON o.spent_by = t.id
+             WHERE o.txid = ?1 AND o.vout = ?2 AND o.spendable = 0
+             AND t.status != 'failed'",
+            rusqlite::params![publish_txid, output_index as i32],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).ok();
+
+        if via_spent_by.is_some() {
+            via_spent_by
+        } else {
+            // Method B: Search by description (for cleanup-created txs)
+            let publish_txid_prefix = &publish_txid[..16.min(publish_txid.len())];
+            db.connection().query_row(
+                "SELECT txid, raw_tx, status FROM transactions
+                 WHERE description LIKE '%' || ?1 || '%'
+                 AND status != 'failed'
+                 ORDER BY created_at DESC LIMIT 1",
+                rusqlite::params![publish_txid_prefix],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?)),
+            ).ok()
+        }
     };
 
     if let Some((spending_txid, spending_raw_tx, status)) = existing_spending_tx {

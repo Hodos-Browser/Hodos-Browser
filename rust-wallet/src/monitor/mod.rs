@@ -27,6 +27,7 @@ pub mod task_sync_pending;
 pub mod task_check_peerpay;
 pub mod task_validate_utxos;
 pub mod task_backup;
+pub mod task_replay_overlay;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -50,6 +51,7 @@ struct TaskSchedule {
     check_peerpay: u64,
     validate_utxos: u64,
     backup: u64,
+    replay_overlay: u64,
 }
 
 impl Default for TaskSchedule {
@@ -65,6 +67,7 @@ impl Default for TaskSchedule {
             check_peerpay: 60,        // 1 minute
             validate_utxos: 1800,     // 30 minutes
             backup: 10800,            // 3 hours (180 minutes) — significant events trigger sooner via backup_check_needed flag
+            replay_overlay: 300,      // 5 minutes — retry overlay notification for unpublished certs
         }
     }
 }
@@ -127,7 +130,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 10 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 11 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -138,6 +141,7 @@ impl Monitor {
         info!("   TaskCheckPeerPay: every {}s", self.schedule.check_peerpay);
         info!("   TaskValidateUtxos: every {}s (all spendable outputs)", self.schedule.validate_utxos);
         info!("   TaskBackup: every {}s (if dirty)", self.schedule.backup);
+        info!("   TaskReplayOverlay: every {}s (pending overlay certs)", self.schedule.replay_overlay);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -150,6 +154,7 @@ impl Monitor {
         let mut last_check_peerpay: u64 = 0;
         let mut last_validate_utxos: u64 = 0; // 0 = runs on first tick
         let mut last_backup: u64 = Self::now_secs(); // Don't run on first tick — wait for interval
+        let mut last_replay_overlay: u64 = 0; // 0 = check on first tick
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -285,6 +290,15 @@ impl Monitor {
                         info!("   ⏳ TaskBackup deferred: {}", reason);
                     }
                     _ => {}
+                }
+            }
+
+            // TaskReplayOverlay — retry overlay notification for certs stuck in 'unpublished_pending_overlay'
+            if now - last_replay_overlay >= self.schedule.replay_overlay {
+                last_replay_overlay = now;
+                if let Err(e) = task_replay_overlay::run(&self.state, &self.client).await {
+                    warn!("   ⚠️ TaskReplayOverlay failed: {}", e);
+                    self.log_event("TaskReplayOverlay:error", Some(&e));
                 }
             }
 
