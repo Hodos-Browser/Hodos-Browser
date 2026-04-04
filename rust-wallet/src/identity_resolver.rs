@@ -22,9 +22,10 @@ use crate::beef::{Beef, ParsedTransaction};
 use crate::script::pushdrop;
 use crate::crypto::brc2::decrypt_certificate_field;
 
-/// Overlay lookup endpoints (US primary, EU fallback)
+/// Overlay lookup endpoints (US primary, EU + AP fallback)
 const OVERLAY_US: &str = "https://overlay-us-1.bsvb.tech/lookup";
 const OVERLAY_EU: &str = "https://overlay-eu-1.bsvb.tech/lookup";
+const OVERLAY_AP: &str = "https://overlay-ap-1.bsvb.tech/lookup";
 
 /// Cache TTL: 10 minutes
 const CACHE_TTL_SECS: u64 = 600;
@@ -91,12 +92,18 @@ impl IdentityResolver {
             }
         }
 
-        // Try US overlay, fall back to EU
+        // Try US overlay, fall back to EU, then AP
         let result = match self.query_overlay(OVERLAY_US, &key).await {
             Some(r) => Some(r),
             None => {
                 debug!("IdentityResolver: US overlay failed, trying EU fallback");
-                self.query_overlay(OVERLAY_EU, &key).await
+                match self.query_overlay(OVERLAY_EU, &key).await {
+                    Some(r) => Some(r),
+                    None => {
+                        debug!("IdentityResolver: EU overlay failed, trying AP fallback");
+                        self.query_overlay(OVERLAY_AP, &key).await
+                    }
+                }
             }
         };
 
@@ -123,12 +130,18 @@ impl IdentityResolver {
             return Vec::new();
         }
 
-        // Try US overlay, fall back to EU
+        // Try US overlay, fall back to EU, then AP
         let results = match self.search_overlay(OVERLAY_US, query, limit).await {
             r if !r.is_empty() => r,
             _ => {
                 debug!("IdentityResolver: US overlay search returned empty, trying EU fallback");
-                self.search_overlay(OVERLAY_EU, query, limit).await
+                match self.search_overlay(OVERLAY_EU, query, limit).await {
+                    r if !r.is_empty() => r,
+                    _ => {
+                        debug!("IdentityResolver: EU overlay search returned empty, trying AP fallback");
+                        self.search_overlay(OVERLAY_AP, query, limit).await
+                    }
+                }
             }
         };
 

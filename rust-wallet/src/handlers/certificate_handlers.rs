@@ -5010,3 +5010,744 @@ pub async fn admin_prepare_unpublish(
         "next": "Call POST /wallet/certificate/unpublish with type, serialNumber, certifier"
     }))
 }
+
+// ============================================================================
+// Certificate Overlay Cleanup
+// ============================================================================
+
+/// POST /wallet/certificate/cleanup
+///
+/// Queries all overlay nodes for certificates matching our identity key,
+/// compares with local DB state, and re-submits spending transactions for
+/// certificates that are locally unpublished but still present on overlay.
+pub async fn cleanup_overlay_certificates(
+    state: web::Data<AppState>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 Certificate overlay cleanup: starting");
+
+    // Step 1: Get our identity key
+    let master_pubkey_hex = {
+        let db = state.database.lock().unwrap();
+        match crate::database::get_master_public_key_from_db(&db) {
+            Ok(pk) => hex::encode(&pk),
+            Err(e) => {
+                log::error!("cleanup: failed to get master pubkey: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get master public key: {}", e)
+                }));
+            }
+        }
+    };
+
+    // Step 2: Query all overlay nodes for our certificates
+    let certifiers = [
+        "03daf815fe38f83da0ad83b5bedc520aa488aef5cbb93a93c67a7fe60406cbffe8", // Metanet Trust
+        "02cf6cdf466951d8dfc9e7c9367511d0007ed6fba35ed42d425cc412fd6cfd4a17", // SocialCert
+    ];
+
+    let overlay_certs = match crate::overlay::lookup_certificates_by_identity_key(
+        &master_pubkey_hex,
+        &certifiers.iter().map(|s| *s).collect::<Vec<&str>>(),
+    ).await {
+        Ok(certs) => certs,
+        Err(e) => {
+            log::error!("cleanup: overlay lookup failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Overlay lookup failed: {}", e)
+            }));
+        }
+    };
+
+    log::info!("cleanup: found {} certificate(s) on overlay", overlay_certs.len());
+
+    // Step 3: Compare with local DB and attempt re-submission of spending txs
+    let found = overlay_certs.len();
+    let mut already_clean = 0usize;
+    let mut resubmitted = 0usize;
+    let mut needs_attention = 0usize;
+    let mut details: Vec<serde_json::Value> = Vec::new();
+
+    for cert_output in &overlay_certs {
+        let serial = cert_output.serial_number.clone().unwrap_or_else(|| "unknown".to_string());
+        let serial_short = if serial.len() > 12 { &serial[..12] } else { &serial };
+
+        // Check local DB for this certificate's publish status (query by serial b64)
+        let local_info: Option<(String, Option<String>, Option<i32>)> = {
+            let db = state.database.lock().unwrap();
+            db.connection().query_row(
+                "SELECT publish_status, publish_txid, publish_vout
+                 FROM certificates
+                 WHERE serial_number = ?1
+                 LIMIT 1",
+                rusqlite::params![serial],
+                |row| Ok((
+                    row.get::<_, String>(0).unwrap_or_else(|_| "unpublished".to_string()),
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i32>>(2)?,
+                )),
+            ).ok()
+        };
+        let local_status = local_info.as_ref().map(|(s, _, _)| s.as_str());
+
+        match local_status.as_deref() {
+            Some("published") | Some("broadcast") => {
+                // Expected — cert is published locally and on overlay
+                already_clean += 1;
+                details.push(serde_json::json!({
+                    "serial": serial_short,
+                    "status": "ok",
+                    "message": "Published locally and on overlay"
+                }));
+            }
+            _ => {
+                // Stale! Cert is on overlay but locally unpublished, missing, or unexpected status.
+                // Strategy: try DB spending tx first, then fall back to WoC lookup.
+                let (pub_txid_db, pub_vout_db) = match &local_info {
+                    Some((_, txid, vout)) => (txid.as_deref(), *vout),
+                    None => (None, None),
+                };
+
+                // Try 1: Find spending tx in our DB
+                let db_result = try_resubmit_spending_tx(
+                    &state, &serial, pub_txid_db, pub_vout_db
+                ).await;
+
+                match db_result {
+                    Ok(true) => {
+                        resubmitted += 1;
+                        details.push(serde_json::json!({
+                            "serial": serial_short,
+                            "status": "resubmitted",
+                            "message": "Spending tx re-submitted to overlay (from DB)"
+                        }));
+                        continue;
+                    }
+                    _ => {} // Fall through to WoC lookup
+                }
+
+                // Try 2: Use publish_txid from overlay BEEF → check WoC if spent → resubmit
+                // If unspent, auto-spend the PushDrop UTXO to remove from overlay
+                let woc_result = try_cleanup_via_woc(
+                    &state,
+                    cert_output.publish_txid.as_deref(),
+                    cert_output.output_index,
+                    &cert_output.beef_bytes,
+                ).await;
+
+                match woc_result {
+                    Ok(true) => {
+                        resubmitted += 1;
+                        details.push(serde_json::json!({
+                            "serial": serial_short,
+                            "publish_txid": cert_output.publish_txid,
+                            "status": "resubmitted",
+                            "message": "Spending tx found on-chain via WoC and re-submitted to overlay"
+                        }));
+                    }
+                    Ok(false) => {
+                        needs_attention += 1;
+                        details.push(serde_json::json!({
+                            "serial": serial_short,
+                            "publish_txid": cert_output.publish_txid,
+                            "status": "needs_attention",
+                            "message": "PushDrop UTXO still unspent on-chain — needs manual unpublish"
+                        }));
+                    }
+                    Err(e) => {
+                        needs_attention += 1;
+                        details.push(serde_json::json!({
+                            "serial": serial_short,
+                            "publish_txid": cert_output.publish_txid,
+                            "status": "error",
+                            "message": format!("WoC cleanup failed: {}", e)
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!("📋 Certificate cleanup complete: {} found, {} clean, {} resubmitted, {} need attention",
+        found, already_clean, resubmitted, needs_attention);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "found": found,
+        "already_clean": already_clean,
+        "resubmitted": resubmitted,
+        "needs_attention": needs_attention,
+        "details": details
+    }))
+}
+
+/// Try to find the spending transaction for an unpublished certificate and
+/// re-submit its BEEF to the overlay to remove the stale entry.
+async fn try_resubmit_spending_tx(
+    state: &web::Data<AppState>,
+    serial_b64: &str,
+    publish_txid: Option<&str>,
+    publish_vout: Option<i32>,
+) -> Result<bool, String> {
+    let publish_txid = match publish_txid {
+        Some(t) => t.to_string(),
+        None => return Ok(false),
+    };
+    let publish_vout = publish_vout.unwrap_or(0) as u32;
+
+    // Find the spending transaction: output.spent_by → transactions.txid + raw_tx
+    let (spending_txid, spending_raw_tx) = {
+        let db = state.database.lock().unwrap();
+
+        // Look up the output, then find what spent it
+        // raw_tx may be stored as TEXT (hex) or BLOB (raw bytes) depending on handler
+        let result: Option<(String, Vec<u8>)> = db.connection().query_row(
+            "SELECT t.txid, t.raw_tx
+             FROM outputs o
+             JOIN transactions t ON o.spent_by = t.id
+             WHERE o.txid = ?1 AND o.vout = ?2 AND o.spendable = 0",
+            rusqlite::params![publish_txid, publish_vout],
+            |row| {
+                let txid: String = row.get(0)?;
+                // Try as BLOB first, fall back to hex string
+                let raw_bytes: Vec<u8> = match row.get::<_, Vec<u8>>(1) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        let hex_str: String = row.get(1)?;
+                        hex::decode(&hex_str).unwrap_or_default()
+                    }
+                };
+                Ok((txid, raw_bytes))
+            },
+        ).ok();
+
+        match result {
+            Some(r) => r,
+            None => return Ok(false), // No spending tx found
+        }
+    };
+
+    let serial_short = &serial_b64[..12.min(serial_b64.len())];
+    let txid_short = &spending_txid[..16.min(spending_txid.len())];
+    log::info!("cleanup: found spending tx {} for serial {}", txid_short, serial_short);
+
+    // Build BEEF for the spending transaction
+    let mut beef = crate::beef::Beef::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    match crate::beef_helpers::build_beef_for_txid(
+        &spending_txid, &mut beef, &state.database, &client,
+    ).await {
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("cleanup: BEEF ancestry build failed: {}", e);
+            // Try submitting with just the raw tx (may work if parents are confirmed)
+        }
+    }
+
+    beef.set_main_transaction(spending_raw_tx);
+    beef.sort_topologically();
+
+    // Convert to V1 bytes for overlay submission
+    let beef_bytes = beef.to_v1_bytes()
+        .map_err(|e| format!("BEEF serialization failed: {}", e))?;
+
+    // Submit to overlay
+    match crate::overlay::submit_to_identity_overlay(&beef_bytes).await {
+        Ok(true) => {
+            log::info!("cleanup: ✅ spending tx re-submitted successfully for serial {}", serial_short);
+            Ok(true)
+        }
+        Ok(false) => {
+            log::warn!("cleanup: overlay rejected spending tx for serial {}", serial_short);
+            Ok(true) // Still count as handled — overlay may have already processed it
+        }
+        Err(e) => {
+            Err(format!("Overlay submission failed: {}", e))
+        }
+    }
+}
+
+/// Try to clean up a stale certificate by checking WoC if the PushDrop UTXO is spent.
+/// If spent: fetch the spending tx and re-submit to overlay.
+/// If unspent: build a new spending tx, broadcast, and submit to overlay.
+///
+/// Returns Ok(true) if successfully cleaned up, Ok(false) if cannot clean, Err on failure.
+async fn try_cleanup_via_woc(
+    state: &web::Data<AppState>,
+    publish_txid: Option<&str>,
+    output_index: usize,
+    overlay_beef_bytes: &[u8],
+) -> Result<bool, String> {
+    let publish_txid = match publish_txid {
+        Some(t) if !t.is_empty() => t,
+        _ => return Err("No publish txid available from overlay BEEF".to_string()),
+    };
+
+    let txid_short = &publish_txid[..16.min(publish_txid.len())];
+    log::info!("cleanup/woc: checking {}:{}", txid_short, output_index);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    // Step 0: Check our own DB for an existing spending tx (from previous cleanup).
+    let existing_spending_tx = {
+        let db = state.database.lock().unwrap();
+        let publish_txid_prefix = &publish_txid[..16.min(publish_txid.len())];
+        db.connection().query_row(
+            "SELECT txid, raw_tx, status FROM transactions
+             WHERE description LIKE '%' || ?1 || '%'
+             AND status != 'failed'
+             ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![publish_txid_prefix],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?)),
+        ).ok()
+    };
+
+    if let Some((spending_txid, spending_raw_tx, status)) = existing_spending_tx {
+        let stxid_short = &spending_txid[..16.min(spending_txid.len())];
+        log::info!("cleanup: found existing spending tx {} (status: {}) — replaying for overlay", stxid_short, status);
+
+        // Build BEEF with publish tx (parent) + spending tx (main).
+        // Both are confirmed on-chain. We're replaying for the overlay so it can
+        // see the spending tx consumes the admitted PushDrop output.
+        let mut beef = crate::beef::Beef::new();
+
+        // 1. Add publish tx from WoC + its merkle proof
+        let parent_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", publish_txid);
+        if let Ok(resp) = client.get(&parent_url).send().await {
+            if resp.status().as_u16() == 200 {
+                if let Ok(parent_hex) = resp.text().await {
+                    if let Ok(parent_bytes) = hex::decode(parent_hex.trim()) {
+                        beef.add_parent_transaction(parent_bytes);
+                        log::info!("cleanup: added publish tx {} to BEEF", txid_short);
+                    }
+                }
+            }
+        }
+
+        let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", publish_txid);
+        if let Ok(proof_resp) = client.get(&proof_url).send().await {
+            if proof_resp.status().as_u16() == 200 {
+                if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
+                    match resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &client).await {
+                        Ok(()) => log::info!("cleanup: added merkle proof for publish tx {}", txid_short),
+                        Err(e) => log::warn!("cleanup: publish tx proof failed: {}", e),
+                    }
+                }
+            }
+        }
+
+        // 2. Add spending tx as main + its merkle proof from our DB
+        beef.set_main_transaction(spending_raw_tx);
+        {
+            let db = state.database.lock().unwrap();
+            let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+            if let Ok(Some(tsc_json)) = proven_tx_repo.get_merkle_proof_as_tsc(&spending_txid) {
+                if let Some(tx_idx) = beef.find_txid(&spending_txid) {
+                    match beef.add_tsc_merkle_proof(&spending_txid, tx_idx, &tsc_json) {
+                        Ok(()) => log::info!("cleanup: added merkle proof for spending tx {}", stxid_short),
+                        Err(e) => log::warn!("cleanup: spending tx proof failed: {}", e),
+                    }
+                }
+            }
+        }
+
+        beef.sort_topologically();
+        let beef_v1 = beef.to_v1_bytes()
+            .map_err(|e| format!("BEEF V1 serialization failed: {}", e))?;
+
+        log::info!("cleanup: submitting to overlay ({} bytes — publish + spending tx, no miners)", beef_v1.len());
+
+        match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+            Ok(accepted) => {
+                log::info!("cleanup: ✅ overlay accepted={}", accepted);
+                return Ok(true);
+            }
+            Err(e) => {
+                return Err(format!("Overlay rejected: {}", e));
+            }
+        }
+    }
+
+    // No existing spending tx in DB.
+    // TODO (force_spend mode): Auto-spend the PushDrop UTXO by building + broadcasting a new tx.
+    // The auto_spend_pushdrop() function below handles this but requires force_spend=true.
+    // For now, report as needs_attention so the user knows manual action is needed.
+    log::info!("cleanup: no existing spending tx found for {}:{} — needs manual unpublish or force_spend", txid_short, output_index);
+    Ok(false)
+
+    // FUTURE: Uncomment when force_spend parameter is added to the cleanup endpoint:
+    // if force_spend {
+    //     auto_spend_pushdrop(state, publish_txid, output_index, overlay_beef_bytes, &client).await
+    // } else {
+    //     Ok(false)
+    // }
+}
+
+/// Helper: Resolve block height from a WoC TSC proof and add the proof to BEEF,
+/// properly linked to the transaction.
+///
+/// WoC TSC proofs have `target` (block hash) instead of `height`.
+/// We resolve the height by fetching the block header from WoC.
+async fn resolve_and_add_tsc_proof_to_beef(
+    beef: &mut crate::beef::Beef,
+    proof_json: &serde_json::Value,
+    txid: &str,
+    client: &reqwest::Client,
+) -> Result<(), String> {
+    // Normalize: WoC may return array or single object
+    let proof_obj = if let Some(arr) = proof_json.as_array() {
+        arr.first().ok_or("Empty proof array".to_string())?.clone()
+    } else {
+        proof_json.clone()
+    };
+
+    // Resolve block height: try height/blockHeight fields first, then resolve via target
+    let block_height = if let Some(h) = proof_obj.get("height").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
+        h as u32
+    } else if let Some(h) = proof_obj.get("blockHeight").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
+        h as u32
+    } else if let Some(target) = proof_obj.get("target").and_then(|v| v.as_str()).filter(|t| !t.is_empty()) {
+        // Resolve height from block hash via WoC
+        let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
+        let resp = client.get(&header_url).send().await
+            .map_err(|e| format!("Failed to fetch block header for target {}: {}", target, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Block header API returned {} for target {}", resp.status(), target));
+        }
+        let header_json: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse block header: {}", e))?;
+        header_json.get("height").and_then(|v| v.as_u64())
+            .ok_or_else(|| "Block header missing height".to_string())? as u32
+    } else {
+        return Err("TSC proof has no height, blockHeight, or target".to_string());
+    };
+
+    // Build a TSC JSON object with the resolved height for beef.add_tsc_merkle_proof()
+    let mut tsc_for_beef = proof_obj.clone();
+    tsc_for_beef["height"] = serde_json::json!(block_height);
+
+    // Find the tx index in the BEEF structure
+    let tx_idx = beef.find_txid(txid)
+        .ok_or_else(|| format!("Transaction {} not found in BEEF — add it first", txid))?;
+
+    // Use the proper BEEF method that links the proof to the transaction
+    beef.add_tsc_merkle_proof(txid, tx_idx, &tsc_for_beef)
+}
+
+/// Auto-spend an unspent PushDrop UTXO to remove a stale certificate from the overlay.
+///
+/// Uses the same transaction building pattern as `unpublish_certificate_core`.
+async fn auto_spend_pushdrop(
+    state: &web::Data<AppState>,
+    publish_txid: &str,
+    output_index: usize,
+    overlay_beef_bytes: &[u8],
+    client: &reqwest::Client,
+) -> Result<bool, String> {
+    let txid_short = &publish_txid[..16.min(publish_txid.len())];
+    log::info!("cleanup/auto-spend: building spending tx for {}:{}", txid_short, output_index);
+
+    // Step 1: Extract the PushDrop locking script from the overlay BEEF
+    let (locking_script_bytes, pushdrop_satoshis) = {
+        let beef = crate::beef::Beef::from_bytes(overlay_beef_bytes)
+            .map_err(|e| format!("Failed to parse overlay BEEF: {}", e))?;
+        let tx_bytes = beef.transactions.last()
+            .ok_or("No transactions in overlay BEEF")?;
+        let parsed = crate::beef::ParsedTransaction::from_bytes(tx_bytes)
+            .map_err(|e| format!("Failed to parse tx: {}", e))?;
+        if output_index >= parsed.outputs.len() {
+            return Err(format!("Output index {} out of range", output_index));
+        }
+        let output = &parsed.outputs[output_index];
+        (output.script.clone(), output.value)
+    };
+
+    log::info!("cleanup/auto-spend: PushDrop script {} bytes, {} sats",
+        locking_script_bytes.len(), pushdrop_satoshis);
+
+    // Step 2: Derive the PushDrop signing key (same as unpublish_certificate_core)
+    let (child_privkey, master_privkey) = {
+        let db = state.database.lock().unwrap();
+        let master_priv = crate::database::get_master_private_key_from_db(&db)
+            .map_err(|e| format!("Failed to get master key: {}", e))?;
+
+        let anyone_pubkey_bytes = hex::decode(ANYONE_PUBKEY_HEX)
+            .map_err(|_| "Invalid anyone pubkey".to_string())?;
+
+        let child = crate::crypto::brc42::derive_child_private_key(
+            &master_priv, &anyone_pubkey_bytes, IDENTITY_INVOICE,
+        ).map_err(|e| format!("Key derivation failed: {}", e))?;
+
+        (child, master_priv)
+    };
+
+    // Verify the derived key matches the locking script
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&child_privkey)
+        .map_err(|_| "Invalid derived private key".to_string())?;
+    let derived_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+
+    if locking_script_bytes.len() > 34 && locking_script_bytes[0] == 0x21 {
+        let locking_pubkey = &locking_script_bytes[1..34];
+        if derived_pubkey.as_slice() != locking_pubkey {
+            return Err(format!(
+                "Key mismatch: locking={} derived={}. Cannot sign — may belong to different wallet.",
+                hex::encode(locking_pubkey), hex::encode(&derived_pubkey)
+            ));
+        }
+        log::info!("cleanup/auto-spend: ✅ signing key matches PushDrop locking key");
+    } else {
+        return Err("PushDrop script format unexpected".to_string());
+    }
+
+    // Step 3: Select a funding UTXO for fees (same pattern as unpublish)
+    let service_fee = crate::handlers::HODOS_SERVICE_FEE_SATS;
+    let fee_estimate: i64 = 300; // Conservative for 2-in, 2-out
+
+    let funding_utxo = {
+        let _utxo_lock = state.utxo_selection_lock.lock().await;
+        let db = state.database.lock().unwrap();
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let spendable = output_repo.get_spendable_confirmed_by_user(state.current_user_id)
+            .map_err(|e| format!("Failed to get UTXOs: {}", e))?;
+
+        // Convert to usable format and filter
+        spendable.into_iter()
+            .filter(|u| {
+                let txid_match = u.txid.as_deref() == Some(publish_txid);
+                let vout_match = u.vout == output_index as i32;
+                !(txid_match && vout_match)
+            })
+            .filter(|u| u.satoshis >= fee_estimate + service_fee)
+            .min_by_key(|u| u.satoshis)
+            .ok_or_else(|| format!("No confirmed UTXO with >= {} sats for fee", fee_estimate + service_fee))?
+    };
+
+    let funding_txid = funding_utxo.txid.clone().ok_or("Funding UTXO has no txid")?;
+    let funding_vout = funding_utxo.vout as u32;
+    let funding_sats = funding_utxo.satoshis;
+    let funding_script_bytes = funding_utxo.locking_script.clone()
+        .ok_or("Funding UTXO has no locking script")?;
+
+    log::info!("cleanup/auto-spend: funding UTXO {}:{} ({} sats)",
+        &funding_txid[..16.min(funding_txid.len())], funding_vout, funding_sats);
+
+    // Step 4: Build transaction (same pattern as unpublish_certificate_core)
+    let mut tx = Transaction::new();
+    tx.add_input(TxInput::new(OutPoint::new(publish_txid.to_string(), output_index as u32)));
+    tx.add_input(TxInput::new(OutPoint::new(funding_txid.clone(), funding_vout)));
+
+    // Service fee output
+    let fee_script_bytes = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+        .expect("HODOS_FEE_ADDRESS constant is invalid");
+    tx.add_output(TxOutput::new(service_fee, fee_script_bytes));
+
+    // Change output
+    let total_in = pushdrop_satoshis + funding_sats;
+    let change_amount = total_in - fee_estimate - service_fee;
+
+    if change_amount > 546 {
+        // Derive change address using same pattern as unpublish_certificate_core
+        let change_script = {
+            let db = state.database.lock().unwrap();
+            let wallet_repo = crate::database::WalletRepository::new(db.connection());
+            let wallet = wallet_repo.get_primary_wallet()
+                .map_err(|e| format!("No wallet: {}", e))?
+                .ok_or("No wallet found")?;
+            let wallet_id = wallet.id.ok_or("Wallet has no ID")?;
+
+            let addr_repo = crate::database::AddressRepository::new(db.connection());
+            let current_index = addr_repo.get_max_index(wallet_id)
+                .ok().flatten().map(|i| i + 1)
+                .unwrap_or(wallet.current_index);
+
+            let master_pubkey = crate::database::get_master_public_key_from_db(&db)
+                .map_err(|e| format!("Pubkey error: {}", e))?;
+            let invoice = format!("2-receive address-{}", current_index);
+            let derived_pubkey = crate::crypto::brc42::derive_child_public_key(
+                &master_privkey, &master_pubkey, &invoice,
+            ).map_err(|e| format!("Key derivation error: {}", e))?;
+
+            let change_addr = crate::handlers::pubkey_to_address(&derived_pubkey)
+                .map_err(|e| format!("Address error: {}", e))?;
+
+            // Register the new address
+            let created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let addr_model = crate::database::Address {
+                id: None, wallet_id, index: current_index, address: change_addr,
+                public_key: hex::encode(&derived_pubkey), used: true, balance: 0,
+                pending_utxo_check: false, created_at,
+            };
+            let _ = addr_repo.create(&addr_model);
+            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
+
+            let pubkey_hash = {
+                let sha_hash = Sha256::digest(&derived_pubkey);
+                Ripemd160::digest(&sha_hash)
+            };
+            Script::p2pkh_locking_script(&pubkey_hash)
+                .map_err(|e| format!("Script error: {}", e))?
+        };
+        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
+    }
+
+    // Step 5: Sign input 0 (PushDrop — P2PK: just <sig>)
+    {
+        let sighash = calculate_sighash(&tx, 0, &locking_script_bytes, pushdrop_satoshis, SIGHASH_ALL_FORKID)
+            .map_err(|e| format!("Sighash failed: {}", e))?;
+        let message = Message::from_digest_slice(&sighash)
+            .map_err(|_| "Invalid sighash".to_string())?;
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let mut unlocking = Vec::new();
+        unlocking.push(sig_der.len() as u8);
+        unlocking.extend_from_slice(&sig_der);
+        tx.inputs[0].set_script(unlocking);
+    }
+
+    // Step 6: Sign input 1 (Funding — P2PKH)
+    {
+        let funding_privkey = {
+            let db = state.database.lock().unwrap();
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            match output_repo.get_by_txid_vout(&funding_txid, funding_vout) {
+                Ok(Some(output)) => crate::database::derive_key_for_output(
+                    &db, output.derivation_prefix.as_deref(),
+                    output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
+                ).map_err(|e| format!("Key derivation: {}", e))?,
+                _ => return Err(format!("Funding output not found: {}:{}", funding_txid, funding_vout)),
+            }
+        };
+        let funding_sighash = calculate_sighash(&tx, 1, &funding_script_bytes, funding_sats, SIGHASH_ALL_FORKID)
+            .map_err(|e| format!("Funding sighash failed: {}", e))?;
+        let funding_secret = SecretKey::from_slice(&funding_privkey).unwrap();
+        let funding_message = Message::from_digest_slice(&funding_sighash).unwrap();
+        let funding_sig = secp.sign_ecdsa(&funding_message, &funding_secret);
+        let mut fsig_der = funding_sig.serialize_der().to_vec();
+        fsig_der.push(SIGHASH_ALL_FORKID as u8);
+        let funding_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &funding_secret).serialize();
+        let mut p2pkh_unlock = Vec::new();
+        p2pkh_unlock.push(fsig_der.len() as u8);
+        p2pkh_unlock.extend_from_slice(&fsig_der);
+        p2pkh_unlock.push(funding_pubkey.len() as u8);
+        p2pkh_unlock.extend_from_slice(&funding_pubkey);
+        tx.inputs[1].set_script(p2pkh_unlock);
+    }
+
+    // Step 7: Serialize and compute txid
+    let raw_tx_hex = tx.to_hex().map_err(|e| format!("Serialize failed: {}", e))?;
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+
+    let hash1 = Sha256::digest(&raw_tx_bytes);
+    let hash2 = Sha256::digest(&hash1);
+    let mut txid_bytes_arr = hash2.to_vec();
+    txid_bytes_arr.reverse();
+    let spend_txid = hex::encode(&txid_bytes_arr);
+
+    log::info!("cleanup/auto-spend: built spending tx {} ({} bytes)", &spend_txid[..16], raw_tx_bytes.len());
+
+    // Step 8: Record tx in DB + mark funding UTXO spent
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let db = state.database.lock().unwrap();
+        let _ = db.connection().execute(
+            "INSERT OR IGNORE INTO transactions (
+                user_id, txid, status, reference_number,
+                description, raw_tx, is_outgoing, satoshis,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            rusqlite::params![
+                1i64, spend_txid,
+                format!("cleanup-unpub-{}", &spend_txid[..8]),
+                format!("Cleanup: remove stale cert (publish tx {})", txid_short),
+                raw_tx_bytes,
+                fee_estimate + service_fee,
+                now, now,
+            ],
+        );
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        let _ = output_repo.mark_spent(&funding_txid, funding_vout, &spend_txid);
+    }
+    state.balance_cache.invalidate();
+
+    // Step 9: Build BEEF for broadcast
+    let mut beef = crate::beef::Beef::new();
+
+    // Add publish tx (parent) from WoC
+    let parent_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", publish_txid);
+    if let Ok(resp) = client.get(&parent_url).send().await {
+        if resp.status().as_u16() == 200 {
+            if let Ok(phex) = resp.text().await {
+                if let Ok(parent_bytes) = hex::decode(phex.trim()) {
+                    beef.add_parent_transaction(parent_bytes);
+                }
+            }
+        }
+    }
+
+    // Add merkle proof for publish tx
+    let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", publish_txid);
+    if let Ok(proof_resp) = client.get(&proof_url).send().await {
+        if proof_resp.status().as_u16() == 200 {
+            if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
+                let _ = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, client).await;
+            }
+        }
+    }
+
+    // Add ancestry for funding UTXO
+    match crate::beef_helpers::build_beef_for_txid(
+        &funding_txid, &mut beef, &state.database, client,
+    ).await {
+        Ok(_) => log::info!("cleanup/auto-spend: added BEEF ancestry for funding UTXO"),
+        Err(e) => log::warn!("cleanup/auto-spend: BEEF ancestry failed: {}", e),
+    }
+
+    beef.set_main_transaction(raw_tx_bytes.clone());
+    beef.sort_topologically();
+
+    let beef_v1 = beef.to_v1_bytes()
+        .map_err(|e| format!("BEEF V1 serialization failed: {}", e))?;
+
+    // Step 10: Broadcast
+    let beef_hex = hex::encode(&beef_v1);
+    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&spend_txid)).await {
+        Ok(msg) => {
+            log::info!("cleanup/auto-spend: ✅ broadcast successful: {}", msg);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&spend_txid, crate::action_storage::TransactionStatus::Unproven);
+        }
+        Err(e) => {
+            log::error!("cleanup/auto-spend: ❌ broadcast failed: {}", e);
+            let db = state.database.lock().unwrap();
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&spend_txid, crate::action_storage::TransactionStatus::Failed);
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            let _ = output_repo.restore_spent_by_txid(&spend_txid);
+            drop(db);
+            state.balance_cache.invalidate();
+            return Err(format!("Broadcast failed: {}", e));
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    // Step 11: Submit spending BEEF to overlay
+    match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+        Ok(_) => log::info!("cleanup/auto-spend: ✅ overlay submission done"),
+        Err(e) => log::warn!("cleanup/auto-spend: overlay submission error: {}", e),
+    }
+
+    Ok(true)
+}

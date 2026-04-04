@@ -638,6 +638,7 @@ async fn main() -> std::io::Result<()> {
             .route("/discoverByAttributes", web::post().to(handlers::discover_by_attributes))  // Group C - Part 4
             .route("/wallet/certificate/publish", web::post().to(handlers::publish_certificate))  // Certificate publish to overlay
             .route("/wallet/certificate/unpublish", web::post().to(handlers::unpublish_certificate))  // Certificate unpublish from overlay
+            .route("/wallet/certificate/cleanup", web::post().to(handlers::cleanup_overlay_certificates))  // Cleanup stale certs on overlay
             .route("/admin/prepare-unpublish", web::post().to(handlers::admin_prepare_unpublish))  // Admin: populate DB for unpublish
 
             // Authentication endpoints

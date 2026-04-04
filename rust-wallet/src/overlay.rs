@@ -22,9 +22,12 @@ use std::time::{Duration, Instant};
 
 /// Default SLAP trackers for SHIP host discovery (mainnet).
 /// These are the well-known overlay nodes that index SHIP advertisements.
+/// Matches the BSV SDK's DEFAULT_SLAP_TRACKERS list.
 const DEFAULT_SLAP_TRACKERS: &[&str] = &[
     "https://overlay-us-1.bsvb.tech",
     "https://overlay-eu-1.bsvb.tech",
+    "https://overlay-ap-1.bsvb.tech",
+    "https://users.bapp.dev",
 ];
 
 /// Hardcoded fallback hosts per topic (used when SHIP discovery fails).
@@ -34,10 +37,12 @@ fn fallback_hosts_for_topic(topic: &str) -> Vec<&'static str> {
         "tm_identity" => vec![
             "https://overlay-us-1.bsvb.tech",
             "https://overlay-eu-1.bsvb.tech",
+            "https://overlay-ap-1.bsvb.tech",
         ],
         _ => vec![
             "https://overlay-us-1.bsvb.tech",
             "https://overlay-eu-1.bsvb.tech",
+            "https://overlay-ap-1.bsvb.tech",
         ],
     }
 }
@@ -51,8 +56,8 @@ const SHIP_CACHE_TTL: Duration = Duration::from_secs(300);
 /// SHIP discovery timeout per tracker
 const SHIP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Overlay submission timeout
-const SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Overlay submission timeout per host (reduced from 30s since we now submit to 3+ hosts)
+const SUBMIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ═══════════════════════════════════════════════════════════════
 // SHIP Host Discovery Cache
@@ -96,18 +101,18 @@ pub async fn submit_to_topic(topic: &str, beef_bytes: &[u8]) -> Result<bool, Str
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    // Step 1: Discover hosts via SHIP protocol
+    // Step 1: Merge SHIP-discovered hosts with hardcoded fallbacks (SDK pattern).
+    // Overlays don't auto-sync (no GASP), so we must submit to ALL known hosts.
     let discovered_hosts = discover_hosts_for_topic(topic).await;
+    let fallbacks = fallback_hosts_for_topic(topic);
 
-    let hosts: Vec<String> = if !discovered_hosts.is_empty() {
-        info!("Overlay: SHIP discovered {} host(s) for topic '{}'", discovered_hosts.len(), topic);
-        discovered_hosts
-    } else {
-        // Step 2: Fall back to hardcoded hosts
-        let fallbacks = fallback_hosts_for_topic(topic);
-        warn!("Overlay: SHIP discovery found no hosts for '{}', using {} hardcoded fallback(s)", topic, fallbacks.len());
-        fallbacks.into_iter().map(String::from).collect()
-    };
+    let mut host_set: HashSet<String> = HashSet::new();
+    for h in &discovered_hosts { host_set.insert(h.clone()); }
+    for h in &fallbacks { host_set.insert(h.to_string()); }
+    let hosts: Vec<String> = host_set.into_iter().collect();
+
+    info!("Overlay: {} host(s) for '{}' ({} discovered + {} fallback, {} unique)",
+        hosts.len(), topic, discovered_hosts.len(), fallbacks.len(), hosts.len());
 
     // Step 3: Submit to ALL hosts (overlays are idempotent, more coverage is better)
     let mut any_accepted = false;
@@ -158,13 +163,13 @@ pub async fn lookup_published_certificate(
         }
     });
 
-    // Use discovered hosts for lookups too, with fallback
-    let hosts = discover_hosts_for_service("ls_identity").await;
-    let hosts: Vec<String> = if !hosts.is_empty() {
-        hosts
-    } else {
-        fallback_hosts_for_topic(TOPIC_IDENTITY).into_iter().map(String::from).collect()
-    };
+    // Merge discovered + fallback hosts for lookups (same as submit pattern)
+    let discovered = discover_hosts_for_service("ls_identity").await;
+    let fallbacks = fallback_hosts_for_topic(TOPIC_IDENTITY);
+    let mut host_set: HashSet<String> = HashSet::new();
+    for h in discovered { host_set.insert(h); }
+    for h in fallbacks { host_set.insert(h.to_string()); }
+    let hosts: Vec<String> = host_set.into_iter().collect();
 
     for host in &hosts {
         let url = format!("{}/lookup", host);
@@ -201,18 +206,23 @@ pub async fn lookup_published_certificate(
         if let Some(outputs) = outputs {
             if !outputs.is_empty() {
                 if let Some(first) = outputs.first() {
-                    let beef_b64 = first.get("beef").and_then(|v| v.as_str()).unwrap_or("");
                     let output_index = first.get("outputIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
+                    // BEEF can be base64 string OR number array (SDK format)
                     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-                    match BASE64.decode(beef_b64) {
-                        Ok(beef_bytes) => {
-                            info!("Overlay lookup: found certificate ({} bytes BEEF, outputIndex {})", beef_bytes.len(), output_index);
-                            return Ok(Some((beef_bytes, output_index)));
-                        }
-                        Err(e) => {
-                            warn!("Overlay lookup: invalid BEEF base64: {}", e);
-                        }
+                    let beef_bytes = if let Some(s) = first.get("beef").and_then(|v| v.as_str()) {
+                        BASE64.decode(s).ok()
+                    } else if let Some(arr) = first.get("beef").and_then(|v| v.as_array()) {
+                        Some(arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect::<Vec<u8>>())
+                    } else {
+                        None
+                    };
+
+                    if let Some(beef_bytes) = beef_bytes.filter(|b| !b.is_empty()) {
+                        info!("Overlay lookup: found certificate ({} bytes BEEF, outputIndex {})", beef_bytes.len(), output_index);
+                        return Ok(Some((beef_bytes, output_index)));
+                    } else {
+                        warn!("Overlay lookup: could not decode BEEF from response");
                     }
                 }
             }
@@ -223,6 +233,177 @@ pub async fn lookup_published_certificate(
     }
 
     Err("All overlay hosts failed during lookup".to_string())
+}
+
+/// Represents a certificate found on the overlay network.
+#[derive(Debug, Clone)]
+pub struct OverlayCertificateOutput {
+    pub beef_bytes: Vec<u8>,
+    pub output_index: usize,
+    pub serial_number: Option<String>,
+    pub publish_txid: Option<String>,
+    pub host: String,
+}
+
+/// Query ALL overlay nodes for certificates matching a given identity key.
+///
+/// Returns all certificate outputs found across all nodes, deduplicated by serialNumber.
+/// Used for stale certificate cleanup — need to see everything the overlay has for us.
+pub async fn lookup_certificates_by_identity_key(
+    identity_key_hex: &str,
+    certifiers: &[&str],
+) -> Result<Vec<OverlayCertificateOutput>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let body = serde_json::json!({
+        "service": "ls_identity",
+        "query": {
+            "identityKey": identity_key_hex,
+            "certifiers": certifiers
+        }
+    });
+
+    // Merge discovered + fallback hosts
+    let discovered = discover_hosts_for_service("ls_identity").await;
+    let fallbacks = fallback_hosts_for_topic(TOPIC_IDENTITY);
+    let mut host_set: HashSet<String> = HashSet::new();
+    for h in discovered { host_set.insert(h); }
+    for h in fallbacks { host_set.insert(h.to_string()); }
+    let hosts: Vec<String> = host_set.into_iter().collect();
+
+    let mut results: Vec<OverlayCertificateOutput> = Vec::new();
+    let mut seen_serials: HashSet<String> = HashSet::new();
+
+    for host in &hosts {
+        let url = format!("{}/lookup", host);
+        debug!("Overlay cleanup lookup: POST {} for identityKey {}", url, &identity_key_hex[..16]);
+
+        let response = match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Overlay cleanup lookup failed for {}: {}", host, e);
+                continue;
+            }
+        };
+
+        if response.status().as_u16() != 200 {
+            warn!("Overlay cleanup lookup returned HTTP {} from {}", response.status(), host);
+            continue;
+        }
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("Overlay cleanup lookup JSON parse failed from {}: {}", host, e);
+                continue;
+            }
+        };
+
+        let outputs = match json.get("outputs").and_then(|v| v.as_array()) {
+            Some(o) => o,
+            None => continue,
+        };
+
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        for output in outputs {
+            let output_index = output.get("outputIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+            // BEEF can be base64 string OR number array (SDK format)
+            let beef_data = match output.get("beef") {
+                Some(d) => d,
+                None => continue,
+            };
+            let beef_bytes = if let Some(s) = beef_data.as_str() {
+                match BASE64.decode(s) {
+                    Ok(b) if !b.is_empty() => b,
+                    _ => continue,
+                }
+            } else if let Some(arr) = beef_data.as_array() {
+                let bytes: Vec<u8> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+                if bytes.is_empty() { continue; }
+                bytes
+            } else {
+                continue;
+            };
+
+            // Extract serialNumber and publish txid from the BEEF
+            let (serial, publish_txid) = extract_cert_info_from_beef(&beef_bytes, output_index);
+            let serial_str = serial.clone().unwrap_or_default();
+
+            // Dedup by serialNumber
+            if !serial_str.is_empty() && seen_serials.contains(&serial_str) {
+                continue;
+            }
+            if !serial_str.is_empty() {
+                seen_serials.insert(serial_str);
+            }
+
+            results.push(OverlayCertificateOutput {
+                beef_bytes,
+                output_index,
+                serial_number: serial,
+                publish_txid,
+                host: host.clone(),
+            });
+        }
+
+        info!("Overlay cleanup: found {} certificate(s) on {}", outputs.len(), host);
+    }
+
+    info!("Overlay cleanup: {} unique certificate(s) found across all nodes", results.len());
+    Ok(results)
+}
+
+/// Extract the serialNumber and publish txid from a certificate embedded in BEEF.
+/// Returns (serial_number, publish_txid) — either or both may be None.
+fn extract_cert_info_from_beef(beef_bytes: &[u8], output_index: usize) -> (Option<String>, Option<String>) {
+    let beef = match crate::beef::Beef::from_bytes(beef_bytes) {
+        Ok(b) => b,
+        Err(_) => return (None, None),
+    };
+    let tx_bytes = match beef.transactions.last() {
+        Some(b) => b,
+        None => return (None, None),
+    };
+
+    // Compute txid from the raw transaction bytes (double SHA-256, reversed)
+    use sha2::{Sha256, Digest};
+    let hash1 = Sha256::digest(tx_bytes);
+    let hash2 = Sha256::digest(&hash1);
+    let mut txid_bytes = hash2.to_vec();
+    txid_bytes.reverse();
+    let publish_txid = Some(hex::encode(&txid_bytes));
+
+    let parsed_tx = match crate::beef::ParsedTransaction::from_bytes(tx_bytes) {
+        Ok(t) => t,
+        Err(_) => return (None, publish_txid),
+    };
+    if output_index >= parsed_tx.outputs.len() {
+        return (None, publish_txid);
+    }
+
+    let script_bytes = &parsed_tx.outputs[output_index].script;
+    let fields = match decode_pushdrop_fields(script_bytes) {
+        Some(f) if !f.is_empty() => f,
+        _ => return (None, publish_txid),
+    };
+
+    // Field 0 is the certificate JSON
+    let serial = serde_json::from_slice::<serde_json::Value>(&fields[0])
+        .ok()
+        .and_then(|j| j.get("serialNumber").and_then(|v| v.as_str()).map(String::from));
+
+    (serial, publish_txid)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -356,10 +537,8 @@ async fn query_ship_advertisements(topics: &[String]) -> HashMap<String, HashSet
             }
         }
 
-        // If we got results from this tracker, no need to query others
-        if !all_hosts.is_empty() {
-            break;
-        }
+        // Query ALL trackers and merge results (matching SDK behavior).
+        // Different trackers may have different SHIP advertisements.
     }
 
     if !all_hosts.is_empty() {
@@ -609,8 +788,14 @@ async fn submit_beef_to_host(
                     coins_removed_present,
                 );
 
+                let retained_count = coins_to_retain.map(|a| a.len()).unwrap_or(0);
+
                 if admitted_count > 0 {
                     info!("Overlay: ✅ {} new output(s) admitted for '{}' on {}", admitted_count, topic, host);
+                    return Ok(true);
+                }
+                if retained_count > 0 {
+                    info!("Overlay: ✅ {} coin(s) retained for '{}' on {}", retained_count, topic, host);
                     return Ok(true);
                 }
                 if removed_count > 0 {

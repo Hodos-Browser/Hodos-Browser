@@ -19,6 +19,7 @@ pub use certificate_handlers::{
     publish_certificate,
     unpublish_certificate,
     admin_prepare_unpublish,
+    cleanup_overlay_certificates,
 };
 
 // ============================================================================
