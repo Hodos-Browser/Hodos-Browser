@@ -1,13 +1,14 @@
 //! TaskBackup — Periodic on-chain wallet backup
 //!
 //! Triggers an on-chain backup via the HTTP endpoint. The backup handler
-//! uses hash comparison to skip if nothing changed. Skips silently if:
-//! - No wallet exists
-//! - Wallet is locked (PIN not entered)
-//! - Insufficient funds (< 3000 sats)
-//! - No changes since last backup (hash match)
+//! uses hash comparison to skip if nothing changed. Returns BackupOutcome
+//! to let the Monitor decide whether to clear the "soon" flag.
 //!
-//! Interval: 30 minutes (1800s)
+//! Outcomes:
+//! - Broadcast: backup was broadcast on-chain → clear flag
+//! - Skipped: hash unchanged, nothing to back up → clear flag
+//! - Deferred: precondition not met (no wallet, locked, DB busy, insufficient funds) → keep flag
+//! - Failed: backup attempted but errored → keep flag
 
 use actix_web::web;
 use log::{info, warn};
@@ -17,40 +18,46 @@ use crate::database::{WalletRepository, OutputRepository};
 /// Minimum balance required to attempt a backup (token + marker + fee buffer)
 const MIN_BACKUP_BALANCE_SATS: i64 = 3000;
 
-pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
+/// Outcome of a backup attempt — determines whether the "soon" flag is cleared.
+pub enum BackupOutcome {
+    /// Backup transaction was broadcast on-chain
+    Broadcast(String),
+    /// Hash unchanged — no changes since last backup
+    Skipped,
+    /// Precondition not met — retry on next tick (DB busy, locked, no wallet, insufficient funds)
+    Deferred(String),
+    /// Backup attempted but failed — retry on next tick
+    Failed(String),
+}
+
+impl BackupOutcome {
+    /// Whether the backup state is current (flag can be cleared)
+    pub fn is_current(&self) -> bool {
+        matches!(self, BackupOutcome::Broadcast(_) | BackupOutcome::Skipped)
+    }
+}
+
+pub async fn run(state: &web::Data<AppState>) -> BackupOutcome {
     // Quick precondition checks (one DB lock, no network)
     {
         let db = match state.database.try_lock() {
             Ok(db) => db,
-            Err(_) => return Ok(()), // DB busy, skip
+            Err(_) => return BackupOutcome::Deferred("DB busy".into()),
         };
 
         let wallet_repo = WalletRepository::new(db.connection());
         if wallet_repo.get_primary_wallet().ok().flatten().is_none() {
-            return Ok(()); // No wallet
+            return BackupOutcome::Deferred("No wallet".into());
         }
 
         if !db.is_unlocked() {
-            return Ok(()); // Locked
+            return BackupOutcome::Deferred("Wallet locked".into());
         }
 
         let output_repo = OutputRepository::new(db.connection());
         let balance = output_repo.calculate_total_balance().unwrap_or(0);
         if balance < MIN_BACKUP_BALANCE_SATS {
-            return Ok(()); // Insufficient funds
-        }
-
-        // Don't backup while transactions are still settling (nosend/sending/unproven).
-        // A backup taken during this window could capture ghost outputs from txs that
-        // never make it on-chain, leading to corrupt recovery state.
-        let pending_count: i64 = db.connection().query_row(
-            "SELECT COUNT(*) FROM transactions WHERE status IN ('nosend', 'sending', 'unproven')",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
-        if pending_count > 0 {
-            info!("💾 TaskBackup: ⏳ {} pending transaction(s) — deferring backup until settled", pending_count);
-            return Ok(());
+            return BackupOutcome::Deferred("Insufficient funds".into());
         }
     } // DB lock dropped
 
@@ -71,22 +78,28 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
             if resp.status().is_success() {
                 let body: serde_json::Value = resp.json().await.unwrap_or_default();
                 if body["success"].as_bool() == Some(true) {
-                    let txid = body["txid"].as_str().unwrap_or("unknown");
+                    let txid = body["txid"].as_str().unwrap_or("unknown").to_string();
                     info!("💾 TaskBackup: ✅ backup broadcast: {}", txid);
+                    BackupOutcome::Broadcast(txid)
                 } else {
                     let err = body["error"].as_str().unwrap_or("unknown");
                     if err.contains("skipped") {
                         // Hash unchanged — normal, don't log as warning
+                        BackupOutcome::Skipped
                     } else {
                         warn!("💾 TaskBackup: ⚠️  {}", err);
+                        BackupOutcome::Failed(err.to_string())
                     }
                 }
+            } else {
+                let status = resp.status();
+                warn!("💾 TaskBackup: ⚠️  HTTP {}", status);
+                BackupOutcome::Failed(format!("HTTP {}", status))
             }
         }
         Err(e) => {
             warn!("💾 TaskBackup: ⚠️  HTTP error: {}", e);
+            BackupOutcome::Failed(format!("HTTP error: {}", e))
         }
     }
-
-    Ok(())
 }

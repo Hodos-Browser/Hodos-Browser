@@ -59,22 +59,45 @@ pub struct AppState {
     pub current_user_id: i64,  // Default user ID for all operations (multi-user foundation, Phase 3)
     pub shutdown: tokio_util::sync::CancellationToken,  // Graceful shutdown signal (Phase 8D)
     pub sync_status: Arc<std::sync::RwLock<handlers::SyncStatus>>,  // Recovery sync progress
-    pub backup_check_needed: Arc<Mutex<Option<i64>>>,  // Timestamp when a significant event requested backup check (3-min delay before checking)
+    pub backup_check_needed: Arc<Mutex<Option<(i64, i64)>>>,  // (first_event_ts, latest_event_ts) — backup runs 3 min after latest, hard cap 10 min from first
+    pub recovery_just_completed: Arc<std::sync::atomic::AtomicBool>,  // Set after on-chain recovery — triggers immediate TaskCheckForProofs + TaskValidateUtxos
 }
 
 impl AppState {
     /// Signal that a significant wallet event occurred and backup should be checked soon.
-    /// The monitor task will check the DB hash after a 3-minute delay.
+    /// The monitor task will check the DB hash after a 3-minute delay from the LATEST event.
+    ///
+    /// Timer behavior:
+    /// - First event: sets timestamp, 3-minute countdown starts
+    /// - Subsequent events: resets timestamp to now (extends the 3-min window)
+    /// - Hard cap: 10 minutes from the FIRST event (prevents infinite deferral)
+    ///
+    /// The tuple is (first_event_ts, latest_event_ts). Monitor checks: now - latest >= 180.
     pub fn request_backup_check(&self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         if let Ok(mut guard) = self.backup_check_needed.lock() {
-            // Only set if not already pending (don't push back the timer)
-            if guard.is_none() {
-                *guard = Some(now);
-                log::info!("   📋 Backup check requested — will check in ~3 minutes");
+            match *guard {
+                None => {
+                    // First event — start the countdown
+                    *guard = Some((now, now));
+                    log::info!("   📋 Backup check requested — will run in ~3 minutes");
+                }
+                Some((first_ts, _)) => {
+                    // Subsequent event — reset timer but respect 10-min cap from first event
+                    let cap = first_ts + 600; // 10-minute hard cap
+                    if now + 180 <= cap {
+                        // Still within cap — extend the 3-min window from now
+                        *guard = Some((first_ts, now));
+                        let remaining = cap - now;
+                        log::info!("   📋 Backup timer extended (new event) — hard cap in {}s", remaining);
+                    } else {
+                        // Past the cap — don't push further, let it fire
+                        log::info!("   📋 Backup timer at cap — will fire on next check");
+                    }
+                }
             }
         }
     }
@@ -464,6 +487,7 @@ async fn main() -> std::io::Result<()> {
         shutdown: shutdown_token.clone(),  // Graceful shutdown signal (Phase 8D)
         sync_status: Arc::new(std::sync::RwLock::new(handlers::SyncStatus::default())),
         backup_check_needed: Arc::new(Mutex::new(None)),
+        recovery_just_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");

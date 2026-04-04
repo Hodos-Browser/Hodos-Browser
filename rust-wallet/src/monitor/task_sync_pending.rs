@@ -22,8 +22,8 @@ const RECONCILE_GRACE_PERIOD_SECS: i64 = 600;
 /// Stale pending addresses older than this are cleared without checking
 const PENDING_TIMEOUT_HOURS: i64 = 2160; // 90 days
 
-/// Unconfirmed UTXOs older than this are considered failed (never mined)
-const UNCONFIRMED_TIMEOUT_SECS: i64 = 30 * 60; // 30 minutes
+/// Unconfirmed UTXOs older than this trigger a WoC verification check
+const UNCONFIRMED_CHECK_SECS: i64 = 30 * 60; // 30 minutes
 
 /// Run the TaskSyncPending task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
@@ -267,36 +267,116 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     }
 
     // Step 6: Check for stale unconfirmed outputs (> 30 min without confirmation)
-    // If a received UTXO was only seen in mempool and never confirmed, create a
-    // failure notification and remove the output.
+    // Before deleting, verify with WoC whether the tx is actually gone from mempool
+    // or just slow to confirm (e.g., large backup txs with minimum fee rate).
     let mut failed_unconfirmed = 0u32;
-    {
+
+    // 6a: Read stale candidates from DB (brief lock)
+    let stale_candidates: Vec<(String, u32, i64)> = {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let output_repo = OutputRepository::new(db.connection());
+        output_repo.get_stale_unconfirmed(state.current_user_id, UNCONFIRMED_CHECK_SECS)
+            .unwrap_or_default()
+    }; // DB lock dropped
 
-        let stale = output_repo.get_stale_unconfirmed(state.current_user_id, UNCONFIRMED_TIMEOUT_SECS)
-            .map_err(|e| format!("Failed to get stale unconfirmed: {}", e))?;
+    if !stale_candidates.is_empty() {
+        // 6b: Check each unique txid against WoC (no DB lock held)
+        // Deduplicate by txid — multiple outputs can share the same tx
+        let unique_txids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            stale_candidates.iter()
+                .filter(|(txid, _, _)| seen.insert(txid.clone()))
+                .map(|(txid, _, _)| txid.clone())
+                .collect()
+        };
 
-        for (txid, vout, satoshis) in &stale {
-            // Insert red failure notification
-            if let Err(e) = PeerPayRepository::insert_failure_notification(
-                db.connection(), txid, *vout as i64, *satoshis, price_usd_cents,
-            ) {
-                warn!("   Failed to insert failure notification for {}:{}: {}", txid, vout, e);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        // Track which txids are confirmed, still pending, or truly gone
+        let mut confirmed_txids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut still_pending_txids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // txids not in either set = truly failed (404 from WoC)
+
+        for txid in &unique_txids {
+            let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    // Tx exists on WoC — check if confirmed
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            let confirmations = body.get("confirmations")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            if confirmations > 0 {
+                                info!("   ✅ Stale tx {}... is now confirmed ({} confirmations)",
+                                    &txid[..std::cmp::min(16, txid.len())], confirmations);
+                                confirmed_txids.insert(txid.clone());
+                            } else {
+                                info!("   ⏳ Stale tx {}... still in mempool — not deleting",
+                                    &txid[..std::cmp::min(16, txid.len())]);
+                                still_pending_txids.insert(txid.clone());
+                            }
+                        }
+                        Err(_) => {
+                            // Got 200 but couldn't parse — tx exists, treat as pending
+                            still_pending_txids.insert(txid.clone());
+                        }
+                    }
+                }
+                Ok(resp) if resp.status().as_u16() == 404 => {
+                    // Tx truly gone from mempool — will be deleted below
+                    warn!("   ❌ Stale tx {}... not found on WoC (404) — confirmed failed",
+                        &txid[..std::cmp::min(16, txid.len())]);
+                }
+                Ok(resp) => {
+                    // Unexpected status — don't delete, be safe
+                    warn!("   ⚠️  WoC returned {} for tx {}... — skipping",
+                        resp.status(), &txid[..std::cmp::min(16, txid.len())]);
+                    still_pending_txids.insert(txid.clone());
+                }
+                Err(e) => {
+                    // Network error — don't delete, be safe
+                    warn!("   ⚠️  WoC check failed for tx {}...: {} — skipping",
+                        &txid[..std::cmp::min(16, txid.len())], e);
+                    still_pending_txids.insert(txid.clone());
+                }
             }
-
-            // Auto-dismiss the corresponding green receive notification
-            let _ = PeerPayRepository::dismiss_by_txid_prefix(db.connection(), txid);
-
-            // Remove the unconfirmed output
-            if let Err(e) = output_repo.delete_unconfirmed_output(txid, *vout) {
-                warn!("   Failed to delete unconfirmed output {}:{}: {}", txid, vout, e);
-            }
-            failed_unconfirmed += 1;
-            warn!("   🔴 Unconfirmed output {}:{} ({} sats) failed after {}min timeout",
-                  &txid[..std::cmp::min(16, txid.len())], vout, satoshis, UNCONFIRMED_TIMEOUT_SECS / 60);
+            // Rate limit between WoC calls
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
-    } // DB lock dropped
+
+        // 6c: Re-acquire DB lock and process results
+        {
+            let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+            let output_repo = OutputRepository::new(db.connection());
+
+            for (txid, vout, satoshis) in &stale_candidates {
+                if confirmed_txids.contains(txid) {
+                    // Tx confirmed — mark output as confirmed, don't delete
+                    let _ = output_repo.mark_output_confirmed(txid, *vout as i32);
+                } else if still_pending_txids.contains(txid) {
+                    // Still in mempool — leave it alone
+                } else {
+                    // Truly failed (404 from WoC) — delete and notify
+                    if let Err(e) = PeerPayRepository::insert_failure_notification(
+                        db.connection(), txid, *vout as i64, *satoshis, price_usd_cents,
+                    ) {
+                        warn!("   Failed to insert failure notification for {}:{}: {}", txid, vout, e);
+                    }
+                    let _ = PeerPayRepository::dismiss_by_txid_prefix(db.connection(), txid);
+                    if let Err(e) = output_repo.delete_unconfirmed_output(txid, *vout) {
+                        warn!("   Failed to delete unconfirmed output {}:{}: {}", txid, vout, e);
+                    }
+                    failed_unconfirmed += 1;
+                    warn!("   🔴 Unconfirmed output {}:{} ({} sats) confirmed failed — tx dropped from mempool",
+                          &txid[..std::cmp::min(16, txid.len())], vout, satoshis);
+                }
+            }
+        } // DB lock dropped
+    }
 
     // Step 7: Invalidate balance cache if anything changed
     if new_utxo_count > 0 || reconciled_count > 0 || failed_unconfirmed > 0 {

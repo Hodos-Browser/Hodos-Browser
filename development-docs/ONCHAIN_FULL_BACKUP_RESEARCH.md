@@ -348,7 +348,82 @@ UPDATE FLOW:
 
 ---
 
-## 10. Open Questions for Implementation
+## 10. Backup Timing Analysis (2026-04-03)
+
+### Should backup wait for transaction confirmation?
+
+**No.** Analysis of all scenarios (regular sends, PeerPay, PushDrop tokens) shows that waiting is more dangerous than including unproven transactions:
+
+- **Missing token = permanent loss**: PushDrop outputs and BRC-42 PeerPay outputs cannot be rediscovered via address scanning. If the backup never runs (flag consumed by a deferred backup), these are permanently lost on recovery.
+- **Ghost outputs = self-healing**: If backup includes an unproven transaction that later fails, TaskCheckForProofs marks it failed within 6 hours and cleans up ghost outputs. TaskValidateUtxos catches P2PKH ghosts within 30 minutes. BEEF construction fails gracefully for ghost token outputs.
+- **Shutdown backup already does this**: The `do_onchain_backup()` called during shutdown has no pending-tx guard — it has always backed up unproven transactions.
+
+### Full Risk Matrix
+
+**Strategy key**: "Wait" = defer while unproven (old). "Include" = backup regardless (new).
+
+#### Regular P2PKH Send/Receive
+
+| # | Scenario | Strategy | Severity | What Happens on Recovery |
+|---|----------|----------|----------|--------------------------|
+| A1 | Send confirmed, backed up | Either | None | Perfect |
+| A2 | Send unproven, included, confirms | Include | **Low** | Good — TaskCheckForProofs acquires proof, sync finds change |
+| A3 | Send unproven, included, FAILS | Include | **Medium** | Ghost change output + spent inputs. TaskCheckForProofs cleans up ≤6hr, TaskValidateUtxos ≤30min |
+| A4 | Send unproven, backup deferred, shutdown | Wait | **Medium** | Stale backup — inputs appear spendable but spent on-chain. TaskSyncPending reconciles |
+| A5 | Send, flag cleared without backup (old bug) | Wait | **Medium-High** | Same as A4 but 3-hour exposure window |
+| B1 | Receive confirmed, backed up | Either | None | Perfect |
+| B2 | Receive unproven, included, confirms | Include | **Low** | Good — proof acquired later |
+| B3 | Receive unproven, included, FAILS | Include | **Low** | TaskValidateUtxos marks external-spend ≤30min |
+| B4 | Receive confirmed, no backup (old bug) | Wait | **Very Low** | BIP32 recovery rediscovers via address scan |
+
+#### PeerPay Send/Receive (BRC-42 Derived)
+
+| # | Scenario | Strategy | Severity | What Happens on Recovery |
+|---|----------|----------|----------|--------------------------|
+| C1 | PeerPay send confirmed, backed up | Either | None | Perfect |
+| C2 | PeerPay send unproven, included, confirms | Include | **Low** | Good — same as A2 |
+| C3 | PeerPay send unproven, included, FAILS | Include | **Medium** | Same as A3 — ghost cleanup |
+| C4 | PeerPay send, no backup (old bug) | Wait | **Medium** | Inputs spendable in backup but spent on-chain |
+| D1 | PeerPay receive confirmed, backed up | Either | None | Perfect |
+| D2 | PeerPay receive, no backup (old bug) | Wait | **HIGH** | **BRC-42 output LOST** — mnemonic recovery won't find it (BRC-42 scanning disabled). No safeguard. |
+| D3 | PeerPay receive unproven, included, confirms | Include | **Low** | Good — output on-chain, proof later |
+| D4 | PeerPay receive unproven, included, FAILS | Include | **Low** | Ghost BRC-42 output — BEEF fails gracefully, dead weight, no corruption |
+
+#### PushDrop/Token Create & Receive
+
+| # | Scenario | Strategy | Severity | What Happens on Recovery |
+|---|----------|----------|----------|--------------------------|
+| E1 | Token created, confirmed, backed up | Either | None | Perfect |
+| E2 | Token unproven, included, confirms | Include | **Low** | Good — token on-chain, proof later |
+| E3 | Token unproven, included, FAILS | Include | **Medium-High** | Ghost token appears in wallet, can't spend (BEEF fails). TaskCheckForProofs cleans up ≤6hr. TaskValidateUtxos SKIPS tokens. |
+| E4 | Token confirmed, no backup (old bug) | Wait | **CRITICAL** | **Token PERMANENTLY LOST** — can't rediscover via address scan, TaskValidateUtxos skips it. No safeguard. |
+| F1 | Token received, confirmed, backed up | Either | None | Perfect |
+| F2 | Token received, no backup (old bug) | Wait | **CRITICAL** | **Token PERMANENTLY LOST** — same as E4 |
+| F3 | Token received unproven, included, FAILS | Include | **Medium** | Ghost token — dead weight until TaskCheckForProofs cleanup |
+
+### Risk Summary
+
+| Severity | Scenarios | Root Cause |
+|----------|-----------|------------|
+| **CRITICAL** | E4, F2 | Flag consumed without backup → token/PushDrop never backed up → unrecoverable on recovery |
+| **HIGH** | D2 | Flag consumed → BRC-42 PeerPay output never backed up → lost on mnemonic-only recovery |
+| **MEDIUM-HIGH** | A5, E3 | Extended no-backup window OR ghost token persists until 6hr timeout |
+| **MEDIUM** | A3, A4, C3, C4 | Ghost outputs or stale backup — safeguards catch within minutes-hours |
+| **LOW** | A2, B2, B3, C2, D3, D4, E2, F3 | Temporary inconsistency, auto-resolved |
+
+### Key Insight
+
+The worst outcomes (CRITICAL) come from the backup **never running** — not from backing up unproven transactions. Ghost outputs from failed txs are self-healing (MEDIUM at worst). Missing tokens are permanent (CRITICAL).
+
+### Implemented Safeguards
+
+1. **BackupOutcome enum**: `task_backup::run()` returns Broadcast/Skipped/Deferred/Failed. Flag only cleared for Broadcast/Skipped — Deferred/Failed retries on next 30s tick.
+2. **Timer reset with cap**: New events extend the 3-minute delay window, hard-capped at 10 minutes from first event (prevents infinite deferral).
+3. **Post-recovery validation**: After on-chain backup restore, `recovery_just_completed` AtomicBool triggers TaskCheckForProofs + TaskValidateUtxos immediately on next Monitor tick (~30s), not on normal intervals (60s / 30min). This cleans up any ghost outputs or validates unproven transactions from the restored backup.
+
+---
+
+## 11. Open Questions for Implementation
 
 1. **Token amount**: 1000 sats vs 546 sats (dust limit)?
    - 1000 sats is safer against cleanup sweeps
@@ -370,7 +445,7 @@ UPDATE FLOW:
 
 ---
 
-## 11. Conclusion
+## 12. Conclusion
 
 **Matt's approach is not only feasible but superior to the current plan.**
 

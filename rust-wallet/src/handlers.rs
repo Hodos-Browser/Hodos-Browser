@@ -11245,6 +11245,9 @@ pub async fn do_onchain_backup(
     // Design invariant: there should only be ONE unspent backup on-chain.
     // vout 0 = PushDrop (data), vout 1 = marker (discoverable), vout 2 = change.
     // Only the next backup tx may spend vout 0 and vout 1.
+    //
+    // Also collects orphaned markers from old backup cycles for cleanup sweep.
+    let mut extra_markers: Vec<(String, u32, i64, String)> = Vec::new(); // (txid, vout, sats, script_hex)
     {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -11315,6 +11318,40 @@ pub async fn do_onchain_backup(
                 log::info!("   🆕 No previous backup found — first backup");
             }
         }
+
+        // Step 5d: Collect orphaned markers for cleanup sweep.
+        // Any marker whose txid differs from the adopted primary is orphaned dust.
+        let primary_txid = previous_marker.as_ref().map(|(txid, _, _, _)| txid.as_str());
+        let orphaned: Vec<&(String, i64)> = onchain_markers.iter()
+            .filter(|(txid, _)| primary_txid.map_or(true, |pt| txid != pt))
+            .collect();
+        if !orphaned.is_empty() {
+            log::info!("   🧹 Found {} orphaned marker(s) to sweep", orphaned.len());
+            for (orphan_txid, _height) in &orphaned {
+                // Fetch the tx to get the marker output script (vout 1 = marker)
+                let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", orphan_txid);
+                match client.get(&tx_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(tx_data) = resp.json::<serde_json::Value>().await {
+                            if let Some(vouts) = tx_data["vout"].as_array() {
+                                if let Some(vout1) = vouts.get(1) {
+                                    let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
+                                    let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
+                                    if sats > 0 && !script_hex.is_empty() {
+                                        log::info!("   🧹 Sweeping orphaned marker: {}:1 ({} sats)", &orphan_txid[..16.min(orphan_txid.len())], sats);
+                                        extra_markers.push((orphan_txid.clone(), 1, sats, script_hex));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        log::warn!("   ⚠️  Failed to fetch orphan tx {} — skipping", &orphan_txid[..16.min(orphan_txid.len())]);
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            }
+        }
     }
 
     // Step 6: Estimate fee and select funding UTXOs
@@ -11329,13 +11366,15 @@ pub async fn do_onchain_backup(
     let mut num_inputs_estimate = 1; // At least 1 funding input
     if previous_pushdrop.is_some() { num_inputs_estimate += 1; }
     if previous_marker.is_some() { num_inputs_estimate += 1; }
+    num_inputs_estimate += extra_markers.len(); // Orphaned markers being swept
     let estimated_fee = estimate_fee_for_transaction(
         num_inputs_estimate, &output_script_lengths, false, fee_rate,
     ) as i64;
 
     let previous_pushdrop_sats = previous_pushdrop.as_ref().map(|p| p.2).unwrap_or(0);
     let previous_marker_sats = previous_marker.as_ref().map(|p| p.2).unwrap_or(0);
-    let previous_sats = previous_pushdrop_sats + previous_marker_sats;
+    let extra_marker_sats: i64 = extra_markers.iter().map(|(_, _, sats, _)| *sats).sum();
+    let previous_sats = previous_pushdrop_sats + previous_marker_sats + extra_marker_sats;
     let amount_needed = backup_output_sats + marker_sats + estimated_fee - previous_sats;
 
     let funding_utxos = {
@@ -11400,12 +11439,13 @@ pub async fn do_onchain_backup(
         if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
             utxos_to_reserve.push((prev_txid.clone(), prev_vout));
         }
+        // Extra markers are on-chain orphans not tracked in DB — no reservation needed
         let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
     }
     state.balance_cache.invalidate();
 
     // Step 8: Build transaction
-    // Input order: [previous PushDrop] [previous marker] [funding UTXOs]
+    // Input order: [previous PushDrop] [previous marker] [extra markers] [funding UTXOs]
     let mut tx = Transaction::new();
 
     if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
@@ -11413,6 +11453,9 @@ pub async fn do_onchain_backup(
     }
     if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
         tx.add_input(TxInput::new(OutPoint::new(prev_txid.clone(), prev_vout)));
+    }
+    for (ref extra_txid, extra_vout, _, _) in &extra_markers {
+        tx.add_input(TxInput::new(OutPoint::new(extra_txid.clone(), *extra_vout)));
     }
     for utxo in &funding_utxos {
         tx.add_input(TxInput::new(OutPoint::new(utxo.txid.clone(), utxo.vout)));
@@ -11513,6 +11556,27 @@ pub async fn do_onchain_backup(
         input_idx += 1;
     }
 
+    // Sign extra marker inputs (P2PKH — same backup key as primary marker)
+    for (_, _, extra_sats, ref extra_script_hex) in &extra_markers {
+        let extra_script_bytes = hex::decode(extra_script_hex).unwrap_or_default();
+        let sighash = match calculate_sighash(&tx, input_idx, &extra_script_bytes, *extra_sats, SIGHASH_ALL_FORKID) {
+            Ok(h) => h,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, "").await;
+                return Err(format!("Sighash failed (extra marker): {}", e));
+            }
+        };
+        let secret = SecretKey::from_slice(&backup_privkey).unwrap();
+        let message = Message::from_digest_slice(&sighash).unwrap();
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
+        tx.inputs[input_idx].set_script(unlocking_script.bytes);
+        input_idx += 1;
+    }
+
     // Sign funding UTXOs (P2PKH)
     for utxo in &funding_utxos {
         let key_result: Result<Vec<u8>, String> = {
@@ -11595,6 +11659,11 @@ pub async fn do_onchain_backup(
         if let Some((ref prev_txid, _, _, _)) = previous_marker {
             if !ancestor_txids.contains(prev_txid) {
                 ancestor_txids.push(prev_txid.clone());
+            }
+        }
+        for (ref extra_txid, _, _, _) in &extra_markers {
+            if !ancestor_txids.contains(extra_txid) {
+                ancestor_txids.push(extra_txid.clone());
             }
         }
         for utxo in &funding_utxos {
@@ -12415,6 +12484,9 @@ pub async fn wallet_recover_onchain(
     // Step 7: Start Monitor and update state
     crate::monitor::Monitor::start(state.clone());
     state.balance_cache.invalidate();
+    // Signal Monitor to run TaskCheckForProofs + TaskValidateUtxos immediately
+    // (backup may contain unproven txs or ghost outputs that need validation)
+    state.recovery_just_completed.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let (total_balance, spendable_count) = {
         let db = state.database.lock().unwrap();

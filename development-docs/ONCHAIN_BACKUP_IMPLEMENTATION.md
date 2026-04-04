@@ -453,6 +453,109 @@ Based on ARC dynamic fee rate of 100 sat/KB with ~21 KB compressed payload. Annu
 
 ---
 
+## Backup Timing Risk Matrix & Decisions (2026-04-03)
+
+### Problem Statement
+
+The backup "soon" flag had two bugs:
+1. Flag didn't reset on new events — second event within 3 minutes was silently ignored
+2. Flag was cleared even when backup skipped (e.g., pending transactions) — backup wouldn't retry until next 3-hour periodic cycle
+
+### Key Insight
+
+**Waiting for confirmation before backup is MORE dangerous than backing up unproven transactions.** The shutdown backup already had no pending-tx guard — it would backup unproven transactions on every app close.
+
+### Full Risk Matrix
+
+**Scenario key**: "Wait" = defer backup while unproven txs exist (old behavior). "Include" = backup with unproven txs (new behavior). Severity = what happens if user must recover from this backup.
+
+#### A. Regular P2PKH Send
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| A1 | Send confirmed, backed up | Either | Perfect recovery | None | — |
+| A2 | Send unproven, backup includes it, tx confirms | Include | Good — tx on-chain, proof acquired later, change discovered by sync | **Low** | TaskCheckForProofs, TaskSyncPending |
+| A3 | Send unproven, backup includes it, tx FAILS | Include | Ghost change output inflates balance. Inputs marked spent but tx never mined | **Medium** | TaskCheckForProofs marks failed ≤6hr → deletes ghost + restores inputs. TaskValidateUtxos marks ghost external-spend ≤30min |
+| A4 | Send unproven, backup defers, user shuts down | Wait | Stale backup: inputs appear unspent but are spent on-chain | **Medium** | TaskSyncPending reconciles on next run |
+| A5 | Send unproven, flag cleared without backup, 3hr gap | Wait (old bug) | Same as A4 but 3-hour exposure window | **Medium-High** | Same safeguards, larger window |
+
+#### B. Regular P2PKH Receive (Address Sync)
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| B1 | Receive confirmed, backed up | Either | Perfect | None | — |
+| B2 | Receive unproven, backup includes, confirms | Include | Good — output on-chain, proof later | **Low** | TaskCheckForProofs, TaskSyncPending |
+| B3 | Receive unproven, backup includes, FAILS | Include | Balance inflated temporarily | **Low** | TaskValidateUtxos marks external-spend ≤30min |
+| B4 | Receive confirmed, no backup ran (old bug) | Wait | Receive missing from backup | **Very Low** | BIP32 recovery rediscovers via address scan |
+
+#### C. PeerPay Send
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| C1 | Send confirmed, backed up | Either | Perfect | None | — |
+| C2 | Send unproven, backup includes, confirms | Include | Good — same as A2 | **Low** | TaskCheckForProofs |
+| C3 | Send unproven, backup includes, FAILS | Include | Ghost cleanup needed — same as A3 | **Medium** | TaskCheckForProofs timeout → mark_failed() |
+| C4 | Send, no backup ran (old bug) | Wait | Inputs shown spendable but spent on-chain | **Medium** | TaskSyncPending/TaskValidateUtxos reconcile |
+
+#### D. PeerPay Receive (Auto-Accept) — BRC-42 Derived
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| D1 | Receive confirmed, backed up | Either | Perfect | None | — |
+| D2 | Receive, no backup ran (old bug) | Wait | **BRC-42 output LOST** — mnemonic recovery won't find it (BRC-42 scanning disabled) | **HIGH** | **None** — only prior on-chain backup can save it |
+| D3 | Receive unproven, backup includes, confirms | Include | Good — output on-chain, proof comes later | **Low** | TaskCheckForProofs |
+| D4 | Receive unproven, backup includes, FAILS | Include | Ghost BRC-42 output — can't be spent (BEEF fails), dead weight | **Low** | BEEF construction fails gracefully, no corruption |
+
+#### E. PushDrop/Token Create (Certificate Publish, Token Mint)
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| E1 | Token confirmed, backed up | Either | Perfect | None | — |
+| E2 | Token unproven, backup includes, confirms | Include | Good — token on-chain, proof later | **Low** | TaskCheckForProofs |
+| E3 | Token unproven, backup includes, FAILS | Include | Ghost token in wallet, can't be spent. Inputs marked spent | **Medium-High** | TaskCheckForProofs marks failed ≤6hr → deletes ghost + restores inputs. Note: TaskValidateUtxos SKIPS token outputs |
+| E4 | Token confirmed, no backup ran (old bug) | Wait | **Token PERMANENTLY LOST** — not in backup, can't rediscover via address scan, TaskValidateUtxos skips it | **CRITICAL** | **No safeguard** |
+| E5 | Token unproven, backup defers, confirms, then backup runs | Wait (working) | Perfect | None | — |
+
+#### F. PushDrop/Token Receive
+
+| # | Scenario | Strategy | Recovery Outcome | Severity | Safeguards |
+|---|----------|----------|------------------|----------|------------|
+| F1 | Token received, confirmed, backed up | Either | Perfect | None | — |
+| F2 | Token received, no backup ran (old bug) | Wait | **Token PERMANENTLY LOST** — same as E4 | **CRITICAL** | **None** |
+| F3 | Token received unproven, backup includes, FAILS | Include | Ghost token — dead weight until cleanup | **Medium** | TaskCheckForProofs timeout |
+
+### Risk Summary
+
+| Severity | Scenarios | Root Cause |
+|----------|-----------|------------|
+| **CRITICAL** | E4, F2 | Flag consumed without backup → token/PushDrop never backed up → unrecoverable |
+| **HIGH** | D2 | Flag consumed → BRC-42 PeerPay output never backed up → lost on mnemonic-only recovery |
+| **MEDIUM-HIGH** | A5, E3 | Extended no-backup window (3hr) OR ghost token persists until 6hr timeout |
+| **MEDIUM** | A3, A4, C3, C4 | Ghost outputs or stale backup — safeguards catch within minutes-hours |
+| **LOW** | A2, B2, B3, C2, D3, D4, E2, F3 | Temporary inconsistency, auto-resolved |
+
+### Post-Recovery Validation
+
+After on-chain backup recovery, the imported data may contain unproven transactions or ghost outputs. The Monitor now runs TaskCheckForProofs and TaskValidateUtxos **immediately** on the next tick (~30 seconds) via the `recovery_just_completed` flag, rather than waiting for their normal intervals (60s / 30min).
+
+### Decisions Made
+
+1. **Removed pending-tx guard** from `task_backup.rs` — backup captures current DB state regardless of in-flight transactions. Ghost outputs are self-healing (MEDIUM); missing tokens are not (CRITICAL).
+2. **Flag only cleared on successful backup** — `BackupOutcome` enum distinguishes Broadcast/Skipped (clear flag) from Deferred/Failed (keep flag, retry next tick).
+3. **Timer resets on new events** with 10-minute hard cap — `backup_check_needed` stores `(first_event_ts, latest_event_ts)`. 3-minute delay from latest event, never more than 10 minutes from first event.
+4. **Post-recovery immediate validation** — `recovery_just_completed` AtomicBool triggers TaskCheckForProofs + TaskValidateUtxos on next Monitor tick after on-chain recovery.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `rust-wallet/src/monitor/task_backup.rs` | `BackupOutcome` enum, removed pending-tx guard |
+| `rust-wallet/src/monitor/mod.rs` | Conditional flag clearing, post-recovery immediate validation |
+| `rust-wallet/src/main.rs` | Timer reset with cap, `recovery_just_completed` flag |
+| `rust-wallet/src/handlers.rs` | Set recovery flag after on-chain restore |
+
+---
+
 ## Security Considerations
 
 1. **Encryption key** is derived from master private key — only someone with the mnemonic can decrypt

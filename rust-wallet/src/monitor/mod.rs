@@ -175,6 +175,20 @@ impl Monitor {
 
             let now = Self::now_secs();
 
+            // Post-recovery: force immediate validation of restored data
+            let recovery_mode = self.state.recovery_just_completed.swap(false, std::sync::atomic::Ordering::SeqCst);
+            if recovery_mode {
+                info!("🔄 Post-recovery: running immediate TaskCheckForProofs + TaskValidateUtxos");
+                if let Err(e) = task_check_for_proofs::run(&self.state, &self.client).await {
+                    error!("   ❌ Post-recovery TaskCheckForProofs failed: {}", e);
+                }
+                if let Err(e) = task_validate_utxos::run(&self.state).await {
+                    warn!("   ⚠️ Post-recovery TaskValidateUtxos failed: {}", e);
+                }
+                last_check_for_proofs = now;
+                last_validate_utxos = now;
+            }
+
             // TaskCheckForProofs
             if now - last_check_for_proofs >= self.schedule.check_for_proofs {
                 last_check_for_proofs = now;
@@ -250,17 +264,27 @@ impl Monitor {
             // TaskBackup — runs on periodic schedule (3 hours) OR when significant event flag is set (after 3-min delay)
             let backup_triggered_by_event = {
                 let guard = self.state.backup_check_needed.lock().ok();
-                guard.and_then(|g| *g).map(|ts| now as i64 - ts >= 180).unwrap_or(false)  // 3-minute delay
+                guard.and_then(|g| *g).map(|(_first_ts, latest_ts)| now as i64 - latest_ts >= 180).unwrap_or(false)  // 3-min delay from latest event
             };
             if now - last_backup >= self.schedule.backup || backup_triggered_by_event {
-                last_backup = now;
-                // Clear the "soon" flag before running (so new events during backup can re-trigger)
-                if let Ok(mut guard) = self.state.backup_check_needed.lock() {
-                    *guard = None;
+                let outcome = task_backup::run(&self.state).await;
+                // Only clear the "soon" flag if backup state is current (Broadcast or Skipped).
+                // Deferred/Failed keeps the flag so we retry on next tick.
+                if outcome.is_current() {
+                    last_backup = now;
+                    if let Ok(mut guard) = self.state.backup_check_needed.lock() {
+                        *guard = None;
+                    }
                 }
-                if let Err(e) = task_backup::run(&self.state).await {
-                    error!("   ❌ TaskBackup failed: {}", e);
-                    self.log_event("TaskBackup:error", Some(&e));
+                match &outcome {
+                    task_backup::BackupOutcome::Failed(e) => {
+                        error!("   ❌ TaskBackup failed: {}", e);
+                        self.log_event("TaskBackup:error", Some(e));
+                    }
+                    task_backup::BackupOutcome::Deferred(reason) => {
+                        info!("   ⏳ TaskBackup deferred: {}", reason);
+                    }
+                    _ => {}
                 }
             }
 
