@@ -266,12 +266,16 @@ impl<'a> OutputRepository<'a> {
     ///
     /// Excludes outputs from transactions that are unsigned or failed.
     pub fn calculate_balance(&self, user_id: i64) -> Result<i64> {
+        // NOTE: nosend outputs are INCLUDED in balance display so users see expected change
+        // after overlay/nosend transactions. They are NOT available for UTXO selection
+        // (get_spendable_by_user still excludes nosend). If the nosend tx fails,
+        // TaskCheckForProofs deletes the change output and restores inputs automatically.
         let balance: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(o.satoshis), 0)
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nonfinal'))
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'",
             rusqlite::params![user_id],
             |row| row.get(0),
@@ -284,12 +288,13 @@ impl<'a> OutputRepository<'a> {
     ///
     /// This is useful for single-user wallets where we don't need to filter by user.
     pub fn calculate_total_balance(&self) -> Result<i64> {
+        // NOTE: nosend outputs included in balance (see calculate_balance comment)
         let balance: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(o.satoshis), 0)
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              WHERE o.spendable = 1
-               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nonfinal'))
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'",
             [],
             |row| row.get(0),

@@ -4734,7 +4734,7 @@ async fn unpublish_certificate_core(
         // Verify removal by querying the overlay for this certificate
         use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
         let serial_b64 = BASE64.encode(serial_bytes);
-        let overlay_removed = if overlay_confirmed {
+        if overlay_confirmed {
             true
         } else {
             match crate::overlay::lookup_published_certificate(&serial_b64).await {
@@ -4751,9 +4751,7 @@ async fn unpublish_certificate_core(
                     false
                 }
             }
-        };
-
-        overlay_removed
+        }
     };
 
     // Update certificate publish status based on overlay result

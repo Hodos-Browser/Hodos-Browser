@@ -1824,3 +1824,137 @@ pub fn validate_beef_v1_hex(v1_hex: &str) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Validate that a BEEF structure has complete ancestry chains.
+///
+/// Every transaction in the BEEF must either:
+/// 1. Have a BUMP (merkle proof) — proving it's confirmed on-chain, OR
+/// 2. Have ALL of its input parent transactions also present in the BEEF,
+///    and those parents must recursively satisfy the same condition.
+///
+/// This mirrors the BSV SDK's `Beef.verifyValid()` (Beef.ts:498-567).
+/// The main transaction (last in the array) is allowed to have no BUMP
+/// since it's the new transaction being submitted.
+///
+/// Returns Ok with a summary, or Err describing which txids are missing.
+pub fn validate_beef_ancestry(beef: &Beef) -> Result<BeefValidationReport, String> {
+    use sha2::{Sha256, Digest};
+
+    let num_txs = beef.transactions.len();
+    if num_txs == 0 {
+        return Err("BEEF contains no transactions".to_string());
+    }
+
+    // Build a map of txid → index for all transactions in the BEEF
+    let mut txid_to_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut txids: Vec<String> = Vec::with_capacity(num_txs);
+
+    for (i, tx_bytes) in beef.transactions.iter().enumerate() {
+        let h1 = Sha256::digest(tx_bytes);
+        let h2 = Sha256::digest(&h1);
+        let txid_hex: String = h2.iter().rev().map(|b| format!("{:02x}", b)).collect();
+        txid_to_index.insert(txid_hex.clone(), i);
+        txids.push(txid_hex);
+    }
+
+    let mut report = BeefValidationReport {
+        total_txs: num_txs,
+        confirmed_txs: 0,
+        unconfirmed_txs: 0,
+        main_tx: txids.last().cloned().unwrap_or_default(),
+        missing_parents: Vec::new(),
+        orphaned_txs: Vec::new(),
+    };
+
+    // Check each transaction (except the main/last tx which is the new one)
+    for (i, tx_bytes) in beef.transactions.iter().enumerate() {
+        let txid = &txids[i];
+        let has_bump = i < beef.tx_to_bump.len() && beef.tx_to_bump[i].is_some();
+        let is_main_tx = i == num_txs - 1;
+
+        if has_bump {
+            report.confirmed_txs += 1;
+            continue; // Confirmed with BUMP — no ancestry needed
+        }
+
+        report.unconfirmed_txs += 1;
+
+        if is_main_tx {
+            continue; // Main tx is expected to not have a BUMP
+        }
+
+        // Unconfirmed parent tx — ALL its inputs must be in the BEEF
+        match ParsedTransaction::from_bytes(tx_bytes) {
+            Ok(parsed) => {
+                for input in &parsed.inputs {
+                    if txid_to_index.get(&input.prev_txid).is_none() {
+                        report.missing_parents.push(MissingParent {
+                            child_txid: txid.clone(),
+                            missing_parent_txid: input.prev_txid.clone(),
+                            input_vout: input.prev_vout,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                report.orphaned_txs.push(format!("{}  (parse error: {})", txid, e));
+            }
+        }
+    }
+
+    // Also check main tx inputs — they should all be in the BEEF too
+    if let Some(main_tx_bytes) = beef.transactions.last() {
+        if let Ok(parsed) = ParsedTransaction::from_bytes(main_tx_bytes) {
+            for input in &parsed.inputs {
+                if txid_to_index.get(&input.prev_txid).is_none() {
+                    report.missing_parents.push(MissingParent {
+                        child_txid: report.main_tx.clone(),
+                        missing_parent_txid: input.prev_txid.clone(),
+                        input_vout: input.prev_vout,
+                    });
+                }
+            }
+        }
+    }
+
+    if report.missing_parents.is_empty() && report.orphaned_txs.is_empty() {
+        log::info!("   ✅ BEEF ancestry validation passed: {} txs ({} confirmed, {} unconfirmed, {} BUMPs)",
+            report.total_txs, report.confirmed_txs, report.unconfirmed_txs, beef.bumps.len());
+        Ok(report)
+    } else {
+        let mut err_parts = Vec::new();
+        for mp in &report.missing_parents {
+            err_parts.push(format!(
+                "tx {} input {}:{} — parent not in BEEF",
+                &mp.child_txid[..16.min(mp.child_txid.len())],
+                &mp.missing_parent_txid[..16.min(mp.missing_parent_txid.len())],
+                mp.input_vout
+            ));
+        }
+        for orphan in &report.orphaned_txs {
+            err_parts.push(format!("orphaned: {}", orphan));
+        }
+        let err_msg = format!("BEEF ancestry incomplete — {}", err_parts.join("; "));
+        log::warn!("   ⚠️  {}", err_msg);
+        Err(err_msg)
+    }
+}
+
+/// Report from BEEF ancestry validation
+#[derive(Debug, Clone)]
+pub struct BeefValidationReport {
+    pub total_txs: usize,
+    pub confirmed_txs: usize,
+    pub unconfirmed_txs: usize,
+    pub main_tx: String,
+    pub missing_parents: Vec<MissingParent>,
+    pub orphaned_txs: Vec<String>,
+}
+
+/// A parent transaction that's referenced by an input but missing from the BEEF
+#[derive(Debug, Clone)]
+pub struct MissingParent {
+    pub child_txid: String,
+    pub missing_parent_txid: String,
+    pub input_vout: u32,
+}

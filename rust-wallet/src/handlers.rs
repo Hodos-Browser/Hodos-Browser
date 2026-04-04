@@ -7032,6 +7032,20 @@ pub async fn sign_action(
         }
     }
 
+    // Validate BEEF ancestry completeness (SDK-equivalent: Beef.verifyValid())
+    // Every unconfirmed tx must have all its input parents in the BEEF,
+    // tracing back to confirmed roots with BUMPs.
+    match crate::beef::validate_beef_ancestry(&beef) {
+        Ok(report) => {
+            log::info!("   ✅ BEEF ancestry valid: {} confirmed, {} unconfirmed, {} BUMPs",
+                report.confirmed_txs, report.unconfirmed_txs, beef.bumps.len());
+        }
+        Err(e) => {
+            log::error!("   ❌ BEEF ancestry INCOMPLETE: {}", e);
+            log::error!("   ⚠️  Overlay/app may reject this BEEF — missing parent transactions in ancestry chain");
+        }
+    }
+
     // Generate standard BEEF first (for logging)
     let standard_beef_hex = match beef.to_hex() {
         Ok(hex) => hex,
@@ -15707,6 +15721,374 @@ pub async fn domain_permissions_reset_all(
         Err(e) => {
             drop(db);
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DEBUG: BEEF VALIDATION ENDPOINT
+// ═══════════════════════════════════════════════════════════════
+
+/// Debug endpoint: reconstruct and validate the BEEF that would be built for a transaction.
+///
+/// POST /wallet/debug/validate-beef
+/// Body: { "txid": "..." }
+///
+/// Returns a report showing:
+/// - How many parent txs and BUMPs would be in the BEEF
+/// - Whether all ancestry chains trace back to confirmed roots
+/// - Any missing parent txids
+pub async fn debug_validate_beef(
+    state: web::Data<crate::AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let txid = match body.get("txid").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "missing txid field"})),
+    };
+
+    log::info!("🔍 Debug: validating BEEF for txid {}", &txid[..16.min(txid.len())]);
+
+    // Get the raw tx from DB
+    let raw_tx_hex = {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        match tx_repo.get_raw_tx(&txid) {
+            Ok(Some(hex)) => hex,
+            Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "transaction not found in DB"})),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+        }
+    };
+
+    let raw_tx_bytes = match hex::decode(&raw_tx_hex) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("invalid raw_tx hex: {}", e)})),
+    };
+
+    // Parse the tx to get its inputs
+    let parsed = match crate::beef::ParsedTransaction::from_bytes(&raw_tx_bytes) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("failed to parse tx: {}", e)})),
+    };
+
+    let mut beef = crate::beef::Beef::new();
+    let client = reqwest::Client::new();
+
+    // Build ancestry for each input
+    let mut input_details = Vec::new();
+    for (i, input) in parsed.inputs.iter().enumerate() {
+        let parent_txid = &input.prev_txid;
+
+        // Try to add parent + ancestry to BEEF
+        match crate::beef_helpers::build_beef_for_txid(
+            parent_txid,
+            &mut beef,
+            &state.database,
+            &client,
+        ).await {
+            Ok(_) => {
+                input_details.push(serde_json::json!({
+                    "index": i,
+                    "parent_txid": parent_txid,
+                    "vout": input.prev_vout,
+                    "status": "ok"
+                }));
+            }
+            Err(e) => {
+                input_details.push(serde_json::json!({
+                    "index": i,
+                    "parent_txid": parent_txid,
+                    "vout": input.prev_vout,
+                    "status": "error",
+                    "error": e.to_string()
+                }));
+            }
+        }
+    }
+
+    beef.sort_topologically();
+    beef.set_main_transaction(raw_tx_bytes);
+
+    // Run ancestry validation
+    let validation = match crate::beef::validate_beef_ancestry(&beef) {
+        Ok(report) => serde_json::json!({
+            "valid": true,
+            "total_txs": report.total_txs,
+            "confirmed_txs": report.confirmed_txs,
+            "unconfirmed_txs": report.unconfirmed_txs,
+            "bumps": beef.bumps.len(),
+            "main_tx": report.main_tx,
+        }),
+        Err(e) => serde_json::json!({
+            "valid": false,
+            "error": e,
+            "total_txs": beef.transactions.len(),
+            "bumps": beef.bumps.len(),
+        }),
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "txid": txid,
+        "inputs": input_details,
+        "beef": validation,
+    }))
+}
+
+/// Debug endpoint: repair a nosend tx that was broadcast after TaskCheckForProofs cleaned it up.
+///
+/// POST /wallet/debug/repair-nosend
+/// Body: { "txid": "...", "change_vout": 3, "change_sats": 21998022 }
+///
+/// Re-marks inputs as spent and re-creates the missing change output.
+pub async fn debug_repair_nosend(
+    state: web::Data<crate::AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let txid = match body.get("txid").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "missing txid"})),
+    };
+    let change_vout = body.get("change_vout").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let change_sats = body.get("change_sats").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    log::info!("🔧 Debug: repairing nosend tx {}", &txid[..16.min(txid.len())]);
+
+    // Get raw tx to parse inputs
+    let raw_tx_hex = {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        match tx_repo.get_raw_tx(&txid) {
+            Ok(Some(hex)) => hex,
+            _ => return HttpResponse::NotFound().json(serde_json::json!({"error": "tx not found"})),
+        }
+    };
+
+    let raw_tx_bytes = match hex::decode(&raw_tx_hex) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e.to_string()})),
+    };
+
+    let parsed = match crate::beef::ParsedTransaction::from_bytes(&raw_tx_bytes) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e.to_string()})),
+    };
+
+    let mut repairs = Vec::new();
+
+    {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        // 1. Set status to unproven (it's on-chain now)
+        match tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven) {
+            Ok(_) => repairs.push("status → unproven".to_string()),
+            Err(e) => repairs.push(format!("status update failed: {}", e)),
+        }
+
+        // 2. Re-mark inputs as spent
+        for input in &parsed.inputs {
+            match output_repo.mark_spent(&input.prev_txid, input.prev_vout, &txid) {
+                Ok(_) => repairs.push(format!("input {}:{} → spent", &input.prev_txid[..16], input.prev_vout)),
+                Err(e) => repairs.push(format!("input {}:{} failed: {}", &input.prev_txid[..16], input.prev_vout, e)),
+            }
+        }
+
+        // 3. Re-create change output if missing
+        if change_sats > 0 {
+            if output_repo.get_by_txid_vout(&txid, change_vout).ok().flatten().is_none() {
+                let change_output = &parsed.outputs[change_vout as usize];
+                let script_hex = hex::encode(&change_output.script);
+                let basket_repo = crate::database::BasketRepository::new(db.connection());
+                let default_basket_id = basket_repo.find_or_insert("default", state.current_user_id).ok();
+
+                match output_repo.insert_output(
+                    state.current_user_id, &txid, change_vout, change_sats,
+                    &script_hex, default_basket_id,
+                    None, None, None, None, true,
+                ) {
+                    Ok(id) => repairs.push(format!("change output {}:{} created (id={}, {} sats)", &txid[..16], change_vout, id, change_sats)),
+                    Err(e) => repairs.push(format!("change output failed: {}", e)),
+                }
+            } else {
+                repairs.push(format!("change output {}:{} already exists", &txid[..16], change_vout));
+            }
+        }
+    }
+
+    state.balance_cache.invalidate();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "txid": txid,
+        "repairs": repairs,
+    }))
+}
+
+/// Debug endpoint: broadcast a nosend transaction's BEEF to ARC.
+///
+/// POST /wallet/debug/broadcast-nosend
+/// Body: { "txid": "..." }
+///
+/// Reconstructs the BEEF for a nosend transaction from the DB and broadcasts
+/// it directly to ARC, bypassing the app's SHIP broadcaster. This tests whether
+/// our BEEF is valid and accepted by miners, independent of the app.
+///
+/// On success, updates the transaction status to 'unproven'.
+pub async fn debug_broadcast_nosend(
+    state: web::Data<crate::AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let txid = match body.get("txid").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "missing txid field"})),
+    };
+
+    log::info!("🔍 Debug: broadcasting nosend tx {} to ARC", &txid[..16.min(txid.len())]);
+
+    // Verify the transaction exists and is in nosend status
+    let (raw_tx_hex, tx_status) = {
+        let db = state.database.lock().unwrap();
+        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+        let status = tx_repo.get_broadcast_status(&txid);
+        let raw = tx_repo.get_raw_tx(&txid);
+        match (raw, status) {
+            (Ok(Some(hex)), Ok(Some(s))) => (hex, s),
+            (Ok(None), _) => return HttpResponse::NotFound().json(serde_json::json!({"error": "transaction not found"})),
+            _ => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "DB error"})),
+        }
+    };
+
+    log::info!("   Transaction status: {}", tx_status);
+
+    let raw_tx_bytes = match hex::decode(&raw_tx_hex) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("invalid raw_tx: {}", e)})),
+    };
+
+    // Parse the tx to get inputs
+    let parsed = match crate::beef::ParsedTransaction::from_bytes(&raw_tx_bytes) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("parse error: {}", e)})),
+    };
+
+    // Build BEEF with full ancestry
+    let mut beef = crate::beef::Beef::new();
+    let client = reqwest::Client::new();
+
+    for input in &parsed.inputs {
+        if beef.find_txid(&input.prev_txid).is_some() {
+            continue;
+        }
+        if let Err(e) = crate::beef_helpers::build_beef_for_txid(
+            &input.prev_txid, &mut beef, &state.database, &client,
+        ).await {
+            log::warn!("   ⚠️  Failed to build ancestry for {}: {}", &input.prev_txid[..16], e);
+        }
+    }
+
+    beef.sort_topologically();
+    let raw_tx_bytes_clone = raw_tx_bytes.clone();
+    beef.set_main_transaction(raw_tx_bytes);
+
+    // Validate ancestry
+    match crate::beef::validate_beef_ancestry(&beef) {
+        Ok(report) => {
+            log::info!("   ✅ BEEF valid: {} txs, {} confirmed, {} BUMPs",
+                report.total_txs, report.confirmed_txs, beef.bumps.len());
+        }
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("BEEF ancestry incomplete: {}", e),
+                "action": "cannot broadcast — missing parent transactions"
+            }));
+        }
+    }
+
+    // Serialize to V1 hex for ARC
+    let beef_v1_hex = match beef.to_v1_hex() {
+        Ok(hex) => hex,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("BEEF serialize: {}", e)})),
+    };
+
+    log::info!("   📡 Broadcasting {} bytes of BEEF V1 to ARC...", beef_v1_hex.len() / 2);
+
+    // Broadcast to ARC
+    match broadcast_transaction(&beef_v1_hex, Some(&state.database), Some(&txid)).await {
+        Ok(msg) => {
+            log::info!("   ✅ ARC accepted: {}", msg);
+
+            // Reverse the TaskCheckForProofs failure cleanup:
+            // When a nosend tx timed out, mark_failed() restored inputs as spendable
+            // and deleted the change output. Now that the tx IS on-chain, we need to
+            // re-mark inputs as spent and re-create the change output.
+            {
+                let db = state.database.lock().unwrap();
+                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+
+                // 1. Update transaction status to unproven
+                let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Unproven);
+
+                // 2. Re-mark input UTXOs as spent by this transaction
+                for input in &parsed.inputs {
+                    match output_repo.mark_spent(&input.prev_txid, input.prev_vout, &txid) {
+                        Ok(_) => log::info!("   ✅ Re-marked input {}:{} as spent", &input.prev_txid[..16], input.prev_vout),
+                        Err(e) => log::warn!("   ⚠️  Failed to re-mark input {}:{}: {}", &input.prev_txid[..16], input.prev_vout, e),
+                    }
+                }
+
+                // 3. Re-create change output if it was deleted
+                // The change output is the last output, going to our wallet
+                // Parse the on-chain tx to find it
+                if let Ok(on_chain_parsed) = crate::beef::ParsedTransaction::from_bytes(&raw_tx_bytes_clone) {
+                    let num_outputs = on_chain_parsed.outputs.len();
+                    if num_outputs > 0 {
+                        let change_vout = (num_outputs - 1) as u32;
+                        let change_output = &on_chain_parsed.outputs[change_vout as usize];
+
+                        // Check if change output already exists
+                        if output_repo.get_by_txid_vout(&txid, change_vout).ok().flatten().is_none() {
+                            // Find the derivation info — check if we have an address for this script
+                            let script_hex = hex::encode(&change_output.script);
+                            let basket_repo = crate::database::BasketRepository::new(db.connection());
+                            let default_basket_id = basket_repo.find_or_insert("default", state.current_user_id).ok();
+
+                            match output_repo.insert_output(
+                                state.current_user_id,
+                                &txid,
+                                change_vout,
+                                change_output.value,
+                                &script_hex,
+                                default_basket_id,
+                                None, None, // derivation will be resolved by sync
+                                None, None,
+                                true, // is_change
+                            ) {
+                                Ok(id) => log::info!("   ✅ Re-created change output {}:{} ({} sats, id={})", &txid[..16], change_vout, change_output.value, id),
+                                Err(e) => log::warn!("   ⚠️  Failed to re-create change output: {}", e),
+                            }
+                        } else {
+                            log::info!("   ℹ️  Change output {}:{} already exists", &txid[..16], change_vout);
+                        }
+                    }
+                }
+            }
+            state.balance_cache.invalidate();
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "txid": txid,
+                "arc_response": msg,
+                "new_status": "unproven",
+            }))
+        }
+        Err(e) => {
+            log::error!("   ❌ ARC rejected: {}", e);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": false,
+                "txid": txid,
+                "error": e,
+            }))
         }
     }
 }
