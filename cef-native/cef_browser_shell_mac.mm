@@ -25,6 +25,7 @@
 #include "include/wrapper/cef_library_loader.h"
 #include "OverlayHelpers_mac.h"
 
+#include <atomic>
 #include <iostream>
 #include <fstream>
 #include <chrono>
@@ -179,8 +180,8 @@ static int g_mac_profile_panel_icon_right_offset = 0;
 // Server process management
 static pid_t g_wallet_server_pid = -1;
 static pid_t g_adblock_server_pid = -1;
-bool g_walletServerRunning = false;
-bool g_adblockServerRunning = false;
+std::atomic<bool> g_walletServerRunning{false};
+std::atomic<bool> g_adblockServerRunning{false};
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
