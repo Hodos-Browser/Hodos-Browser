@@ -2791,7 +2791,9 @@ pub struct CreateSignatureRequest {
     #[serde(rename = "counterparty")]
     pub counterparty: serde_json::Value, // "self", "anyone", or hex pubkey
     #[serde(rename = "data")]
-    pub data: serde_json::Value, // Array of bytes to sign
+    pub data: Option<serde_json::Value>, // Array of bytes to sign (mutually exclusive with hashToDirectlySign)
+    #[serde(rename = "hashToDirectlySign")]
+    pub hash_to_directly_sign: Option<serde_json::Value>, // Pre-computed 32-byte hash to sign directly
 }
 
 // Response structure for /createSignature
@@ -2855,19 +2857,45 @@ pub async fn create_signature(
     log::info!("   Key ID: {}", req.key_id);
     log::info!("   Counterparty: {:?}", req.counterparty);
 
-    // Parse data bytes
-    let data_bytes = match &req.data {
-        serde_json::Value::Array(arr) => {
-            arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect::<Vec<u8>>()
+    // Parse data bytes OR hashToDirectlySign (mutually exclusive per BRC-100)
+    let (data_bytes, use_direct_hash) = if let Some(ref hash_val) = req.hash_to_directly_sign {
+        // hashToDirectlySign: pre-computed 32-byte hash, sign directly without hashing
+        match hash_val {
+            serde_json::Value::Array(arr) => {
+                let bytes: Vec<u8> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+                if bytes.len() != 32 {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("hashToDirectlySign must be exactly 32 bytes, got {}", bytes.len())
+                    }));
+                }
+                log::info!("   hashToDirectlySign: {} bytes (will sign directly)", bytes.len());
+                (bytes, true)
+            }
+            _ => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "hashToDirectlySign must be an array of bytes"
+                }));
+            }
         }
-        _ => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "data must be an array of bytes"
-            }));
+    } else if let Some(ref data_val) = req.data {
+        // data: arbitrary bytes, will be SHA256 hashed before signing
+        match data_val {
+            serde_json::Value::Array(arr) => {
+                let bytes: Vec<u8> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+                log::info!("   Data bytes length: {}", bytes.len());
+                (bytes, false)
+            }
+            _ => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "data must be an array of bytes"
+                }));
+            }
         }
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Either 'data' or 'hashToDirectlySign' must be provided"
+        }));
     };
-
-    log::info!("   Data bytes length: {}", data_bytes.len());
 
     // Create BRC-43 invoice number
     let invoice = format!("{}-{}", protocol_id_str, req.key_id);
@@ -3027,9 +3055,15 @@ pub async fn create_signature(
 
     log::info!("   ✅ Child private key derived");
 
-    // Hash the data with SHA256
-    let data_hash = sha256(&data_bytes);
-    log::info!("   Data hash (32 bytes): {}", hex::encode(&data_hash));
+    // Hash the data with SHA256, or use pre-computed hash directly
+    let data_hash: Vec<u8> = if use_direct_hash {
+        log::info!("   Using pre-computed hash directly (32 bytes): {}", hex::encode(&data_bytes));
+        data_bytes
+    } else {
+        let hash = sha256(&data_bytes);
+        log::info!("   Data hash (32 bytes): {}", hex::encode(&hash));
+        hash
+    };
 
     // Sign with ECDSA
     use secp256k1::{Secp256k1, Message, SecretKey};
@@ -3634,15 +3668,15 @@ pub(crate) async fn create_action_internal(
             }
         }
 
-        // Validate output description length if provided (SDK: 5-50 bytes UTF-8)
+        // Validate output description length if provided (SDK: DescriptionString5to2000Bytes)
         if let Some(ref desc) = output.output_description {
             let byte_len = desc.len();
             if byte_len > 0 && byte_len < 5 {
                 log::warn!("   ⚠️  Output {}: outputDescription too short ({} bytes, min 5) - accepting anyway", i, byte_len);
-            } else if byte_len > 50 {
-                log::error!("   ❌ Output {}: outputDescription too long ({} bytes, max 50)", i, byte_len);
+            } else if byte_len > 2000 {
+                log::error!("   ❌ Output {}: outputDescription too long ({} bytes, max 2000)", i, byte_len);
                 return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Output {}: outputDescription exceeds 50 bytes ({} bytes)", i, byte_len),
+                    "error": format!("Output {}: outputDescription exceeds 2000 bytes ({} bytes)", i, byte_len),
                     "code": "ERR_INVALID_OUTPUT_DESCRIPTION"
                 }));
             }

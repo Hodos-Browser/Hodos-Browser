@@ -141,7 +141,7 @@ export const useTabManager = () => {
       if (event.data?.type === 'payment_success_indicator') {
         try {
           const { cents, domain } = JSON.parse(event.data.data);
-          const amount = `$${(cents / 100).toFixed(2)}`;
+          const amount = cents > 0 ? `$${(cents / 100).toFixed(2)}` : '< $0.01';
 
           // Match payment to the specific tab that made the request.
           // Only badge ONE tab — find the first match by domain (tab.id != CEF browserId).

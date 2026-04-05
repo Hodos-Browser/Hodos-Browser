@@ -969,6 +969,7 @@ public:
     void startAsyncHTTPRequest();
 
     int64_t getPreCalculatedCents() const { return preCalculatedCents_; }
+    bool getWasAutoApprovedPayment() const { return wasAutoApprovedPayment_; }
     int getBrowserId() const { return browser_ ? browser_->GetIdentifier() : 0; }
     const std::string& getRequestDomain() const { return requestDomain_; }
 
@@ -991,6 +992,7 @@ private:
 
     // Auto-approve engine: pre-calculated spending for this request
     int64_t preCalculatedCents_ = 0;
+    bool wasAutoApprovedPayment_ = false;
 
     // Browser reference for modal triggering
     CefRefPtr<CefBrowser> browser_;
@@ -1220,6 +1222,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 // Auto-approve: within both limits
                 LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
                 preCalculatedCents_ = cents;
+                wasAutoApprovedPayment_ = true;
                 SessionManager::GetInstance().incrementRateCounter(browserId);
                 SessionManager::GetInstance().incrementPaymentCount(browserId);
                 handle_request = true;
@@ -1650,7 +1653,7 @@ public:
         if (parent_) {
             CefURLRequest::Status status = request->GetRequestStatus();
             int64_t cents = parent_->getPreCalculatedCents();
-            if (status == UR_SUCCESS && cents > 0) {
+            if (status == UR_SUCCESS && parent_->getWasAutoApprovedPayment()) {
                 // Check response is not an error
                 bool isError = false;
                 try {
