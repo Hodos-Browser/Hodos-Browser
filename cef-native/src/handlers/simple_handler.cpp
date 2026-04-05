@@ -888,11 +888,13 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             {
                 extern bool g_header_browser_loaded;
                 g_header_browser_loaded = true;
+#ifdef _WIN32
                 // Invalidate the main window so the loading icon stops being drawn
                 extern HWND g_hwnd;
                 if (g_hwnd && IsWindow(g_hwnd)) {
                     InvalidateRect(g_hwnd, nullptr, TRUE);
                 }
+#endif
             }
             Logger::Log("Header browser loaded - React content now visible", 1, 2);
 
