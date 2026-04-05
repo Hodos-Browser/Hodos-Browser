@@ -183,7 +183,7 @@ begin
           'Do you want to delete your wallet as well?' + #13#10 + #13#10 +
           'Click Yes to delete EVERYTHING (including wallet).' + #13#10 +
           'Click No to keep your wallet safe.',
-          mbCritical, MB_YESNO);
+          mbError, MB_YESNO);
         if WalletWarning = IDNO then
         begin
           // Delete browsing data but preserve wallet
