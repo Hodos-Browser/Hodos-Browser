@@ -182,6 +182,8 @@ static pid_t g_wallet_server_pid = -1;
 static pid_t g_adblock_server_pid = -1;
 std::atomic<bool> g_walletServerRunning{false};
 std::atomic<bool> g_adblockServerRunning{false};
+bool g_app_shutting_down = false;
+bool g_header_browser_loaded = false;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
