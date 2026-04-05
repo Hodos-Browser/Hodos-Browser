@@ -21,13 +21,13 @@ const SettingsTab: React.FC = () => {
   const [revealingMnemonic, setRevealingMnemonic] = useState(false);
   const [showMnemonicForm, setShowMnemonicForm] = useState(false);
 
-  // Export backup
-  const [showExportForm, setShowExportForm] = useState(false);
+  // Export backup (UI not yet wired)
+  const [, setShowExportForm] = useState(false);
   const [exportPassword, setExportPassword] = useState('');
   const [exportConfirm, setExportConfirm] = useState('');
-  const [exportError, setExportError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [exportSuccess, setExportSuccess] = useState(false);
+  const [, setExportError] = useState<string | null>(null);
+  const [, setExporting] = useState(false);
+  const [, setExportSuccess] = useState(false);
 
   // Delete wallet
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -186,6 +186,7 @@ const SettingsTab: React.FC = () => {
       setExporting(false);
     }
   };
+  void handleExportBackup; // suppress TS6133 until export UI is wired
 
   const handleDeleteWallet = async () => {
     try {
