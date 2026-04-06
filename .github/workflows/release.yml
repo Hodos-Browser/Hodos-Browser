@@ -514,6 +514,18 @@ jobs:
           # 6. Sign main executable
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
+          # Debug: check exe signature and architecture
+          echo "=== Post-sign diagnostics ==="
+          echo "Architecture:"
+          lipo -info "$APP/Contents/MacOS/HodosBrowserShell"
+          echo "Code signature details:"
+          codesign -dvvv "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -5
+          echo "Entitlements embedded:"
+          codesign -d --entitlements - "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -10
+          echo "LC_CODE_SIGNATURE:"
+          otool -l "$APP/Contents/MacOS/HodosBrowserShell" | grep -A4 LC_CODE_SIGNATURE || echo "not found"
+          echo "=== End diagnostics ==="
+
           # 7. Sign app bundle (seals everything — MUST be last)
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
