@@ -482,32 +482,30 @@ jobs:
             fi
           done
 
-          # 4. Sign Sparkle inside-out, then sign the top-level framework
+          # 4. Sign Sparkle — matching Brave/steipete/rsms proven pattern
+          # Key: use -f -s -o runtime (no --timestamp on Sparkle internals)
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
           if [ -d "$SPARKLE/Versions/B" ]; then
-            echo "Signing Sparkle framework..."
+            echo "Signing Sparkle framework (Brave/steipete pattern)..."
+            SPARKLE_SIGN="codesign -f -s"
 
-            # Innermost first: individual Mach-O binaries
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer"
-            codesign --force --timestamp --options runtime --sign "$IDENTITY" \
-              --preserve-metadata=entitlements \
-              "$SPARKLE/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app/Contents/MacOS/Updater"
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Autoupdate"
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Sparkle"
-
-            # Then bundles
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-            codesign --force --timestamp --options runtime --sign "$IDENTITY" \
-              --preserve-metadata=entitlements \
+            # 1. XPC services (innermost)
+            $SPARKLE_SIGN "$IDENTITY" -o runtime \
+              "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+            $SPARKLE_SIGN "$IDENTITY" -o runtime --preserve-metadata=entitlements \
               "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
 
-            # Sign the top-level Sparkle.framework (seals the root directory contents)
-            # This fixes "unsealed contents present in the root directory"
-            $CODESIGN "$IDENTITY" "$SPARKLE"
+            # 2. Autoupdate + Updater.app
+            $SPARKLE_SIGN "$IDENTITY" -o runtime \
+              "$SPARKLE/Versions/B/Autoupdate"
+            $SPARKLE_SIGN "$IDENTITY" -o runtime \
+              "$SPARKLE/Versions/B/Updater.app"
 
-            echo "Sparkle framework signed (including top-level seal)"
+            # 3. Top-level Sparkle.framework
+            $SPARKLE_SIGN "$IDENTITY" -o runtime \
+              "$SPARKLE"
+
+            echo "Sparkle framework signed"
           fi
 
           # 5. Sign Rust binaries
