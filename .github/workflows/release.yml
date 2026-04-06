@@ -456,38 +456,30 @@ jobs:
             fi
           done
 
-          # 4. Sign ALL Sparkle binaries with our Developer ID
-          # Apple requires every binary in a notarized app to be signed with YOUR cert
-          # ditto may create copies (not symlinks) so we must sign everything in the entire framework
+          # 4. Sign Sparkle — ONLY real files in Versions/B (symlinks inherit the signature)
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-          if [ -d "$SPARKLE" ]; then
-            echo "Signing all Sparkle Mach-O binaries..."
+          if [ -d "$SPARKLE/Versions/B" ]; then
+            echo "Signing Sparkle framework (Versions/B — real files only)..."
 
-            # Sign every Mach-O binary in the entire Sparkle framework (follows symlinks)
-            find -L "$SPARKLE" -type f | while read binary; do
+            # Sign all Mach-O binaries (real files, no symlinks)
+            find "$SPARKLE/Versions/B" -type f | while read binary; do
               file_type=$(file -b "$binary" 2>/dev/null || echo "")
               if echo "$file_type" | grep -q "Mach-O"; then
                 echo "Signing: $binary"
-                $CODESIGN "$IDENTITY" "$binary" 2>/dev/null || true
+                $CODESIGN "$IDENTITY" "$binary"
               fi
             done
 
-            # Sign all XPC bundles
-            find -L "$SPARKLE" -name "*.xpc" -type d | while read xpc; do
+            # Sign XPC bundles inside-out
+            find "$SPARKLE/Versions/B" -name "*.xpc" -type d | while read xpc; do
               echo "Signing XPC: $xpc"
-              $CODESIGN "$IDENTITY" "$xpc" 2>/dev/null || true
+              $CODESIGN "$IDENTITY" "$xpc"
             done
 
-            # Sign all Updater.app bundles
-            find -L "$SPARKLE" -name "Updater.app" -type d | while read updater; do
-              echo "Signing Updater: $updater"
-              $CODESIGN "$IDENTITY" "$updater" 2>/dev/null || true
-            done
-
-            # Sign Versions/B as the framework version
-            if [ -d "$SPARKLE/Versions/B" ]; then
-              echo "Signing Sparkle Versions/B..."
-              $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B"
+            # Sign Updater.app
+            if [ -d "$SPARKLE/Versions/B/Updater.app" ]; then
+              echo "Signing Updater.app..."
+              $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
             fi
           fi
 
@@ -498,11 +490,9 @@ jobs:
           # 6. Sign main executable
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
-          # 7. Sign the whole app bundle (everything must be in place)
+          # 7. Sign the whole app bundle LAST (seals everything including Sparkle symlinks)
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
-          # 8. Skip local codesign --verify (Sparkle's versioned bundle always triggers "ambiguous" error)
-          # Apple's notarization service is the real verification — if notarization passes, all signatures are valid.
           echo "Signing complete. Notarization will verify all signatures."
 
       # Notarize
