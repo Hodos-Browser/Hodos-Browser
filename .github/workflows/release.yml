@@ -388,12 +388,32 @@ jobs:
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
-          # Copy Sparkle.framework into app bundle Frameworks/
-          # Use ditto to preserve macOS framework symlink structure.
-          # Sparkle ships pre-signed by the Sparkle project — we do NOT re-sign it.
+          # Copy Sparkle.framework into app bundle and fix symlink structure
+          # tar/ditto can break versioned framework symlinks, creating real copies
+          # Apple notarization requires proper symlinks (Versions/Current → B, top-level → Versions/Current/*)
           if [ -d "external/Sparkle.framework" ]; then
             ditto external/Sparkle.framework "$APP/Frameworks/Sparkle.framework"
-            echo "Sparkle.framework copied to app bundle (pre-signed, not re-signed)"
+
+            SPARKLE_FW="$APP/Frameworks/Sparkle.framework"
+
+            # Fix Versions/Current symlink
+            if [ -d "$SPARKLE_FW/Versions/B" ]; then
+              rm -rf "$SPARKLE_FW/Versions/Current"
+              ln -s B "$SPARKLE_FW/Versions/Current"
+            fi
+
+            # Fix top-level symlinks → Versions/Current/*
+            for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources; do
+              rm -rf "$SPARKLE_FW/$item"
+              if [ -e "$SPARKLE_FW/Versions/Current/$item" ]; then
+                ln -s "Versions/Current/$item" "$SPARKLE_FW/$item"
+              fi
+            done
+
+            echo "Sparkle.framework copied with symlinks verified/fixed"
+            echo "Symlink check:"
+            ls -la "$SPARKLE_FW/" | head -15
+            ls -la "$SPARKLE_FW/Versions/"
           fi
 
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
