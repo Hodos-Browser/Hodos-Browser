@@ -453,17 +453,28 @@ jobs:
           IDENTITY="Developer ID Application: Matthew Archbold"
           CODESIGN="codesign --force --timestamp --options runtime --sign"
 
-          # 1. Sign all dylibs inside CEF framework individually
+          # 0. Strip ALL existing signatures (CMake applies ad-hoc sigs during build)
+          echo "Stripping all existing signatures..."
+          find "$APP" -type f | while read f; do
+            file_type=$(file -b "$f" 2>/dev/null || echo "")
+            if echo "$file_type" | grep -q "Mach-O"; then
+              codesign --remove-signature "$f" 2>/dev/null || true
+            fi
+          done
+          find "$APP" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          echo "All signatures stripped."
+
+          # 1. Sign CEF dylibs
           find "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" -name "*.dylib" -type f | while read dylib; do
             echo "Signing dylib: $dylib"
             $CODESIGN "$IDENTITY" "$dylib"
           done
 
-          # 2. Sign the CEF framework itself
+          # 2. Sign CEF framework
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" \
             "$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
 
-          # 3. Sign each CEF helper — executable first, then bundle
+          # 3. Sign CEF helpers — executable first, then bundle
           for helper in "$APP/Contents/Frameworks/HodosBrowser Helper"*.app; do
             if [ -d "$helper" ]; then
               helper_exec="$helper/Contents/MacOS/$(basename "$helper" .app)"
@@ -476,12 +487,10 @@ jobs:
             fi
           done
 
-          # 4. Sign Sparkle — ONLY real files in Versions/B (symlinks inherit the signature)
+          # 4. Sign Sparkle (Versions/B only — symlinks inherit)
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
           if [ -d "$SPARKLE/Versions/B" ]; then
-            echo "Signing Sparkle framework (Versions/B — real files only)..."
-
-            # Sign all Mach-O binaries (real files, no symlinks)
+            echo "Signing Sparkle framework (Versions/B)..."
             find "$SPARKLE/Versions/B" -type f | while read binary; do
               file_type=$(file -b "$binary" 2>/dev/null || echo "")
               if echo "$file_type" | grep -q "Mach-O"; then
@@ -489,16 +498,11 @@ jobs:
                 $CODESIGN "$IDENTITY" "$binary"
               fi
             done
-
-            # Sign XPC bundles inside-out
             find "$SPARKLE/Versions/B" -name "*.xpc" -type d | while read xpc; do
               echo "Signing XPC: $xpc"
               $CODESIGN "$IDENTITY" "$xpc"
             done
-
-            # Sign Updater.app
             if [ -d "$SPARKLE/Versions/B/Updater.app" ]; then
-              echo "Signing Updater.app..."
               $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
             fi
           fi
@@ -507,17 +511,11 @@ jobs:
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 6. Strip any ad-hoc signature from main exe before proper signing
-          codesign --remove-signature "$APP/Contents/MacOS/HodosBrowserShell" 2>/dev/null || true
-
-          # 7. Sign main executable
+          # 6. Sign main executable
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
-          # 8. Sign the app bundle (seals resources, does NOT re-sign the exe)
-          # Remove any existing bundle signature first to avoid conflicts
-          rm -rf "$APP/_CodeSignature" 2>/dev/null || true
-          codesign --timestamp --options runtime \
-            --sign "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
+          # 7. Sign app bundle (seals everything — MUST be last)
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
           echo "Signing complete. Notarization will verify all signatures."
 
