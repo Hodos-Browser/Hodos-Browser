@@ -500,13 +500,16 @@ jobs:
           # 7. Sign the whole app bundle (everything must be in place)
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
-          # 8. Verify (skip --deep which chokes on Sparkle's versioned framework structure)
-          echo "Verifying app bundle signature..."
-          codesign --verify --verbose=2 "$APP"
+          # 8. Verify signatures individually (Sparkle's versioned bundle breaks recursive verify)
+          echo "Verifying main executable..."
+          codesign --verify --verbose=2 "$APP/Contents/MacOS/HodosBrowserShell"
           echo "Verifying CEF framework..."
           codesign --verify --verbose=2 "$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
-          echo "Verifying Sparkle framework version..."
+          echo "Verifying Sparkle Versions/B..."
           codesign --verify --verbose=2 "$SPARKLE_VER"
+          echo "Verifying Rust binaries..."
+          codesign --verify --verbose=2 "$APP/Contents/MacOS/hodos-wallet"
+          codesign --verify --verbose=2 "$APP/Contents/MacOS/hodos-adblock"
           echo "All signatures verified."
 
       # Notarize
