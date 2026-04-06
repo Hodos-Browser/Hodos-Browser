@@ -388,33 +388,12 @@ jobs:
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
-          # Copy Sparkle.framework into app bundle and fix symlink structure
-          # tar/ditto can break versioned framework symlinks, creating real copies
-          # Apple notarization requires proper symlinks (Versions/Current → B, top-level → Versions/Current/*)
-          if [ -d "external/Sparkle.framework" ]; then
-            ditto external/Sparkle.framework "$APP/Frameworks/Sparkle.framework"
-
-            SPARKLE_FW="$APP/Frameworks/Sparkle.framework"
-
-            # Fix Versions/Current symlink
-            if [ -d "$SPARKLE_FW/Versions/B" ]; then
-              rm -rf "$SPARKLE_FW/Versions/Current"
-              ln -s B "$SPARKLE_FW/Versions/Current"
-            fi
-
-            # Fix top-level symlinks → Versions/Current/*
-            for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources; do
-              rm -rf "$SPARKLE_FW/$item"
-              if [ -e "$SPARKLE_FW/Versions/Current/$item" ]; then
-                ln -s "Versions/Current/$item" "$SPARKLE_FW/$item"
-              fi
-            done
-
-            echo "Sparkle.framework copied with symlinks verified/fixed"
-            echo "Symlink check:"
-            ls -la "$SPARKLE_FW/" | head -15
-            ls -la "$SPARKLE_FW/Versions/"
-          fi
+          # Sparkle.framework EXCLUDED from macOS build for now
+          # The versioned framework bundle structure causes "ambiguous format" errors
+          # with codesign that corrupt the outer app bundle's signature during notarization.
+          # macOS auto-update is a no-op stub (AutoUpdater_mac.mm) so this has no user impact.
+          # TODO: Fix Sparkle signing or switch to a different update mechanism for macOS
+          echo "Sparkle.framework excluded from build (macOS auto-update is stub)"
 
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
           echo "App bundle structure:"
@@ -487,25 +466,7 @@ jobs:
             fi
           done
 
-          # 4. Sign Sparkle (Versions/B only — symlinks inherit)
-          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-          if [ -d "$SPARKLE/Versions/B" ]; then
-            echo "Signing Sparkle framework (Versions/B)..."
-            find "$SPARKLE/Versions/B" -type f | while read binary; do
-              file_type=$(file -b "$binary" 2>/dev/null || echo "")
-              if echo "$file_type" | grep -q "Mach-O"; then
-                echo "Signing: $binary"
-                $CODESIGN "$IDENTITY" "$binary"
-              fi
-            done
-            find "$SPARKLE/Versions/B" -name "*.xpc" -type d | while read xpc; do
-              echo "Signing XPC: $xpc"
-              $CODESIGN "$IDENTITY" "$xpc"
-            done
-            if [ -d "$SPARKLE/Versions/B/Updater.app" ]; then
-              $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
-            fi
-          fi
+          # 4. Sparkle excluded — no signing needed (see assembly step)
 
           # 5. Sign Rust binaries
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
@@ -541,13 +502,6 @@ jobs:
 
           # Create zip for notarization using --sequesterRsrc to preserve resource forks and code signatures
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" HodosBrowser-notarize.zip
-
-          # Verify the zip preserves the signature
-          echo "Verifying signature survives zip round-trip..."
-          mkdir -p /tmp/verify-unzip
-          /usr/bin/ditto -x -k HodosBrowser-notarize.zip /tmp/verify-unzip
-          codesign -dvv "/tmp/verify-unzip/HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell" 2>&1 | grep -E "Authority|Format|CodeDirectory" || echo "WARNING: sig verification failed after unzip"
-          rm -rf /tmp/verify-unzip
 
           # Submit for notarization — MUST succeed or build fails
           echo "Submitting for notarization (timeout: 2 hours)..."
