@@ -400,8 +400,9 @@ jobs:
               ln -s B "$SPARKLE_FW/Versions/Current"
             fi
 
-            # Fix top-level symlinks → Versions/Current/*
-            for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources; do
+            # Fix ALL top-level items → symlinks to Versions/Current/*
+            # Any real file/dir at root level causes "unsealed contents" error
+            for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources Modules PrivateHeaders; do
               rm -rf "$SPARKLE_FW/$item"
               if [ -e "$SPARKLE_FW/Versions/Current/$item" ]; then
                 ln -s "Versions/Current/$item" "$SPARKLE_FW/$item"
