@@ -507,10 +507,9 @@ jobs:
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 6. Sign main executable
-          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
-
-          # 7. Sign the whole app bundle LAST (seals everything including Sparkle symlinks)
+          # 6. Sign the whole app bundle (signs main executable + seals everything)
+          # Do NOT sign HodosBrowserShell separately — the bundle signing covers it
+          # and a separate sign would invalidate the bundle seal
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
           echo "Signing complete. Notarization will verify all signatures."
