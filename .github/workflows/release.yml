@@ -511,18 +511,29 @@ jobs:
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 6. Sign the app bundle ONLY (this signs the main executable + seals everything in one pass)
-          # Do NOT sign HodosBrowserShell separately — the bundle sign handles it
-          # Signing the exe then the bundle causes the bundle to re-sign the exe, which
-          # can produce an invalid signature on arm64 that Apple's server rejects
+          # 6. Sign main executable separately with entitlements
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
+
+          # Verify the exe signature is valid BEFORE bundle signing
+          echo "=== Verify exe before bundle sign ==="
+          codesign --verify --verbose=4 "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 || echo "EXE VERIFY FAILED"
+
+          # 7. Sign the app bundle (seals resources around the already-signed exe)
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
-          # Diagnostics: verify the final state
-          echo "=== Final signature state ==="
-          codesign -dvvv "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | grep -E "Identifier|Format|CodeDirectory|Hash type|Authority|Timestamp|Runtime"
-          echo "Entitlements:"
-          codesign -d --entitlements - "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -10
-          echo "=== End diagnostics ==="
+          # Verify the exe is still valid AFTER bundle signing
+          echo "=== Verify exe after bundle sign ==="
+          codesign --verify --verbose=4 "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 || echo "EXE VERIFY FAILED AFTER BUNDLE SIGN"
+
+          # Full bundle verify (will fail on Sparkle ambiguous but that's ok)
+          echo "=== Verify full bundle ==="
+          codesign --verify --verbose=4 "$APP" 2>&1 || echo "Bundle verify had issues (expected with Sparkle)"
+
+          # Check binary structure
+          echo "=== Binary info ==="
+          file "$APP/Contents/MacOS/HodosBrowserShell"
+          otool -l "$APP/Contents/MacOS/HodosBrowserShell" | grep -A5 LC_CODE_SIGNATURE
+          ls -la "$APP/Contents/MacOS/HodosBrowserShell"
 
           echo "Signing complete. Notarization will verify all signatures."
 
