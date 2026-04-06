@@ -482,29 +482,32 @@ jobs:
             fi
           done
 
-          # 4. Sign Sparkle inside-out (Versions/B only — symlinks point back)
+          # 4. Sign Sparkle inside-out, then sign the top-level framework
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
           if [ -d "$SPARKLE/Versions/B" ]; then
             echo "Signing Sparkle framework..."
 
-            # Sign XPC services first (innermost)
-            $CODESIGN "$IDENTITY" \
-              "$SPARKLE/Versions/B/XPCServices/Installer.xpc" 2>/dev/null || true
-            # Downloader.xpc needs --preserve-metadata=entitlements (Sparkle 2.6+)
+            # Innermost first: individual Mach-O binaries
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer"
             codesign --force --timestamp --options runtime --sign "$IDENTITY" \
               --preserve-metadata=entitlements \
-              "$SPARKLE/Versions/B/XPCServices/Downloader.xpc" 2>/dev/null || true
+              "$SPARKLE/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app/Contents/MacOS/Updater"
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Autoupdate"
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Sparkle"
 
-            # Sign Autoupdate binary
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Autoupdate" 2>/dev/null || true
+            # Then bundles
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+            codesign --force --timestamp --options runtime --sign "$IDENTITY" \
+              --preserve-metadata=entitlements \
+              "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
 
-            # Sign Updater.app
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app" 2>/dev/null || true
+            # Sign the top-level Sparkle.framework (seals the root directory contents)
+            # This fixes "unsealed contents present in the root directory"
+            $CODESIGN "$IDENTITY" "$SPARKLE"
 
-            # Sign the Sparkle framework itself (NOT top-level — use Versions/B)
-            $CODESIGN "$IDENTITY" "$SPARKLE/Versions/B"
-
-            echo "Sparkle framework signed"
+            echo "Sparkle framework signed (including top-level seal)"
           fi
 
           # 5. Sign Rust binaries
