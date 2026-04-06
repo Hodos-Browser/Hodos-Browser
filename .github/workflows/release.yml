@@ -443,7 +443,7 @@ jobs:
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" \
             "$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
 
-          # 3. Sign each helper — executable first, then bundle
+          # 3. Sign each CEF helper — executable first, then bundle
           for helper in "$APP/Contents/Frameworks/HodosBrowser Helper"*.app; do
             if [ -d "$helper" ]; then
               helper_exec="$helper/Contents/MacOS/$(basename "$helper" .app)"
@@ -456,30 +456,52 @@ jobs:
             fi
           done
 
-          # 4. Sign Rust binaries
+          # 4. Sign ALL Sparkle binaries inside-out with our Developer ID
+          # Apple requires every binary in a notarized app to be signed with YOUR cert
+          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+          if [ -d "$SPARKLE" ]; then
+            echo "Signing Sparkle framework internals..."
+
+            # Sign all executables and dylibs inside Sparkle (XPC services, Updater, Autoupdate)
+            find "$SPARKLE" -type f \( -name "*.dylib" -o -perm +111 \) | while read binary; do
+              # Skip Info.plist, headers, and other non-binary files
+              file_type=$(file -b "$binary" 2>/dev/null || echo "")
+              if echo "$file_type" | grep -q "Mach-O"; then
+                echo "Signing Sparkle binary: $binary"
+                $CODESIGN "$IDENTITY" "$binary"
+              fi
+            done
+
+            # Sign XPC service bundles
+            find "$SPARKLE" -name "*.xpc" -type d | while read xpc; do
+              echo "Signing Sparkle XPC: $xpc"
+              $CODESIGN "$IDENTITY" "$xpc"
+            done
+
+            # Sign Updater.app bundles
+            find "$SPARKLE" -name "Updater.app" -type d | while read updater; do
+              echo "Signing Sparkle Updater: $updater"
+              $CODESIGN "$IDENTITY" "$updater"
+            done
+
+            # Sign the framework itself (must be last)
+            echo "Signing Sparkle framework bundle..."
+            $CODESIGN "$IDENTITY" "$SPARKLE"
+          fi
+
+          # 5. Sign Rust binaries
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 5. Sign main executable
+          # 6. Sign main executable
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
 
-          # 6. Sign the whole bundle
-          # Temporarily move Sparkle out so --force doesn't try to re-sign it,
-          # then move it back after signing. Sparkle keeps its original signature.
-          SPARKLE_TMP=""
-          if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
-            SPARKLE_TMP="$(mktemp -d)/Sparkle.framework"
-            mv "$APP/Contents/Frameworks/Sparkle.framework" "$SPARKLE_TMP"
-          fi
-
+          # 7. Sign the whole app bundle (everything must be in place)
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
-          if [ -n "$SPARKLE_TMP" ] && [ -d "$SPARKLE_TMP" ]; then
-            mv "$SPARKLE_TMP" "$APP/Contents/Frameworks/Sparkle.framework"
-          fi
-
-          # 7. Verify our components (Sparkle has its own valid signature)
-          codesign --verify --verbose=2 "$APP" || echo "WARNING: verify had issues"
+          # 8. Verify
+          echo "Verifying signature..."
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
       # Notarize
       - name: Notarize app
