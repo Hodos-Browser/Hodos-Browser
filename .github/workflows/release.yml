@@ -511,23 +511,18 @@ jobs:
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 6. Sign main executable
-          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
-
-          # Debug: check exe signature and architecture
-          echo "=== Post-sign diagnostics ==="
-          echo "Architecture:"
-          lipo -info "$APP/Contents/MacOS/HodosBrowserShell"
-          echo "Code signature details:"
-          codesign -dvvv "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -5
-          echo "Entitlements embedded:"
-          codesign -d --entitlements - "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -10
-          echo "LC_CODE_SIGNATURE:"
-          otool -l "$APP/Contents/MacOS/HodosBrowserShell" | grep -A4 LC_CODE_SIGNATURE || echo "not found"
-          echo "=== End diagnostics ==="
-
-          # 7. Sign app bundle (seals everything — MUST be last)
+          # 6. Sign the app bundle ONLY (this signs the main executable + seals everything in one pass)
+          # Do NOT sign HodosBrowserShell separately — the bundle sign handles it
+          # Signing the exe then the bundle causes the bundle to re-sign the exe, which
+          # can produce an invalid signature on arm64 that Apple's server rejects
           $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
+
+          # Diagnostics: verify the final state
+          echo "=== Final signature state ==="
+          codesign -dvvv "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | grep -E "Identifier|Format|CodeDirectory|Hash type|Authority|Timestamp|Runtime"
+          echo "Entitlements:"
+          codesign -d --entitlements - "$APP/Contents/MacOS/HodosBrowserShell" 2>&1 | head -10
+          echo "=== End diagnostics ==="
 
           echo "Signing complete. Notarization will verify all signatures."
 
