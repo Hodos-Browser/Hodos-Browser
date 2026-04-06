@@ -499,15 +499,30 @@ jobs:
 
           # Submit for notarization — MUST succeed or build fails
           echo "Submitting for notarization (timeout: 2 hours)..."
-          xcrun notarytool submit HodosBrowser-notarize.zip \
+          NOTARIZE_OUTPUT=$(xcrun notarytool submit HodosBrowser-notarize.zip \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 7200
+            --wait --timeout 7200 2>&1)
+          echo "$NOTARIZE_OUTPUT"
 
-          echo "Notarization succeeded — stapling ticket..."
-          xcrun stapler staple "$APP"
-          echo "Stapling complete — app is fully notarized"
+          # Extract submission ID for log fetching
+          SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+
+          # Check if notarization actually succeeded (notarytool returns 0 even on Invalid)
+          if echo "$NOTARIZE_OUTPUT" | grep -q "status: Accepted"; then
+            echo "Notarization accepted — stapling ticket..."
+            xcrun stapler staple "$APP"
+            echo "Stapling complete — app is fully notarized"
+          else
+            echo "ERROR: Notarization failed!"
+            echo "Fetching notarization log for details..."
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" 2>&1 || true
+            exit 1
+          fi
 
           rm -f HodosBrowser-notarize.zip
 
