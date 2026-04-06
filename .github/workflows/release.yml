@@ -539,8 +539,15 @@ jobs:
           mkdir -p ~/private_keys
           echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
 
-          # Create zip for notarization
-          ditto -c -k --keepParent "$APP" HodosBrowser-notarize.zip
+          # Create zip for notarization using --sequesterRsrc to preserve resource forks and code signatures
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" HodosBrowser-notarize.zip
+
+          # Verify the zip preserves the signature
+          echo "Verifying signature survives zip round-trip..."
+          mkdir -p /tmp/verify-unzip
+          /usr/bin/ditto -x -k HodosBrowser-notarize.zip /tmp/verify-unzip
+          codesign -dvv "/tmp/verify-unzip/HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell" 2>&1 | grep -E "Authority|Format|CodeDirectory" || echo "WARNING: sig verification failed after unzip"
+          rm -rf /tmp/verify-unzip
 
           # Submit for notarization — MUST succeed or build fails
           echo "Submitting for notarization (timeout: 2 hours)..."
