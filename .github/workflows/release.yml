@@ -507,8 +507,17 @@ jobs:
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-wallet"
           $CODESIGN "$IDENTITY" "$APP/Contents/MacOS/hodos-adblock"
 
-          # 6. Sign the whole app bundle (covers main executable + seals everything)
-          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" --generate-entitlement-der "$APP"
+          # 6. Strip any ad-hoc signature from main exe before proper signing
+          codesign --remove-signature "$APP/Contents/MacOS/HodosBrowserShell" 2>/dev/null || true
+
+          # 7. Sign main executable
+          $CODESIGN "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP/Contents/MacOS/HodosBrowserShell"
+
+          # 8. Sign the app bundle (seals resources, does NOT re-sign the exe)
+          # Remove any existing bundle signature first to avoid conflicts
+          rm -rf "$APP/_CodeSignature" 2>/dev/null || true
+          codesign --timestamp --options runtime \
+            --sign "$IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
 
           echo "Signing complete. Notarization will verify all signatures."
 
