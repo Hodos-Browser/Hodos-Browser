@@ -483,9 +483,25 @@ jobs:
           done
 
           # 4. Sign Sparkle — matching Brave/steipete/rsms proven pattern
-          # Key: use -f -s -o runtime (no --timestamp on Sparkle internals)
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
           if [ -d "$SPARKLE/Versions/B" ]; then
+            echo "=== Sparkle framework structure ==="
+            echo "Root contents:"
+            ls -la "$SPARKLE/"
+            echo "Versions:"
+            ls -la "$SPARKLE/Versions/"
+            echo "Versions/B:"
+            ls -la "$SPARKLE/Versions/B/"
+            echo "Symlink check (Current -> ?):"
+            readlink "$SPARKLE/Versions/Current" || echo "NOT A SYMLINK"
+            echo "Top-level symlink check:"
+            for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources; do
+              if [ -e "$SPARKLE/$item" ]; then
+                readlink "$SPARKLE/$item" || echo "$item: NOT A SYMLINK (real file/dir)"
+              fi
+            done
+            echo "=== End structure ==="
+
             echo "Signing Sparkle framework (Brave/steipete pattern)..."
             SPARKLE_SIGN="codesign -f -s"
 
