@@ -458,13 +458,14 @@ jobs:
 
           # 4. Sign ALL Sparkle binaries inside-out with our Developer ID
           # Apple requires every binary in a notarized app to be signed with YOUR cert
+          # Sparkle uses a versioned framework (Versions/B/) with symlinks — only sign real files
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-          if [ -d "$SPARKLE" ]; then
-            echo "Signing Sparkle framework internals..."
+          SPARKLE_VER="$SPARKLE/Versions/B"
+          if [ -d "$SPARKLE_VER" ]; then
+            echo "Signing Sparkle framework internals (Versions/B only — no symlinks)..."
 
-            # Sign all executables and dylibs inside Sparkle (XPC services, Updater, Autoupdate)
-            find "$SPARKLE" -type f \( -name "*.dylib" -o -perm +111 \) | while read binary; do
-              # Skip Info.plist, headers, and other non-binary files
+            # Sign all Mach-O binaries inside the real version dir (not symlinks)
+            find "$SPARKLE_VER" -not -type l -type f | while read binary; do
               file_type=$(file -b "$binary" 2>/dev/null || echo "")
               if echo "$file_type" | grep -q "Mach-O"; then
                 echo "Signing Sparkle binary: $binary"
@@ -472,21 +473,21 @@ jobs:
               fi
             done
 
-            # Sign XPC service bundles
-            find "$SPARKLE" -name "*.xpc" -type d | while read xpc; do
+            # Sign XPC service bundles (inside Versions/B only)
+            find "$SPARKLE_VER" -not -type l -name "*.xpc" -type d | while read xpc; do
               echo "Signing Sparkle XPC: $xpc"
               $CODESIGN "$IDENTITY" "$xpc"
             done
 
-            # Sign Updater.app bundles
-            find "$SPARKLE" -name "Updater.app" -type d | while read updater; do
-              echo "Signing Sparkle Updater: $updater"
-              $CODESIGN "$IDENTITY" "$updater"
-            done
+            # Sign Updater.app bundle
+            if [ -d "$SPARKLE_VER/Updater.app" ]; then
+              echo "Signing Sparkle Updater.app..."
+              $CODESIGN "$IDENTITY" "$SPARKLE_VER/Updater.app"
+            fi
 
-            # Sign the framework itself (must be last)
-            echo "Signing Sparkle framework bundle..."
-            $CODESIGN "$IDENTITY" "$SPARKLE"
+            # Sign the versioned framework (Versions/B, not the top-level symlink bundle)
+            echo "Signing Sparkle framework version B..."
+            $CODESIGN "$IDENTITY" "$SPARKLE_VER"
           fi
 
           # 5. Sign Rust binaries
