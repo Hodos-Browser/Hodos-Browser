@@ -54,12 +54,10 @@ message(STATUS "App version: ${APP_VERSION}")
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version")
     set(CMAKE_OSX_ARCHITECTURES "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "macOS architecture")
-    # Ensure enough header space for code signing (required for arm64 notarization)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-headerpad,0x4000")
-    # Disable CMake's automatic ad-hoc code signing on arm64
-    # We sign everything ourselves after the build with Developer ID
-    set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
-    set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "")
+    # -headerpad: ensure enough header space for code signing on arm64
+    # -no_adhoc_codesign: prevent linker from embedding ad-hoc signatures on arm64
+    #   (ad-hoc sigs interfere with Developer ID signing for notarization)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-headerpad,0x4000 -Wl,-no_adhoc_codesign")
     message(STATUS "macOS deployment target: ${CMAKE_OSX_DEPLOYMENT_TARGET}")
     message(STATUS "macOS architecture: ${CMAKE_OSX_ARCHITECTURES}")
     message(STATUS "macOS code signing: DISABLED (will sign post-build)")
