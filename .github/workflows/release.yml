@@ -497,15 +497,17 @@ jobs:
           # Create zip for notarization
           ditto -c -k --keepParent "$APP" HodosBrowser-notarize.zip
 
-          # Submit for notarization (don't block on it — Apple can be very slow)
+          # Submit for notarization — MUST succeed or build fails
+          echo "Submitting for notarization (timeout: 2 hours)..."
           xcrun notarytool submit HodosBrowser-notarize.zip \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 3600 2>&1 || echo "Notarization timed out or failed — continuing with signed-only build"
+            --wait --timeout 7200
 
-          # Try to staple (works if notarization completed, no-op if not)
-          xcrun stapler staple "$APP" 2>/dev/null || echo "Stapling skipped — notarization may still be processing"
+          echo "Notarization succeeded — stapling ticket..."
+          xcrun stapler staple "$APP"
+          echo "Stapling complete — app is fully notarized"
 
           rm -f HodosBrowser-notarize.zip
 
