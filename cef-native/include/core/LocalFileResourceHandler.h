@@ -13,6 +13,10 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <sys/stat.h>
+#include <climits>
 #endif
 
 // Serves frontend files from a local directory for production builds.
@@ -175,6 +179,23 @@ inline bool IsFrontendAvailable(std::string& out_frontend_dir) {
         // Check if the directory exists by looking for index.html
         std::string index_path = frontend_dir + "index.html";
         available = (GetFileAttributesA(index_path.c_str()) != INVALID_FILE_ATTRIBUTES);
+#elif defined(__APPLE__)
+        // macOS: frontend is at Contents/Resources/frontend/ inside the app bundle
+        // Get executable path, then navigate to ../Resources/frontend/
+        char exe_path[PATH_MAX];
+        uint32_t size = sizeof(exe_path);
+        if (_NSGetExecutablePath(exe_path, &size) == 0) {
+            std::string exe_dir(exe_path);
+            size_t last_slash = exe_dir.find_last_of("/");
+            if (last_slash != std::string::npos) {
+                exe_dir = exe_dir.substr(0, last_slash);
+            }
+            // exe is at Contents/MacOS/ — go up to Contents/ then into Resources/frontend/
+            frontend_dir = exe_dir + "/../Resources/frontend/";
+            std::string index_path = frontend_dir + "index.html";
+            struct stat st;
+            available = (stat(index_path.c_str(), &st) == 0);
+        }
 #endif
         checked = true;
     }
