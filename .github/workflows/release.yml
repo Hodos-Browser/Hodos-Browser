@@ -622,14 +622,19 @@ jobs:
 
           rm -f HodosBrowser-notarize.zip
 
-      # Create DMG
+      # Create DMG with drag-to-Applications
       - name: Create DMG
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           APP="cef-native/build/bin/HodosBrowserShell.app"
 
-          mkdir -p dist
-          hdiutil create -volname "HodosBrowser" -srcfolder "$APP" -ov -format UDZO "dist/HodosBrowser-${VERSION}.dmg"
+          # Stage the .app alongside an /Applications symlink for drag-to-install
+          mkdir -p dist dmg-staging
+          cp -R "$APP" dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+
+          hdiutil create -volname "HodosBrowser" -srcfolder dmg-staging -ov -format UDZO "dist/HodosBrowser-${VERSION}.dmg"
+          rm -rf dmg-staging
 
           # Sign the DMG too
           codesign --force --sign "Developer ID Application: Matthew Archbold" "dist/HodosBrowser-${VERSION}.dmg"

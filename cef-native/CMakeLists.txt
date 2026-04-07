@@ -256,8 +256,8 @@ if(APPLE)
     set_target_properties(HodosBrowserShell PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
         MACOSX_BUNDLE_BUNDLE_NAME "HodosBrowser"
-        MACOSX_BUNDLE_BUNDLE_VERSION "0.2.0"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.0"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.3.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.3.0"
     )
 elseif(WIN32)
     add_executable(HodosBrowserShell WIN32 ${SOURCES})

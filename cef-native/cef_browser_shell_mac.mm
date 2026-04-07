@@ -3583,17 +3583,19 @@ static void StartWalletServer() {
         exeDir = exeDir.substr(0, lastSlash);
     }
 
-    // Try relative path from build dir: ../../../../../../rust-wallet/target/release/hodos-wallet
-    std::string walletExe = exeDir + "/../../../../../../rust-wallet/target/release/hodos-wallet";
+    // Production: binary alongside main exe in Contents/MacOS/
+    std::string walletExe = exeDir + "/hodos-wallet";
 
-    // Check if file exists
     if (access(walletExe.c_str(), X_OK) != 0) {
-        // Try alternate path for development
-        walletExe = exeDir + "/../../../../../rust-wallet/target/release/hodos-wallet";
+        // Dev fallback: relative path from build dir
+        walletExe = exeDir + "/../../../../../../rust-wallet/target/release/hodos-wallet";
         if (access(walletExe.c_str(), X_OK) != 0) {
-            LOG_WARNING("Wallet server executable not found - browser will run without auto-launched wallet");
-            LOG_WARNING("Start wallet manually: cd rust-wallet && cargo run --release");
-            return;
+            walletExe = exeDir + "/../../../../../rust-wallet/target/release/hodos-wallet";
+            if (access(walletExe.c_str(), X_OK) != 0) {
+                LOG_WARNING("Wallet server executable not found - browser will run without auto-launched wallet");
+                LOG_WARNING("Start wallet manually: cd rust-wallet && cargo run --release");
+                return;
+            }
         }
     }
 
@@ -3635,12 +3637,17 @@ static void StartAdblockServer() {
     size_t lastSlash = exeDir.find_last_of('/');
     if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
 
-    std::string adblockExe = exeDir + "/../../../../../../adblock-engine/target/release/hodos-adblock";
+    // Production: binary alongside main exe in Contents/MacOS/
+    std::string adblockExe = exeDir + "/hodos-adblock";
     if (access(adblockExe.c_str(), X_OK) != 0) {
-        adblockExe = exeDir + "/../../../../../adblock-engine/target/release/hodos-adblock";
+        // Dev fallback: relative path from build dir
+        adblockExe = exeDir + "/../../../../../../adblock-engine/target/release/hodos-adblock";
         if (access(adblockExe.c_str(), X_OK) != 0) {
-            LOG_WARNING("Adblock engine not found - browser will run without ad blocking");
-            return;
+            adblockExe = exeDir + "/../../../../../adblock-engine/target/release/hodos-adblock";
+            if (access(adblockExe.c_str(), X_OK) != 0) {
+                LOG_WARNING("Adblock engine not found - browser will run without ad blocking");
+                return;
+            }
         }
     }
 

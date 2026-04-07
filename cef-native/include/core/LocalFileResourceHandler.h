@@ -32,7 +32,11 @@ public:
         : base_dir_(base_dir), url_(url) {
         // Ensure trailing separator
         if (!base_dir_.empty() && base_dir_.back() != '\\' && base_dir_.back() != '/') {
+#ifdef _WIN32
             base_dir_ += '\\';
+#else
+            base_dir_ += '/';
+#endif
         }
     }
 
@@ -117,8 +121,10 @@ private:
             path = path.substr(0, frag_pos);
         }
 
-        // Normalize separators
+        // Normalize separators (Windows uses backslash, macOS/Linux use forward slash)
+#ifdef _WIN32
         std::replace(path.begin(), path.end(), '/', '\\');
+#endif
 
         // Empty path -> index.html
         if (path.empty()) return "index.html";
