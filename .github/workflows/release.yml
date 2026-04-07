@@ -388,6 +388,28 @@ jobs:
           mkdir -p "$APP/Resources/frontend"
           cp -r frontend/dist/* "$APP/Resources/frontend/"
 
+          # Generate macOS icon from the PNG source
+          # Info.plist references hodos.icns via CFBundleIconFile
+          if [ -f "cef-native/mac/hodos-icon.png" ]; then
+            echo "Generating hodos.icns from source PNG..."
+            mkdir -p hodos.iconset
+            sips -z 16 16 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_16x16.png
+            sips -z 32 32 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_16x16@2x.png
+            sips -z 32 32 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_32x32.png
+            sips -z 64 64 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_32x32@2x.png
+            sips -z 128 128 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_128x128.png
+            sips -z 256 256 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_128x128@2x.png
+            sips -z 256 256 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_256x256.png
+            sips -z 512 512 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_256x256@2x.png
+            sips -z 512 512 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_512x512.png
+            sips -z 1024 1024 cef-native/mac/hodos-icon.png --out hodos.iconset/icon_512x512@2x.png
+            iconutil -c icns hodos.iconset -o "$APP/Resources/hodos.icns"
+            rm -rf hodos.iconset
+            echo "hodos.icns generated and copied to app bundle"
+          else
+            echo "WARNING: cef-native/mac/hodos-icon.png not found — no app icon"
+          fi
+
           # Copy Sparkle.framework and fix symlink structure
           if [ -d "external/Sparkle.framework" ]; then
             ditto external/Sparkle.framework "$APP/Frameworks/Sparkle.framework"

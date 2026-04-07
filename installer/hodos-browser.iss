@@ -2,7 +2,7 @@
 ; Build with: ISCC.exe /DAppVersion=0.1.0-alpha.1 /DProjectRoot=... /DStagingDir=... /DDistDir=... hodos-browser.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0-beta.1"
+  #define AppVersion "0.3.0-beta.2"
 #endif
 
 #ifndef ProjectRoot
@@ -70,6 +70,10 @@ Name: "{group}\{cm:UninstallProgram,Hodos Browser}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowserShell.exe"; Tasks: desktopicon
 
 [Run]
+; Add Windows Firewall rules to prevent the "allow network access" prompt on first launch
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Browser"" dir=in action=allow program=""{app}\HodosBrowserShell.exe"" enable=yes"; Flags: runhidden nowait; StatusMsg: "Configuring firewall..."
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Wallet"" dir=in action=allow program=""{app}\hodos-wallet.exe"" enable=yes"; Flags: runhidden nowait
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Adblock"" dir=in action=allow program=""{app}\hodos-adblock.exe"" enable=yes"; Flags: runhidden nowait
 Filename: "{app}\HodosBrowserShell.exe"; Description: "{cm:LaunchProgram,Hodos Browser}"; Flags: nowait postinstall skipifsilent
 
 ; --- Clean stale runtime files on install/upgrade ---
@@ -86,6 +90,12 @@ Type: files; Name: "{app}\debug_output.log"
 Type: files; Name: "{app}\startup_log.txt"
 Type: files; Name: "{app}\test_debug.log"
 Type: files; Name: "{app}\*.log"
+
+; Remove firewall rules on uninstall
+[UninstallRun]
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Hodos Browser"""; Flags: runhidden nowait
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Hodos Wallet"""; Flags: runhidden nowait
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Hodos Adblock"""; Flags: runhidden nowait
 
 [Code]
 var
