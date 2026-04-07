@@ -4013,7 +4013,7 @@ int main(int argc, char* argv[]) {
         bool webview_created = CefBrowserHost::CreateBrowser(
             webview_window_info,
             webview_handler,
-            "https://metanetapps.com",  // Default page
+            "http://127.0.0.1:5137/newtab",  // New tab page
             webview_settings,
             nullptr,
             CefRequestContext::GetGlobalContext()
