@@ -129,8 +129,9 @@ jobs:
         run: |
           .\scripts\build-release.ps1 -Version "${{ steps.version.outputs.VERSION }}"
       
-      # Sign all executables with Azure Trusted Signing
-      - name: Sign executables with Azure Trusted Signing
+      # Sign all executables and DLLs with Azure Trusted Signing
+      # Unsigned DLLs inside a signed installer trigger AV heuristics
+      - name: Sign executables and DLLs with Azure Trusted Signing
         uses: azure/trusted-signing-action@v1.2.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -140,7 +141,7 @@ jobs:
           trusted-signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ env.AZURE_SIGNING_PROFILE }}
           files-folder: ${{ github.workspace }}/staging/HodosBrowser
-          files-folder-filter: exe
+          files-folder-filter: exe,dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
