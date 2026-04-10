@@ -39,7 +39,7 @@ function toDisplayUrl(url: string): string {
     const prefix = 'http://127.0.0.1:5137/';
     if (!url.startsWith(prefix)) return url;
     const path = url.slice(prefix.length);
-    if (path === 'newtab') return 'hodos://newtab';
+    if (path === 'newtab') return '';  // Empty address bar on new tab (matches Chrome/Firefox/Safari)
     if (path.startsWith('settings-page')) return 'hodos://settings';
     if (path === 'browser-data') return 'hodos://browser-data';
     if (path === 'wallet') return 'hodos://wallet';
@@ -48,10 +48,10 @@ function toDisplayUrl(url: string): string {
 
 const MainBrowserView: React.FC = () => {
     // Address bar state
-    const [address, setAddress] = useState('hodos://newtab');
+    const [address, setAddress] = useState('');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
     const [autocompleteText, setAutocompleteText] = useState<string>('');
-    const [userTypedText, setUserTypedText] = useState('hodos://newtab');
+    const [userTypedText, setUserTypedText] = useState('');
     const addressInputRef = React.useRef<HTMLInputElement>(null);
     const justNavigatedRef = React.useRef(false);
     // Tracks navigation-in-progress to prevent tab sync from reverting address bar

@@ -1,0 +1,61 @@
+MIT License
+
+Copyright (c) 2026 Marston Enterprises
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+TRADEMARK NOTICE
+
+"Hodos", "Hodos Browser", and the Hodos logo are trademarks of Marston
+Enterprises. The MIT License above grants you rights to the source code, but
+it does NOT grant you any rights to use the Hodos name, logo, or branding.
+
+If you fork or modify this Software, you must:
+  1. Choose a different name for your distribution (not "Hodos" or any name
+     confusingly similar to it).
+  2. Use a different logo and branding from the original Hodos Browser.
+  3. Not represent your modified version as being the official Hodos Browser
+     or as endorsed by Marston Enterprises.
+
+This is the same approach used by Mozilla Firefox, Brave, and other open
+source browsers to protect their brand identity while keeping their code open.
+
+---
+
+SERVICE FEE DISCLOSURE
+
+This Software, as distributed by Marston Enterprises, includes a built-in
+service fee of 1000 satoshis sent to a Marston Enterprises BSV address on
+every outgoing transaction (with the exception of backup-token transactions).
+This fee funds ongoing development of the Hodos Browser.
+
+The fee address and amount are defined as constants in
+`rust-wallet/src/handlers.rs` (HODOS_FEE_ADDRESS, HODOS_SERVICE_FEE_SATS) and
+in the certificate publish/unpublish handlers.
+
+If you fork this Software, you are responsible for either:
+  1. Removing or modifying the service fee logic to direct fees to your own
+     address, or
+  2. Clearly disclosing to your users that transactions made through your
+     fork will continue to pay Marston Enterprises.
+
+Failing to do either of the above may mislead your users about where their
+funds are going.

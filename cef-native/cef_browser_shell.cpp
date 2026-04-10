@@ -819,6 +819,24 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             break;
         }
+        case WM_GETMINMAXINFO: {
+            // WS_POPUP windows ignore the taskbar on maximize. Clamp the maximize
+            // size/position to the current monitor's work area so the browser
+            // doesn't cover the taskbar when maximized.
+            HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfo(hMonitor, &mi)) {
+                MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+                mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                mmi->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+                mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+                mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+                mmi->ptMaxTrackSize.x = mmi->ptMaxSize.x;
+                mmi->ptMaxTrackSize.y = mmi->ptMaxSize.y;
+                return 0;
+            }
+            break;
+        }
         case WM_MOVE: {
             // Handle window movement - move overlay windows with main window
             RECT mainRect;

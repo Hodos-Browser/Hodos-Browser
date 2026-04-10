@@ -381,12 +381,13 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
                   ? <><span className="loading-spinner-inline" /> Resolving paymail...</>
                   : paymailInfo?.valid
                     ? <span className="paymail-resolve-row">
+                        <span style={{ color: '#2e7d32', fontWeight: 600, marginRight: 4 }}>✓</span>
                         {paymailInfo.avatar_url && <img src={paymailInfo.avatar_url} className="paymail-avatar" alt="" />}
                         <span>{paymailInfo.name || formData.recipient.trim()}{paymailInfo.has_p2p ? ' (P2P)' : ''}</span>
                       </span>
                     : paymailInfo === null
                       ? 'Verifying paymail...'
-                      : 'Paymail not found'
+                      : <span style={{ color: '#c62828' }}>Paymail not found</span>
                 )
               : isPeerPay
                 ? 'Sending via PeerPay (identity key detected)'
