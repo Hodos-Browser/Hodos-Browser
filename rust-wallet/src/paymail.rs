@@ -574,14 +574,62 @@ impl PaymailClient {
             };
         }
 
-        // Fetch profile (non-fatal)
-        let profile = self.get_profile(&alias, &domain).await;
+        // Authoritative validity check: call the actual payment destination
+        // endpoint. This is the only reliable way to know if an alias exists
+        // because:
+        //   - Capability discovery only proves the DOMAIN supports paymail.
+        //   - HandCash's public-profile endpoint is unreliable — it returns
+        //     HTTP 200 with mismatched data for some non-existent handles
+        //     and HTTP 400 for others.
+        //   - The payment-destination endpoints return HTTP 400 with
+        //     "Paymail not found" for non-existent handles consistently,
+        //     and HTTP 200 with a real output script for valid ones.
+        //
+        // We use a dust amount (546 sats) for the lookup — this does not
+        // commit to anything, it just asks "can this paymail receive?".
+        //
+        // Prefer P2P (BRC-compliant `{satoshis}` body) because HandCash's
+        // basic paymentDestination expects a different body format and will
+        // reject BRC-standard requests. Fall back to basic only if the
+        // domain has no P2P capability.
+        let exists = if has_p2p {
+            self.get_p2p_destination(&alias, &domain, 546)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            self.resolve_address(&alias, &domain, 546, "Hodos")
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
 
-        PaymailResolution {
-            valid: true,
-            name: profile.as_ref().map(|p| p.name.clone()),
-            avatar_url: profile.and_then(|p| p.avatar_url),
-            has_p2p,
+        match exists {
+            Ok(_) => {
+                // Valid — fetch profile metadata as secondary info (non-fatal).
+                // Profile endpoint returns the owner's display name and avatar,
+                // which may differ from the alias (e.g. handle "arch" owned by
+                // user with display name "Chaddy.b"). This is normal.
+                let profile = self.get_profile(&alias, &domain).await;
+                PaymailResolution {
+                    valid: true,
+                    name: profile.as_ref().map(|p| p.name.clone()),
+                    avatar_url: profile.and_then(|p| p.avatar_url),
+                    has_p2p,
+                }
+            }
+            Err(e) => {
+                debug!(
+                    "PaymailClient: payment-destination lookup failed for {}@{}: {}",
+                    alias, domain, e
+                );
+                PaymailResolution {
+                    valid: false,
+                    name: None,
+                    avatar_url: None,
+                    has_p2p: false,
+                }
+            }
         }
     }
 }

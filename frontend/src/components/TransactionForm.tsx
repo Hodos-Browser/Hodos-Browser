@@ -305,7 +305,6 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     const displayName = s.display_name || s.value;
     const showValue = s.display_name && s.display_name !== s.value;
     const cls = badgeClass(s);
-    const isUnverified = s.unverified === true || s.source === 'handcash';
     return (
       <div
         key={`${s.value}-${s.source}`}
@@ -321,7 +320,6 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
         <div className="suggestion-info">
           <span className="suggestion-name">{displayName}</span>
           {showValue && <span className="suggestion-value">{s.value}</span>}
-          {isUnverified && <span className="suggestion-unverified">Will verify on send</span>}
         </div>
         <span className={`suggestion-badge ${cls}`}>{s.source}</span>
       </div>
@@ -378,16 +376,44 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
           <span className="field-hint">
             {isPaymail
               ? (isResolvingPaymail
-                  ? <><span className="loading-spinner-inline" /> Resolving paymail...</>
+                  ? <><span className="loading-spinner-inline" /> Verifying paymail...</>
                   : paymailInfo?.valid
-                    ? <span className="paymail-resolve-row">
-                        <span style={{ color: '#2e7d32', fontWeight: 600, marginRight: 4 }}>✓</span>
-                        {paymailInfo.avatar_url && <img src={paymailInfo.avatar_url} className="paymail-avatar" alt="" />}
-                        <span>{paymailInfo.name || formData.recipient.trim()}{paymailInfo.has_p2p ? ' (P2P)' : ''}</span>
-                      </span>
+                    ? (() => {
+                        // Extract the alias (part before @ or after $) from the recipient
+                        const recipient = formData.recipient.trim();
+                        const alias = recipient.startsWith('$')
+                          ? recipient.slice(1).toLowerCase()
+                          : recipient.split('@')[0]?.toLowerCase() || '';
+                        const profileName = (paymailInfo.name || '').trim();
+                        // Warn if owner display name exists and doesn't contain the alias
+                        // (case-insensitive substring match — handles cases like
+                        // alias "matt" with display name "Matthew Archbold")
+                        const hasNameMismatch = profileName !== '' &&
+                          !profileName.toLowerCase().includes(alias);
+                        return (
+                          <span className="paymail-resolve-row" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                            <span style={{ display: 'flex', alignItems: 'center' }}>
+                              <span style={{ color: '#2e7d32', fontWeight: 600, marginRight: 4 }}>✓</span>
+                              {paymailInfo.avatar_url && <img src={paymailInfo.avatar_url} className="paymail-avatar" alt="" />}
+                              <strong>{recipient}</strong>
+                              {paymailInfo.has_p2p ? <span style={{ color: '#888', marginLeft: 4 }}>(P2P)</span> : null}
+                            </span>
+                            {hasNameMismatch ? (
+                              <span style={{ color: '#b8860b', fontSize: '0.9em', display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+                                <span>⚠️</span>
+                                <span>
+                                  This HandCash handle is owned by <strong>{profileName}</strong>. Make sure this is who you intend to send to.
+                                </span>
+                              </span>
+                            ) : profileName !== '' ? (
+                              <span style={{ color: '#888', fontSize: '0.9em' }}>Owned by {profileName}</span>
+                            ) : null}
+                          </span>
+                        );
+                      })()
                     : paymailInfo === null
-                      ? 'Verifying paymail...'
-                      : <span style={{ color: '#c62828' }}>Paymail not found</span>
+                      ? <><span className="loading-spinner-inline" /> Verifying paymail...</>
+                      : <span style={{ color: '#c62828', fontWeight: 500 }}>✗ Paymail not found — this is not a real paymail address</span>
                 )
               : isPeerPay
                 ? 'Sending via PeerPay (identity key detected)'
@@ -474,7 +500,12 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
           className={`submit-button${isSubmitting ? ' submitting' : ''}`}
           loading={isSubmitting}
           loadingText="Sending..."
-          disabled={isLoading || Object.keys(errors).length > 0}
+          disabled={
+            isLoading ||
+            Object.keys(errors).length > 0 ||
+            // Paymail must be verified (and valid) before sending
+            (isPaymail && (isResolvingPaymail || paymailInfo === null || !paymailInfo.valid))
+          }
         >
           {isPaymail ? 'Send to Paymail' : isPeerPay ? 'Send via PeerPay' : 'Send Transaction'}
         </HodosButton>

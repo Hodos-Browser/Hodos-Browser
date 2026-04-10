@@ -15556,14 +15556,17 @@ pub async fn recipient_suggest(
     if is_handle_like {
         let handle = q.trim_start_matches('$');
         let paymail = format!("{}@handcash.io", handle);
-        let value = if q.starts_with('$') { q.clone() } else { format!("${}", handle) };
+        // Use the full paymail as the canonical value so the recipient field
+        // shows "handle@handcash.io" (not "$handle"). This keeps the UI
+        // unambiguous: users see exactly what they're sending to.
+        let shorthand = format!("${}", handle);
         // Don't duplicate if already in recent recipients
         if !suggestions.iter().any(|s| {
             let sv = s["value"].as_str().unwrap_or("");
-            sv == paymail || sv == value || sv == q
+            sv == paymail || sv == shorthand || sv == q
         }) {
             suggestions.push(serde_json::json!({
-                "value": value,
+                "value": paymail,
                 "display_name": paymail,
                 "avatar_url": null,
                 "type": "paymail",
