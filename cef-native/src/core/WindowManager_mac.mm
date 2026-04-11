@@ -68,6 +68,11 @@ extern void ShutdownApplication();
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    NSArray<NSString*>* stack = [NSThread callStackSymbols];
+    LOG_INFO_WM("🔍 [DIAG-A1] BrowserWindowDelegate::windowShouldClose called (window " +
+                std::to_string(self.window_id) + ") — stack:\n" +
+                std::string([[stack componentsJoinedByString:@"\n"] UTF8String]));
+
     int windowCount = WindowManager::GetInstance().GetWindowCount();
 
     if (windowCount <= 1) {

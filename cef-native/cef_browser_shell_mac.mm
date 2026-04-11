@@ -1972,6 +1972,10 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    NSArray<NSString*>* stack = [NSThread callStackSymbols];
+    LOG_INFO("🔍 [DIAG-A1] MainWindowDelegate::windowShouldClose called (window 0) — stack:\n" +
+             std::string([[stack componentsJoinedByString:@"\n"] UTF8String]));
+
     int windowCount = WindowManager::GetInstance().GetWindowCount();
 
     if (windowCount <= 1) {
