@@ -1,0 +1,74 @@
+# Lock line endings to prevent CRLF/LF flip-flop between Windows + macOS + WSL.
+# Without this file, working in WSL on a /mnt/c/ Windows path can flip a file
+# between CRLF and LF without warning, producing huge phantom diffs.
+
+# Default for everything: treat as text, normalize to LF in the repo.
+# Working trees on Windows still see LF (modern editors all handle it fine).
+* text=auto eol=lf
+
+# Source code — explicit LF (Rust, C++, JS/TS, Python, shell, web)
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.lock     text eol=lf
+*.cpp      text eol=lf
+*.cc       text eol=lf
+*.c        text eol=lf
+*.h        text eol=lf
+*.hpp      text eol=lf
+*.mm       text eol=lf
+*.m        text eol=lf
+*.ts       text eol=lf
+*.tsx      text eol=lf
+*.js       text eol=lf
+*.jsx      text eol=lf
+*.json     text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.scss     text eol=lf
+*.py       text eol=lf
+*.sh       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+*.cmake    text eol=lf
+CMakeLists.txt text eol=lf
+
+# Windows-only scripts must keep CRLF or cmd.exe/PowerShell may misbehave
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.ps1      text eol=crlf
+
+# Binary files — never touch
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.icns     binary
+*.webp     binary
+*.svg      text eol=lf
+*.pdf      binary
+*.zip      binary
+*.gz       binary
+*.tar      binary
+*.dmg      binary
+*.exe      binary
+*.dll      binary
+*.so       binary
+*.dylib    binary
+*.a        binary
+*.lib      binary
+*.o        binary
+*.obj      binary
+*.woff     binary
+*.woff2    binary
+*.ttf      binary
+*.otf      binary
+*.eot      binary
+*.mp3      binary
+*.mp4      binary
+*.wav      binary
+*.db       binary
+*.sqlite   binary
+*.sqlite3  binary
