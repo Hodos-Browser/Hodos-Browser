@@ -997,6 +997,68 @@ pub fn compress_for_onchain(
         ptx.merkle_path = String::new();
     }
 
+    // Spent-output time-tiered strip: drop spent HD-self outputs older than 7 days
+    // whose owning address is no longer flagged for pending UTXO check.
+    //
+    // HARD RULE — non-standard token preservation: any output not recoverable from
+    // the master key alone (BRC-42 counterparty, PushDrop, future BRC-X) MUST be
+    // preserved regardless of age. Token loss is permanent and unrecoverable.
+    //
+    // PENDING-ADDRESS GUARD: even a spent HD-self output is preserved if its
+    // owning address (matched by derivation_suffix → addresses.index) still has
+    // pending_utxo_check=1, because the wallet considers that address live for
+    // future receives. The "advanced wallet receive" UI may display such an
+    // address as the user's current receive address.
+    //
+    // Six inclusion clauses; drop only if NONE match.
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        const SPENT_OUTPUT_BACKUP_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+        let now: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // Build set of HD indices whose owning address is still pending UTXO check.
+        // payload.addresses was loaded by collect_payload above and reflects the live
+        // addresses table at the moment of backup.
+        let pending_indices: std::collections::HashSet<i32> = payload.addresses.iter()
+            .filter(|a| a.pending_utxo_check)
+            .map(|a| a.index)
+            .collect();
+
+        let before = payload.outputs.len();
+        payload.outputs.retain(|o| {
+            // 1. Active UTXOs — always keep
+            if o.spendable { return true; }
+            // 2. BRC-42 counterparty (PeerPay etc.) — non-recoverable from master key
+            if o.sender_identity_key.is_some() { return true; }
+            // 3. Non-HD-self derivation prefixes (PushDrop, tokens, master-direct, future BRC-X)
+            match o.derivation_prefix.as_deref() {
+                Some("2-receive address") | Some("bip32") => {} // candidate for drop
+                _ => return true, // preserve everything else (including None)
+            }
+            // 4. Recent records — keep for in-flight cert reclaim / replay / status reconciliation
+            if now.saturating_sub(o.updated_at) < SPENT_OUTPUT_BACKUP_RETENTION_SECS {
+                return true;
+            }
+            // 5. Pending-address guard — owning address still being watched for new UTXOs.
+            //    Match output's derivation_suffix (HD index as string) against pending set.
+            if let Some(suffix) = o.derivation_suffix.as_deref() {
+                if let Ok(idx) = suffix.parse::<i32>() {
+                    if pending_indices.contains(&idx) { return true; }
+                }
+            }
+            // Spent + HD-self + older than 7 days + owning address not pending → drop
+            false
+        });
+        let dropped = before - payload.outputs.len();
+        if dropped > 0 {
+            info!("   🧹 Backup spent-output strip: dropped {} of {} outputs (spent + HD-self + >7d + addr not pending)",
+                dropped, before);
+        }
+    }
+
     // Null out orphan FK references
     let valid_tx_ids: std::collections::HashSet<i64> = payload.transactions.iter()
         .map(|t| t.id)
