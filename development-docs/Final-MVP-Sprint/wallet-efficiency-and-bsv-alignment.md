@@ -37,6 +37,10 @@ These are the load-bearing properties of the current on-chain backup system. Any
 
 6. **Recovery is the system's most fragile path.** It "took a long time to get working." Any optimization that touches what's in the backup must include a documented argument for why recovery still works after the change. Default: keep recent operationally-relevant data, drop old history.
 
+7. **Recovery code stays the same unless explicitly approved.** Verified 2026-04-11 by reading `handlers.rs:12443`: recovery does NOT do sequential address derivation — it deletes auto-created addresses then imports from the backup payload directly. Optimizations that would require changes to `wallet_recover_onchain`, `wallet_restore`, or `import_to_db` are HIGH RISK and require explicit pre-approval. Prefer optimizations that work with the existing recovery code unchanged.
+
+8. **Non-standard token preservation (HARD RULE).** Any backup field that touches `outputs`, `transactions`, `addresses`, or proof tracking MUST verify it doesn't break recovery for: (a) PushDrop tokens current and future, (b) BRC-42 with external counterparty, (c) future BRC-X protocols with non-standard scripts. **Default position:** assume any output where `derivation_prefix != "2-receive address"` AND `derivation_prefix != "bip32"`, OR where `sender_identity_key IS NOT NULL`, is non-recoverable from master key alone and MUST be preserved in the backup, regardless of age. **Token loss is permanent and unrecoverable.**
+
 ## Cross-cutting context
 
 ### What's already stripped from the on-chain backup
@@ -88,28 +92,44 @@ Both child plans touch these files. **When implementing in parallel, check this 
 
 Cross-cutting priority list for both child plans. Each item points to its child doc for details. **All items are gated on a successful planning session — no implementation until each child doc has explicit approval.**
 
-### P0 — Do first (gated on DIAG-BACKUP measurement)
+### P0 — Measurement complete 2026-04-11. Priorities below are data-driven.
 
-- [ ] **Measurement run** — Build wallet with `[DIAG-BACKUP]` patch (already done 2026-04-11), trigger a backup against your real moderate wallet, capture the per-field byte counts, then revert the patch. **This single measurement determines the order of every other item below.** See child: `wallet-backup-efficiency-plan.md` § "Measurement plan."
-- [ ] **Spent-output time-tiered strip** — Drop spent outputs older than 30 days entirely; keep recent ones with all fields for cert-reclaim safety. Highest-confidence backup-shrinker after measurement validates impact. See child: `wallet-backup-efficiency-plan.md` § "Candidate optimizations."
-- [ ] **`block_headers` strip** — Drop entirely from on-chain backup (re-fetchable from network). Low risk. See child: `wallet-backup-efficiency-plan.md`.
+**Measurement summary:** Backup is 70 KB compressed (~7K sats fee). Top 5 fields = 92.2% of payload: outputs (48.8%), transactions (12.1%), proven_tx_reqs (11.6%), addresses (10.5%), proven_txs (9.2%). 92% of `outputs` records are spent (268 of 293). See `wallet-backup-efficiency-plan.md` § "Measurement results" for full table.
+
+- [x] **Measurement run** — DONE 2026-04-11. DIAG-BACKUP captured per-field byte counts. Patch will be reverted as part of this commit cycle.
+- [ ] **Spent-output time-tiered strip** (was always #1; **measurement confirmed it's even higher leverage than projected**, 48.8% of backup with 92% spent records) — Drop spent outputs older than 30 days entirely; keep recent ones with all fields for cert-reclaim safety. See child: `wallet-backup-efficiency-plan.md` § "Candidate optimizations."
+- [ ] **Address time-tiered strip (NEW from measurement)** — Drop "operationally dead" addresses (used + zero spendable outputs + not pending check + > 30 days old + index ≥ 0). **NOT a "drop addresses entirely" change** — recovery code stays the same; we just thin the records the backup includes. Modest win (~5 KB compressed) but safe and easy. See child: `wallet-backup-efficiency-plan.md` § "1b Address time-tiered strip."
+- [ ] **Cap `proven_tx_reqs.history` field** — Confirmed unbounded JSON audit log appended on every status transition. Cap to last 5 entries. ~3-4 KB compressed savings. See child: `wallet-backup-efficiency-plan.md`.
+- [ ] **Sliding window for `transactions`** — Drop entries older than 60 days from the backup. **NOTE: do NOT also drop proven_txs** (see retraction below). Recommend null-ing the `proven_tx_id` FK on transactions that get sliding-window-dropped to avoid orphan refs. See child: `wallet-backup-efficiency-plan.md` § "Growth strategy."
+- [ ] **`block_headers` strip** — Drop entirely from on-chain backup (re-fetchable from network). Low risk, tiny win (~150 bytes compressed). See child: `wallet-backup-efficiency-plan.md`.
 - [ ] **`3a` Constant-time comparisons** — Add `subtle` crate, fix `verify_hmac_sha256` and any other comparison sites. ~30 min, no risk. See child: `bsv-ecosystem-alignment-plan.md`.
+
+**RETRACTED from earlier proposal (post-measurement reasoning):**
+- ❌ ~~Drop addresses entirely~~ — Verified `handlers.rs:12443` deletes auto-created addresses and imports from backup. No sequential derivation step in recovery. Dropping addresses entirely would break the recovered wallet. The time-tiered version above is the safe alternative.
+- ❌ ~~Drop proven_txs entirely~~ — Would orphan the `proven_tx_id` FK on transactions. Could be solved by also nulling the FKs but that adds complexity for only 9.2% savings. **Keep proven_txs as-is** for now; revisit only if other P0/P1 wins are insufficient.
 
 ### P1 — Do next (after P0 lands and is verified)
 
+- [ ] **Lazy consolidation in real sends (Strategy 5.1)** — Modify UTXO selection in `create_action` to greedily eat small UTXOs during normal payments. **Reduces spendable UTXO count over time without making any new transactions.** Best privacy profile of all consolidation strategies — completely invisible to outside observers. ~1 day. See child: `wallet-backup-efficiency-plan.md` § "UTXO consolidation."
+- [ ] **Auto dust-threshold consolidation (Strategy 5.3)** — New monitor task that consolidates UTXOs below 1000 sats when 20+ accumulate. Opt-out via setting. Daily. ~1 day. See child: `wallet-backup-efficiency-plan.md`.
 - [ ] **`1a` Broadcast failure classification** — Systematize permanent vs transient broadcast errors across `task_send_waiting`, `task_check_for_proofs`, broadcast handler. 1–2 days. Quality win independent of backup. See child: `bsv-ecosystem-alignment-plan.md`.
 - [ ] **`1c` BEEF compaction task** — New monitor task that trims proven ancestors from `parent_transactions` table. **NOT a backup-shrinker** (parent_transactions is already stripped from the backup) — this is a runtime/in-memory state win. 1 day. See child: `bsv-ecosystem-alignment-plan.md`.
-- [ ] **Old confirmed-transaction collapse** — Reduce confirmed transactions older than 90 days to a minimal accounting stub. Estimate before committing — depends on measurement. See child: `wallet-backup-efficiency-plan.md`.
 
 ### P2 — Evaluate after P0+P1 ship
 
+- [ ] **User-initiated same-counterparty consolidation (Strategy 5.2)** — One-click "Combine 23 payments from arch@handcash" UI. No privacy warning needed (no new linkage created). ~1 day. See child: `wallet-backup-efficiency-plan.md`.
+- [ ] **Old confirmed-transaction collapse** — Lower priority now that the sliding window does most of this work. Only revisit if measurement shows old txs are still a significant size contributor after the sliding window lands. See child: `wallet-backup-efficiency-plan.md`.
+
+### P2 — Evaluate after P0+P1 ship (continued)
+
 - [ ] **`1b` Adaptive service timeouts** — EMA-based timeout tracking per API provider. 2–3 days. Real but invisible quality win. See child: `bsv-ecosystem-alignment-plan.md`.
 - [ ] **`1d` WhatsOnChain BUMP endpoint** — Skip TSC↔BUMP conversion when fetching from WoC. Cleanup, ~1–2 days. See child: `bsv-ecosystem-alignment-plan.md`.
-- [ ] **Binary serialization (CBOR/MessagePack)** — Replace JSON with binary format before gzip. ~10–30% additional reduction expected. **Bumps backup format version** — requires migration logic. See child: `wallet-backup-efficiency-plan.md`.
+- [ ] **Binary serialization (CBOR/MessagePack)** — Replace JSON with binary format before gzip. ~10–30% additional reduction expected. **Bumps backup format version** — requires migration logic. See child: `wallet-backup-efficiency-plan.md`. **Skip if P0+P1 already meet the flat-curve acceptance criterion** — the migration cost may not be worth a marginal reduction.
 
-### P3 — User-facing decision required
+### P3 — Power-user / opt-in features
 
-- [ ] **UTXO consolidation feature** — User-initiated only (privacy concern), with UI warning explaining the linkage. Reduces backup size dramatically for power users without forcing the privacy tradeoff on everyone. See child: `wallet-backup-efficiency-plan.md` § "UTXO consolidation."
+- [ ] **Same-basket consolidation (Strategy 5.4)** — User-initiated, with privacy warning modal. See child: `wallet-backup-efficiency-plan.md`.
+- [ ] **Aggressive cross-counterparty consolidation (Strategy 5.5)** — User-initiated, full privacy warning modal. The "I know what I'm doing" power-user button. See child: `wallet-backup-efficiency-plan.md`.
 
 ### Skip / Defer
 
@@ -153,12 +173,14 @@ Each item from the master checklist becomes its own commit. **Every backup-affec
 
 ---
 
-## Open questions for the planning session
+## Open questions — RESOLVED 2026-04-11
 
-1. **What's the user's tolerance for "history loss after recovery"?** This decides how aggressive the spent-output strip can be. If users expect to see all transaction history forever, we're more conservative. If "wallet works perfectly, history rebuilds in background over 30 minutes" is acceptable, we can be much more aggressive.
-2. **How important is multi-device sync via on-chain backup?** Currently it works (per `ONCHAIN_FULL_BACKUP_RESEARCH.md` § 6). If we collapse old transactions, the second device gets less history. Acceptable?
-3. **Format version bump policy.** Binary serialization (CBOR) requires bumping the backup format version. Old backups must still be readable for recovery. Are we OK with permanent backwards-compatible decode logic, or do we want to set a sunset date?
-4. **Acceptance criterion: "X sats per backup at Y wallet scale."** What's the target? Current trajectory says we're heading toward 20–50K sats per backup at heavy scale. What's the number where we'd consider this sprint successful — 5K? 10K? Something measured as a percentage of wallet activity volume?
+| # | Question | Decision |
+|---|---|---|
+| 1 | History loss tolerance after recovery | **Acceptable.** Recovery shows wallet working with current state + recent history (30–60 days). Older history can be re-fetched from chain in background if user wants it. Sliding window approved for `transactions` and `proven_txs`. |
+| 2 | Multi-device sync importance | **Not a current concern. Future problem.** Don't constrain backup design around it. If multi-device matters later, we'll add a separate sync mechanism then. |
+| 3 | Format version bump policy (CBOR) | **Defer.** Skip CBOR entirely if P0+P1 wins meet the flat-curve acceptance criterion. Migration cost not worth a marginal reduction. |
+| 4 | Acceptance criterion | **Static target: 5K sats (goal), 10K sats (acceptable). GROWTH target is the load-bearing one: backup must grow by less than 2× from month 1 to month 6. A flat curve is the win. The slope matters more than the absolute number.** |
 
 ---
 
