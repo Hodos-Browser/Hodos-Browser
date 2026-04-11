@@ -82,6 +82,31 @@ The orphan-sweep doesn't validate this case. It treats every entry in the respon
 
 **The user's framing applies cleanly:** the chain is the source of truth. WoC is normally a window into the chain. But WoC's *address-unspent index* has a documented staleness — and the orphan-sweep's algorithm assumes that index is fresh.
 
+### Bug A also affects RECOVERY (added 2026-04-11 ~21:30 UTC)
+
+User insight: the same WoC address-index staleness affects the recovery flow, not just the orphan-sweep on backup creation. The propagation window is BIDIRECTIONAL.
+
+**Sweep direction (the one we hit today):** during the propagation window of the *previous* backup, WoC's address-unspent index still shows the previous-previous marker as unspent. The orphan-sweep treats it as an orphan and tries to consume it as input → double-spend with the propagating previous backup.
+
+**Recovery direction (newly identified):** during the propagation window of a *new* backup, a fresh `wallet_recover_onchain` call queries WoC for the unspent marker at the backup address. WoC returns the OLD (already-superseded) marker because the address index hasn't caught up. Recovery decrypts the OLD backup payload. The recovered wallet has stale tx history, stale derivation indices, and (worst case) missing PushDrop tokens or BRC-42-counterparty outputs that were created in the gap. **Funds aren't lost** (the actual UTXOs are on chain), but the wallet's local view is wrong and would re-derive over a stale base.
+
+Both halves are the same root cause. The fix has to handle both.
+
+**Proposed fix (covers both directions):** before trusting any candidate marker returned by WoC's address-unspent index, do an INDEPENDENT verification of its spend state via a different, more authoritative source.
+
+- If the candidate's outpoint is reported SPENT by the independent check → there's a newer (or competing) backup that hasn't propagated to the address index yet
+- In SWEEP direction: don't add the candidate as an input (it's not a real orphan)
+- In RECOVERY direction: tell the user "found a backup but it's been superseded by a newer one that hasn't fully propagated; retrying..." with auto-retry every N minutes for up to M minutes (e.g., every 2 min for up to 30 min)
+- After the retry budget is exhausted: surface a clear error to the user with manual options (try again later, or accept the older backup as a starting point)
+
+The independent check needs an endpoint that doesn't read from the address-unspent index. Candidates to research:
+1. WoC `/v1/bsv/main/tx/{txid}/{vout}` (outpoint detail) — does this report spent state?
+2. WoC `/v1/bsv/main/script/{scriptHash}/history` — does this include mempool spends?
+3. ARC has a `/v1/tx/{txid}` status endpoint that's mempool-aware — but ARC is broadcast/proof-only, not query-by-outpoint
+4. A mempool-aware BSV indexer (Taal? GorillaPool? BSV Overlay?) might have an outpoint-spent endpoint
+
+Need to research which API actually surfaces fresh spent-state information. The fix is conceptually clean but depends on finding the right endpoint.
+
 ### Fix options for Bug A
 
 | Option | What it does | Tradeoffs |
