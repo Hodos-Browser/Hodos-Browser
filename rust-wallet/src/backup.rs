@@ -1039,6 +1039,41 @@ fn compress_payload(payload: &BackupPayload) -> std::result::Result<Vec<u8>, Str
     use flate2::Compression;
     use std::io::Write;
 
+    // [DIAG-BACKUP] One-time per-field byte-count instrumentation.
+    // Logs raw JSON byte cost per Vec<>-typed field of BackupPayload so we can
+    // identify the largest contributors before deciding which to optimize.
+    // REVERT THIS BLOCK before any release — it adds N+1 redundant serde passes per backup.
+    {
+        let count_bytes = |label: &str, v: &serde_json::Value| {
+            let bytes = serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
+            info!("📊 [DIAG-BACKUP] {:<22} {:>8} bytes", label, bytes);
+        };
+        info!("📊 [DIAG-BACKUP] === payload composition (raw JSON, pre-gzip) ===");
+        count_bytes("transactions",        &serde_json::to_value(&payload.transactions).unwrap_or_default());
+        count_bytes("outputs",             &serde_json::to_value(&payload.outputs).unwrap_or_default());
+        count_bytes("addresses",           &serde_json::to_value(&payload.addresses).unwrap_or_default());
+        count_bytes("proven_txs",          &serde_json::to_value(&payload.proven_txs).unwrap_or_default());
+        count_bytes("proven_tx_reqs",      &serde_json::to_value(&payload.proven_tx_reqs).unwrap_or_default());
+        count_bytes("certificates",        &serde_json::to_value(&payload.certificates).unwrap_or_default());
+        count_bytes("certificate_fields",  &serde_json::to_value(&payload.certificate_fields).unwrap_or_default());
+        count_bytes("output_baskets",      &serde_json::to_value(&payload.output_baskets).unwrap_or_default());
+        count_bytes("output_tags",         &serde_json::to_value(&payload.output_tags).unwrap_or_default());
+        count_bytes("output_tag_map",      &serde_json::to_value(&payload.output_tag_map).unwrap_or_default());
+        count_bytes("tx_labels",           &serde_json::to_value(&payload.tx_labels).unwrap_or_default());
+        count_bytes("tx_labels_map",       &serde_json::to_value(&payload.tx_labels_map).unwrap_or_default());
+        count_bytes("commissions",         &serde_json::to_value(&payload.commissions).unwrap_or_default());
+        count_bytes("settings",            &serde_json::to_value(&payload.settings).unwrap_or_default());
+        count_bytes("sync_states",         &serde_json::to_value(&payload.sync_states).unwrap_or_default());
+        count_bytes("parent_transactions", &serde_json::to_value(&payload.parent_transactions).unwrap_or_default());
+        count_bytes("block_headers",       &serde_json::to_value(&payload.block_headers).unwrap_or_default());
+        count_bytes("domain_permissions",  &serde_json::to_value(&payload.domain_permissions).unwrap_or_default());
+        count_bytes("cert_field_perms",    &serde_json::to_value(&payload.cert_field_permissions).unwrap_or_default());
+        count_bytes("users",               &serde_json::to_value(&payload.users).unwrap_or_default());
+        info!("📊 [DIAG-BACKUP] (counts: tx={}, out={}, addr={}, ptx={})",
+            payload.transactions.len(), payload.outputs.len(),
+            payload.addresses.len(), payload.proven_txs.len());
+    }
+
     let json_bytes = serde_json::to_vec(payload)
         .map_err(|e| format!("Failed to serialize payload to JSON: {}", e))?;
     let json_size = json_bytes.len();
