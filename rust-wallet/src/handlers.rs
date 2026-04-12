@@ -7648,12 +7648,28 @@ pub(crate) async fn broadcast_transaction(
                         let arc_txid = arc_resp.txid.as_deref().unwrap_or("unknown");
                         let status_str = arc_resp.tx_status.as_deref().unwrap_or("ACCEPTED");
 
-                        // Verify ARC returned the expected txid
+                        // Verify ARC returned the expected txid.
+                        // When txid differs AND no merklePath is present, ARC is telling us
+                        // about a competing tx with the same inputs — this is a collision,
+                        // not a successful broadcast. (CVE-2026-40069 in BSV SDK)
+                        // Exception: when ARC includes a merklePath, the txid refers to a
+                        // parent tx that just got mined (BEEF ancestry) — that's expected.
                         if let Some(expected_txid) = txid_for_cache {
                             if arc_txid != "unknown" && arc_txid != expected_txid {
-                                log::debug!("   ℹ️  ARC txid differs from expected: {} vs {} (common with BEEF ancestry)",
-                                    &expected_txid[..expected_txid.len().min(16)],
-                                    &arc_txid[..arc_txid.len().min(16)]);
+                                if arc_resp.merkle_path.is_some() {
+                                    log::info!("   ℹ️  ARC txid differs (BEEF ancestry): {} vs {} — merklePath present, proceeding",
+                                        &expected_txid[..expected_txid.len().min(16)],
+                                        &arc_txid[..arc_txid.len().min(16)]);
+                                } else {
+                                    let msg = format!(
+                                        "TX collision: ARC returned txid {} instead of our {} (status: {})",
+                                        &arc_txid[..arc_txid.len().min(16)],
+                                        &expected_txid[..expected_txid.len().min(16)],
+                                        status_str,
+                                    );
+                                    log::error!("   ❌ {}", msg);
+                                    return Err(msg);
+                                }
                             }
                         }
 
@@ -11159,7 +11175,7 @@ async fn adopt_onchain_backup(
 pub async fn do_onchain_backup(
     state: &AppState,
 ) -> Result<String, String> {
-    use crate::database::{OutputRepository, WalletRepository, AddressRepository};
+    use crate::database::{OutputRepository, TransactionRepository, WalletRepository, AddressRepository};
     use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
     use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
     use crate::script::pushdrop::{encode, LockPosition};
@@ -11387,6 +11403,47 @@ pub async fn do_onchain_backup(
                                     let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
                                     let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
                                     if sats > 0 && !script_hex.is_empty() {
+                                        // Guard A3: Skip if this orphan's marker is already spent in our DB.
+                                        // The DB knows about our own spends — if spent_by is set, WoC's
+                                        // address-unspent index is stale and this is NOT a real orphan.
+                                        let already_spent = {
+                                            if let Ok(db) = state.database.lock() {
+                                                let output_repo = OutputRepository::new(db.connection());
+                                                match output_repo.get_by_txid_vout(orphan_txid, 1) {
+                                                    Ok(Some(output)) => output.spent_by.is_some(),
+                                                    _ => false,
+                                                }
+                                            } else { false }
+                                        };
+                                        if already_spent {
+                                            log::info!("   ⏭️ Skipping orphan {}:1 — already spent in DB", &orphan_txid[..16.min(orphan_txid.len())]);
+                                            continue;
+                                        }
+
+                                        // Guard A2: Skip unconfirmed markers we recently created.
+                                        // WoC's address-unspent index lags 30s-5min behind chain.
+                                        // During that window a just-consumed marker still appears unspent.
+                                        if *_height <= 0 {
+                                            let is_recent = {
+                                                if let Ok(db) = state.database.lock() {
+                                                    let tx_repo = TransactionRepository::new(db.connection());
+                                                    match tx_repo.get_by_txid(orphan_txid) {
+                                                        Ok(Some(tx)) => {
+                                                            let now = std::time::SystemTime::now()
+                                                                .duration_since(std::time::UNIX_EPOCH)
+                                                                .unwrap_or_default().as_secs() as i64;
+                                                            now - tx.timestamp < 600 // 10 minute cooldown
+                                                        }
+                                                        _ => false,
+                                                    }
+                                                } else { false }
+                                            };
+                                            if is_recent {
+                                                log::info!("   ⏭️ Skipping orphan {}:1 — unconfirmed and < 10min old", &orphan_txid[..16.min(orphan_txid.len())]);
+                                                continue;
+                                            }
+                                        }
+
                                         log::info!("   🧹 Sweeping orphaned marker: {}:1 ({} sats)", &orphan_txid[..16.min(orphan_txid.len())], sats);
                                         extra_markers.push((orphan_txid.clone(), 1, sats, script_hex));
                                     }
@@ -12114,6 +12171,10 @@ async fn fetch_onchain_backup(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
+    // TODO: WoC's address-unspent index can lag 30s-5min behind chain. During the
+    // propagation window of a NEW backup, this query may return the OLD (superseded)
+    // marker. Recovery would then decrypt the stale backup payload. See incident report:
+    // development-docs/Final-MVP-Sprint/backup-double-spend-incident-2026-04-11.md § "Bug A also affects RECOVERY"
     let utxo_url = format!(
         "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
         backup_address

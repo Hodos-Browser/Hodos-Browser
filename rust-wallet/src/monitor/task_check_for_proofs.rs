@@ -171,8 +171,25 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                               &txid[..txid.len().min(16)]);
                         mark_failed(state, txid);
                     }
-                    "DOUBLE_SPEND_ATTEMPTED" | "REJECTED" => {
-                        warn!("   ⚠️ {} status: {} — marking failed", txid, status);
+                    "DOUBLE_SPEND_ATTEMPTED" => {
+                        // ARC marks BOTH competing txs as DOUBLE_SPEND_ATTEMPTED during
+                        // the first-seen conflict window. The winning tx will get mined.
+                        // Cross-verify with WoC before marking failed (same pattern as
+                        // SEEN_IN_ORPHAN_MEMPOOL above).
+                        warn!("   ⚠️ {} DOUBLE_SPEND_ATTEMPTED — cross-verifying with WoC", &txid[..txid.len().min(16)]);
+                        match try_whatsonchain_confirmation(state, client, txid).await {
+                            Some(count) => {
+                                info!("   ✅ {} actually mined despite DOUBLE_SPEND_ATTEMPTED", &txid[..txid.len().min(16)]);
+                                confirmed_count += count;
+                            }
+                            None => {
+                                warn!("   ❌ {} not confirmed on WoC — marking failed", &txid[..txid.len().min(16)]);
+                                mark_failed(state, txid);
+                            }
+                        }
+                    }
+                    "REJECTED" => {
+                        warn!("   ⚠️ {} status: REJECTED — marking failed", txid);
                         mark_failed(state, txid);
                     }
                     other => {
