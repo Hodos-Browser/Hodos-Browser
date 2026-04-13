@@ -97,12 +97,12 @@ Cross-cutting priority list for both child plans. Each item points to its child 
 **Measurement summary:** Backup is 70 KB compressed (~7K sats fee). Top 5 fields = 92.2% of payload: outputs (48.8%), transactions (12.1%), proven_tx_reqs (11.6%), addresses (10.5%), proven_txs (9.2%). 92% of `outputs` records are spent (268 of 293). See `wallet-backup-efficiency-plan.md` § "Measurement results" for full table.
 
 - [x] **Measurement run** — DONE 2026-04-11. DIAG-BACKUP captured per-field byte counts. Patch will be reverted as part of this commit cycle.
-- [ ] **Spent-output time-tiered strip** (was always #1; **measurement confirmed it's even higher leverage than projected**, 48.8% of backup with 92% spent records) — Drop spent outputs older than 30 days entirely; keep recent ones with all fields for cert-reclaim safety. See child: `wallet-backup-efficiency-plan.md` § "Candidate optimizations."
-- [ ] **Address time-tiered strip (NEW from measurement)** — Drop "operationally dead" addresses (used + zero spendable outputs + not pending check + > 30 days old + index ≥ 0). **NOT a "drop addresses entirely" change** — recovery code stays the same; we just thin the records the backup includes. Modest win (~5 KB compressed) but safe and easy. See child: `wallet-backup-efficiency-plan.md` § "1b Address time-tiered strip."
-- [ ] **Cap `proven_tx_reqs.history` field** — Confirmed unbounded JSON audit log appended on every status transition. Cap to last 5 entries. ~3-4 KB compressed savings. See child: `wallet-backup-efficiency-plan.md`.
-- [ ] **Sliding window for `transactions`** — Drop entries older than 60 days from the backup. **NOTE: do NOT also drop proven_txs** (see retraction below). Recommend null-ing the `proven_tx_id` FK on transactions that get sliding-window-dropped to avoid orphan refs. See child: `wallet-backup-efficiency-plan.md` § "Growth strategy."
-- [ ] **`block_headers` strip** — Drop entirely from on-chain backup (re-fetchable from network). Low risk, tiny win (~150 bytes compressed). See child: `wallet-backup-efficiency-plan.md`.
-- [ ] **`3a` Constant-time comparisons** — Add `subtle` crate, fix `verify_hmac_sha256` and any other comparison sites. ~30 min, no risk. See child: `bsv-ecosystem-alignment-plan.md`.
+- [x] **Spent-output time-tiered strip** (was always #1; **measurement confirmed it's even higher leverage than projected**, 48.8% of backup with 92% spent records) — Drop spent outputs older than 30 days entirely; keep recent ones with all fields for cert-reclaim safety. See child: `wallet-backup-efficiency-plan.md` § "Candidate optimizations."
+- [x] **Address time-tiered strip (NEW from measurement)** — Drop "operationally dead" addresses (used + zero spendable outputs + not pending check + > 30 days old + index ≥ 0). **NOT a "drop addresses entirely" change** — recovery code stays the same; we just thin the records the backup includes. Modest win (~5 KB compressed) but safe and easy. See child: `wallet-backup-efficiency-plan.md` § "1b Address time-tiered strip."
+- [x] **Cap `proven_tx_reqs.history` field** — Confirmed unbounded JSON audit log appended on every status transition. Cap to last 5 entries. ~3-4 KB compressed savings. See child: `wallet-backup-efficiency-plan.md`.
+- [x] **Sliding window for `transactions`** — Drop entries older than 60 days from the backup. **NOTE: do NOT also drop proven_txs** (see retraction below). Recommend null-ing the `proven_tx_id` FK on transactions that get sliding-window-dropped to avoid orphan refs. See child: `wallet-backup-efficiency-plan.md` § "Growth strategy."
+- [x] **`block_headers` strip** — Drop entirely from on-chain backup (re-fetchable from network). Low risk, tiny win (~150 bytes compressed). See child: `wallet-backup-efficiency-plan.md`.
+- [x] **`3a` Constant-time comparisons** — DONE 2026-04-13. Added `subtle` crate, fixed AES-GCM tag timing oracle + HMAC verify. Commit 1bce17f.
 
 **RETRACTED from earlier proposal (post-measurement reasoning):**
 - ❌ ~~Drop addresses entirely~~ — Verified `handlers.rs:12443` deletes auto-created addresses and imports from backup. No sequential derivation step in recovery. Dropping addresses entirely would break the recovered wallet. The time-tiered version above is the safe alternative.
@@ -110,10 +110,10 @@ Cross-cutting priority list for both child plans. Each item points to its child 
 
 ### P1 — Do next (after P0 lands and is verified)
 
-- [ ] **Lazy consolidation in real sends (Strategy 5.1)** — Modify UTXO selection in `create_action` to greedily eat small UTXOs during normal payments. **Reduces spendable UTXO count over time without making any new transactions.** Best privacy profile of all consolidation strategies — completely invisible to outside observers. ~1 day. See child: `wallet-backup-efficiency-plan.md` § "UTXO consolidation."
-- [ ] **Auto dust-threshold consolidation (Strategy 5.3)** — New monitor task that consolidates UTXOs below 1000 sats when 20+ accumulate. Opt-out via setting. Daily. ~1 day. See child: `wallet-backup-efficiency-plan.md`.
-- [ ] **`1a` Broadcast failure classification** — Systematize permanent vs transient broadcast errors across `task_send_waiting`, `task_check_for_proofs`, broadcast handler. 1–2 days. Quality win independent of backup. See child: `bsv-ecosystem-alignment-plan.md`.
-- [ ] **`1c` BEEF compaction task** — New monitor task that trims proven ancestors from `parent_transactions` table. **NOT a backup-shrinker** (parent_transactions is already stripped from the backup) — this is a runtime/in-memory state win. 1 day. See child: `bsv-ecosystem-alignment-plan.md`.
+- [x] **Lazy consolidation in real sends (Strategy 5.1)** — DONE 2026-04-13. Commit afd4d0a. `select_utxos_with_preference` adds ≤5000 sat UTXOs (max 10 extra) to normal sends.
+- [x] **Auto dust-threshold consolidation (Strategy 5.3)** — DONE 2026-04-13. Commit 1bce17f. `TaskConsolidateDust` monitor task (daily), P2PKH-only guard, manual trigger at `POST /wallet/consolidate-dust`. Tested on treasury wallet — 3 UTXOs consolidated, tx confirmed on chain.
+- [ ] **`1a` Broadcast failure classification** — DEFERRED. Existing `arc_status.rs` already has well-structured `ArcTxStatus` enum + `is_fatal_broadcast_error()` + `is_double_spend_error()`. No functional improvement needed now.
+- [x] **`1c` BEEF compaction task** — DONE 2026-04-13. Commit 1bce17f. Added to `task_purge.rs` (not a new task): deletes parent_transactions older than 7 days where proven_txs record exists.
 
 ### P2 — Evaluate after P0+P1 ship
 
