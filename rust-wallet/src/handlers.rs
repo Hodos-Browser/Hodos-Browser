@@ -4137,11 +4137,14 @@ pub(crate) async fn create_action_internal(
                 let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
                 log::info!("   Send max: selected ALL {} UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
             } else {
-                // Normal: greedy selection with confirmed preference
+                // Normal: greedy selection with confirmed preference + lazy consolidation.
+                // Consolidation adds small UTXOs (≤5000 sats) to reduce UTXO count over time.
+                // Candidates come from the same filtered pool — all guards already applied.
                 selected_utxos = select_utxos_with_preference(
                     confirmed_utxos.as_deref(),
                     &all_utxos,
                     wallet_amount_needed,
+                    Some(&CONSOLIDATION_FOR_SENDS),
                 );
             }
 
@@ -6127,13 +6130,18 @@ pub fn store_derived_utxo(
             ],
         ).map_err(|e| format!("Failed to update output: {}", e))?;
     } else {
+        // Insert with confirmed=0. The output starts unconfirmed because we don't
+        // know if the parent tx was actually mined. TaskSyncPending will promote to
+        // confirmed=1 when it verifies the UTXO exists on-chain via WoC.
+        // This prevents phantom outputs (from never-mined parent txs) from being
+        // selected for spending.
         conn.execute(
             "INSERT INTO outputs (
                 user_id, txid, vout, satoshis, locking_script,
                 sender_identity_key, derivation_prefix, derivation_suffix,
                 custom_instructions, spendable, change, provided_by, purpose, type,
-                created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, 'you', 'receive', 'P2PKH', ?10, ?11)",
+                confirmed, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, 'you', 'receive', 'P2PKH', 0, ?10, ?11)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -6154,19 +6162,40 @@ pub fn store_derived_utxo(
     Ok(())
 }
 
+/// Lazy consolidation config for UTXO selection.
+/// When provided, after selecting enough UTXOs to cover the target amount,
+/// the selector greedily adds small UTXOs to consolidate them into the
+/// change output. Candidates come from the SAME pre-filtered pool —
+/// all existing guards (spendable, confirmed-only, default-basket, etc.)
+/// are already applied by the DB query before selection begins.
+pub(crate) struct ConsolidationConfig {
+    dust_threshold_sats: i64,  // Include UTXOs ≤ this amount
+    max_extra_inputs: usize,   // Max extra UTXOs to add beyond what's needed
+}
+
+/// Default consolidation config for user-initiated sends.
+const CONSOLIDATION_FOR_SENDS: ConsolidationConfig = ConsolidationConfig {
+    dust_threshold_sats: 5000,  // ≤ 5000 sats (~$0.08 at $15 BSV)
+    max_extra_inputs: 10,       // ~100 sats extra fee at 1 sat/byte
+};
+
 /// Select UTXOs to cover required amount (simple greedy algorithm)
 ///
 /// If `confirmed_utxos` is provided, tries to select from confirmed UTXOs first.
 /// Falls back to `all_utxos` if confirmed outputs are insufficient.
 /// This prevents building long chains of unconfirmed transactions.
+///
+/// When `consolidation` is Some, greedily adds small UTXOs after meeting the
+/// target amount. This reduces UTXO count over time, shrinking backup size.
 pub(crate) fn select_utxos_with_preference(
     confirmed_utxos: Option<&[UTXO]>,
     all_utxos: &[UTXO],
     amount_needed: i64,
+    consolidation: Option<&ConsolidationConfig>,
 ) -> Vec<UTXO> {
     // Try confirmed-only first if available
     if let Some(confirmed) = confirmed_utxos {
-        let selection = select_utxos_greedy(confirmed, amount_needed);
+        let selection = select_utxos_greedy(confirmed, amount_needed, consolidation);
         if !selection.is_empty() {
             log::info!("   ✅ Selected {} UTXOs from CONFIRMED transactions only", selection.len());
             return selection;
@@ -6175,11 +6204,15 @@ pub(crate) fn select_utxos_with_preference(
     }
 
     // Fallback to all UTXOs
-    select_utxos_greedy(all_utxos, amount_needed)
+    select_utxos_greedy(all_utxos, amount_needed, consolidation)
 }
 
-/// Simple greedy UTXO selection (largest first)
-fn select_utxos_greedy(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
+/// Simple greedy UTXO selection (largest first), with optional lazy consolidation.
+fn select_utxos_greedy(
+    available: &[UTXO],
+    amount_needed: i64,
+    consolidation: Option<&ConsolidationConfig>,
+) -> Vec<UTXO> {
     let mut selected = Vec::new();
     let mut total: i64 = 0;
 
@@ -6187,7 +6220,7 @@ fn select_utxos_greedy(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
     let mut sorted_utxos = available.to_vec();
     sorted_utxos.sort_by(|a, b| b.satoshis.cmp(&a.satoshis));
 
-    for utxo in sorted_utxos {
+    for utxo in &sorted_utxos {
         selected.push(utxo.clone());
         total += utxo.satoshis;
 
@@ -6201,12 +6234,33 @@ fn select_utxos_greedy(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
         return Vec::new();
     }
 
+    // Lazy consolidation: after meeting the target, greedily add small UTXOs.
+    // These get folded into the change output, reducing spendable UTXO count
+    // over time. Candidates are from the same pre-filtered pool — all existing
+    // guards (spendable, confirmed, default-basket, derivation) already applied.
+    if let Some(config) = consolidation {
+        let mut extra_added = 0;
+        for utxo in &sorted_utxos {
+            if extra_added >= config.max_extra_inputs { break; }
+            if utxo.satoshis > config.dust_threshold_sats { continue; }
+            // Skip if already selected in the primary pass
+            if selected.iter().any(|s| s.txid == utxo.txid && s.vout == utxo.vout) { continue; }
+            selected.push(utxo.clone());
+            extra_added += 1;
+        }
+        if extra_added > 0 {
+            let extra_sats: i64 = selected.iter().skip(selected.len() - extra_added).map(|u| u.satoshis).sum();
+            log::info!("   🧹 Lazy consolidation: added {} small UTXOs ({} sats, each ≤{} sats)",
+                extra_added, extra_sats, config.dust_threshold_sats);
+        }
+    }
+
     selected
 }
 
 // Backwards-compatible wrapper for existing callers
 fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
-    select_utxos_greedy(available, amount_needed)
+    select_utxos_greedy(available, amount_needed, None)
 }
 
 // Request structure for /signAction
@@ -11514,6 +11568,7 @@ pub async fn do_onchain_backup(
         if amount_needed > 0 {
             let selected = select_utxos_with_preference(
                 Some(&confirmed_utxos), &all_utxos, amount_needed,
+                None, // No consolidation for backup transactions
             );
             if selected.is_empty() {
                 log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);

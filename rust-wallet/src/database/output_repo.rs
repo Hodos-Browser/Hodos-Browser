@@ -84,6 +84,7 @@ impl<'a> OutputRepository<'a> {
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
                AND o.derivation_prefix IS NOT NULL
                AND (o.basket_id IS NULL OR b.name = 'default')
+               AND (o.transaction_id IS NOT NULL OR o.confirmed = 1)
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -130,7 +131,7 @@ impl<'a> OutputRepository<'a> {
              LEFT JOIN transactions t ON o.transaction_id = t.id
              LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.spendable = 1
-               AND (t.status = 'completed' OR o.transaction_id IS NULL)
+               AND (t.status = 'completed' OR (o.transaction_id IS NULL AND o.confirmed = 1))
                AND o.derivation_prefix IS NOT NULL
                AND (o.basket_id IS NULL OR b.name = 'default')
              ORDER BY o.satoshis DESC"
