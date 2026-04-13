@@ -992,6 +992,27 @@ pub fn compress_for_onchain(
     for req in &mut payload.proven_tx_reqs {
         req.raw_tx = String::new();
         req.input_beef = None;
+        // Cap history to last 5 entries. The history field is an unbounded JSON
+        // audit log appended on every status transition — it grows monotonically
+        // and dominates the proven_tx_reqs payload on active wallets.
+        if !req.history.is_empty() && req.history != "{}" {
+            if let Ok(history) = serde_json::from_str::<serde_json::Value>(&req.history) {
+                if let Some(obj) = history.as_object() {
+                    if obj.len() > 5 {
+                        // Keys are unix timestamps — sort descending, keep last 5
+                        let mut keys: Vec<&String> = obj.keys().collect();
+                        keys.sort_unstable_by(|a, b| b.cmp(a));
+                        let trimmed: serde_json::Map<String, serde_json::Value> = keys.into_iter()
+                            .take(5)
+                            .map(|k| (k.clone(), obj[k].clone()))
+                            .collect();
+                        if let Ok(s) = serde_json::to_string(&serde_json::Value::Object(trimmed)) {
+                            req.history = s;
+                        }
+                    }
+                }
+            }
+        }
     }
     for ptx in &mut payload.proven_txs {
         ptx.merkle_path = String::new();
