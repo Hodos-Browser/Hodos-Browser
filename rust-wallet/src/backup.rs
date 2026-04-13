@@ -989,6 +989,7 @@ pub fn compress_for_onchain(
 
     // 2. Strip re-fetchable data (same as serialize_for_onchain)
     payload.parent_transactions.clear();
+    payload.block_headers.clear(); // fetched on demand via cache_helpers.rs
     for req in &mut payload.proven_tx_reqs {
         req.raw_tx = String::new();
         req.input_beef = None;
@@ -1130,6 +1131,62 @@ pub fn compress_for_onchain(
         if dropped > 0 {
             info!("   🧹 Backup address strip: dropped {} of {} addresses (used + no spendable + not pending + >30d)",
                 dropped, before);
+        }
+    }
+
+    // Transaction sliding window: drop confirmed transactions older than 60 days.
+    // Recovery gets current state + 60 days of history. Older history can be
+    // re-fetched from chain in the background if the user wants it.
+    //
+    // Keep rules:
+    //   - Non-completed transactions (sending, unproven, failed, etc.) — always keep
+    //   - Transactions with spendable outputs still referencing them — always keep
+    //   - Completed transactions within 60 days — keep
+    //   - Completed transactions older than 60 days — drop
+    //
+    // The orphan FK cleanup below handles any output.transaction_id or output.spent_by
+    // references that pointed to dropped transactions. proven_txs records are kept
+    // as-is (unreferenced but harmless — they're immutable proof records).
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        const TX_BACKUP_RETENTION_SECS: i64 = 60 * 24 * 60 * 60; // 60 days
+        let now: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // Build set of transaction IDs that have spendable outputs
+        let tx_ids_with_spendable: std::collections::HashSet<i64> = payload.outputs.iter()
+            .filter(|o| o.spendable)
+            .filter_map(|o| o.transaction_id)
+            .collect();
+
+        let before = payload.transactions.len();
+        payload.transactions.retain(|tx| {
+            // ALWAYS keep non-completed transactions (in-flight, failed, etc.)
+            if tx.status != "completed" { return true; }
+            // ALWAYS keep transactions with active spendable outputs
+            if tx_ids_with_spendable.contains(&tx.id) { return true; }
+            // ALWAYS keep recent completed transactions
+            if now.saturating_sub(tx.updated_at) < TX_BACKUP_RETENTION_SECS { return true; }
+            // Old completed transaction with no active outputs — drop
+            false
+        });
+        let dropped = before - payload.transactions.len();
+        if dropped > 0 {
+            info!("   🧹 Backup transaction strip: dropped {} of {} transactions (completed + no spendable + >60d)",
+                dropped, before);
+        }
+
+        // Also drop proven_tx_reqs whose txid no longer has a matching transaction
+        let kept_txids: std::collections::HashSet<&str> = payload.transactions.iter()
+            .filter_map(|t| t.txid.as_deref())
+            .collect();
+        let req_before = payload.proven_tx_reqs.len();
+        payload.proven_tx_reqs.retain(|r| kept_txids.contains(r.txid.as_str()));
+        let req_dropped = req_before - payload.proven_tx_reqs.len();
+        if req_dropped > 0 {
+            info!("   🧹 Backup proven_tx_reqs strip: dropped {} orphaned reqs", req_dropped);
         }
     }
 
