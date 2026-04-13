@@ -28,6 +28,41 @@
 
 ## Log
 
+### 2026-04-13 — Matt / Claude — Wallet Efficiency P0+P1 Complete + UX Fixes
+
+**What was done:**
+- Completed ALL remaining P1 items from wallet efficiency sprint:
+  - Constant-time comparisons: `subtle` crate, fixed AES-GCM timing oracle + HMAC verify
+  - BEEF compaction: parent_transactions cleanup added to task_purge (7-day retention for confirmed txs)
+  - Auto dust consolidation: new TaskConsolidateDust monitor task (daily, P2PKH-only guard, tested on treasury wallet — tx confirmed on chain: `151183399bef47719de7fe296a842b6565653dfcc8f54783aaca61768b7e95d9`)
+  - Manual trigger endpoint: `POST /wallet/consolidate-dust` with detailed JSON response
+- Fixed 2 UX bugs found during testing:
+  - Right-click paste in send form (added `onInput` handler for CEF compatibility)
+  - Broadcast notification lost on overlay close (wallet_prevent_close IPC + sessionStorage persistence)
+- On-chain backup verified after all changes (~68 KB tx size)
+- Updated sprint checklist — all P0 + P1 items checked off
+
+**What's blocked:**
+- macOS bugs (#7, #8, #9, #11) blocked on real Mac hardware (refurb MBP purchased, needs dev env setup)
+- Windows bugs #5, #6 need specific repro info from other PCs
+
+**What's next:**
+- Set up macOS dev environment (clone repo, install Rust/Node/CMake, build CEF from source)
+- Resume macOS Bug #9 diagnostic (A1 — stack trace capture from `v0.3.1-diag.1` DMG)
+- Then fix #8/#9 together (remove legacy webview, seed via TabManager::CreateTab)
+- P2/P3 wallet efficiency items are nice-to-haves, not blocking MVP
+
+**Files changed:**
+- `rust-wallet/Cargo.toml`, `Cargo.lock` (subtle crate)
+- `rust-wallet/src/crypto/aesgcm_custom.rs`, `signing.rs` (constant-time)
+- `rust-wallet/src/monitor/task_consolidate_dust.rs` (NEW)
+- `rust-wallet/src/monitor/mod.rs`, `task_purge.rs` (task registration + BEEF compaction)
+- `rust-wallet/src/handlers.rs`, `main.rs` (consolidate-dust endpoint)
+- `frontend/src/components/TransactionForm.tsx`, `WalletPanel.tsx` (UX fixes)
+- `development-docs/Final-MVP-Sprint/wallet-efficiency-and-bsv-alignment.md` (checklist update)
+
+---
+
 ### 2026-03-09 — Matt / Claude — GitHub Setup & Team Coordination
 
 **What was done:**
