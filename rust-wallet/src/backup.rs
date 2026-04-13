@@ -1059,6 +1059,59 @@ pub fn compress_for_onchain(
         }
     }
 
+    // Address time-tiered strip: drop "operationally dead" addresses from the backup.
+    // An address is operationally dead if ALL of the following are true:
+    //   - used = true (it's been used at some point)
+    //   - has zero spendable outputs (all UTXOs spent or never received)
+    //   - pending_utxo_check = false (not flagged for active sync)
+    //   - older than 30 days (by created_at)
+    //   - index >= 0 (NOT master pubkey at -1, NOT external placeholder at -2)
+    //
+    // Recovery imports addresses from backup directly (handlers.rs:12443 deletes
+    // auto-created then imports from payload). Kept addresses are imported normally.
+    // Dropped addresses have no funds and no in-flight operations.
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        const ADDRESS_BACKUP_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
+        let now: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // Build set of address indices that have spendable outputs
+        let active_indices: std::collections::HashSet<i32> = payload.outputs.iter()
+            .filter(|o| o.spendable)
+            .filter_map(|o| {
+                if o.derivation_prefix.as_deref() == Some("2-receive address") {
+                    o.derivation_suffix.as_deref().and_then(|s| s.parse::<i32>().ok())
+                } else if o.derivation_prefix.as_deref() == Some("bip32") {
+                    o.derivation_suffix.as_deref().and_then(|s| s.parse::<i32>().ok())
+                } else { None }
+            })
+            .collect();
+
+        let before = payload.addresses.len();
+        payload.addresses.retain(|a| {
+            // ALWAYS keep special indices (master pubkey, external placeholder)
+            if a.index < 0 { return true; }
+            // ALWAYS keep unused addresses (might receive future payments)
+            if !a.used { return true; }
+            // ALWAYS keep addresses pending UTXO check
+            if a.pending_utxo_check { return true; }
+            // ALWAYS keep addresses with active spendable UTXOs
+            if active_indices.contains(&a.index) { return true; }
+            // ALWAYS keep recent addresses (within retention window)
+            if now.saturating_sub(a.created_at) < ADDRESS_BACKUP_RETENTION_SECS { return true; }
+            // Operationally dead — drop from backup
+            false
+        });
+        let dropped = before - payload.addresses.len();
+        if dropped > 0 {
+            info!("   🧹 Backup address strip: dropped {} of {} addresses (used + no spendable + not pending + >30d)",
+                dropped, before);
+        }
+    }
+
     // Null out orphan FK references
     let valid_tx_ids: std::collections::HashSet<i64> = payload.transactions.iter()
         .map(|t| t.id)
