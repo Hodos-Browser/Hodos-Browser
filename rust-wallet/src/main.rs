@@ -666,6 +666,7 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/recover-external", web::post().to(handlers::wallet_recover_external))
             .route("/wallet/rescan", web::post().to(handlers::wallet_rescan))
             .route("/wallet/cleanup", web::post().to(handlers::wallet_cleanup))
+            .route("/wallet/consolidate-dust", web::post().to(handlers::wallet_consolidate_dust))
             .route("/wallet/export", web::post().to(handlers::wallet_export))
             .service(
                 web::resource("/wallet/import")

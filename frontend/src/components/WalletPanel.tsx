@@ -28,7 +28,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
-  const [transactionResult, setTransactionResult] = useState<TransactionResponse | null>(null);
+  const [transactionResult, setTransactionResult] = useState<TransactionResponse | null>(() => {
+    // Restore persisted error from a previous overlay session (e.g., overlay closed during broadcast)
+    try {
+      const stored = sessionStorage.getItem('hodos_last_tx_result');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        // Only restore if recent (within 60 seconds)
+        if (Date.now() - (parsed._timestamp || 0) < 60000) {
+          sessionStorage.removeItem('hodos_last_tx_result');
+          return parsed;
+        }
+        sessionStorage.removeItem('hodos_last_tx_result');
+      }
+    } catch {}
+    return null;
+  });
   const [showReceiveAddress, setShowReceiveAddress] = useState(false);
   const [addressCopiedMessage, setAddressCopiedMessage] = useState<string | null>(null);
 
@@ -274,6 +289,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     setShowReceiveAddress(false);
     setAddressCopiedMessage(null);
     setTransactionResult(null);
+
+    // Persist result to sessionStorage so it survives overlay close/reopen
+    try {
+      sessionStorage.setItem('hodos_last_tx_result', JSON.stringify({ ...result, _timestamp: Date.now() }));
+    } catch {}
 
     // Set the transaction result and close the form
     setTransactionResult(result);
@@ -599,7 +619,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                     <p><strong>TxID:</strong> {transactionResult.txid}</p>
                   )}
                 </div>
-                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => setTransactionResult(null)}>
+                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => { setTransactionResult(null); sessionStorage.removeItem('hodos_last_tx_result'); }}>
                   Close
                 </HodosButton>
               </>
@@ -635,7 +655,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                     </HodosButton>
                   </div>
                 )}
-                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => setTransactionResult(null)}>
+                <HodosButton variant="ghost" size="small" className="close-button-light" onClick={() => { setTransactionResult(null); sessionStorage.removeItem('hodos_last_tx_result'); }}>
                   Close
                 </HodosButton>
               </>

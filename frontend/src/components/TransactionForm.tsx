@@ -239,6 +239,8 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     e.preventDefault();
     if (!validateForm()) return;
     setIsSubmitting(true);
+    // Prevent wallet overlay from closing during broadcast (can take 10-30s)
+    try { (window as any).cefMessage?.send('wallet_prevent_close', []); } catch {}
     try {
       const satoshiAmount = Math.round(parseFloat(formData.amount) * 100000000);
       let result: TransactionResponse;
@@ -271,6 +273,8 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       console.error('Transaction flow failed:', err);
     } finally {
       setIsSubmitting(false);
+      // Re-allow overlay close
+      try { (window as any).cefMessage?.send('wallet_allow_close', []); } catch {}
     }
   }, [formData, validateForm, sendTransaction, onTransactionCreated, isPaymail, isPeerPay]);
 
@@ -348,6 +352,14 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
               type="text"
               value={formData.recipient}
               onChange={(e) => handleInputChange('recipient', e.target.value)}
+              onInput={(e) => {
+                // CEF native context menu paste may not fire onChange.
+                // onInput fires on any value change including context menu paste.
+                const target = e.target as HTMLInputElement;
+                if (target.value !== formData.recipient) {
+                  handleInputChange('recipient', target.value);
+                }
+              }}
               onKeyDown={handleRecipientKeyDown}
               onFocus={() => { if (suggestions.length > 0) setShowDropdown(true); }}
               placeholder="BSV address, identity key, or paymail"

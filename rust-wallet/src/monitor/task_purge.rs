@@ -1,8 +1,9 @@
-//! TaskPurge — Cleanup old monitor_events and completed proof requests
+//! TaskPurge — Cleanup old monitor_events, completed proof requests, and confirmed parent_transactions
 //!
 //! Removes old data that's no longer needed:
 //! - monitor_events older than 7 days
 //! - completed+notified proven_tx_reqs older than 30 days
+//! - confirmed parent_transactions older than 7 days (re-fetchable from WoC API)
 //!
 //! Interval: 3600 seconds (1 hour)
 
@@ -16,6 +17,11 @@ const EVENTS_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Keep completed proven_tx_reqs for this many seconds (30 days)
 const PROOF_REQS_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Keep confirmed parent_transactions for this many seconds (7 days)
+/// Once a tx is confirmed (has proven_txs record), its parents aren't needed for BEEF building.
+/// If ever needed again, re-fetched from WoC API (tier 3 in beef_helpers cache hierarchy).
+const PARENT_TX_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Run the TaskPurge task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
@@ -60,6 +66,24 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         }
         Err(e) => {
             info!("   ℹ️ proven_tx_reqs purge skipped: {}", e);
+        }
+        _ => {}
+    }
+
+    // 3. Delete old confirmed parent_transactions (older than 7 days)
+    // Confirmed txs have merkle proofs — their parents aren't needed for BEEF.
+    // Only deletes records that are both old AND confirmed on chain (proven_txs exists).
+    let parent_cutoff = now - PARENT_TX_RETENTION_SECS;
+    match conn.execute(
+        "DELETE FROM parent_transactions WHERE cached_at < ?1 AND txid IN (SELECT txid FROM proven_txs)",
+        rusqlite::params![parent_cutoff],
+    ) {
+        Ok(count) if count > 0 => {
+            info!("🧹 TaskPurge: deleted {} old confirmed parent_transaction(s)", count);
+            total_purged += count;
+        }
+        Err(e) => {
+            info!("   ℹ️ parent_transactions purge skipped: {}", e);
         }
         _ => {}
     }

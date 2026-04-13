@@ -254,8 +254,9 @@ pub fn aesgcm_decrypt_custom(
     let tag_hash = ghash::ghash(&compare_tag, &hash_sub_key);
     let calculated_tag = gctr(&tag_hash, &pre_counter_block, key);
 
-    // 6. Verify tag matches
-    if calculated_tag != auth_tag {
+    // 6. Verify tag matches (constant-time to prevent timing oracle)
+    use subtle::ConstantTimeEq;
+    if calculated_tag.ct_eq(&auth_tag).unwrap_u8() != 1 {
         return Err("Authentication tag verification failed".to_string());
     }
 

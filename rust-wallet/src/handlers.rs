@@ -14546,6 +14546,39 @@ pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> Ht
 // Encrypted Wallet Backup — Export & Import (Phase 1b)
 // ============================================================================
 
+/// POST /wallet/consolidate-dust — manually trigger dust UTXO consolidation
+/// Returns JSON with result of the consolidation attempt.
+pub async fn wallet_consolidate_dust(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
+    log::info!("🧹 /wallet/consolidate-dust called — manual trigger");
+
+    use crate::monitor::task_consolidate_dust::ConsolidateResult;
+
+    match crate::monitor::task_consolidate_dust::run_inner(&state).await {
+        Ok(ConsolidateResult::Consolidated { txid, input_count, net_sats }) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "txid": txid,
+                "inputs_consolidated": input_count,
+                "net_sats": net_sats,
+                "message": format!("Consolidated {} dust UTXOs into {} sats", input_count, net_sats)
+            }))
+        }
+        Ok(ConsolidateResult::Skipped(reason)) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "skipped": true,
+                "message": reason
+            }))
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct WalletExportRequest {
     pub password: String,

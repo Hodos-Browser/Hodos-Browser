@@ -169,16 +169,14 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// ## Returns
 /// true if HMAC is valid
 pub fn verify_hmac_sha256(key: &[u8], data: &[u8], expected_hmac: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
     let computed = hmac_sha256(key, data);
 
-    // Constant-time comparison
     if computed.len() != expected_hmac.len() {
         return false;
     }
 
-    computed.iter()
-        .zip(expected_hmac.iter())
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    computed.ct_eq(expected_hmac).unwrap_u8() == 1
 }
 
 #[cfg(test)]
