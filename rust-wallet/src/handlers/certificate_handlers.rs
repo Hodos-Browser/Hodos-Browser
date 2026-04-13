@@ -2751,6 +2751,7 @@ async fn create_certificate_transaction(
     // Select UTXOs — prefer confirmed to avoid orphaned parents
     let selected_utxos = crate::handlers::select_utxos_with_preference(
         Some(&confirmed_utxos), &all_utxos, total_needed,
+        None, // No consolidation for certificate transactions
     );
     if selected_utxos.is_empty() {
         return Err(CertificateError::Database(format!(
@@ -4381,6 +4382,7 @@ async fn unpublish_certificate_core(
         let amount_needed = estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS;
         let selected = crate::handlers::select_utxos_with_preference(
             Some(&confirmed_utxos), &all_utxos, amount_needed,
+            None, // No consolidation for certificate transactions
         );
         if selected.is_empty() {
             return Err("Insufficient funds for unpublish fee".to_string());
