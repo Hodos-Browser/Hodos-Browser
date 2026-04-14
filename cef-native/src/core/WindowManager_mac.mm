@@ -123,7 +123,8 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     NSWindow* nsWindow = [[NSWindow alloc]
         initWithContentRect:windowFrame
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                  NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered
         defer:NO];
 
@@ -134,6 +135,8 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     }
 
     [nsWindow setTitle:@"Hodos Browser"];
+    [nsWindow setTitlebarAppearsTransparent:YES];
+    [nsWindow setTitleVisibility:NSWindowTitleHidden];
     [nsWindow setReleasedWhenClosed:NO];
 
     // Set per-window delegate (retain via associated object to prevent dealloc)

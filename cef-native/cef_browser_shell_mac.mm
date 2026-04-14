@@ -2229,11 +2229,17 @@ void CreateMainWindow() {
     NSRect screenRect = [[NSScreen mainScreen] visibleFrame];
     LOG_INFO("📐 Screen dimensions: " + std::to_string((int)screenRect.size.width) + " x " + std::to_string((int)screenRect.size.height));
 
-    // Create main window
+    // Create main window. NSWindowStyleMaskFullSizeContentView lets our
+    // React header render underneath the titlebar — combined with
+    // titlebarAppearsTransparent + titleVisibility hidden, the grey titlebar
+    // strip disappears visually while the native traffic-light buttons
+    // continue to render on top at their default macOS position. Our React
+    // TabBar reserves 86px of left padding for them (see TabBar.tsx isMac).
     g_main_window = [[NSWindow alloc]
         initWithContentRect:screenRect
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                  NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered
         defer:NO];
 
@@ -2243,6 +2249,8 @@ void CreateMainWindow() {
     }
 
     [g_main_window setTitle:@"Hodos Browser"];
+    [g_main_window setTitlebarAppearsTransparent:YES];
+    [g_main_window setTitleVisibility:NSWindowTitleHidden];
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 

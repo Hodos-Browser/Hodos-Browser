@@ -33,6 +33,14 @@ export const TabBar: React.FC<TabBarProps> = ({
   onReorderTabs,
   onTearOff,
 }) => {
+  // macOS renders its own native titlebar controls (traffic lights) at the top
+  // of the NSWindow, so we hide our cross-platform min/max/close buttons there
+  // and reserve ~80px of left padding in the tab strip for the lights.
+  // Computed per render so Vite HMR picks up the V8-injected platform value
+  // even if the module was cached before hodosBrowser was set.
+  const isMac = (window as unknown as {
+    hodosBrowser?: { platform?: string };
+  }).hodosBrowser?.platform === 'macos';
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [ghostX, setGhostX] = useState(0); // cursor X for floating ghost
@@ -249,7 +257,8 @@ export const TabBar: React.FC<TabBarProps> = ({
         display: 'flex',
         alignItems: 'center',
         backgroundColor: '#1e1e24',
-        paddingX: '6px',
+        paddingLeft: isMac ? '86px' : '6px',
+        paddingRight: '6px',
         height: 42,
         overflowX: 'auto',
         overflowY: 'hidden',
@@ -394,39 +403,42 @@ export const TabBar: React.FC<TabBarProps> = ({
       {/* Spacer pushes window controls to far right */}
       <Box sx={{ flex: 1, minWidth: 8 }} />
 
-      {/* Window Control Buttons — frameless window */}
-      <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0, mr: '-6px' }}>
-        <HodosButton
-          variant="icon"
-          size="small"
-          onClick={() => window.cefMessage?.send('window_minimize', [])}
-          aria-label="Minimize"
-          title="Minimize"
-          style={{ borderRadius: 0, width: 46, height: 42 }}
-        >
-          <RemoveIcon sx={{ fontSize: 16 }} />
-        </HodosButton>
-        <HodosButton
-          variant="icon"
-          size="small"
-          onClick={() => window.cefMessage?.send('window_maximize', [])}
-          aria-label="Maximize"
-          title="Maximize"
-          style={{ borderRadius: 0, width: 46, height: 42 }}
-        >
-          <CropSquareIcon sx={{ fontSize: 14 }} />
-        </HodosButton>
-        <HodosButton
-          variant="icon"
-          size="small"
-          onClick={() => window.cefMessage?.send('window_close', [])}
-          aria-label="Close"
-          title="Close"
-          style={{ borderRadius: 0, width: 46, height: 42 }}
-        >
-          <CloseIcon sx={{ fontSize: 16 }} />
-        </HodosButton>
-      </Box>
+      {/* Window Control Buttons — frameless window on Windows only.
+          macOS uses the native traffic lights rendered by AppKit. */}
+      {!isMac && (
+        <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0, mr: '-6px' }}>
+          <HodosButton
+            variant="icon"
+            size="small"
+            onClick={() => window.cefMessage?.send('window_minimize', [])}
+            aria-label="Minimize"
+            title="Minimize"
+            style={{ borderRadius: 0, width: 46, height: 42 }}
+          >
+            <RemoveIcon sx={{ fontSize: 16 }} />
+          </HodosButton>
+          <HodosButton
+            variant="icon"
+            size="small"
+            onClick={() => window.cefMessage?.send('window_maximize', [])}
+            aria-label="Maximize"
+            title="Maximize"
+            style={{ borderRadius: 0, width: 46, height: 42 }}
+          >
+            <CropSquareIcon sx={{ fontSize: 14 }} />
+          </HodosButton>
+          <HodosButton
+            variant="icon"
+            size="small"
+            onClick={() => window.cefMessage?.send('window_close', [])}
+            aria-label="Close"
+            title="Close"
+            style={{ borderRadius: 0, width: 46, height: 42 }}
+          >
+            <CloseIcon sx={{ fontSize: 16 }} />
+          </HodosButton>
+        </Box>
+      )}
     </Box>
   );
 };

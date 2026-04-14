@@ -677,6 +677,20 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefV8Value> hodosBrowser = CefV8Value::CreateObject(nullptr, nullptr);
     global->SetValue("hodosBrowser", hodosBrowser, V8_PROPERTY_ATTRIBUTE_READONLY);
 
+    // Expose the host OS to React so we can conditionally render Windows vs
+    // macOS chrome (traffic lights vs our own min/max/close, tab bar padding,
+    // etc.). Always injected, even on external pages — it's a bare string and
+    // not fingerprint-sensitive beyond what the user-agent already reveals.
+#if defined(__APPLE__)
+    hodosBrowser->SetValue("platform",
+        CefV8Value::CreateString("macos"),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+#else
+    hodosBrowser->SetValue("platform",
+        CefV8Value::CreateString("windows"),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+#endif
+
     // Identity, navigation, address, history, overlay APIs — internal pages only.
     // External pages get only BRC-100 + cefMessage (injected below).
     if (isInternalPage || isOverlayBrowser) {
