@@ -28,6 +28,98 @@
 
 ## Log
 
+### 2026-04-14 — Matt / Claude — macOS Dev Environment Setup Complete
+
+**What was done:**
+- Set up macOS dev environment on new MacBook Pro (first Mac, ARM/Apple Silicon)
+- Installed: Xcode CLI tools, Homebrew, cmake, openssl, nlohmann-json, sqlite3, node, gh, Rust, Claude Code
+- Cloned repo from `BSVArchie/Hodos-Browser` (personal fork), checked out `post-beta3-cleanup` branch
+- Downloaded custom CEF binaries from GitHub release (`cef-binaries` tag on `Hodos-Browser/Hodos-Browser` org repo) — NOT the Spotify CDN builds (ours have proprietary codecs)
+- Built all 4 components successfully: rust-wallet, adblock-engine, frontend, cef-native
+- Copied 5 Helper bundles into HodosBrowserShell.app/Contents/Frameworks/
+- Pushed all local Windows commits to `origin/post-beta3-cleanup` (was 20+ commits ahead of remote)
+
+**What's blocked:**
+- Nothing — ready for test run and Bug #9 diagnostic capture
+
+**What's next — INSTRUCTIONS FOR MAC CLAUDE (execute these in order):**
+
+#### Task 1: Test Run — Verify the build works
+
+Open 4 Terminal tabs (`Cmd+T`) and run each in its own tab:
+
+```bash
+# Tab 1: Rust Wallet
+cd ~/Hodos-Browser/rust-wallet && cargo run --release
+# Wait for "Listening on: http://127.0.0.1:31301"
+
+# Tab 2: Adblock Engine
+cd ~/Hodos-Browser/adblock-engine && cargo run --release
+# Wait for "Listening on: http://127.0.0.1:31302"
+
+# Tab 3: Frontend Dev Server
+cd ~/Hodos-Browser/frontend && npm run dev
+# Wait for "Local: http://127.0.0.1:5137"
+
+# Tab 4: Launch Browser
+cd ~/Hodos-Browser/cef-native/build/bin
+./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+```
+
+macOS may ask about network access — user should click **Allow**.
+
+If a browser window appears, the build is working. If "unidentified developer" warning: `xattr -cr HodosBrowserShell.app`
+
+#### Task 2: Capture Bug #9 Diagnostic Stack Trace
+
+**Context:** Bug #9 = closing any tab on macOS kills the entire browser. Commit `eb65d30` on this branch added `[NSThread callStackSymbols]` logging (tagged `DIAG-A1`) to `windowShouldClose:` delegates in `cef_browser_shell_mac.mm` and `WindowManager_mac.mm`. The dev build already includes this instrumentation.
+
+**Hypothesis:** A legacy standalone `"webview"` CEF browser created at `cef_browser_shell_mac.mm:4000-4029` (instead of via `TabManager::CreateTab`) coexists with managed tabs and creates a lifecycle invariant violation. When a managed tab closes, the cascade reaches `windowShouldClose:` → `ShutdownApplication()`.
+
+**Steps:**
+1. With the browser running from Task 1, click `+` to create 3-4 new tabs
+2. Click X on a **middle** tab (not the first or last)
+3. The app will crash/close — this IS the bug, it's expected
+4. In Terminal, run:
+   ```bash
+   grep "DIAG-A1" "$HOME/Library/Application Support/HodosBrowser/debug_output.log"
+   ```
+5. If that returns nothing, try:
+   ```bash
+   cat "$HOME/Library/Application Support/HodosBrowser/debug_output.log" | tail -100
+   ```
+6. **Save the full output** — this is the stack trace we need to confirm the hypothesis
+
+**Three possible outcomes:**
+- **A) Trace shows `MainWindowDelegate::windowShouldClose:` with tab-close frames** → confirms legacy webview hypothesis. Fix: remove legacy webview, seed via `TabManager::CreateTab()`
+- **B) Trace shows `BrowserWindowDelegate::windowShouldClose:`** → multi-window delegate is involved, need to check `WindowManager_mac.mm`
+- **C) No DIAG-A1 output at all** → the crash bypasses `windowShouldClose:` entirely, need different instrumentation
+
+#### Task 3: Report Results
+
+Share the diagnostic output with the user. Include:
+- Whether the browser window appeared (Task 1 result)
+- The full DIAG-A1 grep output (or tail output if grep was empty)
+- Which outcome (A, B, or C) matches
+
+#### Background: Key files for the fix (DO NOT modify yet, just for context)
+- `cef-native/cef_browser_shell_mac.mm` — legacy webview creation (~line 4000), `MainWindowDelegate::windowShouldClose:` (~line 1974)
+- `cef-native/src/core/WindowManager_mac.mm` — `BrowserWindowDelegate::windowShouldClose:`
+- `cef-native/src/core/TabManager_mac.mm` — tab lifecycle on macOS
+- Bug tracker: `development-docs/Final-MVP-Sprint/post-beta3-cleanup.md`
+
+#### Troubleshooting
+- **Permission denied on launch:** `chmod +x HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell`
+- **"unidentified developer":** `xattr -cr ~/Hodos-Browser/cef-native/build/bin/HodosBrowserShell.app`
+- **App crashes immediately:** Check Helper bundles exist: `ls HodosBrowserShell.app/Contents/Frameworks/ | grep Helper` (should be 5)
+- **Port in use:** A previous run didn't clean up. `kill $(lsof -ti :31301) $(lsof -ti :31302)` then retry
+- **No debug_output.log:** Check `~/Library/Application Support/HodosBrowser/` exists. If not, the app never got far enough to create it.
+
+**Files changed:**
+- `development-docs/Final-MVP-Sprint/AI-HANDOFF.md` (this entry)
+
+---
+
 ### 2026-04-13 — Matt / Claude — Wallet Efficiency P0+P1 Complete + UX Fixes
 
 **What was done:**
