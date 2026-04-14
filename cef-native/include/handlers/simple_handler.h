@@ -171,6 +171,15 @@ public:
                              int command_id,
                              EventFlags event_flags) override;
 
+    // macOS: CEF does not auto-present the rebuilt CefMenuModel as an NSMenu
+    // for windowed browsers — we convert + popUpMenuPositioningItem ourselves.
+    // On Windows, return false (default) so CEF shows its own menu.
+    bool RunContextMenu(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       CefRefPtr<CefContextMenuParams> params,
+                       CefRefPtr<CefMenuModel> model,
+                       CefRefPtr<CefRunContextMenuCallback> callback) override;
+
     // CefDialogHandler methods
     bool OnFileDialog(CefRefPtr<CefBrowser> browser,
                       FileDialogMode mode,

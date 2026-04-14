@@ -6561,6 +6561,7 @@ static const int MENU_ID_CUSTOM_SELECT_ALL      = MENU_ID_USER_FIRST + 19;
 static const int MENU_ID_CUSTOM_VIEW_SOURCE     = MENU_ID_USER_FIRST + 20;
 static const int MENU_ID_SET_HOMEPAGE            = MENU_ID_USER_FIRST + 21;
 static const int MENU_ID_MANAGE_PERMISSIONS      = MENU_ID_USER_FIRST + 22;
+static const int MENU_ID_OPEN_LINK_NEW_WINDOW    = MENU_ID_USER_FIRST + 23;
 
 void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
                                         CefRefPtr<CefFrame> frame,
@@ -6598,6 +6599,7 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
     // --- Link context ---
     if (hasLink) {
         model->AddItem(MENU_ID_OPEN_LINK_NEW_TAB, "Open Link in New Tab");
+        model->AddItem(MENU_ID_OPEN_LINK_NEW_WINDOW, "Open Link in New Window");
         model->AddItem(MENU_ID_COPY_LINK_ADDRESS, "Copy Link Address");
         model->AddSeparator();
     }
@@ -6721,6 +6723,32 @@ static void CopyTextToClipboard(const std::string& text) {
 #endif
 }
 
+#if defined(__APPLE__)
+// Defined in simple_handler_mac.mm — converts the CefMenuModel we built in
+// OnBeforeContextMenu into an NSMenu and presents it via AppKit. Returns
+// true when the menu was presented so CEF does not try to show its own.
+bool PresentContextMenuMac(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefContextMenuParams> params,
+                           CefRefPtr<CefMenuModel> model,
+                           CefRefPtr<CefRunContextMenuCallback> callback);
+#endif
+
+bool SimpleHandler::RunContextMenu(CefRefPtr<CefBrowser> browser,
+                                  CefRefPtr<CefFrame> frame,
+                                  CefRefPtr<CefContextMenuParams> params,
+                                  CefRefPtr<CefMenuModel> model,
+                                  CefRefPtr<CefRunContextMenuCallback> callback) {
+#if defined(__APPLE__)
+    // Only intercept for tab browsers — header/overlay OSR browsers do their
+    // own menu handling (most don't show menus at all; the address bar etc.
+    // use our OnBeforeContextMenu Inspect-only fallback).
+    return PresentContextMenuMac(browser, params, model, callback);
+#else
+    // On Windows CEF auto-presents. Returning false tells CEF to proceed.
+    return false;
+#endif
+}
+
 bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
                                          CefRefPtr<CefFrame> frame,
                                          CefRefPtr<CefContextMenuParams> params,
@@ -6743,6 +6771,34 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
             return true;
         }
         return false;
+    }
+
+    // --- Open Link in New Window ---
+    if (command_id == MENU_ID_OPEN_LINK_NEW_WINDOW) {
+        std::string link_url = params->GetLinkUrl().ToString();
+        if (!link_url.empty()) {
+            LOG_DEBUG_BROWSER("Opening link in new window: " + link_url);
+            BrowserWindow* new_bw = WindowManager::GetInstance().CreateFullWindow(/*createInitialTab=*/false);
+            if (new_bw) {
+#ifdef _WIN32
+                RECT rect;
+                GetClientRect(new_bw->hwnd, &rect);
+                int width = rect.right - rect.left;
+                int height = rect.bottom - rect.top;
+                int shellHeight = GetHeaderHeightPx(new_bw->hwnd);
+                TabManager::GetInstance().CreateTab(link_url, new_bw->hwnd, 0, shellHeight,
+                                                    width, height - shellHeight,
+                                                    new_bw->window_id);
+#elif defined(__APPLE__)
+                ViewDimensions dims = GetViewDimensions(new_bw->webview_view);
+                TabManager::GetInstance().CreateTab(link_url, new_bw->webview_view,
+                                                    0, 0, dims.width, dims.height,
+                                                    new_bw->window_id);
+#endif
+                SimpleHandler::NotifyWindowTabListChanged(new_bw->window_id);
+            }
+        }
+        return true;
     }
 
     // --- Copy Link Address ---

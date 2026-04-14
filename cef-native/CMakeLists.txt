@@ -162,6 +162,7 @@ if(APPLE)
     list(APPEND SOURCES
         cef_browser_shell_mac.mm
         OverlayHelpers_mac.mm
+        src/handlers/simple_handler_mac.mm
         src/core/TabManager_mac.mm
         src/core/WindowManager_mac.mm
         src/core/WalletService_mac.cpp
@@ -554,6 +555,21 @@ elseif(APPLE)
         COMMAND ${CMAKE_COMMAND} -E echo "macOS app bundle setup complete."
         COMMENT "Setting up macOS application bundle"
     )
+
+    # ============================================================================
+    # macOS: Generate hodos.icns from hodos-icon.png so local builds have
+    # the Hodos app icon. CI (release.yml) does the same thing; running it
+    # here keeps local and release bundles in sync.
+    # ============================================================================
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mac/hodos-icon.png" AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mac/generate-icon.sh")
+        add_custom_command(TARGET HodosBrowserShell POST_BUILD
+            COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/mac/generate-icon.sh"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/mac/hodos-icon.png"
+                         "$<TARGET_FILE_DIR:HodosBrowserShell>/../Resources/hodos.icns"
+            COMMENT "Generating macOS app icon (hodos.icns)"
+        )
+    endif()
 endif()
 
 # add_subdirectory(src/core) # Removed - wallet library no longer needed

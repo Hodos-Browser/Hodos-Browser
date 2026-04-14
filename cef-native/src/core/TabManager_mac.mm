@@ -71,7 +71,9 @@ int TabManager::CreateTab(const std::string& url, void* parent_view, int x, int 
     Tab new_tab(tab_id, tab_url);
     new_tab.window_id = window_id;
 
-    // Create NSView for this tab's browser
+    // Create NSView for this tab's browser. Right-click handling lives in
+    // SimpleHandler::RunContextMenu (macOS) — CEF's internal NSView receives
+    // the event and routes it through OnBeforeContextMenu / RunContextMenu.
     NSView* parentView = (__bridge NSView*)parent_view;
     NSRect tabFrame = NSMakeRect(x, y, width, height);
     NSView* tabView = [[NSView alloc] initWithFrame:tabFrame];
@@ -242,12 +244,13 @@ bool TabManager::SwitchToTab(int tab_id) {
 
     LOG_INFO("Switching to tab " + std::to_string(tab_id));
 
-    // Hide all tabs (skip tabs that are closing)
+    // Hide only tabs within the same window. Hiding across windows causes
+    // other windows to go white when we switch tabs here (multi-window bug).
+    int target_window_id = it->second.window_id;
     for (auto& pair : tabs_) {
         Tab& tab = pair.second;
-        if (tab.is_closing) {
-            continue;  // Skip tabs being closed
-        }
+        if (tab.is_closing) continue;
+        if (tab.window_id != target_window_id) continue;
         if (tab.view_ptr) {
             NSView* view = (__bridge NSView*)tab.view_ptr;
             [view setHidden:YES];
@@ -269,7 +272,6 @@ bool TabManager::SwitchToTab(int tab_id) {
         tab.is_visible = true;
         tab.last_accessed = std::chrono::system_clock::now();
 
-        // Set focus and notify CEF
         if (tab.browser && tab.browser->GetHost()) {
             [[view window] makeFirstResponder:view];
             tab.browser->GetHost()->SetFocus(true);
@@ -383,6 +385,22 @@ void TabManager::UpdateTabFavicon(int tab_id, const std::string& favicon_url) {
 bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_index) {
     CEF_REQUIRE_UI_THREAD();
 
+    // macOS implementation note (long-term architectural decision):
+    //
+    // CEF provides no API to reparent a windowed browser across NSWindows
+    // (SetAsChild bakes in the parent view at creation; see cef_mac.h). Our
+    // earlier approach — [tabView removeFromSuperview] + addSubview: into
+    // the target window's container — left the source window's CALayer tree
+    // in an undefined state and produced white-screen regressions for the
+    // tab(s) left behind. WasHidden/Invalidate kicks do not reliably recover
+    // it; WasHidden is documented as "only for windowless rendering".
+    //
+    // The correct long-term solution that respects CEF's lifecycle: destroy
+    // the tab's CEF browser and recreate a fresh tab in the target window
+    // with the same URL. History for that single tab is not preserved — an
+    // accepted tradeoff, since Chromium/Brave preserve history only via
+    // WebContents move which CEF does not expose. URL + title are kept.
+
     Tab* tab = GetTab(tab_id);
     if (!tab) {
         LOG_WARNING("MoveTabToWindow: tab " + std::to_string(tab_id) + " not found");
@@ -391,72 +409,48 @@ bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_in
 
     int source_window_id = tab->window_id;
     if (source_window_id == target_window_id) {
-        LOG_WARNING("MoveTabToWindow: tab " + std::to_string(tab_id) + " already in window " + std::to_string(target_window_id));
+        LOG_WARNING("MoveTabToWindow: tab " + std::to_string(tab_id) +
+                    " already in window " + std::to_string(target_window_id));
         return false;
     }
 
     BrowserWindow* target_bw = WindowManager::GetInstance().GetWindow(target_window_id);
-    if (!target_bw) {
+    if (!target_bw || !target_bw->webview_view) {
         LOG_WARNING("MoveTabToWindow: target window " + std::to_string(target_window_id) + " not found");
         return false;
     }
 
-    // 1. Reparent the NSView to the target window's webview container
-    if (tab->view_ptr && target_bw->webview_view) {
-        NSView* tabView = (__bridge NSView*)tab->view_ptr;
-        NSView* targetWebview = (__bridge NSView*)target_bw->webview_view;
-
-        // Remove from current parent
-        [tabView removeFromSuperview];
-
-        // Resize to fit target window's webview area
-        NSRect targetBounds = [targetWebview bounds];
-        [tabView setFrame:targetBounds];
-
-        // Add to target
-        [targetWebview addSubview:tabView];
-
-        // Notify CEF of new size
-        if (tab->browser) {
-            tab->browser->GetHost()->WasResized();
-        }
-    }
-
-    // 2. Update tab ownership
-    LOG_INFO("MoveTabToWindow: moving tab " + std::to_string(tab_id) +
-             " from window " + std::to_string(source_window_id) +
+    std::string url = tab->url.empty() ? "http://127.0.0.1:5137/newtab" : tab->url;
+    LOG_INFO("MoveTabToWindow: destroy+recreate tab " + std::to_string(tab_id) +
+             " (" + url + ") from window " + std::to_string(source_window_id) +
              " to window " + std::to_string(target_window_id));
-    tab->window_id = target_window_id;
 
-    // 3. Update handler's window_id so IPC routes correctly
-    if (tab->handler) {
-        tab->handler->SetWindowId(target_window_id);
+    // 1. Close the source tab's CEF browser cleanly. CloseTab handles view
+    //    removal, active-tab replacement in the source window, and tab-list
+    //    notifications.
+    CloseTab(tab_id);
+
+    // 2. Create a fresh tab in the target window at the same URL.
+    NSView* targetView = (__bridge NSView*)target_bw->webview_view;
+    NSRect bounds = [targetView bounds];
+    int new_tab_id = CreateTab(url,
+                               target_bw->webview_view,
+                               0, 0,
+                               (int)bounds.size.width,
+                               (int)bounds.size.height,
+                               target_window_id);
+
+    if (new_tab_id < 0) {
+        LOG_ERROR("MoveTabToWindow: failed to create replacement tab in target");
+        return false;
     }
 
-    // 4. If this was the active tab in the source window, switch source to another
-    int source_active = GetActiveTabIdForWindow(source_window_id);
-    if (source_active == tab_id) {
-        int replacement = -1;
-        for (auto& [id, t] : tabs_) {
-            if (id != tab_id && t.window_id == source_window_id) {
-                replacement = id;
-                break;
-            }
-        }
-        if (replacement != -1) {
-            SwitchToTab(replacement);
-        }
-        active_tab_per_window_.erase(source_window_id);
-    }
-
-    // 5. Switch to the moved tab in the target window
-    SwitchToTab(tab_id);
-
-    // 6. Notify both windows
-    SimpleHandler::NotifyWindowTabListChanged(source_window_id);
+    // 3. Notify target window (source was notified inside CloseTab via
+    //    NotifyWindowTabListChanged). CreateTab already calls
+    //    NotifyTabListChanged; add the window-scoped notify too.
     SimpleHandler::NotifyWindowTabListChanged(target_window_id);
 
-    // 7. Auto-close source window if it has no tabs left
+    // 4. If the source window has no tabs left, close it.
     int remaining = 0;
     for (auto& [id, t] : tabs_) {
         if (t.window_id == source_window_id) remaining++;
@@ -467,14 +461,14 @@ bool TabManager::MoveTabToWindow(int tab_id, int target_window_id, int insert_in
             NSWindow* srcWindow = (__bridge NSWindow*)src_bw->ns_window;
             LOG_INFO("MoveTabToWindow: source window " + std::to_string(source_window_id) +
                      " has no tabs left — closing");
-            // Defer close to next run loop iteration (we're still inside MoveTabToWindow)
             dispatch_async(dispatch_get_main_queue(), ^{
                 [srcWindow close];
             });
         }
     }
 
-    LOG_INFO("MoveTabToWindow: tab " + std::to_string(tab_id) + " moved successfully");
+    LOG_INFO("MoveTabToWindow: recreated as tab " + std::to_string(new_tab_id) +
+             " in window " + std::to_string(target_window_id));
     return true;
 }
 

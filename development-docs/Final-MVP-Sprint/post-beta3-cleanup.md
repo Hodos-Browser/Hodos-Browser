@@ -193,6 +193,13 @@ For any FAIL or surprising behavior, add a new entry to the bug list at the bott
     - Improve handling of miner responses
   - This should be its own sprint with its own context
 
+- [ ] **#13 — Cookie consent banner blocking (Brave parity)**
+  - Sites still show "Accept / Reject / Necessary only" cookie consent popups
+  - Brave hides these via the "Cookie Notices" filter list (sourced from EasyList Cookie / I-don't-care-about-cookies)
+  - We don't ship that list — adblock blocks tracker cookies but doesn't hide the consent UI
+  - Fix: add the filter-list URL to `adblock-engine/src/engine.rs` filter-list array, bump engine version
+  - Validate on common offenders: nytimes.com, theguardian.com, most EU sites
+
 ---
 
 ## Notes

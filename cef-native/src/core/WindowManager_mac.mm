@@ -67,21 +67,17 @@ extern void ShutdownApplication();
     // Currently overlays are only on window 0 (handled by MainWindowDelegate)
 }
 
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    WindowManager::GetInstance().SetActiveWindowId(self.window_id);
+}
+
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    NSArray<NSString*>* stack = [NSThread callStackSymbols];
-    LOG_INFO_WM("🔍 [DIAG-A1] BrowserWindowDelegate::windowShouldClose called (window " +
-                std::to_string(self.window_id) + ") — stack:\n" +
-                std::string([[stack componentsJoinedByString:@"\n"] UTF8String]));
+    // Close only this window's tabs and remove the window record. Do NOT call
+    // ShutdownApplication() on last window — macOS keeps the process alive
+    // after all windows close (Chromium convention). Quit routes through
+    // HodosBrowserApplication::terminate:.
+    LOG_INFO_WM("Window " + std::to_string(self.window_id) + " close requested");
 
-    int windowCount = WindowManager::GetInstance().GetWindowCount();
-
-    if (windowCount <= 1) {
-        // Last window — quit the application
-        ShutdownApplication();
-        return YES;
-    }
-
-    // Not the last window — close tabs and clean up
     auto allTabs = TabManager::GetInstance().GetAllTabs();
     std::vector<int> tabsToClose;
     for (auto* tab : allTabs) {

@@ -128,6 +128,106 @@ namespace fs = std::filesystem;
 #include "include/core/WindowManager.h"
 
 // ============================================================================
+// NSApplicationDelegate — menu-bar-style keep-alive (Chromium macOS pattern)
+//
+// Mirrors chrome/browser/app_controller_mac.mm:
+//   - applicationShouldHandleReopen:hasVisibleWindows: creates a new window
+//     when the user clicks the dock icon with no windows open.
+//   - applicationDockMenu: offers "New Window" in the dock right-click menu,
+//     routed through newWindowFromDock: which activates first (matches
+//     AppController::commandFromDock:).
+//   - newWindow:/newTab: are the File-menu item targets (Cmd+N / Cmd+T when
+//     no CEF browser has focus; when a browser has focus, these shortcuts
+//     are still handled by SimpleHandler::OnPreKeyEvent).
+// ============================================================================
+
+@interface HodosAppDelegate : NSObject <NSApplicationDelegate>
+@end
+
+@implementation HodosAppDelegate
+
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    Logger::Log("✅ HodosAppDelegate initialized", 1, 0);
+  }
+  return self;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)sender
+                    hasVisibleWindows:(BOOL)hasVisibleWindows {
+  Logger::Log(std::string("🔁 applicationShouldHandleReopen:hasVisibleWindows:") +
+              (hasVisibleWindows ? "YES" : "NO"), 1, 0);
+  if (!hasVisibleWindows) {
+    Logger::Log("🔁 Dock reopen with no visible windows — creating new browser window", 1, 0);
+    WindowManager::GetInstance().CreateFullWindow(/*createInitialTab=*/true);
+  }
+  return NO;
+}
+
+- (NSMenu*)applicationDockMenu:(NSApplication*)sender {
+  fprintf(stderr, "🗂  applicationDockMenu: ENTRY (thread=%s, sender=%p)\n",
+          [NSThread isMainThread] ? "main" : "bg", sender);
+  Logger::Log("🗂  applicationDockMenu: called — building dock menu", 1, 0);
+  NSMenu* dockMenu = [[NSMenu alloc] init];
+  // Disable auto-validation: otherwise AppKit consults validateMenuItem:
+  // on the target chain, and in the dock-menu context nothing in the
+  // responder chain returns YES for a custom selector, so the item is
+  // rendered disabled (gray) and may be suppressed.
+  [dockMenu setAutoenablesItems:NO];
+
+  NSMenuItem* newWindowItem =
+      [[NSMenuItem alloc] initWithTitle:@"New Window"
+                                 action:@selector(newWindowFromDock:)
+                          keyEquivalent:@""];
+  [newWindowItem setTarget:self];
+  [newWindowItem setEnabled:YES];
+  [dockMenu addItem:newWindowItem];
+  return dockMenu;
+}
+
+- (void)newWindow:(id)sender {
+  Logger::Log("🪟 File→New Window (Cmd+N via menu) — creating new browser window", 1, 0);
+  WindowManager::GetInstance().CreateFullWindow(/*createInitialTab=*/true);
+}
+
+- (void)newWindowFromDock:(id)sender {
+  // Activate first so the new window comes to the foreground (Chromium pattern:
+  // AppController::commandFromDock: calls activateIgnoringOtherApps: before
+  // dispatching the command).
+  [NSApp activateIgnoringOtherApps:YES];
+  [self newWindow:sender];
+}
+
+- (void)newTab:(id)sender {
+  BrowserWindow* activeWin = WindowManager::GetInstance().GetActiveWindow();
+  if (!activeWin || !activeWin->webview_view) {
+    // No active window — open a new full window instead (same as Chrome's
+    // Cmd+T with no window falling through to IDC_NEW_WINDOW).
+    Logger::Log("🗂  File→New Tab with no active window — creating new full window", 1, 0);
+    WindowManager::GetInstance().CreateFullWindow(/*createInitialTab=*/true);
+    return;
+  }
+
+  NSView* parentView = (__bridge NSView*)activeWin->webview_view;
+  NSRect b = [parentView bounds];
+  Logger::Log("🗂  File→New Tab (Cmd+T via menu) — creating tab in window " +
+              std::to_string(activeWin->window_id), 1, 0);
+  TabManager::GetInstance().CreateTab(
+      "http://127.0.0.1:5137/newtab",
+      activeWin->webview_view,
+      0, 0,
+      (int)b.size.width, (int)b.size.height,
+      activeWin->window_id);
+  SimpleHandler::NotifyWindowTabListChanged(activeWin->window_id);
+}
+
+@end
+
+// Strong reference so the delegate survives the app's lifetime.
+static HodosAppDelegate* g_app_delegate = nil;
+
+// ============================================================================
 // Global Window References (macOS equivalents of Windows HWNDs)
 // ============================================================================
 
@@ -1938,6 +2038,9 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         LOG_DEBUG("🔄 Header browser notified of resize");
     }
 
+    // Legacy "webview" browser no longer exists (Bug #9 fix) — tab browsers
+    // resize automatically via NSViewWidthSizable/Height autoresizing mask on
+    // their host NSViews (see TabManager_mac.mm).
     CefRefPtr<CefBrowser> webview = SimpleHandler::GetWebviewBrowser();
     if (webview) {
         webview->GetHost()->WasResized();
@@ -1971,21 +2074,17 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
 }
 
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    WindowManager::GetInstance().SetActiveWindowId(0);
+}
+
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    NSArray<NSString*>* stack = [NSThread callStackSymbols];
-    LOG_INFO("🔍 [DIAG-A1] MainWindowDelegate::windowShouldClose called (window 0) — stack:\n" +
-             std::string([[stack componentsJoinedByString:@"\n"] UTF8String]));
-
-    int windowCount = WindowManager::GetInstance().GetWindowCount();
-
-    if (windowCount <= 1) {
-        LOG_INFO("❌ Last window close requested - shutting down application");
-        ShutdownApplication();
-        return YES;
-    }
-
-    // Not the last window — close tabs in window 0 and clean up
-    LOG_INFO("❌ Window 0 close requested (" + std::to_string(windowCount - 1) + " other windows remain)");
+    // Close only this window's tabs and remove the window record. Do NOT call
+    // ShutdownApplication() here — on macOS we follow the Chromium convention
+    // (see chrome/browser/app_controller_mac.mm ScopedKeepAlive) where closing
+    // the last browser window leaves the process alive. Real app quit routes
+    // through HodosBrowserApplication::terminate: (Cmd-Q, menu Quit, dock Quit).
+    LOG_INFO("❌ Window 0 close requested");
     auto allTabs = TabManager::GetInstance().GetAllTabs();
     std::vector<int> tabsToClose;
     for (auto* tab : allTabs) {
@@ -2078,6 +2177,30 @@ void CreateMainWindow() {
                                                keyEquivalent:@"q"];
     [appMenu addItem:quitItem];
     [appMenuItem setSubmenu:appMenu];
+
+    // File menu — New Window (Cmd+N), New Tab (Cmd+T). Targets the
+    // NSApplicationDelegate (HodosAppDelegate) directly so these shortcuts
+    // work even when no CEF browser has focus (e.g. after the last window
+    // closes but the process is still alive). When a browser IS focused,
+    // AppKit menu-key-equivalent dispatch runs first and preempts
+    // SimpleHandler::OnPreKeyEvent's duplicate handling of Cmd+N/T —
+    // intentional, matches Chromium's macOS behaviour.
+    NSMenuItem* fileMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:fileMenuItem];
+    NSMenu* fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+    NSMenuItem* newWindowItem =
+        [[NSMenuItem alloc] initWithTitle:@"New Window"
+                                   action:@selector(newWindow:)
+                            keyEquivalent:@"n"];
+    [newWindowItem setTarget:g_app_delegate];
+    [fileMenu addItem:newWindowItem];
+    NSMenuItem* newTabItem =
+        [[NSMenuItem alloc] initWithTitle:@"New Tab"
+                                   action:@selector(newTab:)
+                            keyEquivalent:@"t"];
+    [newTabItem setTarget:g_app_delegate];
+    [fileMenu addItem:newTabItem];
+    [fileMenuItem setSubmenu:fileMenu];
 
     // Edit menu with standard text editing shortcuts (Cmd+A/C/V/X/Z).
     // Required on macOS: without this, Cmd+A bypasses the NSMenu action
@@ -3399,7 +3522,7 @@ void ShutdownApplication() {
     {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         const std::string roles[] = {
-            "header", "webview", "wallet_panel", "overlay", "settings",
+            "header", "wallet_panel", "overlay", "settings",
             "wallet", "backup", "brc100auth", "notification", "settings_menu",
             "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
         };
@@ -3771,6 +3894,15 @@ int main(int argc, char* argv[]) {
         // Only the main process should be a regular application
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
+        // Install NSApplicationDelegate for menu-bar-style keep-alive (dock
+        // reopen, applicationShouldHandleReopen:, dock menu). See
+        // HodosAppDelegate comment for the Chromium pattern we mirror.
+        g_app_delegate = [[HodosAppDelegate alloc] init];
+        [NSApp setDelegate:g_app_delegate];
+        fprintf(stderr, "✅ NSApp.delegate installed: %s (responds to applicationDockMenu: = %d)\n",
+                [NSApp delegate] == g_app_delegate ? "yes" : "NO",
+                [g_app_delegate respondsToSelector:@selector(applicationDockMenu:)]);
+
         // Initialize centralized logger with absolute path
         // (CWD is '/' when launched via 'open', so relative paths fail)
         {
@@ -4002,53 +4134,39 @@ int main(int argc, char* argv[]) {
         LOG_INFO("✅ Header browser creation result: " + std::string(browser_created ? "SUCCESS" : "FAILED"));
 
         // ===================================================================
-        // Create Webview Browser (for actual webpage content)
+        // Seed first tab via TabManager (window 0)
+        //
+        // Replaces the previous standalone "webview" CEF browser (Bug #9):
+        // the standalone browser parented a CEF-managed NSWindow subtree to
+        // g_webview_view, and React tab-close clicks cascaded up the responder
+        // chain into [NSWindow close] on the main window — shutting down the
+        // whole app. Routing the first tab through TabManager mirrors what
+        // WindowManager_mac.mm:186-194 already does for secondary windows and
+        // matches upstream Chromium (all content WebContents enter via
+        // TabStripModel; see chrome/browser/ui/browser_tabstrip.cc).
         // ===================================================================
 
-        NSView* webviewView = (__bridge NSView*)g_webview_view;
-        NSRect webviewBounds = [webviewView bounds];
+        if (TabManager::GetInstance().GetAllTabs().empty()) {
+            NSView* webviewView = (__bridge NSView*)g_webview_view;
+            NSRect webviewBounds = [webviewView bounds];
 
-        LOG_INFO("🔧 Creating webview browser with SetAsChild (for webpage content)");
-        LOG_INFO("📐 Webview bounds: " + std::to_string((int)webviewBounds.size.width) +
-                 "x" + std::to_string((int)webviewBounds.size.height));
+            LOG_INFO("🔧 Seeding first tab via TabManager::CreateTab (window 0)");
+            LOG_INFO("📐 Webview bounds: " + std::to_string((int)webviewBounds.size.width) +
+                     "x" + std::to_string((int)webviewBounds.size.height));
 
-        CefWindowInfo webview_window_info;
-        CefRect webviewRect(0, 0, (int)webviewBounds.size.width, (int)webviewBounds.size.height);
-        webview_window_info.SetAsChild((__bridge void*)webviewView, webviewRect);
+            int tabId = TabManager::GetInstance().CreateTab(
+                "http://127.0.0.1:5137/newtab",
+                g_webview_view,
+                0, 0,
+                (int)webviewBounds.size.width,
+                (int)webviewBounds.size.height,
+                /*window_id=*/0);
 
-        CefRefPtr<SimpleHandler> webview_handler = new SimpleHandler("webview");
-
-        CefBrowserSettings webview_settings;
-        webview_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
-
-        bool webview_created = CefBrowserHost::CreateBrowser(
-            webview_window_info,
-            webview_handler,
-            "http://127.0.0.1:5137/newtab",  // New tab page
-            webview_settings,
-            nullptr,
-            CefRequestContext::GetGlobalContext()
-        );
-
-        LOG_INFO("✅ Webview browser creation result: " + std::string(webview_created ? "SUCCESS" : "FAILED"));
-
-        // Note: Wallet panel browser removed - now uses overlay window approach
-        // (CreateWalletOverlayWithSeparateProcess) to match Windows implementation
-
-        // Debug: Check webview hierarchy after browsers created
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            NSView* webview = (__bridge NSView*)g_webview_view;
-            LOG_INFO("🔍 Webview has " + std::to_string([[webview subviews] count]) + " subviews");
-            LOG_INFO("🔍 Webview frame: Y=" + std::to_string((int)[webview frame].origin.y) +
-                     " H=" + std::to_string((int)[webview frame].size.height));
-
-            for (NSView* subview in [webview subviews]) {
-                NSRect frame = [subview frame];
-                LOG_INFO("  CEF subview: " + std::string([[subview className] UTF8String]) +
-                         " Y=" + std::to_string((int)frame.origin.y) +
-                         " H=" + std::to_string((int)frame.size.height));
-            }
-        });
+            LOG_INFO("✅ First tab seeded: tab id " + std::to_string(tabId));
+            SimpleHandler::NotifyWindowTabListChanged(0);
+        } else {
+            LOG_INFO("ℹ️ Skipping first-tab seed — TabManager already has tabs (session restore?)");
+        }
 
         // ===================================================================
         // Initialize HistoryManager

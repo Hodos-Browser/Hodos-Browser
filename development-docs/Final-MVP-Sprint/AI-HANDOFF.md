@@ -28,6 +28,53 @@
 
 ## Log
 
+### 2026-04-14 — Matt / Claude (Mac) — Bug #9 DIAG-A1 Captured (Outcome A confirmed)
+
+**What was done:**
+- Set up the dev environment on the new MBP and ran tasks 1–3 from the prior handoff
+- Discovered macOS-specific gap: CMake links with `-no_adhoc_codesign` so the locally built `.app` ships **unsigned**. Apple Silicon refuses to spawn unsigned CEF Helper bundles → browser exited cleanly with no window. Workaround: `codesign --force --deep --sign - HodosBrowserShell.app`. (CI release builds get Developer ID via `--force` so they overwrite ad-hoc; no conflict.) Worth adding a post-build ad-hoc-sign step in CMake for new Mac devs.
+- **Bug #9 did NOT reproduce** in the locally built dev binary (ad-hoc signed, launched from CLI) — opened/closed tabs in many positions, no crash.
+- Ran the macOS Standard test (~15 min): GitHub login + 2FA ✓, Google ✓, YouTube playback + adblock ✓ (one first-load ad slipped, refresh fixed it — known scriptlet pre-cache race), Twitch streams play ✓ (ads NOT blocked — expected, no Twitch-specific scriptlets), NYT ✓, WhatsOnChain ✓ (no CF challenge fired), nowsecure.nl ✓, g2.com ✓. **x.com login is broken**: enter email, page reloads, never advances. Same code paths as Windows for fingerprint + adblock unbreak — likely x.com bot detection vs our privacy stack (same friction Brave reports).
+- Downloaded the `v0.3.1-diag.1.dmg` (notarized release with the DIAG-A1 instrumentation), launched via Finder.
+- **Bug #9 DID reproduce** on the notarized release on first middle-tab close. DIAG-A1 stack trace captured — see below.
+
+**Diagnostic result: Outcome A confirmed.**
+
+```
+[DIAG-A1] MainWindowDelegate::windowShouldClose called (window 0) — stack:
+0  HodosBrowserShell  -[MainWindowDelegate windowShouldClose:]
+1  AppKit             -[NSWindow __close]
+2  AppKit             -[NSWindow __close]_block_invoke
+3  AppKit             -[NSApplication sendAction:to:from:]
+4  AppKit             -[NSControl sendAction:to:]
+...
+8  AppKit             -[NSButtonCell performClick:]   ← tab-close X button click
+...
+22 Chromium Embedded Framework  ChromeWebAppShortcutCopierMain ...
+27 HodosBrowserShell  main + 9688
+❌ Last window close requested - shutting down application
+```
+
+Trace shows that clicking a tab-close button on the legacy webview's tab triggers `[NSWindow close]` on the **main window** (not the tab). `MainWindowDelegate::windowShouldClose:` then fires, our handler treats it as "last window closed → shut down". Matches the legacy-webview hypothesis exactly.
+
+**Why the dev build doesn't reproduce:** Most likely activation/responder-chain differences between Finder-launch + hardened runtime vs CLI-launch + ad-hoc. Untested but cheap to verify: move the dev `.app` to `/Applications`, `xattr -cr`, double-click from Finder — if it reproduces, that's our iteration loop.
+
+**What's next (recommended, in order):**
+1. Implement Phase A2/A3/B1 from `~/.claude/plans/graceful-forging-nygaard.md`:
+   - Remove the legacy webview creation at `cef_browser_shell_mac.mm:4000-4029`
+   - Seed the first tab via `TabManager::CreateTab()`
+   - Wire tab-close buttons to TabManager, not NSWindow
+   - Decouple "last tab closed" from "last window closed" (macOS menu-bar app convention)
+2. Verify in dev via Finder-launch (move `.app` to `/Applications`) before going to a full notarized rebuild
+3. Once green: add a post-build ad-hoc-sign step in `cef-native/CMakeLists.txt` so future Mac devs don't hit the silent-launch problem
+4. Logged as new P4 #13: cookie consent banner blocking (Brave parity via EasyList Cookie filter list) — `post-beta3-cleanup.md` updated
+
+**Files changed:**
+- `development-docs/Final-MVP-Sprint/AI-HANDOFF.md` (this entry)
+- `development-docs/Final-MVP-Sprint/post-beta3-cleanup.md` (added P4 #13)
+
+---
+
 ### 2026-04-14 — Matt / Claude — macOS Dev Environment Setup Complete
 
 **What was done:**
