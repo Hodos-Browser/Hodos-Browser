@@ -19,14 +19,18 @@ const MAX_BATCH: usize = 20;
 /// Timeout for transactions WE broadcast (unproven/sending) - 6 hours
 const UNPROVEN_TIMEOUT_SECS: i64 = 6 * 60 * 60;
 
-/// Threshold after which a tx that BOTH ARC (authoritatively, via 404) and
-/// WhatsOnChain (404) have never heard of is considered failed. Shorter than
-/// UNPROVEN_TIMEOUT_SECS because two independent txid-based indexers both
-/// returning 404 is strong evidence the tx was never broadcast (e.g. process
-/// killed mid-broadcast). Covers realistic propagation windows (both
-/// indexers' mempools see tx within 1-5 min of broadcast) with margin.
-/// TaskUnFail's 6h recovery window catches any false positives.
-const BOTH_NOT_FOUND_TIMEOUT_SECS: i64 = 30 * 60;
+/// Threshold after which a tx that three independent txid-based indexers
+/// (WhatsOnChain, JungleBus/GorillaPool, Bitails) ALL return 404 for is
+/// considered failed. Each indexer covers both mempool and chain; a
+/// three-way quorum 404 after this window is strong evidence the tx was
+/// never successfully broadcast (e.g. process killed mid-broadcast) or
+/// dropped from every mempool. TaskUnFail's 6h recovery window catches
+/// false positives: if we prematurely fail a tx that later appears on
+/// chain, inputs are re-reserved and proof is linked.
+///
+/// 5 min × 60s tick × 3 oracles = up to 15 independent "not found" signals
+/// before rollback. Well above typical mempool propagation (<30s).
+const ALL_ORACLES_NOT_FOUND_TIMEOUT_SECS: i64 = 5 * 60;
 
 /// Timeout for transactions the APP broadcasts (nosend) - 10 minutes
 /// Apps broadcast immediately after receiving the Atomic BEEF from createAction.
@@ -207,38 +211,48 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 }
             }
             Err(e) => {
-                // Fall back to WhatsOnChain on ANY ARC error, not just 404.
-                // ARC 5xx (502 gateway, 500 internal error) and network errors are
-                // "ARC is broken right now" — they tell us nothing about the tx.
-                // WoC is an independent indexer and can confirm the tx regardless.
-                // Only gating on 404 previously caused confirmed txs to stay stuck
-                // as `unproven` during any ARC outage.
-                let reason = if e.contains("404") { "not on ARC" } else { "ARC error" };
-                info!("   ℹ️ {} {} ({}), checking WhatsOnChain...",
-                      &txid[..txid.len().min(16)], reason, e.lines().next().unwrap_or(&e));
-                match try_whatsonchain_confirmation(state, client, txid).await {
-                    Some(count) => { confirmed_count += count; }
-                    None => {
-                        // Not found anywhere. We only short-circuit to mark_failed when
-                        // ARC itself returned 404 (authoritative "unknown txid" from a
-                        // healthy gateway) — never on ARC 5xx, where we cannot tell
-                        // "unknown tx" from "ARC down".
-                        let arc_authoritative_404 = e.contains("404");
-                        if arc_authoritative_404 {
-                            if tx_info.age_secs > BOTH_NOT_FOUND_TIMEOUT_SECS {
-                                let mins = tx_info.age_secs / 60;
-                                warn!("   ⏰ {} 404 on both ARC and WoC after {}m — marking FAILED",
-                                      &txid[..txid.len().min(16)], mins);
-                                mark_failed(state, txid);
-                            } else if is_timed_out {
-                                // Safety net — in practice BOTH_NOT_FOUND_TIMEOUT will
-                                // have fired hours earlier, but keep the 6h backstop.
-                                let hours = tx_info.age_secs / 3600;
-                                warn!("   ⏰ {} not found after {}h — marking FAILED",
-                                      &txid[..txid.len().min(16)], hours);
-                                mark_failed(state, txid);
+                // ARC gave us nothing useful (404 or 5xx or transport error).
+                // Fall over to a three-oracle quorum: WhatsOnChain, JungleBus
+                // (GorillaPool non-ARC), and Bitails — all keyless, all indexing
+                // both mempool and chain by txid. ARC's health is no longer a
+                // prerequisite for detecting a failed broadcast.
+                info!("   ℹ️ {} ARC unavailable ({}), running oracle quorum",
+                      &txid[..txid.len().min(16)],
+                      e.lines().next().unwrap_or(&e));
+                match oracle_quorum_check(client, txid).await {
+                    OracleVerdict::Present { any_confirmed } => {
+                        if any_confirmed {
+                            // At least one oracle reports confirmations. Try to fetch
+                            // the merkle proof via WoC (same path ARC-OK/MINED uses
+                            // when we have no ARC BUMP).
+                            if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                                confirmed_count += count;
+                            } else {
+                                // Oracle saw it mined but WoC proof fetch raced or
+                                // /proof/tsc lagged — leave for next tick.
+                                info!("   ⏳ {} oracle saw confirmed but proof fetch lagged — retrying next tick",
+                                      &txid[..txid.len().min(16)]);
                             }
+                        } else {
+                            info!("   ⏳ {} seen in a mempool — awaiting mining",
+                                  &txid[..txid.len().min(16)]);
                         }
+                    }
+                    OracleVerdict::AllNotFound => {
+                        if tx_info.age_secs > ALL_ORACLES_NOT_FOUND_TIMEOUT_SECS {
+                            let mins = tx_info.age_secs / 60;
+                            warn!("   🧹 {} 404 on WoC, JungleBus, and Bitails after {}m — rolling back",
+                                  &txid[..txid.len().min(16)], mins);
+                            mark_failed(state, txid);
+                        } else {
+                            let remaining = (ALL_ORACLES_NOT_FOUND_TIMEOUT_SECS - tx_info.age_secs).max(0) / 60;
+                            info!("   ⏳ {} not found on any oracle yet ({}m age, rolling back in ~{}m)",
+                                  &txid[..txid.len().min(16)], tx_info.age_secs / 60, remaining);
+                        }
+                    }
+                    OracleVerdict::Inconclusive(reasons) => {
+                        warn!("   ⚠️ {} oracle quorum inconclusive ({}), skipping tick",
+                              &txid[..txid.len().min(16)], reasons);
                     }
                 }
             }
@@ -593,4 +607,132 @@ async fn fetch_and_store_woc_proof(
     }
 
     Ok(proven_tx_id)
+}
+
+/// Per-oracle verdict for a single txid lookup.
+#[derive(Debug)]
+enum OracleStatus {
+    /// Oracle returned 200 with a parsed response. `confirmations` is 0 for
+    /// mempool-only visibility, >0 for on-chain.
+    Present(u32),
+    /// Oracle returned HTTP 404 — authoritative "not found in mempool or chain".
+    NotFound,
+    /// Anything else: 5xx, timeout, transport error, bad JSON. Cannot
+    /// distinguish "unknown tx" from "oracle broken" — treat as no signal.
+    Error(String),
+}
+
+/// Aggregate verdict across all queried oracles.
+#[derive(Debug)]
+enum OracleVerdict {
+    /// At least one oracle saw the tx.
+    Present { any_confirmed: bool },
+    /// Every oracle returned an authoritative 404. Safe to mark failed after
+    /// the age threshold.
+    AllNotFound,
+    /// Nothing authoritative either way (at least one oracle errored and none
+    /// saw the tx). Skip this tick.
+    Inconclusive(String),
+}
+
+async fn oracle_quorum_check(client: &reqwest::Client, txid: &str) -> OracleVerdict {
+    let (woc, jb, bt) = tokio::join!(
+        query_woc_txid(client, txid),
+        query_junglebus_txid(client, txid),
+        query_bitails_txid(client, txid),
+    );
+
+    let confirmations_if_present = |s: &OracleStatus| -> Option<u32> {
+        if let OracleStatus::Present(c) = s { Some(*c) } else { None }
+    };
+
+    let present_confs: Vec<u32> = [&woc, &jb, &bt]
+        .iter()
+        .filter_map(|s| confirmations_if_present(s))
+        .collect();
+
+    if !present_confs.is_empty() {
+        return OracleVerdict::Present {
+            any_confirmed: present_confs.iter().any(|&c| c > 0),
+        };
+    }
+
+    let all_not_found = matches!(woc, OracleStatus::NotFound)
+        && matches!(jb, OracleStatus::NotFound)
+        && matches!(bt, OracleStatus::NotFound);
+
+    if all_not_found {
+        return OracleVerdict::AllNotFound;
+    }
+
+    let mut reasons: Vec<String> = Vec::new();
+    if let OracleStatus::Error(e) = &woc { reasons.push(format!("WoC:{}", e)); }
+    if let OracleStatus::Error(e) = &jb { reasons.push(format!("JB:{}", e)); }
+    if let OracleStatus::Error(e) = &bt { reasons.push(format!("BT:{}", e)); }
+    OracleVerdict::Inconclusive(reasons.join("; "))
+}
+
+async fn query_woc_txid(client: &reqwest::Client, txid: &str) -> OracleStatus {
+    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+    match client.get(&url).timeout(Duration::from_secs(10)).send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 404 { return OracleStatus::NotFound; }
+            if !resp.status().is_success() {
+                return OracleStatus::Error(format!("HTTP {}", code));
+            }
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => OracleStatus::Present(v["confirmations"].as_u64().unwrap_or(0) as u32),
+                Err(e) => OracleStatus::Error(format!("json:{}", e)),
+            }
+        }
+        Err(e) => OracleStatus::Error(format!("transport:{}", e)),
+    }
+}
+
+async fn query_junglebus_txid(client: &reqwest::Client, txid: &str) -> OracleStatus {
+    let url = format!("https://junglebus.gorillapool.io/v1/transaction/get/{}", txid);
+    match client.get(&url).timeout(Duration::from_secs(10)).send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 404 { return OracleStatus::NotFound; }
+            if !resp.status().is_success() {
+                return OracleStatus::Error(format!("HTTP {}", code));
+            }
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    // JungleBus returns { block_height: u64, ... }. 0 = mempool/unknown.
+                    // We don't have current tip to compute exact confirmations; treat
+                    // block_height > 0 as "confirmed" (conf >= 1).
+                    let height = v["block_height"].as_u64().unwrap_or(0);
+                    OracleStatus::Present(if height > 0 { 1 } else { 0 })
+                }
+                Err(e) => OracleStatus::Error(format!("json:{}", e)),
+            }
+        }
+        Err(e) => OracleStatus::Error(format!("transport:{}", e)),
+    }
+}
+
+async fn query_bitails_txid(client: &reqwest::Client, txid: &str) -> OracleStatus {
+    let url = format!("https://api.bitails.io/tx/{}", txid);
+    match client.get(&url).timeout(Duration::from_secs(10)).send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 404 { return OracleStatus::NotFound; }
+            if !resp.status().is_success() {
+                return OracleStatus::Error(format!("HTTP {}", code));
+            }
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    let height = v["blockHeight"].as_u64()
+                        .or_else(|| v["block"]["height"].as_u64())
+                        .unwrap_or(0);
+                    OracleStatus::Present(if height > 0 { 1 } else { 0 })
+                }
+                Err(e) => OracleStatus::Error(format!("json:{}", e)),
+            }
+        }
+        Err(e) => OracleStatus::Error(format!("transport:{}", e)),
+    }
 }
