@@ -212,6 +212,18 @@ public:
             "hcaptcha.com",               // hCaptcha
             "js.hcaptcha.com",            // hCaptcha JS
             "newassets.hcaptcha.com",     // hCaptcha assets
+
+            // --- Per-site webcompat exceptions for Cloudflare Turnstile ---
+            // Skipping only the challenge iframe is insufficient: Turnstile
+            // reads the parent window's Canvas/WebGL/Audio fingerprints to
+            // score the browser. Farbling the parent while leaving the iframe
+            // native produces an inconsistent signal that mac Turnstile rejects
+            // (Brave hits the same problem — see brave/brave-browser#45608).
+            // Until we have a more general parent-frame-of-Turnstile detector,
+            // list BSV-explorer sites users hit here so farbling skips them too.
+            "whatsonchain.com",           // WoC BSV explorer — uses Turnstile
+            "www.whatsonchain.com",
+            "test.whatsonchain.com",
         };
         for (const auto& auth : authDomains) {
             if (lower == auth) return true;

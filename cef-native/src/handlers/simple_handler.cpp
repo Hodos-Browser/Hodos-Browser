@@ -5830,7 +5830,14 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
     int tab_id = ExtractTabIdFromRole(role_);
     if (tab_id == -1) return false;  // Only pre-cache for tab browsers
 
-#ifdef _WIN32
+    // Pre-cache adblock scriptlets in OnBeforeBrowse so they inject
+    // synchronously in OnContextCreated before any page JS runs. Without this,
+    // scriptlets arrive later via OnLoadingStateChange (post-load), and
+    // anti-bot scripts like Cloudflare Turnstile observe the un-mutated
+    // fetch/XHR/canvas surface, producing false-positive "Verify you are
+    // human" loops — reproducible on macOS prior to this unification.
+    // Previously this block was #ifdef _WIN32; removing the guard makes
+    // behaviour match on both platforms (adblock engine runs on both).
     if (g_adblockServerRunning && AdblockCache::GetInstance().IsGlobalEnabled() && frame->IsMain()) {
         std::string navUrl = request->GetURL().ToString();
         if (!navUrl.empty() && !shouldSkipAdblockCheck(navUrl)) {
@@ -5848,7 +5855,6 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
             }
         }
     }
-#endif
 
     // Pre-warm domain permission cache for navigated domain (fire-and-forget)
     if (frame->IsMain()) {

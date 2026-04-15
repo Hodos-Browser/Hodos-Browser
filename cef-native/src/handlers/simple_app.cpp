@@ -10,6 +10,7 @@
 #include "include/cef_request_context.h"
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 
 #include "../../include/core/TabManager.h"
 #include "../../include/core/SettingsManager.h"
@@ -72,18 +73,23 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     // Prevent WebRTC from leaking real IP address via STUN requests
     command_line->AppendSwitchWithValue("force-webrtc-ip-handling-policy", "default_public_interface_only");
 
-    // macOS: Use in-process GPU instead of separate GPU process
-    // This avoids GPU process launch failures during development
+    // macOS: localhost loopback is always required (frontend dev server + Rust backends).
+    // Other dev-only flags (--disable-web-security, --in-process-gpu, etc.) are
+    // detectable by anti-bot systems (e.g. Cloudflare Turnstile rejects them on
+    // whatsonchain.com), so they are now opt-in via HODOS_MAC_DEV_FLAGS=1.
 #ifdef __APPLE__
-    command_line->AppendSwitch("in-process-gpu");
-    command_line->AppendSwitch("disable-gpu-sandbox");
-    // CRITICAL: Allow localhost connections for frontend dev server
     command_line->AppendSwitch("allow-loopback-in-sandbox");
-    command_line->AppendSwitch("disable-web-security");  // Disable for development
-    command_line->AppendSwitch("allow-running-insecure-content");
-    // Prevent Keychain access that blocks CefInitialize on unsigned apps
+    // Mock keychain is not web-visible and avoids CefInitialize hangs on unsigned apps.
     command_line->AppendSwitch("use-mock-keychain");
-    LOG_INFO_APP("Using in-process GPU on macOS; web security disabled for localhost dev");
+    if (std::getenv("HODOS_MAC_DEV_FLAGS")) {
+        command_line->AppendSwitch("in-process-gpu");
+        command_line->AppendSwitch("disable-gpu-sandbox");
+        command_line->AppendSwitch("disable-web-security");
+        command_line->AppendSwitch("allow-running-insecure-content");
+        LOG_INFO_APP("HODOS_MAC_DEV_FLAGS set: dev-only Chromium flags enabled");
+    } else {
+        LOG_INFO_APP("Production macOS Chromium config (set HODOS_MAC_DEV_FLAGS=1 to re-enable dev flags)");
+    }
 #endif
 
     // Disable Chromium's built-in autofill, autocorrect, and spell checking
