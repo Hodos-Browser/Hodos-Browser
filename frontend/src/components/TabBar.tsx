@@ -259,7 +259,12 @@ export const TabBar: React.FC<TabBarProps> = ({
         backgroundColor: '#1e1e24',
         paddingLeft: isMac ? '86px' : '6px',
         paddingRight: '6px',
-        height: 42,
+        // Small top inset on macOS so tabs clear the window's top edge —
+        // FullSizeContentView lets the header paint under the titlebar
+        // region, and without this the tab tops visually kiss the screen
+        // bezel next to the traffic lights.
+        paddingTop: isMac ? '4px' : 0,
+        height: isMac ? 46 : 42,
         overflowX: 'auto',
         overflowY: 'hidden',
         flexShrink: 0,
