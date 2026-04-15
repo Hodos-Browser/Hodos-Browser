@@ -57,6 +57,20 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [showIdentityKey, setShowIdentityKey] = useState(false);
   const [identityKeyCopied, setIdentityKeyCopied] = useState(false);
 
+  // Always refresh balance on mount. The panel seeds from the localStorage
+  // cache for instant paint, but that cache can be up to 30s stale (the
+  // background poller runs at that interval). Without this fetch, a payment
+  // that arrived since the last poll — very common right after opening the
+  // panel in response to a green-dot notification — wouldn't be reflected
+  // until the user manually refreshed or reopened the panel.
+  //
+  // On Windows the same goal is achieved by the 'wallet_shown' postMessage
+  // the keep-alive overlay receives on each show (see below). On macOS the
+  // overlay is freshly created each time, so that path never fires.
+  useEffect(() => {
+    refreshBalance();
+  }, [refreshBalance]);
+
   // Keep-alive: reset to balance view on hide (so next open is clean)
   useEffect(() => {
     const handleHidden = (e: MessageEvent) => {
@@ -118,6 +132,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         })
         .catch(() => {});
     };
+    pollStatus();  // fire immediately so the banner appears on first paint
     const interval = setInterval(pollStatus, 10000);
     return () => clearInterval(interval);
   }, []);
@@ -636,15 +651,27 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                 </div>
                 {transactionResult.whatsOnChainUrl && (
                   <div className="whatsonchain-container-light">
-                    <a
-                      href={transactionResult.whatsOnChainUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      type="button"
                       className="whatsonchain-link-light"
-                      onClick={() => onClose?.()}
+                      style={{
+                        cursor: 'pointer',
+                        border: 'none',
+                        background: 'none',
+                        color: 'inherit',
+                        textDecoration: 'underline',
+                        padding: 0,
+                        font: 'inherit',
+                      }}
+                      onClick={() => {
+                        if (window.cefMessage?.send && transactionResult.whatsOnChainUrl) {
+                          window.cefMessage.send('tab_create', transactionResult.whatsOnChainUrl);
+                        }
+                        onClose?.();
+                      }}
                     >
                       View on WhatsOnChain
-                    </a>
+                    </button>
                     <HodosButton
                       variant="secondary"
                       size="small"

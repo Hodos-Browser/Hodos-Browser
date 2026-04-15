@@ -2626,7 +2626,15 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
                                    (int)walletFrame.size.height);
     handler->SetRenderHandler(render_handler);
 
+    // Pass pending PeerPay count/amount as query params so the React panel
+    // can render the notification banner on first paint. Mirrors the Windows
+    // code path in simple_app.cpp:777. g_peerpay_count/amount are set by the
+    // toggle_wallet_panel IPC handler just before this function runs.
     std::string walletUrl = "http://127.0.0.1:5137/wallet-panel?iro=" + std::to_string(iconRightOffset);
+    if (g_peerpay_count > 0) {
+        walletUrl += "&ppc=" + std::to_string(g_peerpay_count) +
+                     "&ppa=" + std::to_string(g_peerpay_amount);
+    }
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
         handler,
