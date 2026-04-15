@@ -198,22 +198,28 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 }
             }
             Err(e) => {
-                if e.contains("404") {
-                    // Not on ARC — fallback to WhatsOnChain
-                    info!("   ℹ️ {} not on ARC, checking WhatsOnChain...", &txid[..txid.len().min(16)]);
-                    match try_whatsonchain_confirmation(state, client, txid).await {
-                        Some(count) => { confirmed_count += count; }
-                        None => {
-                            // Not found anywhere
-                            if is_timed_out {
-                                let hours = tx_info.age_secs / 3600;
-                                warn!("   ⏰ {} not found after {}h — marking FAILED", &txid[..txid.len().min(16)], hours);
-                                mark_failed(state, txid);
-                            }
+                // Fall back to WhatsOnChain on ANY ARC error, not just 404.
+                // ARC 5xx (502 gateway, 500 internal error) and network errors are
+                // "ARC is broken right now" — they tell us nothing about the tx.
+                // WoC is an independent indexer and can confirm the tx regardless.
+                // Only gating on 404 previously caused confirmed txs to stay stuck
+                // as `unproven` during any ARC outage.
+                let reason = if e.contains("404") { "not on ARC" } else { "ARC error" };
+                info!("   ℹ️ {} {} ({}), checking WhatsOnChain...",
+                      &txid[..txid.len().min(16)], reason, e.lines().next().unwrap_or(&e));
+                match try_whatsonchain_confirmation(state, client, txid).await {
+                    Some(count) => { confirmed_count += count; }
+                    None => {
+                        // Not found anywhere. Only mark failed on genuine 404-from-ARC +
+                        // not-on-WoC timeouts — not on transient ARC 5xx where we cannot
+                        // distinguish "unknown tx" from "ARC down".
+                        if is_timed_out && e.contains("404") {
+                            let hours = tx_info.age_secs / 3600;
+                            warn!("   ⏰ {} not found after {}h — marking FAILED",
+                                  &txid[..txid.len().min(16)], hours);
+                            mark_failed(state, txid);
                         }
                     }
-                } else {
-                    warn!("   ⚠️ ARC query failed for {}: {}", txid, e);
                 }
             }
         }
