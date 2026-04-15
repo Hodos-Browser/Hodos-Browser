@@ -19,6 +19,15 @@ const MAX_BATCH: usize = 20;
 /// Timeout for transactions WE broadcast (unproven/sending) - 6 hours
 const UNPROVEN_TIMEOUT_SECS: i64 = 6 * 60 * 60;
 
+/// Threshold after which a tx that BOTH ARC (authoritatively, via 404) and
+/// WhatsOnChain (404) have never heard of is considered failed. Shorter than
+/// UNPROVEN_TIMEOUT_SECS because two independent txid-based indexers both
+/// returning 404 is strong evidence the tx was never broadcast (e.g. process
+/// killed mid-broadcast). Covers realistic propagation windows (both
+/// indexers' mempools see tx within 1-5 min of broadcast) with margin.
+/// TaskUnFail's 6h recovery window catches any false positives.
+const BOTH_NOT_FOUND_TIMEOUT_SECS: i64 = 30 * 60;
+
 /// Timeout for transactions the APP broadcasts (nosend) - 10 minutes
 /// Apps broadcast immediately after receiving the Atomic BEEF from createAction.
 /// If the tx isn't on ARC or WoC within 10 minutes, the broadcast likely failed.
@@ -210,14 +219,25 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 match try_whatsonchain_confirmation(state, client, txid).await {
                     Some(count) => { confirmed_count += count; }
                     None => {
-                        // Not found anywhere. Only mark failed on genuine 404-from-ARC +
-                        // not-on-WoC timeouts — not on transient ARC 5xx where we cannot
-                        // distinguish "unknown tx" from "ARC down".
-                        if is_timed_out && e.contains("404") {
-                            let hours = tx_info.age_secs / 3600;
-                            warn!("   ⏰ {} not found after {}h — marking FAILED",
-                                  &txid[..txid.len().min(16)], hours);
-                            mark_failed(state, txid);
+                        // Not found anywhere. We only short-circuit to mark_failed when
+                        // ARC itself returned 404 (authoritative "unknown txid" from a
+                        // healthy gateway) — never on ARC 5xx, where we cannot tell
+                        // "unknown tx" from "ARC down".
+                        let arc_authoritative_404 = e.contains("404");
+                        if arc_authoritative_404 {
+                            if tx_info.age_secs > BOTH_NOT_FOUND_TIMEOUT_SECS {
+                                let mins = tx_info.age_secs / 60;
+                                warn!("   ⏰ {} 404 on both ARC and WoC after {}m — marking FAILED",
+                                      &txid[..txid.len().min(16)], mins);
+                                mark_failed(state, txid);
+                            } else if is_timed_out {
+                                // Safety net — in practice BOTH_NOT_FOUND_TIMEOUT will
+                                // have fired hours earlier, but keep the 6h backstop.
+                                let hours = tx_info.age_secs / 3600;
+                                warn!("   ⏰ {} not found after {}h — marking FAILED",
+                                      &txid[..txid.len().min(16)], hours);
+                                mark_failed(state, txid);
+                            }
                         }
                     }
                 }
