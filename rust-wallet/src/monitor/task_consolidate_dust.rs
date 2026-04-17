@@ -413,9 +413,9 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                     rusqlite::params![now, txid],
                 );
 
-                // Delete the consolidated output (ghost)
+                // Disable the consolidated output (recoverable by TaskUnFail if tx was actually mined)
                 let output_repo = OutputRepository::new(conn);
-                let _ = output_repo.delete_by_txid(&txid);
+                let _ = output_repo.disable_by_txid(&txid);
 
                 // Restore dust inputs (un-mark as spent)
                 let _ = conn.execute(

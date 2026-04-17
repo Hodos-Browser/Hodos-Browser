@@ -10,6 +10,14 @@ use reqwest::Client;
 use std::sync::Mutex;
 use sha2::{Sha256, Digest};
 
+/// Result from fetch_transaction_for_beef indicating where the tx was found
+pub struct FetchedTx {
+    pub bytes: Vec<u8>,
+    /// true if the tx was fetched from an external API (WoC), confirming it exists on-chain/mempool.
+    /// false if it was found only in local cache (transactions table or parent_transactions).
+    pub verified_on_network: bool,
+}
+
 /// Fetch a transaction by TXID from cache or API
 ///
 /// Checks in order:
@@ -17,12 +25,12 @@ use sha2::{Sha256, Digest};
 /// 2. `parent_transactions` table (cached parent transactions)
 /// 3. WhatsOnChain API (if not cached)
 ///
-/// Returns raw transaction bytes
+/// Returns raw transaction bytes and whether the tx was verified on-network
 pub async fn fetch_transaction_for_beef(
     txid: &str,
     db: &Mutex<WalletDatabase>,
     client: &Client,
-) -> Result<Vec<u8>, String> {
+) -> Result<FetchedTx, String> {
     // Step 1: Check transactions table (wallet's own transactions)
     // IMPORTANT: Lock must be scoped so it's dropped before Step 2
     let step1_hex: Option<String> = {
@@ -49,7 +57,7 @@ pub async fn fetch_transaction_for_beef(
 
                 if calculated_txid_hex == txid {
                     log::info!("   ✅ Found transaction {} in transactions table", txid);
-                    return Ok(bytes);
+                    return Ok(FetchedTx { bytes, verified_on_network: false });
                 } else {
                     log::warn!("   ⚠️  TXID mismatch for {} in transactions table, trying cache...", txid);
                 }
@@ -98,7 +106,7 @@ pub async fn fetch_transaction_for_beef(
 
     if let Some(cached_hex) = step2_hex {
         match hex::decode(&cached_hex) {
-            Ok(bytes) => return Ok(bytes),
+            Ok(bytes) => return Ok(FetchedTx { bytes, verified_on_network: false }),
             Err(e) => {
                 log::warn!("   ⚠️  Failed to decode cached transaction {}: {}, fetching from API", txid, e);
             },
@@ -127,7 +135,7 @@ pub async fn fetch_transaction_for_beef(
                             let _ = parent_tx_repo.upsert(utxo_id, txid, &parent_tx_hex);
                         }
                         log::info!("   💾 Cached transaction {} from API", txid);
-                        Ok(bytes)
+                        Ok(FetchedTx { bytes, verified_on_network: true })
                     } else {
                         Err(format!("TXID verification failed for {}: calculated {} but expected {}", txid, calculated_txid_hex, txid))
                     }
@@ -169,6 +177,7 @@ pub async fn build_beef_for_txid(
     // Queue of transactions to process
     let mut queue = vec![txid.to_string()];
     let mut processed = HashSet::new();
+    let mut missing_ancestors: Vec<String> = Vec::new();
 
     while let Some(current_txid) = queue.pop() {
         // Skip if already processed
@@ -191,14 +200,19 @@ pub async fn build_beef_for_txid(
         log::info!("   📥 Building BEEF for transaction {}", current_txid);
 
         // Fetch transaction (from cache or API)
-        let tx_bytes = match fetch_transaction_for_beef(&current_txid, db, client).await {
-            Ok(bytes) => bytes,
+        // If fetch fails, this ancestor is unfetchable (ghost/phantom) — track it
+        // but continue walking to discover ALL missing ancestors for a complete error message.
+        let fetched = match fetch_transaction_for_beef(&current_txid, db, client).await {
+            Ok(f) => f,
             Err(e) => {
-                log::warn!("   ⚠️  Failed to fetch transaction {}: {}, skipping", current_txid, e);
+                log::error!("   ❌ Failed to fetch ancestor {}: {} — ancestry chain broken", current_txid, e);
+                missing_ancestors.push(current_txid.clone());
                 processed.insert(current_txid);
                 continue;
             }
         };
+        let tx_bytes = fetched.bytes;
+        let verified_on_network = fetched.verified_on_network;
 
         // Parse transaction to get inputs
         let parsed = match ParsedTransaction::from_bytes(&tx_bytes) {
@@ -363,6 +377,65 @@ pub async fn build_beef_for_txid(
             has_bump = false;
         }
 
+        // Ghost detection: if this tx has no merkle proof AND was found only in local cache
+        // (not verified on the network), check if it actually exists on WoC.
+        // A tx in our local cache but unknown to the network is a ghost/phantom —
+        // it was never successfully broadcast or was dropped from all mempools.
+        // Including it in BEEF will cause SEEN_IN_ORPHAN_MEMPOOL from ARC.
+        if !has_bump && !verified_on_network {
+            let woc_url = format!(
+                "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
+                current_txid
+            );
+            match client.get(&woc_url).send().await {
+                Ok(resp) if resp.status().as_u16() == 404 => {
+                    log::error!(
+                        "   ❌ Unconfirmed parent {} NOT FOUND on WoC (404) — ghost transaction, excluding from BEEF",
+                        &current_txid[..std::cmp::min(16, current_txid.len())]
+                    );
+                    // Clean up: mark any outputs from this ghost tx as not spendable
+                    {
+                        let db_guard = db.lock().unwrap();
+                        let conn = db_guard.connection();
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let _ = conn.execute(
+                            "UPDATE outputs SET spendable = 0, spending_description = 'phantom: parent tx not on chain', updated_at = ?1
+                             WHERE txid = ?2 AND spendable = 1",
+                            rusqlite::params![now, &current_txid],
+                        );
+                        log::info!(
+                            "   🗑️  Marked outputs from ghost tx {} as phantom",
+                            &current_txid[..std::cmp::min(16, current_txid.len())]
+                        );
+                    }
+                    missing_ancestors.push(current_txid.clone());
+                    processed.insert(current_txid);
+                    continue;
+                }
+                Ok(resp) if resp.status().is_success() => {
+                    log::info!(
+                        "   ✅ Unconfirmed parent {} verified on WoC (exists in mempool/chain)",
+                        &current_txid[..std::cmp::min(16, current_txid.len())]
+                    );
+                }
+                Ok(resp) => {
+                    log::warn!(
+                        "   ⚠️  WoC returned {} for {} — proceeding cautiously",
+                        resp.status(), &current_txid[..std::cmp::min(16, current_txid.len())]
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "   ⚠️  WoC check failed for {}: {} — proceeding without verification",
+                        &current_txid[..std::cmp::min(16, current_txid.len())], e
+                    );
+                }
+            }
+        }
+
         // Only queue parent transactions if this tx has NO merkle proof.
         // A transaction with a BUMP is proven by its block inclusion -
         // its parents are not needed in the BEEF.
@@ -377,6 +450,19 @@ pub async fn build_beef_for_txid(
         }
 
         processed.insert(current_txid);
+    }
+
+    // If any ancestors couldn't be fetched, the BEEF chain is broken.
+    // Return error with full list so caller can decide how to handle.
+    if !missing_ancestors.is_empty() {
+        let short_ids: Vec<String> = missing_ancestors.iter()
+            .map(|t| t[..16.min(t.len())].to_string())
+            .collect();
+        return Err(format!(
+            "BEEF ancestry broken: {} unfetchable ancestor(s): {}",
+            missing_ancestors.len(),
+            short_ids.join(", ")
+        ));
     }
 
     Ok(())

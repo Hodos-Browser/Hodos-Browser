@@ -4692,7 +4692,7 @@ async fn unpublish_certificate_core(
             let tx_repo = crate::database::TransactionRepository::new(db.connection());
             let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
             let output_repo = OutputRepository::new(db.connection());
-            let _ = output_repo.delete_by_txid(&txid);
+            let _ = output_repo.disable_by_txid(&txid);
             let _ = output_repo.restore_by_spending_description(&txid);
             let _ = output_repo.restore_by_spending_description(&placeholder_txid);
             drop(db);

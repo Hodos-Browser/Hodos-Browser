@@ -222,11 +222,19 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
             }
         }
 
-        // NOTE: We do NOT re-create deleted change outputs here.
-        // The change outputs from this recovered tx will be discovered by the
-        // next UTXO sync (POST /wallet/sync or TaskSyncPending).
+        // Re-enable change outputs that were disabled during false failure cleanup.
+        // When mark_failed ran, it set spendable=0 and spending_description='failed-tx-output'.
+        // Now that the tx is confirmed on-chain, those outputs are real — flip them back.
+        match output_repo.reenable_failed_outputs(txid) {
+            Ok(count) if count > 0 => {
+                info!("   ♻️ Re-enabled {} change output(s) from recovered tx {}", count, short_txid);
+            }
+            Err(e) => {
+                warn!("   ⚠️ Failed to re-enable outputs for {}: {} — run /wallet/sync to reconcile", short_txid, e);
+            }
+            _ => {}
+        }
         info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height);
-        info!("   ℹ️ Run /wallet/sync to discover change outputs from this recovered transaction");
     }
 
     // Invalidate balance cache since status changed

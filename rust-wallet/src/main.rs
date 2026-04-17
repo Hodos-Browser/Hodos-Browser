@@ -549,6 +549,138 @@ async fn main() -> std::io::Result<()> {
     // Replaces: arc_status_poller, cache_sync, utxo_sync background services
     // Only start if wallet exists — no background work to do without a wallet
     if wallet_exists {
+        // Startup phantom UTXO sweep: check outputs with transaction_id=NULL that claim
+        // to be confirmed. These are externally-received outputs (PeerPay, address sync)
+        // that may reference parent txs that were never mined. Before the April 13 fix,
+        // store_derived_utxo() defaulted confirmed=1 on insert. This sweep catches any
+        // historical ghosts by verifying each parent txid exists on WoC.
+        {
+            let sweep_state = app_state.clone();
+            tokio::spawn(async move {
+                // Brief delay to let the HTTP server start first
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                let candidates: Vec<(String, i32, i64)> = {
+                    let db = match sweep_state.database.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    let conn = db.connection();
+                    let mut stmt = match conn.prepare(
+                        "SELECT txid, vout, satoshis FROM outputs \
+                         WHERE transaction_id IS NULL AND confirmed = 1 AND spendable = 1 \
+                           AND txid IS NOT NULL"
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    stmt.query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?, row.get::<_, i64>(2)?))
+                    }).ok()
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default()
+                }; // DB lock dropped
+
+                if candidates.is_empty() {
+                    return;
+                }
+
+                log::info!("🔍 Startup phantom sweep: checking {} externally-received output(s)...", candidates.len());
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+
+                // Deduplicate by txid (multiple outputs can share a parent tx)
+                let mut checked_txids = std::collections::HashSet::new();
+                let mut phantom_txids = std::collections::HashSet::new();
+
+                for (txid, _vout, _sats) in &candidates {
+                    if checked_txids.contains(txid) {
+                        if phantom_txids.contains(txid) {
+                            // Already confirmed phantom — will be cleaned up below
+                        }
+                        continue;
+                    }
+                    checked_txids.insert(txid.clone());
+
+                    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
+                    match client.get(&url).send().await {
+                        Ok(resp) if resp.status().as_u16() == 404 => {
+                            log::warn!(
+                                "   🔴 Phantom output detected: tx {} not found on WoC (404)",
+                                &txid[..std::cmp::min(16, txid.len())]
+                            );
+                            phantom_txids.insert(txid.clone());
+                        }
+                        Ok(resp) if resp.status().is_success() => {
+                            log::info!(
+                                "   ✅ Output tx {} verified on WoC",
+                                &txid[..std::cmp::min(16, txid.len())]
+                            );
+                        }
+                        Ok(resp) => {
+                            log::warn!(
+                                "   ⚠️  WoC returned {} for {} — skipping",
+                                resp.status(), &txid[..std::cmp::min(16, txid.len())]
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "   ⚠️  WoC check failed for {}: {} — skipping",
+                                &txid[..std::cmp::min(16, txid.len())], e
+                            );
+                        }
+                    }
+                    // Rate limit
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+
+                // Clean up phantoms
+                if !phantom_txids.is_empty() {
+                    let db = match sweep_state.database.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    let conn = db.connection();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+
+                    let mut total_cleaned = 0u32;
+                    for txid in &phantom_txids {
+                        let cleaned = conn.execute(
+                            "UPDATE outputs SET spendable = 0, \
+                             spending_description = 'phantom: parent tx not on chain (startup sweep)', \
+                             updated_at = ?1 \
+                             WHERE txid = ?2 AND spendable = 1",
+                            rusqlite::params![now, txid],
+                        ).unwrap_or(0) as u32;
+                        if cleaned > 0 {
+                            log::warn!(
+                                "   🗑️  Marked {} phantom output(s) from tx {} as not spendable",
+                                cleaned, &txid[..std::cmp::min(16, txid.len())]
+                            );
+                            total_cleaned += cleaned;
+                        }
+                    }
+
+                    if total_cleaned > 0 {
+                        drop(db); // Release lock before invalidating cache
+                        sweep_state.balance_cache.invalidate();
+                        log::info!(
+                            "🧹 Startup phantom sweep complete: cleaned {} phantom output(s) from {} ghost tx(s)",
+                            total_cleaned, phantom_txids.len()
+                        );
+                    }
+                } else {
+                    log::info!("✅ Startup phantom sweep: all externally-received outputs verified");
+                }
+            });
+        }
+
         println!("🔄 Starting Monitor (background task scheduler)...");
         monitor::Monitor::start(app_state.clone());
         println!("   ✅ Monitor started with 7 tasks");
@@ -560,9 +692,15 @@ async fn main() -> std::io::Result<()> {
 
     // Start HTTP server with graceful shutdown support (Phase 8D)
     let server = HttpServer::new(move || {
-        // Configure CORS (allow all for development)
+        // CORS: Only allow requests from our own frontend origins.
+        // In production, CEF intercepts wallet requests at the C++ layer before they
+        // reach Rust — CORS here is defense-in-depth against any bypass.
+        // Website JS uses window.hodosBrowser.* (V8 IPC), never direct fetch to :31301.
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin("http://127.0.0.1:5137")
+            .allowed_origin("http://localhost:5137")
+            .allowed_origin("http://127.0.0.1")
+            .allowed_origin("http://localhost")
             .allow_any_method()
             .allow_any_header()
             .max_age(3600);

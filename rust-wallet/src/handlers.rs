@@ -5420,7 +5420,7 @@ pub(crate) async fn create_action_internal(
                         // (signAction may not have updated the output txid if it failed)
                         let output_repo = crate::database::OutputRepository::new(db.connection());
                         let mut deleted_count = 0usize;
-                        match output_repo.delete_by_txid(&final_txid) {
+                        match output_repo.disable_by_txid(&final_txid) {
                             Ok(count) => { deleted_count += count; }
                             Err(e) => {
                                 log::warn!("   ⚠️  Failed to remove ghost output by signed txid: {}", e);
@@ -5429,7 +5429,7 @@ pub(crate) async fn create_action_internal(
 
                         // Fallback: also try pre-signing txid in case signAction didn't update it
                         if final_txid != pre_signing_txid {
-                            match output_repo.delete_by_txid(&pre_signing_txid) {
+                            match output_repo.disable_by_txid(&pre_signing_txid) {
                                 Ok(count) => { deleted_count += count; }
                                 Err(e) => {
                                     log::warn!("   ⚠️  Failed to remove ghost output by pre-signing txid: {}", e);
@@ -7052,6 +7052,7 @@ pub async fn sign_action(
                 // Use build_beef_for_txid to add each ancestor chain.
                 // build_beef_for_txid stops at confirmed transactions (with BUMPs)
                 // and has a MAX_BEEF_ANCESTORS safety limit.
+                let mut ancestry_errors: Vec<String> = Vec::new();
                 for ancestor_txid in &ancestor_txids_to_add {
                     if beef.find_txid(ancestor_txid).is_some() {
                         continue; // Already added by a previous iteration
@@ -7067,10 +7068,13 @@ pub async fn sign_action(
                             log::info!("   ✅ Added ancestry chain for {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())]);
                         }
                         Err(e) => {
-                            log::warn!("   ⚠️  Failed to build ancestry for {}: {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())], e);
-                            // Continue - partial ancestry is better than none
+                            log::error!("   ❌ Ancestry chain broken for {}: {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())], e);
+                            ancestry_errors.push(e);
                         }
                     }
+                }
+                if !ancestry_errors.is_empty() {
+                    log::error!("   ❌ BEEF ancestry has {} broken chain(s) — will abort before broadcast", ancestry_errors.len());
                 }
 
                 // Sort transactions topologically (parents before children) as required by BRC-62
@@ -7079,7 +7083,21 @@ pub async fn sign_action(
         ).await;
 
         if ancestry_result.is_err() {
-            log::warn!("   ⚠️  Ancestry chain building timed out (30s) - proceeding with partial BEEF");
+            log::error!("   ❌ Ancestry chain building timed out (30s) — aborting to prevent invalid BEEF broadcast");
+            // Clean up: mark tx as failed so monitor can restore inputs
+            {
+                let db = state.database.lock().unwrap();
+                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                let _ = output_repo.disable_by_txid(&txid);
+                let _ = output_repo.restore_spent_by_txid(&txid);
+            }
+            state.balance_cache.invalidate();
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "BEEF ancestry building timed out — transaction aborted to prevent invalid broadcast",
+                "code": "ERR_BEEF_ANCESTRY_TIMEOUT"
+            }));
         }
     }
 
@@ -7123,14 +7141,38 @@ pub async fn sign_action(
     // Validate BEEF ancestry completeness (SDK-equivalent: Beef.verifyValid())
     // Every unconfirmed tx must have all its input parents in the BEEF,
     // tracing back to confirmed roots with BUMPs.
+    // This is BLOCKING — matching BSV SDK behavior. Invalid BEEF causes
+    // SEEN_IN_ORPHAN_MEMPOOL at ARC (permanent graveyard), so we abort here.
     match crate::beef::validate_beef_ancestry(&beef) {
         Ok(report) => {
             log::info!("   ✅ BEEF ancestry valid: {} confirmed, {} unconfirmed, {} BUMPs",
                 report.confirmed_txs, report.unconfirmed_txs, beef.bumps.len());
         }
         Err(e) => {
-            log::error!("   ❌ BEEF ancestry INCOMPLETE: {}", e);
-            log::error!("   ⚠️  Overlay/app may reject this BEEF — missing parent transactions in ancestry chain");
+            log::error!("   ❌ BEEF ancestry INCOMPLETE — aborting broadcast: {}", e);
+            // Clean up: mark tx as failed, restore inputs, delete ghost outputs
+            {
+                let db = state.database.lock().unwrap();
+                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
+                let output_repo = crate::database::OutputRepository::new(db.connection());
+                let _ = output_repo.disable_by_txid(&txid);
+                let _ = output_repo.restore_spent_by_txid(&txid);
+                // Clean up commission
+                if let Ok(tx_id) = db.connection().query_row(
+                    "SELECT id FROM transactions WHERE txid = ?1",
+                    rusqlite::params![&txid],
+                    |row| row.get::<_, i64>(0),
+                ) {
+                    let commission_repo = crate::database::CommissionRepository::new(db.connection());
+                    let _ = commission_repo.delete_by_transaction_id(tx_id);
+                }
+            }
+            state.balance_cache.invalidate();
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("BEEF ancestry validation failed: {}", e),
+                "code": "ERR_BEEF_ANCESTRY_INCOMPLETE"
+            }));
         }
     }
 
@@ -7534,7 +7576,7 @@ pub async fn process_action(
 
                     // CRITICAL: Remove ghost change output since broadcast failed
                     let output_repo = crate::database::OutputRepository::new(db.connection());
-                    match output_repo.delete_by_txid(&txid) {
+                    match output_repo.disable_by_txid(&txid) {
                         Ok(count) if count > 0 => {
                             log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", count);
                         }
@@ -7775,6 +7817,16 @@ pub(crate) async fn broadcast_transaction(
                             }
                         }
 
+                        // ANNOUNCED_TO_NETWORK is a weak signal — ARC announced the
+                        // txid to peers but peers haven't confirmed receipt. The BSV SDK
+                        // handles this by trying 4 broadcasters in sequence (GorillaPool,
+                        // TAAL, Bitails, WoC). We do the same: don't treat ANNOUNCED as
+                        // final success — fall through to fallback broadcasters.
+                        if status_str == "ANNOUNCED_TO_NETWORK" {
+                            log::warn!("   ⚠️ ARC returned ANNOUNCED_TO_NETWORK — peers may not have accepted. Falling through to fallback broadcasters...");
+                            break; // Exit ARC retry loop, fall through to Strategy 2
+                        }
+
                         return Ok(msg);
                     }
                     Err(e) => {
@@ -7823,8 +7875,60 @@ pub(crate) async fn broadcast_transaction(
                     }
                 }
             }
-            log::info!("   🔄 Falling back to raw tx broadcasters...");
+            log::info!("   🔄 GorillaPool ARC unsuccessful, trying TAAL ARC...");
         }
+    }
+
+    // Strategy 1b: TAAL ARC (BEEF-capable, requires API key)
+    // Try TAAL as second BEEF broadcaster before falling through to raw tx.
+    if is_beef {
+        if let Some(ref hex_for_taal) = {
+            // Extract BEEF V1 from Atomic BEEF if needed
+            if beef_or_raw_hex.starts_with("01010101") {
+                if beef_or_raw_hex.len() > 72 {
+                    let v1_hex = &beef_or_raw_hex[72..];
+                    if v1_hex.starts_with("0100beef") {
+                        Some(v1_hex.to_string())
+                    } else {
+                        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                            Ok(beef) => beef.to_v1_hex().ok(),
+                            Err(_) => None,
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else if beef_or_raw_hex.starts_with("0200beef") {
+                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                    Ok(beef) => beef.to_v1_hex().ok(),
+                    Err(_) => None,
+                }
+            } else if beef_or_raw_hex.starts_with("0100beef") {
+                Some(beef_or_raw_hex.to_string())
+            } else {
+                None
+            }
+        } {
+            log::info!("   📡 Broadcasting BEEF V1 to TAAL ARC...");
+            match broadcast_to_taal_arc(&client, hex_for_taal).await {
+                Ok(response) => {
+                    log::info!("   🎉 TAAL ARC: {}", response);
+
+                    // Cache merkle proof if TAAL returns one
+                    // (reuse same pattern as GorillaPool ARC)
+
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if is_fatal_broadcast_error(&e) {
+                        log::error!("   ❌ Fatal broadcast error from TAAL ARC: {}", e);
+                        return Err(extract_core_error(&e));
+                    }
+                    log::warn!("   ⚠️ TAAL ARC failed: {}", e);
+                }
+            }
+        }
+        log::info!("   🔄 Falling back to raw tx broadcasters...");
     }
 
     // Strategy 2: Extract raw tx and use traditional broadcasters as fallback
@@ -8207,6 +8311,83 @@ async fn broadcast_to_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Re
                 .unwrap_or_else(|| text.clone());
             log::error!("   ❌ ARC error {}: {}", status.as_u16(), detail);
             Err(format!("ARC error {}: {}", status.as_u16(), detail))
+        }
+    }
+}
+
+/// Broadcast a transaction to TAAL's ARC endpoint (BEEF-capable, requires API key)
+async fn broadcast_to_taal_arc(client: &reqwest::Client, beef_or_raw_hex: &str) -> Result<String, String> {
+    let url = "https://arc.taal.com/v1/tx";
+    let api_key = "mainnet_fa871d12caa95b39076ac0b6b532a410";
+
+    log::info!("   📡 TAAL ARC: Sending {} hex chars to {}", beef_or_raw_hex.len(), url);
+
+    let body = serde_json::json!({ "rawTx": beef_or_raw_hex });
+    let response = client.post(url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("TAAL ARC HTTP error: {}", e))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    log::info!("   📡 TAAL ARC response: HTTP {} - {}", status.as_u16(), &text[..text.len().min(500)]);
+
+    let arc_response: ArcResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("TAAL ARC: Failed to parse response: {} - Body: {}", e, &text[..text.len().min(200)]))?;
+
+    let tx_status = arc_response.tx_status.as_deref().unwrap_or("");
+
+    // Check for error statuses
+    if tx_status == "DOUBLE_SPEND_ATTEMPTED" || tx_status == "REJECTED"
+        || tx_status == "SEEN_IN_ORPHAN_MEMPOOL" || tx_status == "MINED_IN_STALE_BLOCK"
+    {
+        let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+        return Err(format!("TAAL ARC: {} for txid={}", tx_status, txid));
+    }
+
+    match status.as_u16() {
+        200 | 201 => {
+            let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+            let tx_status = arc_response.tx_status.as_deref().unwrap_or("ACCEPTED");
+
+            // ANNOUNCED_TO_NETWORK from TAAL is also not ideal — but since TAAL
+            // is already our fallback, don't chain further. Just return it.
+            if tx_status == "ANNOUNCED_TO_NETWORK" {
+                log::warn!("   ⚠️ TAAL ARC also returned ANNOUNCED_TO_NETWORK — tx may need mAPI fallback");
+            }
+
+            let msg = format!("TAAL ARC accepted: {} ({})", txid, tx_status);
+            log::info!("   ✅ {}", msg);
+            Ok(msg)
+        }
+        409 => {
+            let txid = arc_response.txid.as_deref().unwrap_or("unknown");
+            let has_real_txid = !txid.is_empty() && txid != "unknown" && txid != "null";
+            let extra_info = arc_response.extra_info.as_deref().unwrap_or("");
+            let is_timeout = extra_info.contains("DeadlineExceeded");
+
+            if is_timeout || !has_real_txid {
+                Err(format!("TAAL ARC timeout/error (409): {}", extra_info))
+            } else {
+                let msg = format!("TAAL ARC: already known: {} ({})", txid, tx_status);
+                log::info!("   ℹ️ {}", msg);
+                Ok(msg)
+            }
+        }
+        401 => {
+            log::error!("   ❌ TAAL ARC: Authentication failed — API key may be invalid or revoked");
+            Err("TAAL ARC: Authentication failed (401)".to_string())
+        }
+        _ => {
+            let detail = arc_response.detail
+                .or(arc_response.title)
+                .unwrap_or_else(|| text.clone());
+            Err(format!("TAAL ARC error {}: {}", status.as_u16(), detail))
         }
     }
 }
@@ -8930,7 +9111,7 @@ pub async fn send_transaction(
 
                 // CRITICAL: Remove ghost change output since broadcast failed
                 let output_repo = crate::database::OutputRepository::new(db.connection());
-                match output_repo.delete_by_txid(&txid) {
+                match output_repo.disable_by_txid(&txid) {
                     Ok(count) if count > 0 => {
                         log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", count);
                     }
@@ -12009,7 +12190,7 @@ async fn rollback_backup(state: &AppState, placeholder_txid: &str, txid: &str) {
     if !txid.is_empty() {
         let tx_repo = crate::database::TransactionRepository::new(db.connection());
         let _ = tx_repo.set_transaction_status(txid, crate::action_storage::TransactionStatus::Failed);
-        let _ = output_repo.delete_by_txid(txid);
+        let _ = output_repo.disable_by_txid(txid);
         let _ = output_repo.restore_by_spending_description(txid);
     }
     let _ = output_repo.restore_by_spending_description(placeholder_txid);
@@ -15382,7 +15563,7 @@ pub async fn paymail_send(
             {
                 let db = state.database.lock().unwrap();
                 let output_repo = crate::database::OutputRepository::new(db.connection());
-                let _ = output_repo.delete_by_txid(&txid);
+                let _ = output_repo.disable_by_txid(&txid);
                 let _ = output_repo.restore_by_spending_description(&txid);
                 let tx_repo = crate::database::TransactionRepository::new(db.connection());
                 let _ = tx_repo.update_broadcast_status(&txid, "failed");

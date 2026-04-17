@@ -818,6 +818,60 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
+    /// Disable (not delete) all outputs with the given txid
+    ///
+    /// Used for cleaning up outputs from failed broadcasts. Instead of deleting,
+    /// marks outputs as non-spendable with 'failed-tx-output' description.
+    /// If TaskUnFail later discovers the tx was actually mined, it can re-enable
+    /// these outputs by flipping spendable back to 1 — preserving all metadata
+    /// (derivation info, basket, etc.) that would be lost on delete.
+    ///
+    /// # Arguments
+    /// * `txid` - The transaction ID whose outputs should be disabled
+    pub fn disable_by_txid(&self, txid: &str) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE outputs SET spendable = 0, spending_description = 'failed-tx-output', updated_at = ?1
+             WHERE txid = ?2 AND spendable = 1",
+            rusqlite::params![now, txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   🚫 Disabled {} output(s) with txid {} (failed-tx-output)",
+                rows_affected, &txid[..std::cmp::min(16, txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
+    /// Re-enable outputs that were disabled during a false failure cleanup
+    ///
+    /// Called by TaskUnFail when a transaction that was marked failed turns out
+    /// to have been mined on-chain. Restores the outputs to spendable state.
+    pub fn reenable_failed_outputs(&self, txid: &str) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows_affected = self.conn.execute(
+            "UPDATE outputs SET spendable = 1, spending_description = NULL, updated_at = ?1
+             WHERE txid = ?2 AND spending_description = 'failed-tx-output'",
+            rusqlite::params![now, txid],
+        )?;
+
+        if rows_affected > 0 {
+            info!("   ♻️  Re-enabled {} output(s) with txid {} (recovered from false failure)",
+                rows_affected, &txid[..std::cmp::min(16, txid.len())]);
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Restore outputs that were marked spent by a placeholder (Phase 4C dual-write)
     ///
     /// When transactions fail after UTXO reservation, restore the outputs.

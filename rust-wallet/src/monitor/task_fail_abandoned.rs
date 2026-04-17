@@ -71,14 +71,14 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 continue;
             }
 
-            // 2. Delete ghost change outputs for this transaction
-            match output_repo.delete_by_txid(txid) {
+            // 2. Disable (not delete) change outputs — TaskUnFail can re-enable if tx was actually mined
+            match output_repo.disable_by_txid(txid) {
                 Ok(count) if count > 0 => {
-                    info!("   🗑️ Deleted {} ghost output(s) from tx {}", count, short_txid);
+                    info!("   🚫 Disabled {} output(s) from tx {} (recoverable by TaskUnFail)", count, short_txid);
                     total_outputs_deleted += count;
                 }
                 Err(e) => {
-                    warn!("   ⚠️ Failed to delete ghost outputs for {}: {}", short_txid, e);
+                    warn!("   ⚠️ Failed to disable outputs for {}: {}", short_txid, e);
                 }
                 _ => {}
             }
@@ -138,12 +138,12 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 continue;
             }
 
-            match output_repo.delete_by_txid(txid) {
+            match output_repo.disable_by_txid(txid) {
                 Ok(count) if count > 0 => {
-                    info!("   🗑️ Deleted {} ghost output(s) from stuck backup {}", count, short_txid);
+                    info!("   🚫 Disabled {} output(s) from stuck backup {} (recoverable by TaskUnFail)", count, short_txid);
                     total_outputs_deleted += count;
                 }
-                Err(e) => warn!("   ⚠️ Failed to delete ghost outputs for backup {}: {}", short_txid, e),
+                Err(e) => warn!("   ⚠️ Failed to disable outputs for backup {}: {}", short_txid, e),
                 _ => {}
             }
 

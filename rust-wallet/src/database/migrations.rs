@@ -216,7 +216,7 @@ pub fn create_schema_v1(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS outputs (
             outputId INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            transaction_id INTEGER,
+            transaction_id INTEGER, -- FK to transactions.id (internal row ID, NOT the on-chain txid). NULL for externally-received outputs (address sync, PeerPay).
             basket_id INTEGER,
             spendable INTEGER NOT NULL DEFAULT 0,
             change INTEGER NOT NULL DEFAULT 0,

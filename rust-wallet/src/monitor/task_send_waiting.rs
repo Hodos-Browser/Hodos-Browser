@@ -256,13 +256,13 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
 
         let output_repo = OutputRepository::new(conn);
 
-        // 2. Delete ghost change outputs created by this transaction
-        match output_repo.delete_by_txid(txid) {
+        // 2. Disable (not delete) change outputs — TaskUnFail can re-enable if tx was actually mined
+        match output_repo.disable_by_txid(txid) {
             Ok(count) if count > 0 => {
-                info!("   🗑️ Deleted {} ghost output(s) from failed tx {}", count, short_txid);
+                info!("   🚫 Disabled {} output(s) from failed tx {} (recoverable by TaskUnFail)", count, short_txid);
             }
             Err(e) => {
-                warn!("   ⚠️ Failed to delete ghost outputs for {}: {}", short_txid, e);
+                warn!("   ⚠️ Failed to disable outputs for {}: {}", short_txid, e);
             }
             _ => {}
         }

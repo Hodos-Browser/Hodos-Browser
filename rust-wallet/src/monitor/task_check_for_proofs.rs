@@ -40,6 +40,10 @@ const NOSEND_TIMEOUT_SECS: i64 = 10 * 60;
 /// After this many seconds in mempool, cross-verify with WhatsOnChain
 const MEMPOOL_VERIFY_THRESHOLD_SECS: i64 = 30 * 60;
 
+/// ANNOUNCED_TO_NETWORK is a weak signal — ARC told peers but they may not
+/// have accepted. Cross-verify with WoC much sooner than the standard 30 min.
+const ANNOUNCED_VERIFY_THRESHOLD_SECS: i64 = 3 * 60;
+
 // ORPHAN_TIMEOUT_SECS removed — orphan/stale txs now fail immediately
 
 struct PendingTxInfo {
@@ -109,6 +113,44 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             continue;
         }
 
+        // Hard timeout backstop — any tx past UNPROVEN_TIMEOUT (6h) or NOSEND_TIMEOUT (10m)
+        // gets one final oracle check, then force-fail. Catches any status that slipped
+        // through the normal handling paths (e.g. ARC returning mempool status indefinitely).
+        if is_timed_out {
+            let hours = tx_info.age_secs / 3600;
+            let mins = (tx_info.age_secs % 3600) / 60;
+            warn!("   ⏰ {} exceeded timeout ({}h{}m) — final oracle check",
+                  &txid[..txid.len().min(16)], hours, mins);
+            match oracle_quorum_check(client, txid).await {
+                OracleVerdict::Present { any_confirmed: true } => {
+                    if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                        confirmed_count += count;
+                    } else {
+                        info!("   ⏳ {} oracle saw confirmed but proof fetch lagged — retrying next tick",
+                              &txid[..txid.len().min(16)]);
+                    }
+                }
+                OracleVerdict::Present { any_confirmed: false } => {
+                    // In someone's mempool but past timeout — still fail
+                    warn!("   ❌ {} in mempool but past timeout — marking failed",
+                          &txid[..txid.len().min(16)]);
+                    mark_failed(state, txid);
+                }
+                OracleVerdict::AllNotFound => {
+                    warn!("   ❌ {} timed out and not found on any oracle — marking failed",
+                          &txid[..txid.len().min(16)]);
+                    mark_failed(state, txid);
+                }
+                OracleVerdict::Inconclusive(reasons) => {
+                    warn!("   ⚠️ {} timed out but oracle quorum inconclusive ({}) — forcing failure",
+                          &txid[..txid.len().min(16)], reasons);
+                    mark_failed(state, txid);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+
         // For nosend txs older than 60s: the app should have broadcast by now.
         // Check WoC directly — if not found, the app's broadcast likely failed.
         // This catches ARC 409 DeadlineExceeded failures where the app thinks it
@@ -150,13 +192,74 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                         mark_confirmed(state, txid, block_height as u32);
                         confirmed_count += 1;
                     }
-                    "SEEN_ON_NETWORK" | "ANNOUNCED_TO_NETWORK"
-                    | "REQUESTED_BY_NETWORK" | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK"
-                    | "STORED" | "QUEUED" | "RECEIVED" => {
-                        // In mempool — cross-verify with WhatsOnChain if old enough
+                    "ANNOUNCED_TO_NETWORK" => {
+                        // ANNOUNCED = weak signal (ARC told peers, but peers may not
+                        // have accepted). Cross-verify sooner than standard mempool.
+                        if tx_info.age_secs > ANNOUNCED_VERIFY_THRESHOLD_SECS {
+                            if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                                confirmed_count += count;
+                            } else {
+                                // WoC doesn't have it — run three-oracle quorum
+                                info!("   🔍 {} ANNOUNCED but WoC 404 after {}m — running oracle quorum",
+                                      &txid[..txid.len().min(16)], tx_info.age_secs / 60);
+                                match oracle_quorum_check(client, txid).await {
+                                    OracleVerdict::AllNotFound => {
+                                        warn!("   🧹 {} ANNOUNCED but 404 on all oracles after {}m — rolling back",
+                                              &txid[..txid.len().min(16)], tx_info.age_secs / 60);
+                                        mark_failed(state, txid);
+                                    }
+                                    OracleVerdict::Present { any_confirmed } => {
+                                        if any_confirmed {
+                                            if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                                                confirmed_count += count;
+                                            }
+                                        } else {
+                                            info!("   ⏳ {} seen in a mempool by oracle — awaiting mining",
+                                                  &txid[..txid.len().min(16)]);
+                                        }
+                                    }
+                                    OracleVerdict::Inconclusive(reasons) => {
+                                        warn!("   ⚠️ {} oracle quorum inconclusive ({}), skipping tick",
+                                              &txid[..txid.len().min(16)], reasons);
+                                    }
+                                }
+                            }
+                        } else {
+                            info!("   ⏳ {} ANNOUNCED ({}s age, verifying at {}s)",
+                                  &txid[..txid.len().min(16)], tx_info.age_secs, ANNOUNCED_VERIFY_THRESHOLD_SECS);
+                        }
+                    }
+                    "SEEN_ON_NETWORK" | "REQUESTED_BY_NETWORK" | "SENT_TO_NETWORK"
+                    | "ACCEPTED_BY_NETWORK" | "STORED" | "QUEUED" | "RECEIVED" => {
+                        // Strong mempool signals — standard 30-min threshold
                         if tx_info.age_secs > MEMPOOL_VERIFY_THRESHOLD_SECS {
                             if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
                                 confirmed_count += count;
+                            } else {
+                                // WoC doesn't have it despite ARC mempool status — run oracle quorum
+                                info!("   🔍 {} in mempool per ARC but WoC 404 after {}m — running oracle quorum",
+                                      &txid[..txid.len().min(16)], tx_info.age_secs / 60);
+                                match oracle_quorum_check(client, txid).await {
+                                    OracleVerdict::AllNotFound => {
+                                        warn!("   🧹 {} in mempool per ARC but 404 on all oracles after {}m — rolling back",
+                                              &txid[..txid.len().min(16)], tx_info.age_secs / 60);
+                                        mark_failed(state, txid);
+                                    }
+                                    OracleVerdict::Present { any_confirmed } => {
+                                        if any_confirmed {
+                                            if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                                                confirmed_count += count;
+                                            }
+                                        } else {
+                                            info!("   ⏳ {} seen in a mempool by oracle — awaiting mining",
+                                                  &txid[..txid.len().min(16)]);
+                                        }
+                                    }
+                                    OracleVerdict::Inconclusive(reasons) => {
+                                        warn!("   ⚠️ {} oracle quorum inconclusive ({}), skipping tick",
+                                              &txid[..txid.len().min(16)], reasons);
+                                    }
+                                }
                             }
                         } else {
                             info!("   ⏳ {} in mempool ({})", &txid[..txid.len().min(16)], status);
@@ -165,15 +268,29 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                     "SEEN_IN_ORPHAN_MEMPOOL" => {
                         // Orphan mempool = BEEF ancestry validation failure.
                         // The orphan pool is a graveyard — ARC never re-processes.
-                        // Fail immediately so inputs are restored for re-broadcast.
-                        warn!("   ⚠️ {} in orphan mempool — failing immediately", &txid[..txid.len().min(16)]);
+                        // But check WoC first: if tx exists (even in mempool), don't fail.
+                        warn!("   ⚠️ {} in orphan mempool — checking WoC before failing", &txid[..txid.len().min(16)]);
 
-                        // Quick check: already confirmed despite ARC's orphan status?
-                        match try_whatsonchain_confirmation(state, client, txid).await {
-                            Some(count) => {
-                                confirmed_count += count;
+                        match check_whatsonchain_confirmation(client, txid).await {
+                            Ok(Some((confirmations, block_height))) => {
+                                if confirmations > 0 {
+                                    info!("   ✅ {} confirmed on WoC despite orphan mempool status", &txid[..txid.len().min(16)]);
+                                    if let Err(e) = fetch_and_store_woc_proof(state, client, txid, block_height).await {
+                                        warn!("   ⚠️ Failed to store WoC proof for {}: {}", txid, e);
+                                    }
+                                    mark_confirmed(state, txid, block_height.unwrap_or(0));
+                                    confirmed_count += 1;
+                                } else {
+                                    // In mempool — tx exists despite ARC orphan status. Wait.
+                                    info!("   ⏳ {} in mempool despite orphan status — waiting", &txid[..txid.len().min(16)]);
+                                }
                             }
-                            None => {
+                            Ok(None) => {
+                                // 404 — genuinely not on chain
+                                mark_failed(state, txid);
+                            }
+                            Err(_) => {
+                                // WoC error — fail anyway for orphan (it's a graveyard)
                                 mark_failed(state, txid);
                             }
                         }
@@ -187,17 +304,36 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                     "DOUBLE_SPEND_ATTEMPTED" => {
                         // ARC marks BOTH competing txs as DOUBLE_SPEND_ATTEMPTED during
                         // the first-seen conflict window. The winning tx will get mined.
-                        // Cross-verify with WoC before marking failed (same pattern as
-                        // SEEN_IN_ORPHAN_MEMPOOL above).
+                        // Cross-verify with WoC: if tx exists (even 0 confirmations in
+                        // mempool), don't fail — it may still get mined. Only fail if
+                        // WoC returns 404 (tx genuinely not found).
                         warn!("   ⚠️ {} DOUBLE_SPEND_ATTEMPTED — cross-verifying with WoC", &txid[..txid.len().min(16)]);
-                        match try_whatsonchain_confirmation(state, client, txid).await {
-                            Some(count) => {
-                                info!("   ✅ {} actually mined despite DOUBLE_SPEND_ATTEMPTED", &txid[..txid.len().min(16)]);
-                                confirmed_count += count;
+                        match check_whatsonchain_confirmation(client, txid).await {
+                            Ok(Some((confirmations, block_height))) => {
+                                if confirmations > 0 {
+                                    // Already confirmed — recover it
+                                    info!("   ✅ {} actually mined despite DOUBLE_SPEND_ATTEMPTED ({} confirmations)",
+                                          &txid[..txid.len().min(16)], confirmations);
+                                    if let Err(e) = fetch_and_store_woc_proof(state, client, txid, block_height).await {
+                                        warn!("   ⚠️ Failed to store WoC proof for {}: {}", txid, e);
+                                    }
+                                    mark_confirmed(state, txid, block_height.unwrap_or(0));
+                                    confirmed_count += 1;
+                                } else {
+                                    // In mempool (0 confirmations) — tx exists, don't fail.
+                                    // It's competing but may still win and get mined.
+                                    info!("   ⏳ {} in mempool despite DOUBLE_SPEND_ATTEMPTED — waiting for resolution",
+                                          &txid[..txid.len().min(16)]);
+                                }
                             }
-                            None => {
-                                warn!("   ❌ {} not confirmed on WoC — marking failed", &txid[..txid.len().min(16)]);
+                            Ok(None) => {
+                                // 404 — tx genuinely not found on WoC
+                                warn!("   ❌ {} not found on WoC (404) — marking failed", &txid[..txid.len().min(16)]);
                                 mark_failed(state, txid);
+                            }
+                            Err(e) => {
+                                // WoC API error — skip this tick, don't make irreversible decisions
+                                warn!("   ⚠️ {} WoC check failed ({}), skipping tick", &txid[..txid.len().min(16)], e);
                             }
                         }
                     }
@@ -341,14 +477,14 @@ fn mark_failed(state: &web::Data<AppState>, txid: &str) {
             return;
         }
 
-        // 2. Delete ghost change outputs created by this transaction
+        // 2. Disable (not delete) change outputs — TaskUnFail can re-enable if tx was actually mined
         let output_repo = OutputRepository::new(conn);
-        match output_repo.delete_by_txid(txid) {
+        match output_repo.disable_by_txid(txid) {
             Ok(count) if count > 0 => {
-                info!("   🗑️ Deleted {} ghost output(s) from tx {}", count, short_txid);
+                info!("   🚫 Disabled {} output(s) from tx {} (recoverable by TaskUnFail)", count, short_txid);
             }
             Err(e) => {
-                warn!("   ⚠️ Failed to delete ghost outputs for {}: {}", short_txid, e);
+                warn!("   ⚠️ Failed to disable outputs for {}: {}", short_txid, e);
             }
             _ => {}
         }
