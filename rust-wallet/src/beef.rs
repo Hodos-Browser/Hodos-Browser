@@ -656,6 +656,99 @@ impl Beef {
 
         Ok(hex::encode(atomic_beef))
     }
+
+    /// Build EF (Extended Format / BRC-30) hex from BEEF data.
+    ///
+    /// EF embeds source output data (satoshis + locking script) inline with each input,
+    /// allowing ARC to validate without parsing BEEF ancestry. This is what the BSV SDK
+    /// sends to ARC via `Transaction.toHexEF()`.
+    ///
+    /// Returns the EF hex string, or Err if source data cannot be found for any input.
+    pub fn to_ef_hex(&self) -> Result<String, String> {
+        // The main (subject) transaction is always the last in the BEEF
+        let main_tx_bytes = self.transactions.last()
+            .ok_or("BEEF has no transactions")?;
+
+        // Parse the main transaction to extract its structure
+        let parsed = ParsedTransaction::from_bytes(main_tx_bytes)
+            .map_err(|e| format!("Failed to parse main tx for EF: {}", e))?;
+
+        // Build a txid → raw bytes lookup for parent transactions
+        let mut parent_map: std::collections::HashMap<String, &Vec<u8>> = std::collections::HashMap::new();
+        for tx_bytes in &self.transactions {
+            use sha2::{Sha256, Digest};
+            let first_hash = Sha256::digest(tx_bytes);
+            let second_hash = Sha256::digest(&first_hash);
+            let txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
+            parent_map.insert(txid, tx_bytes);
+        }
+
+        let mut ef = Vec::new();
+
+        // 1. Version (4 bytes LE)
+        ef.extend(&parsed.version.to_le_bytes());
+
+        // 2. EF marker (6 bytes: 0x00 0x00 0x00 0x00 0x00 0xEF)
+        ef.extend(&[0x00, 0x00, 0x00, 0x00, 0x00, 0xEF]);
+
+        // 3. Input count
+        write_varint(&mut ef, parsed.inputs.len() as u64);
+
+        // 4. Each input with source output data
+        for input in &parsed.inputs {
+            // prev_txid (32 bytes, already LE in parsed format)
+            let prev_txid_bytes = hex::decode(&input.prev_txid)
+                .map_err(|e| format!("Invalid prev_txid: {}", e))?;
+            let mut prev_txid_le = prev_txid_bytes;
+            prev_txid_le.reverse(); // display hex → internal LE
+            ef.extend(&prev_txid_le);
+
+            // prev_vout (4 bytes LE)
+            ef.extend(&input.prev_vout.to_le_bytes());
+
+            // scriptSig
+            write_varint(&mut ef, input.script.len() as u64);
+            ef.extend(&input.script);
+
+            // sequence (4 bytes LE)
+            ef.extend(&input.sequence.to_le_bytes());
+
+            // Source output data — find the parent tx and extract the output
+            let parent_tx_bytes = parent_map.get(&input.prev_txid)
+                .ok_or_else(|| format!("EF build: parent tx {} not found in BEEF", &input.prev_txid[..16]))?;
+
+            let parent_parsed = ParsedTransaction::from_bytes(parent_tx_bytes)
+                .map_err(|e| format!("Failed to parse parent tx {}: {}", &input.prev_txid[..16], e))?;
+
+            let source_output = parent_parsed.outputs.get(input.prev_vout as usize)
+                .ok_or_else(|| format!("EF build: output index {} not found in parent tx {}", input.prev_vout, &input.prev_txid[..16]))?;
+
+            // source satoshis (8 bytes LE)
+            ef.extend(&source_output.value.to_le_bytes());
+
+            // source locking script
+            write_varint(&mut ef, source_output.script.len() as u64);
+            ef.extend(&source_output.script);
+        }
+
+        // 5. Output count
+        write_varint(&mut ef, parsed.outputs.len() as u64);
+
+        // 6. Each output
+        for output in &parsed.outputs {
+            // value (8 bytes LE)
+            ef.extend(&output.value.to_le_bytes());
+
+            // locking script
+            write_varint(&mut ef, output.script.len() as u64);
+            ef.extend(&output.script);
+        }
+
+        // 7. Locktime (4 bytes LE)
+        ef.extend(&parsed.lock_time.to_le_bytes());
+
+        Ok(hex::encode(ef))
+    }
 }
 
 /// Read a single byte

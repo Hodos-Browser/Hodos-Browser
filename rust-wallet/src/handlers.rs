@@ -3143,6 +3143,7 @@ struct PendingTransaction {
     brc29_info: Option<Brc29PaymentInfo>, // BRC-29 payment metadata if applicable
     input_beef: Option<crate::beef::Beef>, // Full inputBEEF for verification chain
     reservation_placeholder: Option<String>, // pending-{timestamp} for optimistic lock rollback
+    no_send: bool, // Original noSend option from createAction (default false)
 }
 
 // In-memory storage for pending transactions
@@ -4813,6 +4814,11 @@ pub(crate) async fn create_action_internal(
         is_pre_signed: ui.unlocking_script.is_some(),
     }).collect();
 
+    // Extract noSend option early so it can be stored with the pending transaction.
+    // This is needed for two-phase signing: when the SDK calls signAction directly
+    // for phase 2, sign_action needs to know whether to broadcast.
+    let no_send = req.options.as_ref().and_then(|o| o.no_send).unwrap_or(false);
+
     // Store transaction in memory with UTXO metadata for signing
     {
         let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
@@ -4823,6 +4829,7 @@ pub(crate) async fn create_action_internal(
             brc29_info: brc29_info.clone(),
             input_beef: parsed_input_beef.clone(),
             reservation_placeholder: reservation_placeholder.clone(),
+            no_send,
         });
     }
 
@@ -5052,7 +5059,7 @@ pub(crate) async fn create_action_internal(
     let options = req.options.as_ref();
     let sign_and_process = options.and_then(|o| o.sign_and_process).unwrap_or(true);
     let accept_delayed_broadcast = options.and_then(|o| o.accept_delayed_broadcast).unwrap_or(true);
-    let no_send = options.and_then(|o| o.no_send).unwrap_or(false);
+    // no_send already extracted earlier (before PENDING_TRANSACTIONS insert)
     let send_with_txids: Vec<String> = options
         .and_then(|o| o.send_with.clone())
         .unwrap_or_default();
@@ -5082,6 +5089,11 @@ pub(crate) async fn create_action_internal(
         let sign_req = SignActionRequest {
             reference: reference.clone(),
             spends: None,
+            options: Some(SignActionOptions {
+                no_send: Some(true), // suppress broadcast — create_action_internal handles it
+                accept_delayed_broadcast: None,
+                send_with: None,
+            }),
         };
 
         let sign_body = match serde_json::to_vec(&sign_req) {
@@ -5339,8 +5351,10 @@ pub(crate) async fn create_action_internal(
                                 v1_bytes.as_slice()
                             }
                             Err(e) => {
-                                log::warn!("   ⚠️  BEEF V1 conversion failed: {}, using raw bytes", e);
-                                tx_bytes
+                                log::error!("   ❌ BEEF V1 conversion failed for overlay: {}", e);
+                                // Don't send raw Atomic BEEF to overlay — wrong format.
+                                // Skip overlay submission; background TaskReplayOverlay will retry.
+                                &[] as &[u8]
                             }
                         };
                         // Parse cert identifiers from the PushDrop script (needed for both success and failure)
@@ -6264,6 +6278,19 @@ fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
     select_utxos_greedy(available, amount_needed, None)
 }
 
+// Options for /signAction (per SDK spec: SignActionOptions)
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct SignActionOptions {
+    #[serde(rename = "noSend")]
+    pub no_send: Option<bool>,
+
+    #[serde(rename = "acceptDelayedBroadcast")]
+    pub accept_delayed_broadcast: Option<bool>,
+
+    #[serde(rename = "sendWith")]
+    pub send_with: Option<Vec<String>>,
+}
+
 // Request structure for /signAction
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignActionRequest {
@@ -6272,6 +6299,9 @@ pub struct SignActionRequest {
 
     #[serde(rename = "spends")]
     pub spends: Option<serde_json::Value>, // SDK-provided unlock scripts: { "inputIndex": { "unlockingScript": hex } }
+
+    #[serde(rename = "options")]
+    pub options: Option<SignActionOptions>,
 }
 
 // Response structure for /signAction
@@ -6327,6 +6357,15 @@ pub async fn sign_action(
     let brc29_info = pending_tx.brc29_info;
     let input_beef = pending_tx.input_beef;
     let reservation_placeholder = pending_tx.reservation_placeholder;
+    let pending_no_send = pending_tx.no_send;
+
+    // Determine effective noSend: request options take priority, fallback to createAction's original option.
+    // When called internally by create_action_internal (single-phase), options.noSend=true
+    // to suppress broadcast (create_action_internal handles it).
+    // When called externally by SDK (two-phase phase 2), options.noSend defaults to false per spec.
+    let effective_no_send = req.options.as_ref()
+        .and_then(|o| o.no_send)
+        .unwrap_or(pending_no_send);
 
     let num_user_inputs = user_input_infos.len();
     let num_wallet_inputs = input_utxos.len();
@@ -7261,19 +7300,9 @@ pub async fn sign_action(
             log::info!("   💾 Action status updated: created → signed");
         }
 
-        // Update to "nosend" status — signAction returns a fully-signed Atomic BEEF
-        // to the app which will submit it to the overlay network. We don't broadcast
-        // ourselves, so the correct status is "nosend" (not "broadcast").
-        // The ARC poller will periodically check old nosend transactions on WhatsOnChain
-        // to see if they were broadcast by the app and update status accordingly.
-        if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Nosend) {
-            log::warn!("   ⚠️  Failed to update status: {}", e);
-        } else {
-            log::info!("   💾 Transaction status: nosend (app will broadcast to overlay)");
-        }
-
-        // Create proven_tx_req to track proof acquisition lifecycle
-        // Status is "nosend" since we're not broadcasting - the app will
+        // Set transaction status based on effective noSend option.
+        // noSend=true: app will broadcast (e.g., to overlay). Status = nosend.
+        // noSend=false: wallet must broadcast after signing. Status = sending (broadcast happens after DB lock).
         {
             let conn = db.connection();
             let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(conn);
@@ -7287,17 +7316,53 @@ pub async fn sign_action(
                 }
             }
 
-            let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
-                Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "nosend") {
-                Ok(req_id) => {
-                    log::info!("   📋 Created proven_tx_req {} for {} (status: nosend)", req_id, txid);
+            if effective_no_send {
+                // noSend=true: set nosend status, don't broadcast
+                if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Nosend) {
+                    log::warn!("   ⚠️  Failed to update status: {}", e);
+                } else {
+                    log::info!("   💾 Transaction status: nosend (noSend=true, app will broadcast)");
                 }
-                Err(e) => {
-                    log::warn!("   ⚠️  Failed to create proven_tx_req for {}: {}", txid, e);
-                    // Non-fatal: proof tracking is advisory, doesn't block the transaction
+
+                let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
+                    Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "nosend") {
+                    Ok(req_id) => {
+                        log::info!("   📋 Created proven_tx_req {} for {} (status: nosend)", req_id, txid);
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to create proven_tx_req for {}: {}", txid, e);
+                    }
+                }
+            } else if unsigned_inputs.is_empty() {
+                // noSend=false and all inputs signed: set sending status, broadcast after DB lock
+                if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Sending) {
+                    log::warn!("   ⚠️  Failed to update status to sending: {}", e);
+                } else {
+                    log::info!("   💾 Transaction status: sending (noSend=false, will broadcast)");
+                }
+            } else {
+                // noSend=false but unsigned inputs remain: set nosend temporarily (phase 1)
+                // The next signAction call (phase 2) will set the final status.
+                if let Err(e) = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Nosend) {
+                    log::warn!("   ⚠️  Failed to update status: {}", e);
+                } else {
+                    log::info!("   💾 Transaction status: nosend (awaiting phase 2 signatures)");
+                }
+
+                let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
+                    Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "nosend") {
+                    Ok(req_id) => {
+                        log::info!("   📋 Created proven_tx_req {} for {} (status: nosend, phase 1)", req_id, txid);
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to create proven_tx_req for {}: {}", txid, e);
+                    }
                 }
             }
         }
@@ -7357,6 +7422,47 @@ pub async fn sign_action(
         let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
         if pending.remove(&req.reference).is_some() {
             log::info!("   🗑️  Cleaned up pending transaction for reference {}", req.reference);
+        }
+    }
+
+    // Broadcast if noSend=false and all inputs are signed.
+    // This handles the two-phase signing case where the SDK calls signAction directly
+    // for phase 2. For the internal single-phase path, create_action_internal passes
+    // noSend=true in options to suppress this broadcast (it handles broadcast itself).
+    // ARC is idempotent — duplicate broadcasts return "already known" (safe).
+    if !effective_no_send && unsigned_inputs.is_empty() {
+        log::info!("   📡 Broadcasting fully-signed transaction to network...");
+        match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+            Ok(msg) => {
+                log::info!("   ✅ Broadcast successful: {}", msg);
+                {
+                    let db = state.database.lock().unwrap();
+                    let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                    if let Err(e) = tx_repo.update_broadcast_status(&txid, "broadcast") {
+                        log::warn!("   ⚠️  Failed to update broadcast_status: {}", e);
+                    }
+                    // Create proven_tx_req for proof tracking
+                    let proven_tx_req_repo = crate::database::ProvenTxReqRepository::new(db.connection());
+                    let raw_tx_bytes = match tx_repo.get_by_txid(&txid) {
+                        Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    match proven_tx_req_repo.create(&txid, &raw_tx_bytes, None, "unproven") {
+                        Ok(req_id) => {
+                            log::info!("   📋 Created proven_tx_req {} for {} (status: unproven)", req_id, txid);
+                        }
+                        Err(e) => {
+                            // May already exist from the sending status path — not fatal
+                            log::debug!("   proven_tx_req create for {}: {}", txid, e);
+                        }
+                    }
+                }
+                state.balance_cache.invalidate();
+            }
+            Err(e) => {
+                log::error!("   ❌ Broadcast failed: {}", e);
+                // Leave status as 'sending' — TaskSendWaiting (120s) will retry
+            }
         }
     }
 
@@ -7470,6 +7576,11 @@ pub async fn process_action(
     let sign_req = SignActionRequest {
         reference: reference.clone(),
         spends: None,
+        options: Some(SignActionOptions {
+            no_send: Some(true), // suppress broadcast — process_action handles it
+            accept_delayed_broadcast: None,
+            send_with: None,
+        }),
     };
 
     let sign_body = serde_json::to_vec(&sign_req).unwrap();
@@ -7665,71 +7776,52 @@ pub(crate) async fn broadcast_transaction(
     // ARC accepts BEEF with unconfirmed parent transactions included, solving the
     // race condition where a second tx spends change from the first before it confirms.
     // ARC auto-detects format (BEEF V1, EF, or raw tx) from the hex content.
-    // NOTE: ARC only accepts BEEF V1, not V2 - we must convert if needed.
+    // ARC receives EF (Extended Format / BRC-30) — same as what the BSV SDK sends.
+    // EF embeds source output data (satoshis + locking script) inline with each input,
+    // so ARC can validate without parsing BEEF ancestry.
+    // For BEEF inputs: parse BEEF, build EF from main tx + parent txs.
+    // For raw tx inputs: send as-is (ARC auto-detects raw tx format).
     {
         let hex_for_arc = if is_beef {
-            // Check if it's Atomic BEEF (01010101) - strip 36-byte header to get V1 directly.
-            // Atomic BEEF = [01010101](4) + [txid BE](32) + [BEEF V1 data](variable)
-            // = 36 bytes header = 72 hex chars. The V1 data was already serialized by
-            // to_atomic_beef_hex(), so we extract it directly instead of re-parsing.
-            if beef_or_raw_hex.starts_with("01010101") {
-                log::info!("   📦 Input is Atomic BEEF, stripping 36-byte header to get BEEF V1...");
-                if beef_or_raw_hex.len() > 72 {
-                    let v1_hex = &beef_or_raw_hex[72..];
-                    if v1_hex.starts_with("0100beef") {
-                        log::info!("   ✅ Extracted BEEF V1 ({} hex chars) — no re-parse needed", v1_hex.len());
-                        Some(v1_hex.to_string())
-                    } else {
-                        // V1 marker not found — fall back to parse/re-serialize
-                        log::warn!("   ⚠️ Stripped data doesn't start with 0100beef (got {}), falling back to parse",
-                            &v1_hex[..v1_hex.len().min(8)]);
-                        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-                            Ok(beef) => beef.to_v1_hex().ok(),
-                            Err(_) => None,
+            // Parse BEEF (any format: Atomic, V1, V2) and build EF
+            log::info!("   📦 Converting BEEF to EF (Extended Format) for ARC...");
+            match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                Ok(beef) => {
+                    match beef.to_ef_hex() {
+                        Ok(ef_hex) => {
+                            log::info!("   ✅ Built EF format ({} hex chars) for ARC", ef_hex.len());
+                            Some(ef_hex)
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️ Failed to build EF from BEEF: {}", e);
+                            // Fallback: try sending BEEF V1 directly (ARC may accept it)
+                            log::info!("   🔄 Falling back to BEEF V1 for ARC...");
+                            beef.to_v1_hex().ok()
                         }
                     }
-                } else {
-                    log::warn!("   ⚠️ Atomic BEEF too short ({} hex chars)", beef_or_raw_hex.len());
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️ Failed to parse BEEF for EF conversion: {}", e);
                     None
                 }
-            } else if beef_or_raw_hex.starts_with("0200beef") {
-                // BEEF V2 - convert to V1 for ARC
-                log::info!("   📦 Input is BEEF V2, converting to V1 for ARC...");
-                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-                    Ok(beef) => {
-                        match beef.to_v1_hex() {
-                            Ok(v1_hex) => {
-                                log::info!("   ✅ Converted to BEEF V1 ({} hex chars)", v1_hex.len());
-                                Some(v1_hex)
-                            }
-                            Err(e) => {
-                                log::warn!("   ⚠️ Failed to convert to BEEF V1: {}", e);
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("   ⚠️ Failed to parse BEEF V2: {}", e);
-                        None
-                    }
-                }
-            } else {
-                // Already BEEF V1
-                log::info!("   📦 Input is BEEF V1, sending directly to ARC...");
-                Some(beef_or_raw_hex.to_string())
             }
         } else {
-            // Raw transaction hex - send as-is
+            // Raw transaction hex - send as-is (ARC auto-detects)
             log::info!("   📦 Input is raw transaction, sending to ARC...");
             Some(beef_or_raw_hex.to_string())
         };
 
         if let Some(hex_to_send) = hex_for_arc {
-            // Validate BEEF before sending to ARC — parse every transaction to catch corrupt data
-            if hex_to_send.starts_with("0100beef") {
-                match crate::beef::validate_beef_v1_hex(&hex_to_send) {
-                    Ok(()) => log::info!("   ✅ Pre-broadcast BEEF validation passed"),
-                    Err(e) => log::error!("   ❌ Pre-broadcast BEEF validation FAILED: {}", e),
+            // Log format being sent to ARC
+            if hex_to_send.len() >= 20 {
+                let prefix = &hex_to_send[..20.min(hex_to_send.len())];
+                // EF starts with version (e.g. 01000000) + 0000000000ef
+                if hex_to_send.len() > 20 && &hex_to_send[8..20] == "0000000000ef" {
+                    log::info!("   ✅ Sending EF format to ARC ({} hex chars)", hex_to_send.len());
+                } else if hex_to_send.starts_with("0100beef") {
+                    log::info!("   ✅ Sending BEEF V1 to ARC ({} hex chars, fallback)", hex_to_send.len());
+                } else {
+                    log::info!("   ✅ Sending raw tx to ARC ({} hex chars, prefix: {})", hex_to_send.len(), prefix);
                 }
             }
 
@@ -7880,37 +7972,22 @@ pub(crate) async fn broadcast_transaction(
         }
     }
 
-    // Strategy 1b: TAAL ARC (BEEF-capable, requires API key)
-    // Try TAAL as second BEEF broadcaster before falling through to raw tx.
+    // Strategy 1b: TAAL ARC (EF format, requires API key)
+    // Try TAAL as second ARC broadcaster before falling through to raw tx.
     if is_beef {
         if let Some(ref hex_for_taal) = {
-            // Extract BEEF V1 from Atomic BEEF if needed
-            if beef_or_raw_hex.starts_with("01010101") {
-                if beef_or_raw_hex.len() > 72 {
-                    let v1_hex = &beef_or_raw_hex[72..];
-                    if v1_hex.starts_with("0100beef") {
-                        Some(v1_hex.to_string())
-                    } else {
-                        match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-                            Ok(beef) => beef.to_v1_hex().ok(),
-                            Err(_) => None,
-                        }
+            // Build EF from BEEF for TAAL ARC (same format as GorillaPool ARC)
+            match crate::beef::Beef::from_hex(beef_or_raw_hex) {
+                Ok(beef) => {
+                    match beef.to_ef_hex() {
+                        Ok(ef_hex) => Some(ef_hex),
+                        Err(_) => beef.to_v1_hex().ok(), // fallback to BEEF V1
                     }
-                } else {
-                    None
                 }
-            } else if beef_or_raw_hex.starts_with("0200beef") {
-                match crate::beef::Beef::from_hex(beef_or_raw_hex) {
-                    Ok(beef) => beef.to_v1_hex().ok(),
-                    Err(_) => None,
-                }
-            } else if beef_or_raw_hex.starts_with("0100beef") {
-                Some(beef_or_raw_hex.to_string())
-            } else {
-                None
+                Err(_) => None,
             }
         } {
-            log::info!("   📡 Broadcasting BEEF V1 to TAAL ARC...");
+            log::info!("   📡 Broadcasting EF to TAAL ARC...");
             match broadcast_to_taal_arc(&client, hex_for_taal).await {
                 Ok(response) => {
                     log::info!("   🎉 TAAL ARC: {}", response);

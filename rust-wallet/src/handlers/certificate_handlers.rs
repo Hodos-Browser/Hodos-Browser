@@ -4589,8 +4589,8 @@ async fn unpublish_certificate_core(
         let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
         beef.set_main_transaction(signed_tx_bytes);
 
-        // Serialize as standard BEEF (overlay expects plain BEEF, not Atomic)
-        beef.to_bytes().map_err(|e| format!("BEEF serialization failed: {}", e))?
+        // Serialize as BEEF V1 (overlay expects V1 with 0100beef marker)
+        beef.to_v1_bytes().map_err(|e| format!("BEEF V1 serialization failed: {}", e))?
     };
     log::info!("   📦 Built BEEF with ancestry: {} bytes", beef_bytes.len());
 

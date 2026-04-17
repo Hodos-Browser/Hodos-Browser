@@ -96,6 +96,10 @@ pub async fn submit_to_identity_overlay(beef_bytes: &[u8]) -> Result<bool, Strin
 ///
 /// Uses SHIP discovery with hardcoded fallback.
 pub async fn submit_to_topic(topic: &str, beef_bytes: &[u8]) -> Result<bool, String> {
+    if beef_bytes.is_empty() {
+        return Err("Empty BEEF bytes — nothing to submit".to_string());
+    }
+
     let client = reqwest::Client::builder()
         .timeout(SUBMIT_TIMEOUT)
         .build()
