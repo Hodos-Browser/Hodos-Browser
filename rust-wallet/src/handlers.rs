@@ -183,6 +183,7 @@ pub async fn health() -> HttpResponse {
     }))
 }
 
+
 // Graceful shutdown — called by CEF browser before process termination
 pub async fn shutdown(data: web::Data<crate::AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🛑 /shutdown received — initiating graceful shutdown");
@@ -12291,19 +12292,53 @@ fn reconcile_backup_tx(
     let db = state.database.lock().unwrap();
     let output_repo = crate::database::OutputRepository::new(db.connection());
 
-    // Mark inputs as spent (these are funding UTXOs from the imported backup state)
+    // Create a transaction record for the backup tx so we can set spent_by FK.
+    // The backup tx is NOT in the imported payload (payload captures pre-backup state),
+    // so we must create it here. Without spent_by, TaskReviewStatus would undo our
+    // spendable=0 marks (it restores outputs where spent_by IS NULL).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let _ = db.connection().execute(
+        "INSERT OR IGNORE INTO transactions (user_id, txid, status, reference_number, \
+         description, is_outgoing, satoshis, created_at, updated_at) \
+         VALUES (1, ?1, 'unproven', ?2, 'On-chain wallet backup (recovered)', 1, 0, ?3, ?4)",
+        rusqlite::params![backup_txid, format!("backup-{}", &backup_txid[..8]), now, now],
+    );
+    let backup_tx_row_id: i64 = db.connection().query_row(
+        "SELECT id FROM transactions WHERE txid = ?1",
+        rusqlite::params![backup_txid],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if backup_tx_row_id > 0 {
+        log::info!("   ✅ Created backup tx record (row_id={})", backup_tx_row_id);
+    } else {
+        log::warn!("   ⚠️  Failed to create/find backup tx record — spent_by FK will be NULL");
+    }
+
+    // Mark inputs as spent (these are funding UTXOs from the imported backup state).
+    // CRITICAL: Set spent_by FK so TaskReviewStatus doesn't undo this.
     let mut inputs_marked = 0u32;
+    let spent_by_id = if backup_tx_row_id > 0 { Some(backup_tx_row_id) } else { None };
     for (txid, vout) in &inputs {
-        let rows = db.connection().execute(
-            "UPDATE outputs SET spendable = 0, spending_description = ?1
-             WHERE txid = ?2 AND vout = ?3 AND spendable = 1",
+        match db.connection().execute(
+            "UPDATE outputs SET spendable = 0, spent_by = ?1, spending_description = ?2
+             WHERE txid = ?3 AND vout = ?4 AND spendable = 1",
             rusqlite::params![
+                spent_by_id,
                 format!("spent-by-backup-{}", &backup_txid[..16]),
                 txid, *vout as i32
             ],
-        ).unwrap_or(0);
-        if rows > 0 {
-            inputs_marked += rows as u32;
+        ) {
+            Ok(rows) if rows > 0 => {
+                inputs_marked += rows as u32;
+                log::info!("   ✅ reconcile: marked {}:{}  as spent ({} rows)", &txid[..16.min(txid.len())], vout, rows);
+            }
+            Ok(_) => {
+                log::warn!("   ⚠️  reconcile: input {}:{} NOT FOUND as spendable in DB", &txid[..16.min(txid.len())], vout);
+            }
+            Err(e) => {
+                log::error!("   ❌ reconcile: SQL error marking {}:{} spent: {}", &txid[..16.min(txid.len())], vout, e);
+            }
         }
     }
 
@@ -12331,6 +12366,14 @@ fn reconcile_backup_tx(
             backup_basket_id,
             Some("1-wallet-backup"), Some("marker"),
             None, None, false,
+        );
+    }
+
+    // Link all backup tx outputs to the transaction record
+    if backup_tx_row_id > 0 {
+        let _ = db.connection().execute(
+            "UPDATE outputs SET transaction_id = ?1 WHERE txid = ?2 AND transaction_id IS NULL",
+            rusqlite::params![backup_tx_row_id, backup_txid],
         );
     }
 

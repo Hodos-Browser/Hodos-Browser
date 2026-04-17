@@ -78,7 +78,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
              WHERE t.status = 'completed'
              AND o.spendable = 0
              AND o.spent_by IS NULL
-             AND (o.spending_description IS NULL OR o.spending_description NOT IN ('external-spend', 'stale-backup'))"
+             AND (o.spending_description IS NULL OR (o.spending_description NOT IN ('external-spend', 'stale-backup') AND o.spending_description NOT LIKE 'spent-by-backup-%'))"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let needs_fix: Vec<(i64, String, i64)> = stmt.query_map(

@@ -117,18 +117,20 @@ export default function WalletPanelPage() {
     initialStatus as 'loading' | 'exists' | 'no-wallet' | 'locked'
   );
 
-  // Fetch and cache identity key in localStorage (called after wallet creation/recovery)
-  const cacheIdentityKey = () => {
-    fetch('http://127.0.0.1:31301/getPublicKey', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identityKey: true }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.publicKey) localStorage.setItem('hodos_identity_key', data.publicKey);
-      })
-      .catch(() => {});
+  // Fetch and cache identity key in localStorage (called after wallet creation/recovery).
+  // Returns a promise so callers can await it before rendering components that read the key.
+  const cacheIdentityKey = async () => {
+    try {
+      const r = await fetch('http://127.0.0.1:31301/getPublicKey', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identityKey: true }),
+      });
+      const data = await r.json();
+      if (data.publicKey) localStorage.setItem('hodos_identity_key', data.publicKey);
+    } catch {
+      // Silently fail — identity key will be fetched on next wallet panel open
+    }
   };
   const [creating, setCreating] = useState(false);
   const [mnemonic, setMnemonic] = useState<string | null>(null);
@@ -381,9 +383,9 @@ export default function WalletPanelPage() {
     }
   };
 
-  const handleConfirmBackup = () => {
+  const handleConfirmBackup = async () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    cacheIdentityKey();
+    await cacheIdentityKey();
 
     setMnemonic(null);
     setCreating(false);
@@ -496,11 +498,12 @@ export default function WalletPanelPage() {
     setRecovering(false);
   };
 
-  const handleRecoveryComplete = () => {
+  const handleRecoveryComplete = async () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
     // Clear stale balance cache so wallet panel fetches fresh balance from backend
     localStorage.removeItem('hodos:wallet:balance');
-    cacheIdentityKey();
+    // Await identity key cache so WalletPanel reads it from localStorage on mount
+    await cacheIdentityKey();
 
     setRecoveryResult(null);
     setShowRecoveryInput(false);
@@ -604,9 +607,9 @@ export default function WalletPanelPage() {
     setImporting(false);
   };
 
-  const handleImportComplete = () => {
+  const handleImportComplete = async () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    cacheIdentityKey();
+    await cacheIdentityKey();
 
     setImportResult(null);
     setShowImportForm(false);
@@ -722,9 +725,9 @@ export default function WalletPanelPage() {
     setCentbeeProgress(null);
   };
 
-  const handleCentbeeComplete = () => {
+  const handleCentbeeComplete = async () => {
     localStorage.setItem('hodos_wallet_exists', 'true');
-    cacheIdentityKey();
+    await cacheIdentityKey();
 
     setCentbeeResult(null);
     setShowCentbeeRecovery(false);
