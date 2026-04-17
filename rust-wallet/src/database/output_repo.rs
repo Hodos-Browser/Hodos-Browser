@@ -1093,18 +1093,30 @@ impl<'a> OutputRepository<'a> {
         // The bulk API only returns confirmed UTXOs, so unconfirmed wallet-created outputs
         // (change outputs, PeerPay sends) would be falsely marked as "externally spent."
         // Also exclude outputs with confirmed=0 (received UTXOs still in mempool only).
+        //
+        // CRITICAL: Exclude outputs in non-default baskets. These are PushDrop tokens,
+        // identity certificates, wallet-backup data, and other nonstandard scripts.
+        // WhatsOnChain indexes UTXOs by P2PKH address — nonstandard scripts DON'T appear
+        // in address UTXO queries even though they're valid on-chain. Without this filter,
+        // reconciliation falsely marks them as "external-spend" because WoC doesn't return
+        // them. Only outputs with basket_id IS NULL or basket name = 'default'/'change' are
+        // standard P2PKH outputs safe to reconcile against address-based API queries.
         let query = if derivation_prefix.is_some() {
             "SELECT o.txid, o.vout FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.derivation_prefix = ?2 AND o.derivation_suffix = ?3
                AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?4 AND o.txid IS NOT NULL
-               AND (o.transaction_id IS NULL OR t.status = 'completed')"
+               AND (o.transaction_id IS NULL OR t.status = 'completed')
+               AND (o.basket_id IS NULL OR b.name IN ('default', 'change'))"
         } else {
             "SELECT o.txid, o.vout FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.derivation_prefix IS NULL AND o.derivation_suffix IS NULL
                AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?2 AND o.txid IS NOT NULL
-               AND (o.transaction_id IS NULL OR t.status = 'completed')"
+               AND (o.transaction_id IS NULL OR t.status = 'completed')
+               AND (o.basket_id IS NULL OR b.name IN ('default', 'change'))"
         };
 
         let db_outputs: Vec<(String, i32)> = if derivation_prefix.is_some() {

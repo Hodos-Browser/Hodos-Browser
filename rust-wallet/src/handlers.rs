@@ -12410,6 +12410,23 @@ fn reconcile_backup_tx(
         }
     }
 
+    // Restore token/certificate outputs that were falsely marked as external-spend
+    // in the old wallet. This happens when TaskValidateUtxos reconciles master address
+    // outputs against WoC — PushDrop/nonstandard scripts don't appear in address UTXO
+    // queries, so reconciliation marks them as spent. After recovery, restore any output
+    // that is spendable=0, spending_description='external-spend', spent_by IS NULL,
+    // and belongs to a non-default basket (tokens, certificates, etc.).
+    let restored = db.connection().execute(
+        "UPDATE outputs SET spendable = 1, spending_description = NULL, updated_at = strftime('%s', 'now')
+         WHERE spendable = 0 AND spending_description = 'external-spend' AND spent_by IS NULL
+           AND basket_id IS NOT NULL
+           AND basket_id NOT IN (SELECT basketId FROM output_baskets WHERE name IN ('default', 'change'))",
+        [],
+    ).unwrap_or(0);
+    if restored > 0 {
+        log::info!("   ✅ Restored {} token/certificate output(s) falsely marked as external-spend", restored);
+    }
+
     state.balance_cache.invalidate();
     Ok((inputs_marked, change_inserted))
 }
