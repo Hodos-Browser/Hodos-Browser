@@ -55,11 +55,28 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const [copied, setCopied] = useState(false);
   const [generating, setGenerating] = useState(false);
 
-  // Identity key state
-  const [identityKey] = useState<string | null>(
+  // Identity key state — seed from localStorage, fetch from backend if missing
+  const [identityKey, setIdentityKey] = useState<string | null>(
     () => localStorage.getItem('hodos_identity_key')
   );
   const [identityKeyCopied, setIdentityKeyCopied] = useState(false);
+
+  useEffect(() => {
+    if (identityKey) return;
+    fetch('http://127.0.0.1:31301/getPublicKey', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identityKey: true }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.publicKey) {
+          localStorage.setItem('hodos_identity_key', data.publicKey);
+          setIdentityKey(data.publicKey);
+        }
+      })
+      .catch(() => {});
+  }, [identityKey]);
 
   // Recent activity state
   const [recentActions, setRecentActions] = useState<ActivityItem[]>([]);

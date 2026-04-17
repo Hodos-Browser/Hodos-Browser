@@ -50,12 +50,29 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [copyAgainClicked, setCopyAgainClicked] = useState(false);
   const [copyLinkClicked, setCopyLinkClicked] = useState(false);
 
-  // Identity key state — read from localStorage (cached by MainBrowserView at startup)
-  const [identityKey] = useState<string | null>(
+  // Identity key state — seed from localStorage, fetch from backend if missing
+  const [identityKey, setIdentityKey] = useState<string | null>(
     () => localStorage.getItem('hodos_identity_key')
   );
   const [showIdentityKey, setShowIdentityKey] = useState(false);
   const [identityKeyCopied, setIdentityKeyCopied] = useState(false);
+
+  useEffect(() => {
+    if (identityKey) return;
+    fetch('http://127.0.0.1:31301/getPublicKey', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identityKey: true }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.publicKey) {
+          localStorage.setItem('hodos_identity_key', data.publicKey);
+          setIdentityKey(data.publicKey);
+        }
+      })
+      .catch(() => {});
+  }, [identityKey]);
 
   // Always refresh balance on mount. The panel seeds from the localStorage
   // cache for instant paint, but that cache can be up to 30s stale (the
