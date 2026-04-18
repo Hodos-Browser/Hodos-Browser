@@ -78,8 +78,9 @@ async function fetchFaviconDataUrl(faviconUrl: string): Promise<string> {
 
 const NewTabPage: React.FC = () => {
     const [searchQuery, setSearchQuery] = useState('');
-    // Load cached tiles synchronously so the page renders fully on first paint
-    const [topSites, setTopSites] = useState<TopSite[] | null>(() => getCachedTiles());
+    // Load cached tiles synchronously so the page renders fully on first paint.
+    // Fall back to DEFAULT_TILES on fresh installs so users always see content.
+    const [topSites, setTopSites] = useState<TopSite[] | null>(() => getCachedTiles() || DEFAULT_TILES);
     const [searchEngine, setSearchEngine] = useState('duckduckgo');
     const searchInputRef = useRef<HTMLInputElement>(null);
 

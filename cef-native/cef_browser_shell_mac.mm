@@ -21,6 +21,7 @@
 #include "include/handlers/simple_handler.h"
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
+#include "include/core/AppPaths.h"
 #include "include/handlers/my_overlay_render_handler.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "OverlayHelpers_mac.h"
@@ -1136,7 +1137,9 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     static std::string hitLogPath;
     if (hitLogPath.empty()) {
         NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-        hitLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+        NSString* appDirName = [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()];
+        NSString* logRelPath = [appDirName stringByAppendingPathComponent:@"wallet_events.log"];
+        hitLogPath = std::string([[appSup stringByAppendingPathComponent:logRelPath] UTF8String]);
     }
     static int hitCount = 0;
     if (hitCount < 10) {
@@ -1174,7 +1177,9 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     static std::string mdLogPath;
     if (mdLogPath.empty()) {
         NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-        mdLogPath = std::string([[appSup stringByAppendingPathComponent:@"HodosBrowser/wallet_events.log"] UTF8String]);
+        NSString* mdAppDir = [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()];
+        NSString* mdLogRel = [mdAppDir stringByAppendingPathComponent:@"wallet_events.log"];
+        mdLogPath = std::string([[appSup stringByAppendingPathComponent:mdLogRel] UTF8String]);
     }
     std::ofstream dbg(mdLogPath, std::ios::app);
     dbg << "VIEW mouseDown: NSView(" << location.x << "," << location.y
@@ -3966,6 +3971,12 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "✅ CEF framework loaded successfully\n");
 
+    // Dev safeguard: refuse to run from build directory without HODOS_DEV=1
+    if (!AppPaths::EnforceDevSafeguard(std::string(exec_path))) {
+        fprintf(stderr, "Exiting due to dev safeguard.\n");
+        return 1;
+    }
+
     // CEF subprocess handling
     CefMainArgs main_args(argc, argv);
 
@@ -4009,7 +4020,8 @@ int main(int argc, char* argv[]) {
         // (CWD is '/' when launched via 'open', so relative paths fail)
         {
             NSString* appSupDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-            NSString* logDir = [appSupDir stringByAppendingPathComponent:@"HodosBrowser"];
+            NSString* logDir = [appSupDir stringByAppendingPathComponent:
+                [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()]];
             std::string logPath = std::string([logDir UTF8String]) + "/debug_output.log";
             Logger::Initialize(ProcessType::MAIN, logPath);
         }
@@ -4046,7 +4058,8 @@ int main(int argc, char* argv[]) {
         NSArray* paths = NSSearchPathForDirectoriesInDomains(
             NSApplicationSupportDirectory, NSUserDomainMask, YES);
         NSString* appSupport = [paths firstObject];
-        NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
+        NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:
+            [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()]];
 
         std::string user_data_path = [hodosBrowserDir UTF8String];
         // NOTE: root_cache_path is set AFTER profile resolution below (must be unique per instance)

@@ -9,6 +9,7 @@
 #include "../../include/core/NavigationHandler.h"
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/AddressHandler.h"
+#include "../../include/core/AppPaths.h"
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -538,7 +539,7 @@ SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
 
     // Initialize HistoryManager for render process (Windows-only)
     std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
-    std::string user_data_path = appdata_path + "\\HodosBrowser\\Default";
+    std::string user_data_path = appdata_path + "\\" + AppPaths::GetAppDirName() + "\\Default";
 
     LOG_DEBUG_RENDER("🔧 Initializing HistoryManager in RENDER process");
     if (HistoryManager::GetInstance().Initialize(user_data_path)) {

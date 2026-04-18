@@ -1,5 +1,6 @@
 #include "../../include/core/CookieManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/AppPaths.h"
 
 #include "include/cef_cookie.h"
 #include "include/cef_task.h"
@@ -181,13 +182,13 @@ public:
 #ifdef _WIN32
             const char* appdata = std::getenv("APPDATA");
             if (appdata) {
-                cache_dir = std::string(appdata) + "\\HodosBrowser\\Default\\Cache";
+                cache_dir = std::string(appdata) + "\\" + AppPaths::GetAppDirName() + "\\Default\\Cache";
             }
 #else
             const char* home = std::getenv("HOME");
             if (home) {
                 cache_dir = std::string(home) +
-                            "/Library/Application Support/HodosBrowser/Default/Cache";
+                            "/Library/Application Support/" + AppPaths::GetAppDirName() + "/Default/Cache";
             }
 #endif
 

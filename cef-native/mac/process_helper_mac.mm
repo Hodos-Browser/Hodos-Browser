@@ -14,6 +14,7 @@
 #include "../include/handlers/simple_render_process_handler.h"
 #include "../include/core/HistoryManager.h"
 #include "../include/core/Logger.h"
+#include "../include/core/AppPaths.h"
 
 // Minimal CefApp for helpers (only provides render process handler)
 class HelperApp : public CefApp {
@@ -49,7 +50,8 @@ int main(int argc, char* argv[]) {
       NSApplicationSupportDirectory, NSUserDomainMask, YES);
   if (paths && [paths count] > 0) {
       NSString* appSupport = [paths firstObject];
-      NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:@"HodosBrowser"];
+      NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:
+          [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()]];
       NSString* defaultDir = [hodosBrowserDir stringByAppendingPathComponent:@"Default"];
       std::string cache_path = [defaultDir UTF8String];
 

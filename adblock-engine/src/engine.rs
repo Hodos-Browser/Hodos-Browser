@@ -940,6 +940,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn app_dir_name() -> &'static str {
+        match std::env::var("HODOS_DEV").as_deref() {
+            Ok("1") => "HodosBrowserDev",
+            _ => "HodosBrowser",
+        }
+    }
+
     /// Helper: build an engine from raw EasyList-style filter rules
     fn engine_from_rules(rules: &str) -> Engine {
         let mut filter_set = FilterSet::new(false);
@@ -1202,14 +1209,14 @@ youtube.com##.ad-showing
         #[cfg(target_os = "windows")]
         if let Ok(appdata) = std::env::var("APPDATA") {
             possible_dirs.insert(0,
-                PathBuf::from(appdata).join("HodosBrowser").join("adblock").join("lists"));
+                PathBuf::from(appdata).join(app_dir_name()).join("adblock").join("lists"));
         }
 
         #[cfg(target_os = "macos")]
         if let Some(home) = std::env::var_os("HOME") {
             possible_dirs.insert(0,
                 PathBuf::from(home).join("Library").join("Application Support")
-                    .join("HodosBrowser").join("adblock").join("lists"));
+                    .join(app_dir_name()).join("adblock").join("lists"));
         }
 
         let lists_dir = possible_dirs.iter().find(|d| d.join("easylist.txt").exists());
@@ -1266,13 +1273,13 @@ youtube.com##.ad-showing
             #[cfg(target_os = "windows")]
             {
                 PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-                    .join("HodosBrowser").join("adblock").join("engine.dat")
+                    .join(app_dir_name()).join("adblock").join("engine.dat")
             }
             #[cfg(target_os = "macos")]
             {
                 PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
                     .join("Library").join("Application Support")
-                    .join("HodosBrowser").join("adblock").join("engine.dat")
+                    .join(app_dir_name()).join("adblock").join("engine.dat")
             }
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {

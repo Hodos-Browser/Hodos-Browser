@@ -38,6 +38,36 @@ use database::WalletDatabase;  // NEW: Import WalletDatabase
 use std::sync::Arc;
 use std::collections::HashMap;
 
+fn app_dir_name() -> &'static str {
+    match std::env::var("HODOS_DEV").as_deref() {
+        Ok("1") => "HodosBrowserDev",
+        _ => "HodosBrowser",
+    }
+}
+
+/// Safeguard: if running from a cargo build directory (dev build), require HODOS_DEV=1.
+/// Installed app runs from a different path, so this check won't trigger for real users.
+fn enforce_dev_safeguard() {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_str = exe.to_string_lossy();
+    let is_dev_build = exe_str.contains("target\\release")
+        || exe_str.contains("target\\debug")
+        || exe_str.contains("target/release")
+        || exe_str.contains("target/debug");
+    if is_dev_build && std::env::var("HODOS_DEV").as_deref() != Ok("1") {
+        eprintln!("========================================================");
+        eprintln!("  DEV SAFEGUARD: HODOS_DEV=1 is not set!");
+        eprintln!("  Running a dev build without it would use the");
+        eprintln!("  production database and risk corrupting real data.");
+        eprintln!();
+        eprintln!("  Use the launcher script instead:");
+        eprintln!("    PowerShell: .\\dev-wallet.ps1");
+        eprintln!("    Mac/Linux:  ./dev-wallet.sh");
+        eprintln!("========================================================");
+        std::process::exit(1);
+    }
+}
+
 /// Info needed to re-derive a child private key for signing PushDrop inputs.
 /// Populated by getPublicKey (forSelf=true), consumed by signAction.
 #[derive(Debug, Clone)]
@@ -122,9 +152,15 @@ async fn main() -> std::io::Result<()> {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    enforce_dev_safeguard();
+
     println!("🦀 Bitcoin Browser Wallet (Rust)");
     println!("=================================");
     println!();
+
+    if app_dir_name() == "HodosBrowserDev" {
+        println!("🔧 DEV MODE: Using HodosBrowserDev data directory");
+    }
 
     // Get wallet path (cross-platform)
     let wallet_dir = dirs::data_dir()
@@ -138,7 +174,7 @@ async fn main() -> std::io::Result<()> {
                 }
             }
         })
-        .join("HodosBrowser")
+        .join(app_dir_name())
         .join("wallet");
 
     // Ensure wallet directory exists (needed for both JSON and database)

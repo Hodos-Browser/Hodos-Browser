@@ -1,5 +1,6 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/AppPaths.h"
 #include <fstream>
 #include <cstdlib>
 #include <filesystem>
@@ -29,20 +30,20 @@ std::string SettingsManager::GetGlobalSettingsFilePath() const {
 #ifdef _WIN32
     const char* appdata = std::getenv("APPDATA");
     if (appdata) {
-        return std::string(appdata) + "\\HodosBrowser\\settings.json";
+        return std::string(appdata) + "\\" + AppPaths::GetAppDirName() + "\\settings.json";
     }
     return "settings.json";
 #elif defined(__APPLE__)
     const char* home = std::getenv("HOME");
     if (home) {
-        return std::string(home) + "/Library/Application Support/HodosBrowser/settings.json";
+        return std::string(home) + "/Library/Application Support/" + AppPaths::GetAppDirName() + "/settings.json";
     }
     return "settings.json";
 #else
     // Linux fallback
     const char* home = std::getenv("HOME");
     if (home) {
-        return std::string(home) + "/.config/HodosBrowser/settings.json";
+        return std::string(home) + "/.config/" + AppPaths::GetAppDirName() + "/settings.json";
     }
     return "settings.json";
 #endif
