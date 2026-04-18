@@ -255,6 +255,7 @@ endif()
 if(APPLE)
     add_executable(HodosBrowserShell MACOSX_BUNDLE ${SOURCES})
     set_target_properties(HodosBrowserShell PROPERTIES
+        OUTPUT_NAME "HodosBrowser"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
         MACOSX_BUNDLE_BUNDLE_NAME "HodosBrowser"
         MACOSX_BUNDLE_BUNDLE_VERSION "0.3.0"
@@ -263,6 +264,7 @@ if(APPLE)
 elseif(WIN32)
     add_executable(HodosBrowserShell WIN32 ${SOURCES})
     set_target_properties(HodosBrowserShell PROPERTIES
+        OUTPUT_NAME "HodosBrowser"
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
 else()

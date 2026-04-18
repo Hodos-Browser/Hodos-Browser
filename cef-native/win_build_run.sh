@@ -14,7 +14,7 @@ if [ "$1" = "--clean" ]; then
 fi
 
 # Configure if needed
-if [ ! -f build/HodosBrowserShell.sln ] && [ ! -f build/build.ninja ]; then
+if [ ! -f build/HodosBrowser.sln ] && [ ! -f build/build.ninja ]; then
     echo "Configuring CMake..."
     cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 fi
@@ -24,9 +24,9 @@ echo "Building..."
 cmake --build build --config Release
 
 # Kill any existing instance
-taskkill //F //IM HodosBrowserShell.exe 2>/dev/null || true
+taskkill //F //IM HodosBrowser.exe 2>/dev/null || true
 
 # Launch
 echo "Launching HodosBrowser..."
 cd build/bin/Release
-./HodosBrowserShell.exe
+./HodosBrowser.exe

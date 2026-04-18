@@ -377,7 +377,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
     }
 #elif defined(__APPLE__)
     // Get the executable path and walk up to the .app bundle
-    // Executable: .../HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+    // Executable: .../HodosBrowser.app/Contents/MacOS/HodosBrowser
     char exePath[PATH_MAX];
     uint32_t size = sizeof(exePath);
     if (_NSGetExecutablePath(exePath, &size) != 0) {
@@ -385,7 +385,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
         return false;
     }
 
-    // Strip /Contents/MacOS/HodosBrowserShell (3 path components) to get .app bundle
+    // Strip /Contents/MacOS/HodosBrowser (3 path components) to get .app bundle
     std::string appPath(exePath);
     for (int i = 0; i < 3; i++) {
         size_t pos = appPath.rfind('/');

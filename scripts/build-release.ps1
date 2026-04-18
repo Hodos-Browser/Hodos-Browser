@@ -95,7 +95,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $StagingDir "locales") | Ou
 New-Item -ItemType Directory -Force -Path (Join-Path $StagingDir "frontend") | Out-Null
 
 # Copy main executable
-Copy-Item (Join-Path $CefRelease "HodosBrowserShell.exe") $StagingDir
+Copy-Item (Join-Path $CefRelease "HodosBrowser.exe") $StagingDir
 
 # Copy Rust binaries
 Copy-Item (Join-Path $ProjectRoot "rust-wallet\target\release\hodos-wallet.exe") $StagingDir
@@ -153,7 +153,7 @@ Write-Host ""
 Write-Host "[6/8] Verifying staging directory..." -ForegroundColor Yellow
 
 $requiredFiles = @(
-    "HodosBrowserShell.exe",
+    "HodosBrowser.exe",
     "hodos-wallet.exe",
     "hodos-adblock.exe",
     "libcef.dll",

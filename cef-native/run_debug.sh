@@ -1,3 +1,3 @@
 #!/bin/bash
 cd build/bin
-./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+./HodosBrowser.app/Contents/MacOS/HodosBrowser

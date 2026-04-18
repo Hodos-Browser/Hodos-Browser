@@ -31,11 +31,11 @@ cp -r "HodosBrowser Helper.app" \
       "HodosBrowser Helper (GPU).app" \
       "HodosBrowser Helper (Plugin).app" \
       "HodosBrowser Helper (Renderer).app" \
-      HodosBrowserShell.app/Contents/Frameworks/
+      HodosBrowser.app/Contents/Frameworks/
 
 # Kill any existing instance
-pkill -9 HodosBrowserShell 2>/dev/null || true
+pkill -9 HodosBrowser 2>/dev/null || true
 
 # Launch
 echo "Launching HodosBrowser..."
-./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell
+./HodosBrowser.app/Contents/MacOS/HodosBrowser

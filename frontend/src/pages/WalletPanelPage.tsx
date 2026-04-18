@@ -971,7 +971,7 @@ export default function WalletPanelPage() {
                 </p>
                 <p style={{ color: tokens.textMuted, fontSize: '12px', margin: 0 }}>
                   Looking up your wallet backup on the blockchain and restoring data.
-                  This usually takes 10-30 seconds.
+                  This may take several minutes depending on wallet size.
                 </p>
               </div>
             )}
