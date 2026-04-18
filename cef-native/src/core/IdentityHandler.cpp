@@ -1,4 +1,5 @@
 #include "../../include/core/IdentityHandler.h"
+#include "../../include/core/AppPaths.h"
 #include <fstream>
 #include <cstdlib>
 #include <filesystem>
@@ -44,13 +45,13 @@ bool IdentityHandler::Execute(const CefString& name,
     if (name == "get") {
 #ifdef _WIN32
         const char* homeDir = std::getenv("USERPROFILE");
-        std::string identityPath = std::string(homeDir ? homeDir : "") + "\\AppData\\Roaming\\HodosBrowser\\identity.json";
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "\\AppData\\Roaming\\" + AppPaths::GetAppDirName() + "\\identity.json";
 #elif defined(__APPLE__)
         const char* homeDir = std::getenv("HOME");
-        std::string identityPath = std::string(homeDir ? homeDir : "") + "/Library/Application Support/HodosBrowser/identity.json";
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "/Library/Application Support/" + AppPaths::GetAppDirName() + "/identity.json";
 #else
         const char* homeDir = std::getenv("HOME");
-        std::string identityPath = std::string(homeDir ? homeDir : "") + "/.config/HodosBrowser/identity.json";
+        std::string identityPath = std::string(homeDir ? homeDir : "") + "/.config/" + AppPaths::GetAppDirName() + "/identity.json";
 #endif
         std::ifstream identityFile(identityPath);
         if (identityFile.good()) {

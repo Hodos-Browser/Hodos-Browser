@@ -240,15 +240,47 @@ browser->GetHost()->SetFocus(true);
 
 ## Dev Runbook
 
-**Run order** (all three must be running):
+### ⚠️ CRITICAL: Dev/Production Data Isolation
 
-1. **Rust wallet**: `cd rust-wallet && cargo run --release` → localhost:31301
+Dev builds and the installed app use **separate data directories** to prevent database corruption:
+
+| Context | Data Directory | How |
+|---------|---------------|-----|
+| **Dev builds** | `HodosBrowserDev/` | `HODOS_DEV=1` env var set by launcher scripts |
+| **Installed app** (users) | `HodosBrowser/` | No env var — default path |
+
+**Safeguard:** Dev binaries detect they are running from a build directory (`target/release/`, `build/bin/Release/`). If `HODOS_DEV=1` is not set, they **refuse to start** with a clear error. This prevents accidentally hitting the production database.
+
+**NEVER run dev servers with bare `cargo run` or by launching the exe directly.** Always use the launcher scripts below.
+
+### Run order (all three must be running):
+
+1. **Rust wallet** (PowerShell): `.\dev-wallet.ps1` → localhost:31301
+   - Mac/Linux: `./dev-wallet.sh`
 2. **Frontend dev server**: `cd frontend && npm run dev` → localhost:5137
 3. **CEF browser**:
-   - Windows: `cd cef-native/build/bin/Release && ./HodosBrowserShell.exe`
-   - macOS: `cd cef-native/build/bin && ./HodosBrowserShell.app/Contents/MacOS/HodosBrowserShell`
+   - Windows: `cd cef-native && .\win_build_run.sh` (builds + launches with `HODOS_DEV=1`)
+   - macOS: `cd cef-native && ./mac_build_run.sh`
 
-**Storage**: Windows: `%APPDATA%/HodosBrowser/`, macOS: `~/Library/Application Support/HodosBrowser/`. Wallet DB: `<storage>/wallet/wallet.db` (SQLite)
+### Build only (no launch)
+
+Building does NOT require `HODOS_DEV`. The safeguard is at **runtime**, not build time.
+
+- Rust: `cd rust-wallet && cargo build --release`
+- Adblock: `cd adblock-engine && cargo build --release`
+- Frontend: `cd frontend && npm run build`
+- C++ (Developer Command Prompt): same cmake commands as before — see Build section below
+
+### What Claude must do
+
+When asked to run/test the wallet, adblock, or CEF browser during development:
+- **Rust wallet:** Use `HODOS_DEV=1 cargo run --release` (or the launcher script)
+- **Adblock engine:** Use `HODOS_DEV=1 cargo run --release` (or the launcher script)
+- **CEF exe:** Ensure `HODOS_DEV=1` is in the environment before launching
+- **NEVER run `cargo run` without `HODOS_DEV=1`** — the safeguard will block it anyway, but don't even try
+
+**Storage (dev)**: Windows: `%APPDATA%/HodosBrowserDev/`, macOS: `~/Library/Application Support/HodosBrowserDev/`
+**Storage (production)**: Windows: `%APPDATA%/HodosBrowser/`, macOS: `~/Library/Application Support/HodosBrowser/`
 
 ---
 

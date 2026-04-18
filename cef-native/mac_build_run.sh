@@ -36,6 +36,7 @@ cp -r "HodosBrowser Helper.app" \
 # Kill any existing instance
 pkill -9 HodosBrowser 2>/dev/null || true
 
-# Launch
-echo "Launching HodosBrowser..."
+# Launch in dev mode (separate data directory from installed app)
+export HODOS_DEV=1
+echo "Launching HodosBrowser (DEV MODE)..."
 ./HodosBrowser.app/Contents/MacOS/HodosBrowser

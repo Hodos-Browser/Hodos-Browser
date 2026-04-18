@@ -6,6 +6,13 @@ use rusqlite::Connection;
 use bip39::{Mnemonic, Language};
 use bip32::XPrv;
 
+fn app_dir_name() -> &'static str {
+    match std::env::var("HODOS_DEV").as_deref() {
+        Ok("1") => "HodosBrowserDev",
+        _ => "HodosBrowser",
+    }
+}
+
 fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -23,7 +30,7 @@ fn main() {
                 }
             }
         })
-        .join("HodosBrowser")
+        .join(app_dir_name())
         .join("wallet");
 
     let db_path = wallet_dir.join("wallet.db");

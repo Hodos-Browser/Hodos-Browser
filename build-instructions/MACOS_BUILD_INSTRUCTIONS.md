@@ -101,14 +101,16 @@ cd rust-wallet
 # Build release version
 cargo build --release
 
-# Test (optional - will start wallet server)
-cargo run --release
+# Test (use launcher script — sets HODOS_DEV=1 for dev isolation)
+# From project root: ./dev-wallet.sh
 ```
 
 **Expected output:**
 ```
+DEV MODE: Launching wallet (data -> HodosBrowserDev)
 🦀 Bitcoin Browser Wallet (Rust)
-📁 Wallet directory: ~/Library/Application Support/HodosBrowser/wallet
+🔧 DEV MODE: Using HodosBrowserDev data directory
+📁 Wallet directory: ~/Library/Application Support/HodosBrowserDev/wallet
 ✅ Database initialized
 ...
 Listening on: http://127.0.0.1:3301
@@ -215,8 +217,8 @@ You need **three terminals** running simultaneously (four if you also want adblo
 ### Terminal 1: Rust Wallet Backend
 
 ```bash
-cd rust-wallet
-cargo run --release
+# From project root (sets HODOS_DEV=1 for dev/production isolation)
+./dev-wallet.sh
 
 # Wait for:
 # "Listening on: http://127.0.0.1:3301"
@@ -227,14 +229,16 @@ cargo run --release
 ### Terminal 2: Adblock Engine (optional but recommended)
 
 ```bash
-cd adblock-engine
-cargo run --release
+# From project root (sets HODOS_DEV=1 for dev/production isolation)
+./dev-adblock.sh
 
 # Wait for:
 # "Listening on: http://127.0.0.1:3302"
 ```
 
 **Leave running** - Provides ad/tracker blocking
+
+> **⚠️ Dev Isolation:** All dev launcher scripts set `HODOS_DEV=1` so dev data goes to `~/Library/Application Support/HodosBrowserDev/` (separate from the installed app). Dev builds refuse to start without it.
 
 ### Terminal 3: React Frontend Dev Server
 
@@ -548,14 +552,14 @@ cd build/bin && cp -r "HodosBrowser Helper"*.app HodosBrowserShell.app/Contents/
 
 ### Launch stack (3 terminals):
 ```bash
-# Terminal 1
-cd rust-wallet && cargo run --release
+# Terminal 1 (from project root)
+./dev-wallet.sh
 
 # Terminal 2
 cd frontend && npm run dev
 
 # Terminal 3
-cd cef-native/build/bin && open -a HodosBrowserShell.app
+cd cef-native && ./mac_build_run.sh
 ```
 
 ### Clean rebuild:

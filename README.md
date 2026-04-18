@@ -35,19 +35,20 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 
 **Prerequisites**: VS 2022 (MSVC), vcpkg, Rust, Node.js 18+, CEF binaries
 
-All three must be running:
+All three must be running. Dev launcher scripts set `HODOS_DEV=1` to isolate dev data from the installed app:
 
 ```powershell
-# 1. Rust wallet
-cd rust-wallet && cargo run --release
-# Runs on localhost:3301
+# 1. Rust wallet (from project root)
+.\dev-wallet.ps1           # Windows
+./dev-wallet.sh            # Mac
 
 # 2. Frontend
 cd frontend && npm install && npm run dev
-# Runs on localhost:5137
 
 # 3. CEF browser
-cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
+cd cef-native
+.\win_build_run.ps1        # Windows
+./mac_build_run.sh         # Mac
 ```
 
 **Build from source**: See `build-instructions/BUILD_INSTRUCTIONS.md` for first-time setup (CEF binaries, CMake, vcpkg).
