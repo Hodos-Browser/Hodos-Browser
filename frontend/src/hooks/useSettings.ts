@@ -10,7 +10,6 @@ export interface BrowserSettings {
   restoreSessionOnStart: boolean;
   askWhereToSave: boolean;
   autoUpdateEnabled: boolean;
-  autoUpdateNotifications: boolean;
 }
 
 export interface PrivacySettings {
@@ -47,7 +46,6 @@ const defaultSettings: AllSettings = {
     restoreSessionOnStart: false,
     askWhereToSave: true,
     autoUpdateEnabled: true,
-    autoUpdateNotifications: false,
   },
   privacy: {
     adBlockEnabled: true,

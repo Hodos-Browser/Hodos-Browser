@@ -2518,15 +2518,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Auto-update settings
         else if (key == "browser.autoUpdateEnabled") {
             settings.SetAutoUpdateEnabled(value == "true");
-            // Auto-check only active when both autoUpdate and notifications are on
-            bool notifications = settings.GetBrowserSettings().autoUpdateNotifications;
-            AutoUpdater::GetInstance().SetAutoCheckEnabled((value == "true") && notifications);
-        }
-        else if (key == "browser.autoUpdateNotifications") {
-            settings.SetAutoUpdateNotifications(value == "true");
-            // Auto-check only active when both autoUpdate and notifications are on
-            bool autoUpdate = settings.GetBrowserSettings().autoUpdateEnabled;
-            AutoUpdater::GetInstance().SetAutoCheckEnabled(autoUpdate && (value == "true"));
+            AutoUpdater::GetInstance().SetAutoCheckEnabled(value == "true");
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }

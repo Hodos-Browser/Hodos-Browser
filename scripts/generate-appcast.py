@@ -22,10 +22,12 @@ from datetime import datetime, timezone
 
 
 def generate_appcast(args):
+    # Register namespace prefixes so ElementTree uses 'sparkle:' instead of 'ns0:'
+    ET.register_namespace('sparkle', 'http://www.andymatuschak.org/xml-namespaces/sparkle')
+    ET.register_namespace('dc', 'http://purl.org/dc/elements/1.1/')
+
     rss = ET.Element('rss', {
         'version': '2.0',
-        'xmlns:sparkle': 'http://www.andymatuschak.org/xml-namespaces/sparkle',
-        'xmlns:dc': 'http://purl.org/dc/elements/1.1/',
     })
 
     channel = ET.SubElement(rss, 'channel')
