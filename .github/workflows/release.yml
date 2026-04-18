@@ -640,6 +640,45 @@ jobs:
           # Sign the DMG too
           codesign --force --sign "Developer ID Application: Matthew Archbold" "dist/HodosBrowser-${VERSION}.dmg"
 
+      # EdDSA sign the DMG for Sparkle 2 auto-update verification
+      - name: EdDSA sign DMG for Sparkle
+        shell: bash
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        id: eddsa_sign
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          DMG="dist/HodosBrowser-${VERSION}.dmg"
+
+          if [ -z "$EDDSA_PRIVATE_KEY" ]; then
+            echo "WARNING: SPARKLE_EDDSA_PRIVATE_KEY not set — skipping EdDSA signing"
+            echo "EDDSA_SIGNATURE=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Write EdDSA private key to temp file
+          echo "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_priv.pem
+
+          # Use Sparkle's sign_update tool from the bundled framework
+          SIGN_TOOL="external/Sparkle.framework/Versions/B/Resources/sign_update"
+          if [ ! -f "$SIGN_TOOL" ]; then
+            # Fallback: try Versions/Current
+            SIGN_TOOL="external/Sparkle.framework/Resources/sign_update"
+          fi
+
+          if [ -f "$SIGN_TOOL" ]; then
+            chmod +x "$SIGN_TOOL"
+            EDDSA_SIG=$("$SIGN_TOOL" "$DMG" --ed-key-file /tmp/ed25519_priv.pem 2>&1 | grep "sparkle:edSignature=" | cut -d'"' -f2)
+            echo "EdDSA signature: ${EDDSA_SIG:0:20}..."
+            echo "EDDSA_SIGNATURE=$EDDSA_SIG" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Sparkle sign_update tool not found — skipping EdDSA signing"
+            ls -la external/Sparkle.framework/Versions/B/Resources/ 2>/dev/null || echo "No Resources dir"
+            echo "EDDSA_SIGNATURE=" >> $GITHUB_OUTPUT
+          fi
+
+          rm -f /tmp/ed25519_priv.pem
+
       # Upload
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v7
@@ -647,6 +686,24 @@ jobs:
           name: macos-dmg
           path: dist/*.dmg
           if-no-files-found: error
+
+      - name: Upload EdDSA signature
+        shell: bash
+        run: |
+          mkdir -p dist
+          SIG="${{ steps.eddsa_sign.outputs.EDDSA_SIGNATURE }}"
+          if [ -n "$SIG" ]; then
+            echo "$SIG" > dist/eddsa_signature.txt
+            echo "EdDSA signature saved to artifact"
+          else
+            echo "No EdDSA signature to upload"
+            echo "" > dist/eddsa_signature.txt
+          fi
+      - name: Upload EdDSA signature artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-eddsa-signature
+          path: dist/eddsa_signature.txt
 
   # ============================================================
   # PUBLISH RELEASE
@@ -694,6 +751,9 @@ jobs:
           # Read DSA signature if available
           WIN_SIG=$(cat artifacts/windows-dsa-signature/dsa_signature.txt 2>/dev/null || echo "")
 
+          # Read EdDSA signature if available
+          MAC_SIG=$(cat artifacts/macos-eddsa-signature/eddsa_signature.txt 2>/dev/null || echo "")
+
           APPCAST_ARGS="--version $VERSION"
           APPCAST_ARGS="$APPCAST_ARGS --windows-url ${REPO_URL}/HodosBrowser-${VERSION}-setup.exe"
           APPCAST_ARGS="$APPCAST_ARGS --windows-size $WIN_SIZE"
@@ -705,6 +765,12 @@ jobs:
             echo "Windows DSA signature included in appcast"
           else
             echo "WARNING: No Windows DSA signature found"
+          fi
+          if [ -n "$MAC_SIG" ]; then
+            APPCAST_ARGS="$APPCAST_ARGS --macos-signature $MAC_SIG"
+            echo "macOS EdDSA signature included in appcast"
+          else
+            echo "WARNING: No macOS EdDSA signature found"
           fi
 
           python3 scripts/generate-appcast.py $APPCAST_ARGS
