@@ -25,10 +25,14 @@ cmake --build build --config Release
 
 Rust wallet and frontend dev server must be running first.
 
+**To run the dev build**, use the launcher script (sets `HODOS_DEV=1` automatically):
 ```powershell
-cd cef-native/build/bin/Release
-./HodosBrowserShell.exe
+cd cef-native
+.\win_build_run.ps1      # Windows (PowerShell) — builds + launches
+./mac_build_run.sh       # Mac — builds + launches
 ```
+
+**⚠️ NEVER launch the exe directly from the build directory** — the dev safeguard will block it. Dev builds detect they are running from `build/bin/Release/` and refuse to start without `HODOS_DEV=1` to prevent hitting the production database.
 
 ## Invariants
 

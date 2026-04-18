@@ -139,16 +139,17 @@ cd rust-wallet
 # Build release version
 cargo build --release
 
-# Test build (optional)
-cargo run --release
+# Test build (use launcher script — sets HODOS_DEV=1 for dev isolation)
+# From project root: .\dev-wallet.ps1
 ```
 
 **Expected output:**
 ```
+DEV MODE: Launching wallet (data -> HodosBrowserDev)
 🦀 Bitcoin Browser Wallet (Rust)
 =================================
-
-📁 Wallet directory: C:\Users\<YourUsername>\AppData\Roaming\HodosBrowser\wallet
+🔧 DEV MODE: Using HodosBrowserDev data directory
+📁 Wallet directory: C:\Users\<YourUsername>\AppData\Roaming\HodosBrowserDev\wallet
 ✅ Database initialized
 ✅ Domain whitelist manager initialized
 ✅ BRC-33 message relay initialized
@@ -279,20 +280,22 @@ cd cef-native/build/bin/Release
 
 ### Optional: Run Backend Services Manually (for debugging)
 
-If you need to see wallet or adblock logs, run them before launching the browser:
+If you need to see wallet or adblock logs, run them before launching the browser.
 
-```bash
+**⚠️ Dev/Production Isolation:** All dev launcher scripts set `HODOS_DEV=1` so dev data goes to `%APPDATA%/HodosBrowserDev/` (separate from the installed app's `%APPDATA%/HodosBrowser/`). Dev builds will refuse to start without this variable.
+
+```powershell
 # Terminal 1 (optional): Rust Wallet - for logs
-cd rust-wallet && cargo run --release
+.\dev-wallet.ps1
 
 # Terminal 2 (optional): Adblock Engine - for logs  
-cd adblock-engine && cargo run --release
+.\dev-adblock.ps1
 
 # Terminal 3: Frontend Dev Server (required)
 cd frontend && npm run dev
 
-# Terminal 4: CEF Browser
-cd cef-native/build/bin/Release && ./HodosBrowserShell.exe
+# Terminal 4: CEF Browser (builds + launches)
+cd cef-native && .\win_build_run.ps1
 ```
 
 When services are already running, the browser detects and uses them instead of spawning new processes.
@@ -429,14 +432,16 @@ cmake --build . --config Release
 
 ## 🎯 Quick Reference
 
-| Component | Port | Auto-launched? | Command |
+| Component | Port | Auto-launched? | Dev Launch Command |
 |-----------|------|----------------|---------|
-| **Rust Wallet** | 3301 | ✅ Yes | `cd rust-wallet && cargo run --release` |
-| **Adblock Engine** | 3302 | ✅ Yes | `cd adblock-engine && cargo run --release` |
+| **Rust Wallet** | 31301 | ✅ Yes | `.\dev-wallet.ps1` (from project root) |
+| **Adblock Engine** | 31302 | ✅ Yes | `.\dev-adblock.ps1` (from project root) |
 | **Frontend** | 5137 | ❌ No | `cd frontend && npm run dev` |
-| **CEF Browser** | — | — | `cd cef-native/build/bin/Release && ./HodosBrowserShell.exe` |
+| **CEF Browser** | — | — | `cd cef-native && .\win_build_run.ps1` |
 
 **Minimal run:** Start frontend (`npm run dev`), then launch browser. Wallet and adblock auto-start.
+
+**⚠️ Dev isolation:** All `dev-*.ps1` and `win_build_run.ps1` scripts set `HODOS_DEV=1` so dev data goes to `%APPDATA%/HodosBrowserDev/`. Dev builds refuse to start without it.
 
 ---
 

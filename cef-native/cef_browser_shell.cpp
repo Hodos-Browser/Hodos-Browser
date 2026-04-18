@@ -28,6 +28,7 @@
 #include "include/handlers/simple_handler.h"
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
+#include "include/core/AppPaths.h"
 #include "include/core/WalletService.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
@@ -3128,6 +3129,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     g_hInstance = hInstance;
 
+    // Dev safeguard: refuse to run from build directory without HODOS_DEV=1
+    {
+        char exe_path[MAX_PATH];
+        GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+        if (!AppPaths::EnforceDevSafeguard(std::string(exe_path))) {
+            MessageBoxA(NULL,
+                "DEV SAFEGUARD: HODOS_DEV=1 is not set!\n\n"
+                "Running a dev build without it would use the production database.\n\n"
+                "Use win_build_run.sh to launch, or set HODOS_DEV=1 in your terminal.",
+                "HodosBrowser - Dev Safeguard", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+    }
+
     // Enable Per-Monitor DPI V2 awareness. Must be called before any window creation.
     // This ensures WM_DPICHANGED fires when dragging between monitors with different DPI,
     // and CEF browsers render at the correct scale factor for each monitor.
@@ -3169,7 +3184,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Set base app data path
     std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
-    std::string user_data_path = appdata_path + "\\HodosBrowser";
+    std::string user_data_path = appdata_path + "\\" + AppPaths::GetAppDirName();
 
     // Initialize ProfileManager BEFORE CefInitialize so cache_path is correct
     LOG_INFO("Initializing ProfileManager...");

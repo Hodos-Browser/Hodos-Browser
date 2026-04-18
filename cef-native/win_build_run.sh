@@ -26,7 +26,8 @@ cmake --build build --config Release
 # Kill any existing instance
 taskkill //F //IM HodosBrowser.exe 2>/dev/null || true
 
-# Launch
-echo "Launching HodosBrowser..."
+# Launch in dev mode (separate data directory from installed app)
+export HODOS_DEV=1
+echo "Launching HodosBrowser (DEV MODE)..."
 cd build/bin/Release
 ./HodosBrowser.exe

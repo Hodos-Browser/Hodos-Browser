@@ -156,11 +156,13 @@ cd rust-wallet
 # Build the wallet executable (release mode)
 cargo build --release
 
-# Run the wallet server
-cargo run --release
-# Or run directly: ./target/release/hodos-wallet.exe
+# Run the wallet server (use launcher script for dev/production isolation)
+# From project root:
+#   Windows: .\dev-wallet.ps1
+#   Mac:     ./dev-wallet.sh
+# ⚠️ Do NOT use bare 'cargo run' — dev safeguard requires HODOS_DEV=1
 
-# Server starts on http://127.0.0.1:3301
+# Server starts on http://127.0.0.1:31301
 ```
 
 **Features:**
@@ -238,9 +240,10 @@ The adblock engine has specific version pins due to Rust compatibility:
 #### Run Manually (Optional)
 
 ```bash
-cd adblock-engine
-cargo run --release
-# Server starts on http://127.0.0.1:3302
+# From project root (sets HODOS_DEV=1 for dev isolation):
+#   Windows: .\dev-adblock.ps1
+#   Mac:     ./dev-adblock.sh
+# Server starts on http://127.0.0.1:31302
 ```
 
 #### Adblock Engine Endpoints
@@ -357,22 +360,22 @@ The browser will automatically start `rust-wallet` and `adblock-engine` from the
 
 If you need to see wallet or adblock logs, run them in separate terminals before launching the browser:
 
-```bash
-# Terminal 1: Wallet (optional - for logs)
-cd rust-wallet
-cargo run --release
+```powershell
+# Terminal 1: Wallet (from project root — sets HODOS_DEV=1)
+.\dev-wallet.ps1           # Windows
+./dev-wallet.sh            # Mac
 
-# Terminal 2: Adblock (optional - for logs)
-cd adblock-engine
-cargo run --release
+# Terminal 2: Adblock (from project root — sets HODOS_DEV=1)
+.\dev-adblock.ps1          # Windows
+./dev-adblock.sh           # Mac
 
 # Terminal 3: Frontend (required)
-cd frontend
-npm run dev
+cd frontend && npm run dev
 
-# Terminal 4: Browser
-cd cef-native/build/bin/Release
-./HodosBrowserShell.exe
+# Terminal 4: Browser (builds + launches with HODOS_DEV=1)
+cd cef-native
+.\win_build_run.ps1        # Windows
+./mac_build_run.sh         # Mac
 ```
 
 When running services manually, the browser detects they're already running and uses them instead of spawning new processes.

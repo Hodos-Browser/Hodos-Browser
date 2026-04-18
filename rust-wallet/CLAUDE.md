@@ -4,17 +4,25 @@
 
 Actix-web HTTP server providing wallet operations, BRC-100 protocol endpoints, cryptographic signing, and SQLite database storage. This is the security-critical layer: Rust was chosen for compile-time memory safety guarantees and secure memory clearing of private keys. Private keys never leave this process.
 
-## Build & Run (Windows)
+## Build & Run
 
 ```powershell
 cd rust-wallet
-cargo build --release    # Build
-cargo run --release      # Run on localhost:31301
+cargo build --release    # Build only
 cargo test               # Run tests
 cargo check              # Fast type-check without building
 ```
 
-Server logs to console. Creates wallet DB at `%APPDATA%/HodosBrowser/wallet/wallet.db` on first run.
+**To run the dev server**, use the launcher script from the project root (sets `HODOS_DEV=1` automatically):
+```powershell
+.\dev-wallet.ps1         # Windows (PowerShell)
+./dev-wallet.sh          # Mac/Linux
+```
+
+**⚠️ NEVER use bare `cargo run --release`** — the dev safeguard will block it. Dev builds detect they are running from `target/release/` and refuse to start without `HODOS_DEV=1` to prevent hitting the production database.
+
+**Dev storage**: `%APPDATA%/HodosBrowserDev/wallet/wallet.db`
+**Production storage**: `%APPDATA%/HodosBrowser/wallet/wallet.db`
 
 ## Invariants
 

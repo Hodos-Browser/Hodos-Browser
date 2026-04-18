@@ -17,10 +17,41 @@ use std::path::PathBuf;
 
 const ADBLOCK_PORT: u16 = 31302;
 
+fn app_dir_name() -> &'static str {
+    match std::env::var("HODOS_DEV").as_deref() {
+        Ok("1") => "HodosBrowserDev",
+        _ => "HodosBrowser",
+    }
+}
+
+/// Safeguard: if running from a cargo build directory (dev build), require HODOS_DEV=1.
+fn enforce_dev_safeguard() {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_str = exe.to_string_lossy();
+    let is_dev_build = exe_str.contains("target\\release")
+        || exe_str.contains("target\\debug")
+        || exe_str.contains("target/release")
+        || exe_str.contains("target/debug");
+    if is_dev_build && std::env::var("HODOS_DEV").as_deref() != Ok("1") {
+        eprintln!("========================================================");
+        eprintln!("  DEV SAFEGUARD: HODOS_DEV=1 is not set!");
+        eprintln!("  Running a dev build without it would use the");
+        eprintln!("  production database and risk corrupting real data.");
+        eprintln!();
+        eprintln!("  Use the launcher script instead:");
+        eprintln!("    PowerShell: .\\dev-adblock.ps1");
+        eprintln!("    Mac/Linux:  ./dev-adblock.sh");
+        eprintln!("========================================================");
+        std::process::exit(1);
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    enforce_dev_safeguard();
 
     println!("Hodos Adblock Engine");
     println!("====================");
@@ -132,7 +163,7 @@ fn resolve_adblock_dir() -> PathBuf {
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
             return PathBuf::from(appdata)
-                .join("HodosBrowser")
+                .join(app_dir_name())
                 .join("adblock");
         }
     }
@@ -143,7 +174,7 @@ fn resolve_adblock_dir() -> PathBuf {
             return PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("HodosBrowser")
+                .join(app_dir_name())
                 .join("adblock");
         }
     }
