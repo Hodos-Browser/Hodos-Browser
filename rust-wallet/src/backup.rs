@@ -208,6 +208,12 @@ pub struct BackupCertificate {
     pub is_deleted: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub publish_status: Option<String>,
+    #[serde(default)]
+    pub publish_txid: Option<String>,
+    #[serde(default)]
+    pub publish_vout: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -591,7 +597,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let certificates = {
         let mut stmt = conn.prepare(
             "SELECT certificateId, user_id, type, serial_number, certifier, subject, verifier, \
-             revocation_outpoint, signature, is_deleted, created_at, updated_at FROM certificates"
+             revocation_outpoint, signature, is_deleted, created_at, updated_at, \
+             publish_status, publish_txid, publish_vout FROM certificates"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupCertificate {
             certificate_id: row.get(0)?,
@@ -606,6 +613,9 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
             is_deleted: row.get::<_, i32>(9)? != 0,
             created_at: row.get(10)?,
             updated_at: row.get(11)?,
+            publish_status: row.get(12)?,
+            publish_txid: row.get(13)?,
+            publish_vout: row.get(14)?,
         }))?.collect::<Result<Vec<_>>>()?;
         rows
     };
@@ -1447,11 +1457,14 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
     for c in &payload.certificates {
         conn.execute(
             "INSERT INTO certificates (certificateId, user_id, type, serial_number, certifier, subject, verifier, \
-             revocation_outpoint, signature, is_deleted, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             revocation_outpoint, signature, is_deleted, created_at, updated_at, \
+             publish_status, publish_txid, publish_vout) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![c.certificate_id, c.user_id, c.cert_type, c.serial_number, c.certifier,
                              c.subject, c.verifier, c.revocation_outpoint, c.signature,
-                             c.is_deleted as i32, c.created_at, c.updated_at],
+                             c.is_deleted as i32, c.created_at, c.updated_at,
+                             c.publish_status.as_deref().unwrap_or("unpublished"),
+                             c.publish_txid, c.publish_vout],
         ).map_err(|e| format!("Insert certificates: {}", e))?;
     }
 

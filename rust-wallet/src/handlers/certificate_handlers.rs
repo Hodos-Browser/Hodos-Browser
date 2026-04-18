@@ -4770,7 +4770,38 @@ async fn unpublish_certificate_core(
     if overlay_removed {
         log::info!("   ✅ Certificate unpublished successfully (overlay confirmed)");
     } else {
-        log::info!("   ⚠️  Certificate unpublished on-chain, overlay pending — background task will retry");
+        log::info!("   ⚠️  Certificate unpublished on-chain, overlay pending — scheduling 30s re-check");
+
+        // Spawn a one-shot delayed re-check to catch cases where the overlay
+        // just needed a moment to process. If still pending after 30s,
+        // TaskReplayOverlay (5-min interval) handles ongoing retries.
+        let db_clone = state.database.clone();
+        let type_owned = type_bytes.to_vec();
+        let serial_owned = serial_bytes.to_vec();
+        let certifier_owned = certifier_bytes.to_vec();
+        let serial_b64_owned = BASE64.encode(serial_bytes);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            match crate::overlay::lookup_published_certificate(&serial_b64_owned).await {
+                Ok(None) => {
+                    log::info!("   ✅ Post-unpublish re-check: overlay confirmed removal");
+                    let db = db_clone.lock().unwrap();
+                    let cert_repo = CertificateRepository::new(db.connection());
+                    let _ = cert_repo.update_publish_status(
+                        &type_owned, &serial_owned, &certifier_owned,
+                        "unpublished", None, None,
+                    );
+                }
+                Ok(Some(_)) => {
+                    log::info!("   ℹ️  Post-unpublish re-check: overlay still has cert — TaskReplayOverlay will handle");
+                }
+                Err(e) => {
+                    log::warn!("   ⚠️  Post-unpublish re-check failed: {} — TaskReplayOverlay will handle", e);
+                }
+            }
+        });
     }
 
     Ok(txid)
