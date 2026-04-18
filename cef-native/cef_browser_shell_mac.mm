@@ -235,6 +235,11 @@ NSWindow* g_main_window = nullptr;
 NSView* g_header_view = nullptr;
 NSView* g_webview_view = nullptr;
 
+// Content fullscreen state (HTML5 Fullscreen API, e.g. YouTube video)
+static bool g_content_fullscreen = false;
+static NSRect g_pre_fullscreen_frame = NSZeroRect;
+static id g_fullscreen_escape_monitor = nil;
+
 // Overlay windows (created on-demand)
 NSWindow* g_settings_overlay_window = nullptr;
 NSWindow* g_wallet_overlay_window = nullptr;
@@ -297,9 +302,88 @@ void DebugLog(const std::string& message) {
 }
 
 // Handle fullscreen mode transitions (called from SimpleHandler::OnFullscreenModeChange)
+// Uses presentation options to cover the screen (like Chrome's "tab fullscreen")
+// rather than a native macOS Space transition via toggleFullScreen.
 void HandleFullscreenChange(bool fullscreen) {
-    // TODO: Implement macOS fullscreen handling (NSWindow toggleFullScreen)
-    LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "enter" : "exit") + " (macOS stub)");
+    LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "ENTER" : "EXIT"));
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_main_window || !g_header_view || !g_webview_view) return;
+
+        if (fullscreen) {
+            g_pre_fullscreen_frame = [g_main_window frame];
+            g_content_fullscreen = true;
+
+            [g_header_view setHidden:YES];
+
+            NSRect contentRect = [[g_main_window contentView] bounds];
+            [g_webview_view setFrame:contentRect];
+
+            auto* activeTab = TabManager::GetInstance().GetActiveTab();
+            if (activeTab && activeTab->browser) {
+                activeTab->browser->GetHost()->WasResized();
+            }
+
+            [NSApp setPresentationOptions:
+                NSApplicationPresentationAutoHideMenuBar |
+                NSApplicationPresentationAutoHideDock];
+
+            NSRect screenFrame = [[g_main_window screen] frame];
+            [g_main_window setFrame:screenFrame display:YES animate:YES];
+
+            // Catch Escape at the NSEvent level — macOS presentation
+            // options can swallow keys before they reach the CEF view.
+            if (g_fullscreen_escape_monitor) {
+                [NSEvent removeMonitor:g_fullscreen_escape_monitor];
+            }
+            g_fullscreen_escape_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent* (NSEvent* event) {
+                if ([event keyCode] == 53) {  // 53 = kVK_Escape
+                    auto* tab = TabManager::GetInstance().GetActiveTab();
+                    if (tab && tab->browser && tab->browser->GetMainFrame()) {
+                        tab->browser->GetMainFrame()->ExecuteJavaScript(
+                            "document.exitFullscreen()", "", 0);
+                    }
+                    return nil;  // consume
+                }
+                return event;
+            }];
+        } else {
+            g_content_fullscreen = false;
+
+            if (g_fullscreen_escape_monitor) {
+                [NSEvent removeMonitor:g_fullscreen_escape_monitor];
+                g_fullscreen_escape_monitor = nil;
+            }
+
+            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+
+            [g_header_view setHidden:NO];
+
+            if (!NSIsEmptyRect(g_pre_fullscreen_frame)) {
+                [g_main_window setFrame:g_pre_fullscreen_frame display:YES animate:YES];
+            }
+
+            NSRect contentRect = [[g_main_window contentView] bounds];
+            int headerHeight = 96;
+            NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
+                                           contentRect.size.width, headerHeight);
+            [g_header_view setFrame:headerRect];
+
+            NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width,
+                                            contentRect.size.height - headerHeight);
+            [g_webview_view setFrame:webviewRect];
+
+            auto* activeTab = TabManager::GetInstance().GetActiveTab();
+            if (activeTab && activeTab->browser) {
+                activeTab->browser->GetHost()->WasResized();
+            }
+
+            CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+            if (header) {
+                header->GetHost()->WasResized();
+            }
+        }
+    });
 }
 
 // Toggle fullscreen for the main window (called from menu_action "fullscreen")
@@ -2017,19 +2101,21 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     LOG_DEBUG("🔄 Main window resized - updating layout");
 
     NSRect contentRect = [[g_main_window contentView] bounds];
-    int headerHeight = 96;
-    int walletPanelWidth = 250;    // Vertical panel width
-    int walletPanelHeight = 200;   // Vertical panel height
-    int webviewHeight = contentRect.size.height - headerHeight;  // Full height
 
-    // Resize header view (fixed 80px at top)
-    NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
-                                   contentRect.size.width, headerHeight);
-    [g_header_view setFrame:headerRect];
+    if (g_content_fullscreen) {
+        // In content fullscreen: webview fills entire content area, header stays hidden
+        [g_webview_view setFrame:contentRect];
+    } else {
+        int headerHeight = 96;
+        int webviewHeight = contentRect.size.height - headerHeight;
 
-    // Resize webview (full height below header)
-    NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width, webviewHeight);
-    [g_webview_view setFrame:webviewRect];
+        NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
+                                       contentRect.size.width, headerHeight);
+        [g_header_view setFrame:headerRect];
+
+        NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width, webviewHeight);
+        [g_webview_view setFrame:webviewRect];
+    }
 
     // Notify CEF browsers of resize
     CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
