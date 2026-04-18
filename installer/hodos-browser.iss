@@ -37,7 +37,7 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
 SetupIconFile={#ProjectRoot}\cef-native\hodos.ico
-UninstallDisplayIcon={app}\HodosBrowserShell.exe
+UninstallDisplayIcon={app}\HodosBrowser.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -47,7 +47,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; Main executable and helpers
-Source: "{#StagingDir}\HodosBrowserShell.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\HodosBrowser.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\hodos-wallet.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\hodos-adblock.exe"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -65,16 +65,16 @@ Source: "{#StagingDir}\locales\*"; DestDir: "{app}\locales"; Flags: ignoreversio
 Source: "{#StagingDir}\frontend\*"; DestDir: "{app}\frontend"; Flags: ignoreversion recursesubdirs
 
 [Icons]
-Name: "{group}\Hodos Browser"; Filename: "{app}\HodosBrowserShell.exe"
+Name: "{group}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"
 Name: "{group}\{cm:UninstallProgram,Hodos Browser}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowserShell.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"; Tasks: desktopicon
 
 [Run]
 ; Add Windows Firewall rules to prevent the "allow network access" prompt on first launch
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Browser"" dir=in action=allow program=""{app}\HodosBrowserShell.exe"" enable=yes"; Flags: runhidden nowait; StatusMsg: "Configuring firewall..."
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Browser"" dir=in action=allow program=""{app}\HodosBrowser.exe"" enable=yes"; Flags: runhidden nowait; StatusMsg: "Configuring firewall..."
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Wallet"" dir=in action=allow program=""{app}\hodos-wallet.exe"" enable=yes"; Flags: runhidden nowait
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Hodos Adblock"" dir=in action=allow program=""{app}\hodos-adblock.exe"" enable=yes"; Flags: runhidden nowait
-Filename: "{app}\HodosBrowserShell.exe"; Description: "{cm:LaunchProgram,Hodos Browser}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\HodosBrowser.exe"; Description: "{cm:LaunchProgram,Hodos Browser}"; Flags: nowait postinstall skipifsilent
 
 ; --- Clean stale runtime files on install/upgrade ---
 [InstallDelete]
@@ -106,8 +106,8 @@ function IsAppRunning(): Boolean;
 var
   ResultCode: Integer;
 begin
-  // Use tasklist to check if HodosBrowserShell.exe is running
-  Exec('cmd.exe', '/c tasklist /FI "IMAGENAME eq HodosBrowserShell.exe" 2>NUL | find /I "HodosBrowserShell.exe" >NUL', '',
+  // Use tasklist to check if HodosBrowser.exe is running
+  Exec('cmd.exe', '/c tasklist /FI "IMAGENAME eq HodosBrowser.exe" 2>NUL | find /I "HodosBrowser.exe" >NUL', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := (ResultCode = 0);
 end;
