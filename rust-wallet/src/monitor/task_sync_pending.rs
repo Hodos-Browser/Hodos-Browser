@@ -205,27 +205,11 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                     }
                 }
 
-                // Reconcile stale outputs
-                let derivation_prefix = "2-receive address";
-                let derivation_suffix = addr.index.to_string();
-                let owned_utxos: Vec<crate::utxo_fetcher::UTXO> = addr_utxos.iter()
-                    .map(|u| (*u).clone())
-                    .collect();
-
-                match output_repo.reconcile_for_derivation(
-                    state.current_user_id,
-                    Some(derivation_prefix),
-                    Some(&derivation_suffix),
-                    &owned_utxos,
-                    RECONCILE_GRACE_PERIOD_SECS,
-                ) {
-                    Ok(stale) if stale > 0 => {
-                        info!("   🔄 Reconciled {} stale output(s) for address {}", stale, addr.address);
-                        reconciled_count += stale as u32;
-                    }
-                    Ok(_) => {}
-                    Err(e) => warn!("   ⚠️  Failed to reconcile outputs for {}: {}", addr.address, e),
-                }
+                // Reconcile stale outputs — DISABLED (2026-04-19)
+                // Same bug as TaskValidateUtxos: reconcile_for_derivation marks outputs
+                // as externally-spent based on absence from the confirmed UTXO endpoint,
+                // which misses unconfirmed outputs and causes false balance loss.
+                // TODO: Re-enable after adding individual spent-check verification.
 
                 // Never clear pending flag on UTXO discovery — keep checking
                 // for the full 90-day window. Users may reuse addresses or

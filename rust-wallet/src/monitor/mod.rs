@@ -188,13 +188,11 @@ impl Monitor {
             // Post-recovery: force immediate validation of restored data
             let recovery_mode = self.state.recovery_just_completed.swap(false, std::sync::atomic::Ordering::SeqCst);
             if recovery_mode {
-                info!("🔄 Post-recovery: running immediate TaskCheckForProofs + TaskValidateUtxos");
+                info!("🔄 Post-recovery: running immediate TaskCheckForProofs");
                 if let Err(e) = task_check_for_proofs::run(&self.state, &self.client).await {
                     error!("   ❌ Post-recovery TaskCheckForProofs failed: {}", e);
                 }
-                if let Err(e) = task_validate_utxos::run(&self.state).await {
-                    warn!("   ⚠️ Post-recovery TaskValidateUtxos failed: {}", e);
-                }
+                // TaskValidateUtxos disabled — see comment at line ~319
                 last_check_for_proofs = now;
                 last_validate_utxos = now;
             }
@@ -316,13 +314,13 @@ impl Monitor {
                 }
             }
 
-            // TaskValidateUtxos — Re-enabled with safety guards:
-            // - Only validates P2PKH outputs (skips PushDrop/token/backup)
-            // - Skips addresses with in-flight (sending/unsigned) transactions
-            // - Never reconciles against empty API responses
-            // - 5-minute grace period for new outputs
-            // - 30-minute interval (not 10)
-            if now - last_validate_utxos >= self.schedule.validate_utxos {
+            // TaskValidateUtxos — DISABLED (2026-04-19)
+            // Bug: reconcile_for_derivation marks outputs as externally-spent based solely
+            // on absence from the WoC confirmed UTXO endpoint. This causes false positives
+            // when outputs are unconfirmed (mempool-only) or when the API returns partial data.
+            // Result: $13+ in valid unspent outputs wrongly marked non-spendable.
+            // TODO: Re-enable after adding individual spent-check verification before marking.
+            if false && now - last_validate_utxos >= self.schedule.validate_utxos {
                 last_validate_utxos = now;
                 if let Err(e) = task_validate_utxos::run(&self.state).await {
                     warn!("   ⚠️ TaskValidateUtxos failed: {}", e);
