@@ -656,8 +656,22 @@ jobs:
             exit 0
           fi
 
-          # Write EdDSA private key to temp file
-          echo "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_priv.pem
+          # Write EdDSA private key to temp file (strip trailing newline from echo)
+          printf '%s' "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_priv.pem
+
+          # Diagnostic: how many chars did GitHub actually give us?
+          # 44 chars = new 32-byte seed format (correct)
+          # 88 chars = old 64-byte concat format (wrong)
+          # Anything else = malformed
+          KEY_LEN=$(wc -c < /tmp/ed25519_priv.pem | tr -d ' ')
+          echo "=== Secret length: $KEY_LEN chars ==="
+          if [ "$KEY_LEN" = "44" ]; then
+            echo "  -> 44 chars = 32 bytes decoded (Sparkle 'regular seed' format) ✓"
+          elif [ "$KEY_LEN" = "88" ]; then
+            echo "  -> 88 chars = 64 bytes decoded (WRONG — update GitHub secret to 32-byte seed)"
+          else
+            echo "  -> unexpected length, expected 44"
+          fi
 
           # Sparkle 2.x ships sign_update in sparkle-extract/bin/, NOT inside the framework
           SIGN_TOOL="sparkle-extract/bin/sign_update"
