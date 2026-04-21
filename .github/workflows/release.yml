@@ -662,16 +662,30 @@ jobs:
           # Sparkle 2.x ships sign_update in sparkle-extract/bin/, NOT inside the framework
           SIGN_TOOL="sparkle-extract/bin/sign_update"
 
-          if [ ! -x "$SIGN_TOOL" ]; then
-            echo "ERROR: Sparkle sign_update tool not found at $SIGN_TOOL"
-            echo "Contents of sparkle-extract/:"
-            ls -la sparkle-extract/ 2>/dev/null || echo "sparkle-extract/ missing"
+          echo "=== sparkle-extract/bin contents ==="
+          ls -la sparkle-extract/bin/ 2>/dev/null || echo "sparkle-extract/bin missing"
+          echo "=== DMG ==="
+          ls -la "$DMG" 2>/dev/null || { echo "ERROR: DMG not found at $DMG"; exit 1; }
+
+          if [ ! -f "$SIGN_TOOL" ]; then
+            echo "ERROR: sign_update not found at $SIGN_TOOL"
             exit 1
           fi
+          chmod +x "$SIGN_TOOL" || true
 
-          EDDSA_SIG=$("$SIGN_TOOL" "$DMG" --ed-key-file /tmp/ed25519_priv.pem 2>&1 | grep "sparkle:edSignature=" | cut -d'"' -f2)
+          # Run sign_update capturing BOTH stdout and stderr so we can see errors
+          # (don't pipe through grep — pipefail swallows diagnostic output on failure)
+          SIGN_OUT=$("$SIGN_TOOL" "$DMG" --ed-key-file /tmp/ed25519_priv.pem 2>&1) || {
+            echo "ERROR: sign_update failed with exit code $?"
+            echo "Output was:"
+            echo "$SIGN_OUT"
+            exit 1
+          }
+          echo "sign_update output: $SIGN_OUT"
+
+          EDDSA_SIG=$(echo "$SIGN_OUT" | grep -o 'sparkle:edSignature="[^"]*"' | cut -d'"' -f2)
           if [ -z "$EDDSA_SIG" ]; then
-            echo "ERROR: sign_update produced empty signature"
+            echo "ERROR: could not extract sparkle:edSignature from sign_update output"
             exit 1
           fi
           echo "EdDSA signature: ${EDDSA_SIG:0:20}..."
