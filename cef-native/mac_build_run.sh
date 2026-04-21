@@ -38,5 +38,8 @@ pkill -9 HodosBrowser 2>/dev/null || true
 
 # Launch in dev mode (separate data directory from installed app)
 export HODOS_DEV=1
+# Enable in-process GPU for ad-hoc signed dev builds (GPU Helper subprocess
+# requires proper code signing that only the release build has)
+export HODOS_MAC_DEV_FLAGS=1
 echo "Launching HodosBrowser (DEV MODE)..."
 ./HodosBrowser.app/Contents/MacOS/HodosBrowser

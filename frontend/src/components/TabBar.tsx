@@ -85,20 +85,32 @@ export const TabBar: React.FC<TabBarProps> = ({
   }, []);
 
   const handlePointerDown = useCallback((e: React.PointerEvent, index: number) => {
-    if (!onReorderTabs || tabs.length < 2) return;
     // Only primary button
     if (e.button !== 0) return;
     // Don't start drag when clicking the close button
     if ((e.target as HTMLElement).closest('.tab-close-btn')) return;
+
+    // Chrome behavior: select (activate) the tab immediately on mouseDown,
+    // before any drag tracking. This way dragging an inactive tab reorders/
+    // tears it off instead of moving the window.
+    const clickedTab = tabs[index];
+    if (clickedTab && clickedTab.id !== activeTabId) {
+      onSwitchTab(clickedTab.id);
+    }
+
+    // Always capture the pointer and record the ref on tab clicks — even for
+    // single-tab windows. Without capture, macOS's transparent-titlebar drag
+    // takes over at the OS level (FullSizeContentView makes the header region
+    // a drag zone) and our React stopPropagation can't prevent it.
+    // The ref must also be set so releaseCapture() in resetDragState() can
+    // find the element+pointerId to release cleanly.
     const el = tabElsRef.current[index];
     const tabRect = el ? el.getBoundingClientRect() : null;
     pointerDownRef.current = { index, startX: e.clientX, startY: e.clientY, pointerId: e.pointerId, tabRect };
-    // Capture pointer so events continue even when cursor leaves the header HWND
-    // (CEF windowed mode: sibling HWNDs steal mouse events without capture)
     if (el) {
       try { el.setPointerCapture(e.pointerId); } catch {}
     }
-  }, [onReorderTabs, tabs.length]);
+  }, [tabs, activeTabId, onSwitchTab]);
 
   // Track dropIndex in a ref so pointerup can read it synchronously
   const dropIndexRef = useRef<number | null>(null);
@@ -148,6 +160,9 @@ export const TabBar: React.FC<TabBarProps> = ({
 
       const dx = Math.abs(e.clientX - down.startX);
       const dy = e.clientY - down.startY;
+
+      // Only start drag if reorder/tearoff is possible (2+ tabs)
+      if (!onReorderTabsRef.current || tabs.length < 2) return;
 
       // Start dragging after threshold (horizontal or vertical)
       if (!isDraggingRef.current && (dx >= DRAG_THRESHOLD || dy > TEAROFF_THRESHOLD_Y)) {

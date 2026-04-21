@@ -2658,6 +2658,14 @@ void CloseWalletOverlay() {
 
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+
+    if (!g_main_window || ![g_main_window isVisible] || [g_main_window frame].size.width < 100) {
+        LOG_WARNING("Wallet overlay skipped — main window not ready (visible=" +
+            std::string(g_main_window && [g_main_window isVisible] ? "yes" : "no") +
+            " width=" + std::to_string(g_main_window ? (int)[g_main_window frame].size.width : 0) + ")");
+        return;
+    }
+
     g_mac_wallet_icon_right_offset = iconRightOffset;
 
     // Position: fixed-width panel, flush right, flush below header, full remaining height

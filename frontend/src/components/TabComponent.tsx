@@ -51,6 +51,11 @@ export const TabComponent: React.FC<TabComponentProps> = ({
       ref={tabRef}
       onClick={onClick}
       onPointerDown={onPointerDown}
+      onMouseDown={(e: React.MouseEvent) => {
+        // Prevent bubbling to TabBar's window-drag handler so clicking
+        // any tab (active or inactive) never triggers window_start_drag.
+        e.stopPropagation();
+      }}
       sx={{
         position: 'relative',
         flex: 1,
