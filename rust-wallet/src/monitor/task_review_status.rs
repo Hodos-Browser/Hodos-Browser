@@ -68,9 +68,12 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     {
         // Find outputs that belong to completed transactions but aren't spendable
         // (and aren't already spent by another transaction).
-        // IMPORTANT: Exclude outputs marked 'external-spend' (confirmed spent on-chain by
-        // unknown tx) and 'stale-backup' (old backup infrastructure outputs cleared by
-        // stale detection — should not be restored to spendable).
+        // IMPORTANT: Only fix outputs where spending_description is NULL.
+        // If spending_description is set, something already decided this output is
+        // spent/reserved — TaskReviewStatus must not override that judgment.
+        // Patterns we must NOT touch: 'spent-by:*' (reconciliation), 'dss:*' (suspected
+        // double-spend), 'double-spend-detected', 'external-spend', 'stale-backup',
+        // 'spent-by-backup-*', 'failed-tx-output', or any txid reservation.
         let mut stmt = conn.prepare(
             "SELECT o.outputId, o.txid, t.id
              FROM outputs o
@@ -78,7 +81,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
              WHERE t.status = 'completed'
              AND o.spendable = 0
              AND o.spent_by IS NULL
-             AND (o.spending_description IS NULL OR (o.spending_description NOT IN ('external-spend', 'stale-backup') AND o.spending_description NOT LIKE 'spent-by-backup-%'))"
+             AND o.spending_description IS NULL"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let needs_fix: Vec<(i64, String, i64)> = stmt.query_map(

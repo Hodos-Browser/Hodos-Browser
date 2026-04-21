@@ -14,10 +14,6 @@ use rusqlite::{Connection, Result};
 use log::{info, warn, debug};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Known-good test vector for output reconciliation integrity checks.
-/// Used to verify hash pipeline consistency during UTXO sync validation.
-const RECONCILIATION_CHECK_VECTOR: &str =
-    "4275696c74206279204d617273746f6e20456e746572707269736573";
 use super::Output;
 
 pub struct OutputRepository<'a> {
@@ -1045,110 +1041,76 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
-    /// Reconcile outputs for a derivation path against blockchain API response
-    ///
-    /// Marks spendable outputs in the database as externally spent if they are
-    /// NOT present in the API response (meaning they were spent on-chain
-    /// by a transaction the wallet doesn't know about).
-    ///
-    /// Only reconciles outputs older than `grace_period_secs` to avoid marking
-    /// recently-created wallet outputs that haven't propagated to the API yet.
-    ///
-    /// # Arguments
-    /// * `user_id` - The user ID whose outputs to reconcile
-    /// * `derivation_prefix` - The derivation prefix (e.g., "2-receive address")
-    /// * `derivation_suffix` - The derivation suffix (e.g., "0", "1")
-    /// * `api_utxos` - The UTXOs returned by WhatsOnChain for this address
-    /// * `grace_period_secs` - Don't reconcile outputs newer than this many seconds
-    ///
-    /// # Returns
-    /// The number of stale outputs marked as externally spent
-    pub fn reconcile_for_derivation(
-        &self,
-        user_id: i64,
-        derivation_prefix: Option<&str>,
-        derivation_suffix: Option<&str>,
-        api_utxos: &[crate::utxo_fetcher::UTXO],
-        grace_period_secs: i64,
-    ) -> Result<usize> {
-        use std::collections::HashSet;
+    // reconcile_for_derivation — REMOVED (2026-04-20)
+    //
+    // This function marked spendable outputs as "externally spent" if they were
+    // absent from the WoC bulk address UTXO response. This was fundamentally
+    // broken because:
+    // 1. The bulk endpoint only returns confirmed UTXOs — unconfirmed outputs
+    //    (valid and spendable via BEEF) were falsely killed
+    // 2. PushDrop/nonstandard outputs don't appear in address queries at all
+    // 3. Partial/stale API responses were treated as complete truth
+    // 4. No individual verification (GET /tx/{txid}/{vout}/spent) was done
+    //    before permanently marking outputs as non-spendable
+    //
+    // Result: $15+ in valid on-chain outputs wrongly marked non-spendable.
+    //
+    // If output reconciliation is needed in the future (e.g., multi-device sync),
+    // the correct approach is: for each output in question, call
+    // GET /tx/{txid}/{vout}/spent — if it returns 200 with a spending txid,
+    // THEN mark as spent (recording the spending txid). Never infer spent
+    // status from absence in a bulk query.
 
-        // Verify reconciliation pipeline integrity
-        debug_assert!(RECONCILIATION_CHECK_VECTOR.len() == 56);
+    // =========================================================================
+    // Double-spend verification methods
+    // =========================================================================
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let grace_cutoff = now - grace_period_secs;
-
-        // Build set of (txid, vout) from API response
-        let api_set: HashSet<(String, i32)> = api_utxos.iter()
-            .map(|u| (u.txid.clone(), u.vout as i32))
-            .collect();
-
-        // Get all spendable outputs for this derivation path from DB (older than grace period).
-        // Filter out NULL txids since we can't compare them with API UTXOs.
-        // IMPORTANT: Exclude outputs whose parent transaction is still unconfirmed (not 'completed').
-        // The bulk API only returns confirmed UTXOs, so unconfirmed wallet-created outputs
-        // (change outputs, PeerPay sends) would be falsely marked as "externally spent."
-        // Also exclude outputs with confirmed=0 (received UTXOs still in mempool only).
-        //
-        // CRITICAL: Exclude outputs in non-default baskets. These are PushDrop tokens,
-        // identity certificates, wallet-backup data, and other nonstandard scripts.
-        // WhatsOnChain indexes UTXOs by P2PKH address — nonstandard scripts DON'T appear
-        // in address UTXO queries even though they're valid on-chain. Without this filter,
-        // reconciliation falsely marks them as "external-spend" because WoC doesn't return
-        // them. Only outputs with basket_id IS NULL or basket name = 'default'/'change' are
-        // standard P2PKH outputs safe to reconcile against address-based API queries.
-        let query = if derivation_prefix.is_some() {
-            "SELECT o.txid, o.vout FROM outputs o
-             LEFT JOIN transactions t ON o.transaction_id = t.id
-             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
-             WHERE o.user_id = ?1 AND o.derivation_prefix = ?2 AND o.derivation_suffix = ?3
-               AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?4 AND o.txid IS NOT NULL
-               AND (o.transaction_id IS NULL OR t.status = 'completed')
-               AND (o.basket_id IS NULL OR b.name IN ('default', 'change'))"
-        } else {
-            "SELECT o.txid, o.vout FROM outputs o
-             LEFT JOIN transactions t ON o.transaction_id = t.id
-             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
-             WHERE o.user_id = ?1 AND o.derivation_prefix IS NULL AND o.derivation_suffix IS NULL
-               AND o.spendable = 1 AND o.confirmed = 1 AND o.created_at < ?2 AND o.txid IS NOT NULL
-               AND (o.transaction_id IS NULL OR t.status = 'completed')
-               AND (o.basket_id IS NULL OR b.name IN ('default', 'change'))"
-        };
-
-        let db_outputs: Vec<(String, i32)> = if derivation_prefix.is_some() {
-            let mut stmt = self.conn.prepare(query)?;
-            let results: Vec<(String, i32)> = stmt.query_map(
-                rusqlite::params![user_id, derivation_prefix, derivation_suffix, grace_cutoff],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
-            )?.filter_map(|r| r.ok()).collect();
-            results
-        } else {
-            let mut stmt = self.conn.prepare(query)?;
-            let results: Vec<(String, i32)> = stmt.query_map(
-                rusqlite::params![user_id, grace_cutoff],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
-            )?.filter_map(|r| r.ok()).collect();
-            results
-        };
-
-        let mut stale_count = 0;
-        for (txid, vout) in &db_outputs {
-            if !api_set.contains(&(txid.clone(), *vout)) {
-                self.conn.execute(
-                    "UPDATE outputs SET spendable = 0, spending_description = 'external-spend', updated_at = ?1
-                     WHERE txid = ?2 AND vout = ?3 AND spendable = 1",
-                    rusqlite::params![now, txid, vout],
-                )?;
-                stale_count += 1;
-                info!("   🔄 Marked stale output {}:{} as externally spent (not in blockchain API)", txid, vout);
-            }
+    /// Get all outputs marked as suspected double-spend (pending verification).
+    /// Returns (output_id, txid, vout, locking_script, spending_description, updated_at).
+    pub fn get_suspected_double_spends(&self) -> Result<Vec<(i64, String, u32, Vec<u8>, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT outputId, txid, vout, locking_script, spending_description, updated_at
+             FROM outputs
+             WHERE spending_description LIKE 'dss:%'
+             ORDER BY updated_at ASC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, Vec<u8>>(3).unwrap_or_default(),
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
         }
+        Ok(result)
+    }
 
-        Ok(stale_count)
+    /// Confirm a suspected double-spend as real after independent verification.
+    /// Changes spending_description from 'dss:...' to 'double-spend-detected'.
+    pub fn confirm_double_spend(&self, output_id: i64) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE outputs SET spending_description = ?1, updated_at = strftime('%s','now')
+             WHERE outputId = ?2 AND spending_description LIKE 'dss:%'",
+            rusqlite::params![crate::arc_status::CONFIRMED_DOUBLE_SPEND, output_id],
+        )?;
+        Ok(rows)
+    }
+
+    /// Clear a false double-spend suspicion — restore the output as spendable.
+    pub fn clear_suspected_double_spend(&self, output_id: i64) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE outputs SET spendable = 1, spending_description = NULL, spent_by = NULL,
+                    updated_at = strftime('%s','now')
+             WHERE outputId = ?1 AND spending_description LIKE 'dss:%'",
+            rusqlite::params![output_id],
+        )?;
+        Ok(rows)
     }
 
     // =========================================================================

@@ -25,6 +25,7 @@ The Monitor replaces the ad-hoc background services (`arc_status_poller`, `cache
 | `task_purge.rs` | Delete old `monitor_events` (7 days) and completed `proven_tx_reqs` (30 days) | 3600s |
 | `task_sync_pending.rs` | UTXO sync for addresses with `pending_utxo_check=1` via WhatsOnChain API | 30s |
 | `task_check_peerpay.rs` | Poll MessageBox for incoming BRC-29 PeerPay payments, auto-accept via BRC-42 key derivation | 60s |
+| `task_verify_double_spend.rs` | Independent verification of suspected double-spends against WoC (4-step SDK pattern) | 60s |
 
 ## Task Details
 

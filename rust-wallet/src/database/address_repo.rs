@@ -258,7 +258,7 @@ impl<'a> AddressRepository<'a> {
 
         let rows_affected = self.conn.execute(
             "UPDATE addresses SET pending_utxo_check = 1, created_at = ?1
-             WHERE wallet_id = ?2",
+             WHERE wallet_id = ?2 AND (\"index\" >= 0 OR \"index\" = -1)",
             rusqlite::params![now, wallet_id],
         )?;
 
