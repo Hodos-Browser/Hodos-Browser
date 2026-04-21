@@ -61,20 +61,6 @@ const AboutSettings: React.FC = () => {
               />
             }
           />
-          <SettingRow
-            label="Update notifications"
-            description="Show a dialog when a new version is available"
-            control={
-              <Switch
-                checked={settings.browser.autoUpdateNotifications ?? false}
-                onChange={(e) => updateSetting('browser.autoUpdateNotifications', e.target.checked)}
-                sx={{
-                  '& .MuiSwitch-switchBase.Mui-checked': { color: '#a67c00' },
-                  '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#a67c00' },
-                }}
-              />
-            }
-          />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <button
               onClick={handleCheckForUpdates}

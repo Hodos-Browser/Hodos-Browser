@@ -25,10 +25,10 @@ pub mod task_review_status;
 pub mod task_purge;
 pub mod task_sync_pending;
 pub mod task_check_peerpay;
-pub mod task_validate_utxos;
 pub mod task_backup;
 pub mod task_replay_overlay;
 pub mod task_consolidate_dust;
+pub mod task_verify_double_spend;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -50,10 +50,10 @@ struct TaskSchedule {
     purge: u64,
     sync_pending: u64,
     check_peerpay: u64,
-    validate_utxos: u64,
     backup: u64,
     replay_overlay: u64,
     consolidate_dust: u64,
+    verify_double_spend: u64,
 }
 
 impl Default for TaskSchedule {
@@ -67,10 +67,10 @@ impl Default for TaskSchedule {
             purge: 3600,              // 1 hour
             sync_pending: 30,         // 30 seconds
             check_peerpay: 60,        // 1 minute
-            validate_utxos: 1800,     // 30 minutes
             backup: 10800,            // 3 hours (180 minutes) — significant events trigger sooner via backup_check_needed flag
             replay_overlay: 300,      // 5 minutes — retry overlay notification for unpublished certs
             consolidate_dust: 86400,  // 24 hours — daily dust consolidation check
+            verify_double_spend: 60,  // 1 minute — fast verification for suspected double-spends
         }
     }
 }
@@ -140,12 +140,12 @@ impl Monitor {
         info!("   TaskUnFail: every {}s", self.schedule.unfail);
         info!("   TaskReviewStatus: every {}s", self.schedule.review_status);
         info!("   TaskPurge: every {}s", self.schedule.purge);
-        info!("   TaskSyncPending: every {}s (pending addresses only)", self.schedule.sync_pending);
+        info!("   TaskSyncPending: every {}s (tiered: 30s fresh, 3m recent, 30m old)", self.schedule.sync_pending);
         info!("   TaskCheckPeerPay: every {}s", self.schedule.check_peerpay);
-        info!("   TaskValidateUtxos: every {}s (all spendable outputs)", self.schedule.validate_utxos);
         info!("   TaskBackup: every {}s (if dirty)", self.schedule.backup);
         info!("   TaskReplayOverlay: every {}s (pending overlay certs)", self.schedule.replay_overlay);
         info!("   TaskConsolidateDust: every {}s (dust UTXO sweep)", self.schedule.consolidate_dust);
+        info!("   TaskVerifyDoubleSpend: every {}s (independent DS verification)", self.schedule.verify_double_spend);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -156,10 +156,10 @@ impl Monitor {
         let mut last_purge: u64 = 0;
         let mut last_sync_pending: u64 = 0;
         let mut last_check_peerpay: u64 = 0;
-        let mut last_validate_utxos: u64 = 0; // 0 = runs on first tick
         let mut last_backup: u64 = Self::now_secs(); // Don't run on first tick — wait for interval
         let mut last_replay_overlay: u64 = 0; // 0 = check on first tick
         let mut last_consolidate_dust: u64 = Self::now_secs(); // Don't run on first tick — daily task
+        let mut last_verify_double_spend: u64 = 0; // Check on first tick
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -188,15 +188,11 @@ impl Monitor {
             // Post-recovery: force immediate validation of restored data
             let recovery_mode = self.state.recovery_just_completed.swap(false, std::sync::atomic::Ordering::SeqCst);
             if recovery_mode {
-                info!("🔄 Post-recovery: running immediate TaskCheckForProofs + TaskValidateUtxos");
+                info!("🔄 Post-recovery: running immediate TaskCheckForProofs");
                 if let Err(e) = task_check_for_proofs::run(&self.state, &self.client).await {
                     error!("   ❌ Post-recovery TaskCheckForProofs failed: {}", e);
                 }
-                if let Err(e) = task_validate_utxos::run(&self.state).await {
-                    warn!("   ⚠️ Post-recovery TaskValidateUtxos failed: {}", e);
-                }
                 last_check_for_proofs = now;
-                last_validate_utxos = now;
             }
 
             // TaskCheckForProofs
@@ -316,19 +312,15 @@ impl Monitor {
                 }
             }
 
-            // TaskValidateUtxos — Re-enabled with safety guards:
-            // - Only validates P2PKH outputs (skips PushDrop/token/backup)
-            // - Skips addresses with in-flight (sending/unsigned) transactions
-            // - Never reconciles against empty API responses
-            // - 5-minute grace period for new outputs
-            // - 30-minute interval (not 10)
-            if now - last_validate_utxos >= self.schedule.validate_utxos {
-                last_validate_utxos = now;
-                if let Err(e) = task_validate_utxos::run(&self.state).await {
-                    warn!("   ⚠️ TaskValidateUtxos failed: {}", e);
-                    self.log_event("TaskValidateUtxos:error", Some(&e));
+            // TaskVerifyDoubleSpend — independent verification of suspected double-spends
+            if now - last_verify_double_spend >= self.schedule.verify_double_spend {
+                last_verify_double_spend = now;
+                if let Err(e) = task_verify_double_spend::run(&self.state, &self.client).await {
+                    error!("   ❌ TaskVerifyDoubleSpend failed: {}", e);
+                    self.log_event("TaskVerifyDoubleSpend:error", Some(&e));
                 }
             }
+
         }
 
         info!("🛑 Monitor stopped");

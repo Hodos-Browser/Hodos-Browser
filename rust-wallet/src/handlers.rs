@@ -2393,8 +2393,6 @@ pub async fn wallet_sync(
     let mut synced_count = 0u32;
     let mut new_utxo_count = 0u32;
     let mut reconciled_count = 0u32;
-    // Grace period: don't mark outputs as externally spent if created < 10 min ago
-    const RECONCILE_GRACE_PERIOD_SECS: i64 = 600;
     {
         let db = state.database.lock().unwrap();
         let address_repo = crate::database::AddressRepository::new(db.connection());
@@ -2425,34 +2423,10 @@ pub async fn wallet_sync(
                     let _ = address_repo.mark_used(addr_id);
                 }
 
-                // Reconcile: mark DB outputs as externally spent if they no longer
-                // appear in the WoC API response. This catches outputs spent on-chain
-                // by transactions the wallet lost track of (e.g., marked failed but
-                // actually mined). Without this, balance stays inflated and the wallet
-                // tries to double-spend already-spent UTXOs.
-                let derivation_prefix = "2-receive address";
-                let derivation_suffix = addr.index.to_string();
-                let owned_utxos: Vec<crate::utxo_fetcher::UTXO> = addr_utxos.iter()
-                    .map(|u| (*u).clone())
-                    .collect();
-
-                match output_repo.reconcile_for_derivation(
-                    state.current_user_id,
-                    Some(derivation_prefix),
-                    Some(&derivation_suffix),
-                    &owned_utxos,
-                    RECONCILE_GRACE_PERIOD_SECS,
-                ) {
-                    Ok(stale) if stale > 0 => {
-                        log::info!("   🔄 Reconciled {} stale output(s) for address {} (marked as externally spent)",
-                                  stale, addr.address);
-                        reconciled_count += stale as u32;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!("   ⚠️  Failed to reconcile outputs for {}: {}", addr.address, e);
-                    }
-                }
+                // No reconcile — discovery only. Never mark existing outputs as spent
+                // based on absence from the bulk API response. The only way to confirm
+                // an output is spent is via GET /tx/{txid}/{vout}/spent which returns
+                // the actual spending transaction.
 
                 // Don't clear pending flag here — the 90-day stale timeout
                 // in clear_stale_pending_addresses handles expiry. Clearing early
@@ -5455,39 +5429,25 @@ pub(crate) async fn create_action_internal(
                             log::info!("   🗑️  Removed {} ghost change output(s) from failed broadcast", deleted_count);
                         }
 
-                        // Check if this is a confirmed double-spend error.
-                        // If so, the inputs ARE spent on-chain — do NOT restore them.
-                        // "Missing inputs" is NOT included — could be BEEF validation failure
-                        // where inputs are still spendable. Safe default: restore inputs.
-                        // TaskUnFail/TaskValidateUtxos will catch genuine on-chain spends.
+                        // Check if this is a double-spend error.
+                        // If so, mark inputs as SUSPECTED (not confirmed) — TaskVerifyDoubleSpend
+                        // will verify independently against WoC before confirming.
+                        // "Missing inputs" is NOT included — could be BEEF validation failure.
                         let is_double_spend = crate::arc_status::is_double_spend_error(&e.to_string());
 
                         if is_double_spend {
-                            // Mark inputs as externally spent — they're gone on-chain.
-                            // Use spending_description='double-spend-detected' so the
-                            // restore_spent_by_txid below won't match them.
-                            let marked = db.connection().execute(
-                                "UPDATE outputs SET spending_description = 'double-spend-detected'
-                                 WHERE spending_description = ?1 AND spendable = 0",
-                                rusqlite::params![&final_txid],
-                            ).unwrap_or(0);
-                            // Also check placeholder
-                            let marked2 = if let Some(ref placeholder) = reservation_placeholder {
-                                db.connection().execute(
-                                    "UPDATE outputs SET spending_description = 'double-spend-detected'
-                                     WHERE spending_description = ?1 AND spendable = 0",
-                                    rusqlite::params![placeholder],
-                                ).unwrap_or(0)
-                            } else { 0 };
-                            if marked + marked2 > 0 {
-                                log::warn!("   ⚠️  Double-spend detected: marked {} input(s) as externally spent \
-                                            (will NOT restore — they're spent on-chain)", marked + marked2);
-                            }
+                            // Mark inputs as suspected double-spend for independent verification.
+                            // Use 'dss:{txid}' so restore_spent_by_txid below won't match them.
+                            crate::arc_status::mark_inputs_suspected(
+                                db.connection(),
+                                &final_txid,
+                                reservation_placeholder.as_deref(),
+                            );
                         }
 
                         // Restore input outputs that were reserved for this transaction.
-                        // If double-spend was detected above, the spending_description was
-                        // changed to 'double-spend-detected', so this restore won't match them.
+                        // If suspected double-spend was detected above, the spending_description
+                        // was changed to 'dss:{txid}', so this restore won't match them.
                         match output_repo.restore_spent_by_txid(&final_txid) {
                             Ok(count) if count > 0 => {
                                 log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
@@ -7619,26 +7579,23 @@ pub async fn process_action(
 
         let broadcast_result = broadcast_transaction(&raw_tx, Some(&state.database), Some(&txid)).await;
 
-        // Handle double-spend / missing-inputs errors by marking inputs as externally spent.
-        // This prevents the wallet from repeatedly picking the same dead UTXOs.
+        // Handle double-spend errors by marking inputs as SUSPECTED (not confirmed).
+        // TaskVerifyDoubleSpend will verify independently against WoC.
+        // Uses centralized arc_status::is_double_spend_error() instead of inline matching.
         if let Err(ref e) = broadcast_result {
-            let error_str = e.to_string().to_lowercase();
-            let is_double_spend = error_str.contains("double spend")
-                || error_str.contains("double-spend")
-                || error_str.contains("txn-mempool-conflict")
-                || error_str.contains("missing inputs")
-                || error_str.contains("missingorspent");
+            let is_double_spend = crate::arc_status::is_double_spend_error(&e.to_string());
 
             if is_double_spend && !input_utxos.is_empty() {
-                log::warn!("   ⚠️  Double-spend/missing-inputs detected — marking {} input(s) as externally spent",
+                log::warn!("   ⚠️  Suspected double-spend — marking {} input(s) for verification",
                            input_utxos.len());
 
+                let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, &txid);
                 let db = state.database.lock().unwrap();
                 for utxo in &input_utxos {
                     let _ = db.connection().execute(
-                        "UPDATE outputs SET spendable = 0, spending_description = 'double-spend-detected'
-                         WHERE txid = ?1 AND vout = ?2 AND spendable = 0",
-                        rusqlite::params![&utxo.txid, utxo.vout],
+                        "UPDATE outputs SET spending_description = ?1
+                         WHERE txid = ?2 AND vout = ?3 AND spendable = 0",
+                        rusqlite::params![&suspected_desc, &utxo.txid, utxo.vout],
                     );
                 }
                 drop(db);
@@ -11118,9 +11075,11 @@ pub async fn wallet_activity(
                     MIN(o.confirmed) as confirmed
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1
                AND o.satoshis > 0
                AND o.change = 0
+               AND (b.name IS NULL OR b.name != 'wallet-backup')
              GROUP BY COALESCE(o.txid, CAST(o.outputId AS TEXT))
              ORDER BY created_at DESC"
         ) {
@@ -11442,38 +11401,67 @@ async fn adopt_onchain_backup(
     previous_pushdrop: &mut Option<(String, u32, i64, String)>,
     previous_marker: &mut Option<(String, u32, i64, String)>,
 ) {
+    // Fetch raw tx hex — NOT the JSON endpoint, which truncates large scriptPubKey.hex fields.
+    // This matches the pattern used by fetch_onchain_backup() for recovery.
     let tx_url = format!(
-        "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
+        "https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex",
         chain_txid
     );
-    let tx_data = match client.get(&tx_url).send().await {
-        Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+    let raw_hex = match client.get(&tx_url).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                log::warn!("   ⚠️  WoC returned status {} for tx {}", resp.status(), &chain_txid[..16.min(chain_txid.len())]);
+                return;
+            }
+            match resp.text().await {
+                Ok(text) => text.trim().to_string(),
+                Err(e) => {
+                    log::warn!("   ⚠️  Failed to read tx hex for {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
+                    return;
+                }
+            }
+        }
         Err(e) => {
             log::warn!("   ⚠️  Failed to fetch on-chain backup tx {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
             return;
         }
     };
 
-    if let Some(tx_data) = tx_data {
-        if let Some(vouts) = tx_data["vout"].as_array() {
-            // PushDrop is vout 0 (nonstandard script with encrypted backup data)
-            if let Some(vout0) = vouts.get(0) {
-                let sats = (vout0["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
-                let script_hex = vout0["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
-                if sats > 0 && !script_hex.is_empty() {
-                    *previous_pushdrop = Some((chain_txid.to_string(), 0, sats, script_hex));
-                    log::info!("   ✅ Adopted on-chain PushDrop: {} sats at {}:0", sats, &chain_txid[..16.min(chain_txid.len())]);
-                }
+    let raw_tx = match hex::decode(&raw_hex) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!("   ⚠️  Invalid hex for tx {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
+            return;
+        }
+    };
+
+    log::info!("   📦 Fetched raw backup tx: {} bytes", raw_tx.len());
+
+    // PushDrop is vout 0 (nonstandard script with encrypted backup data)
+    match extract_output_value_and_script(&raw_tx, 0) {
+        Ok((sats, script_bytes)) => {
+            if sats > 0 && !script_bytes.is_empty() {
+                log::info!("   ✅ Adopted on-chain PushDrop: {} sats, script {} bytes at {}:0",
+                    sats, script_bytes.len(), &chain_txid[..16.min(chain_txid.len())]);
+                *previous_pushdrop = Some((chain_txid.to_string(), 0, sats, hex::encode(&script_bytes)));
             }
-            // Marker is vout 1 (P2PKH at backup address)
-            if let Some(vout1) = vouts.get(1) {
-                let sats = (vout1["value"].as_f64().unwrap_or(0.0) * 100_000_000.0) as i64;
-                let script_hex = vout1["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string();
-                if sats > 0 && !script_hex.is_empty() {
-                    *previous_marker = Some((chain_txid.to_string(), 1, sats, script_hex));
-                    log::info!("   ✅ Adopted on-chain marker: {} sats at {}:1", sats, &chain_txid[..16.min(chain_txid.len())]);
-                }
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to extract PushDrop (vout 0) from {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
+        }
+    }
+
+    // Marker is vout 1 (P2PKH at backup address)
+    match extract_output_value_and_script(&raw_tx, 1) {
+        Ok((sats, script_bytes)) => {
+            if sats > 0 && !script_bytes.is_empty() {
+                log::info!("   ✅ Adopted on-chain marker: {} sats, script {} bytes at {}:1",
+                    sats, script_bytes.len(), &chain_txid[..16.min(chain_txid.len())]);
+                *previous_marker = Some((chain_txid.to_string(), 1, sats, hex::encode(&script_bytes)));
             }
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to extract marker (vout 1) from {}: {}", &chain_txid[..16.min(chain_txid.len())], e);
         }
     }
 
@@ -11679,9 +11667,49 @@ pub async fn do_onchain_backup(
                     &db_txid[..16.min(db_txid.len())], &best_txid[..16.min(best_txid.len())], best_height);
                 adopt_onchain_backup(&client, best_txid, &mut previous_pushdrop, &mut previous_marker).await;
             } else {
-                // DB backup not found and no markers on-chain (WoC might have returned empty
-                // due to network error, or markers were all consumed). Trust DB.
-                log::warn!("   ⚠️  No markers found on-chain — trusting DB backup {}", &db_txid[..16.min(db_txid.len())]);
+                // DB backup not found and no markers on-chain. Two possible causes:
+                // 1. WoC returned empty due to network error (trust DB)
+                // 2. A previous backup was broadcast but DB record was lost (crash between
+                //    broadcast and Step 12 DB write). The old outputs are spent on-chain
+                //    but DB still thinks they're the current backup.
+                //
+                // Verify the specific DB outputs are still unspent before trusting them.
+                let mut db_outputs_valid = true;
+                if let Some(ref pd) = previous_pushdrop {
+                    let spent_url = format!(
+                        "https://api.whatsonchain.com/v1/bsv/main/tx/{}/{}/spent",
+                        pd.0, pd.1
+                    );
+                    match client.get(&spent_url).send().await {
+                        Ok(resp) if resp.status().as_u16() == 200 => {
+                            // Output IS spent on-chain — DB is stale
+                            let spent_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                            let spending_txid = spent_body["txid"].as_str().unwrap_or("unknown");
+                            log::warn!("   ⚠️  DB backup PushDrop {}:{} is SPENT on-chain by {} — DB is stale",
+                                &pd.0[..16.min(pd.0.len())], pd.1, &spending_txid[..16.min(spending_txid.len())]);
+                            db_outputs_valid = false;
+
+                            // Try to adopt the spending tx as the current backup
+                            // (it likely has the new PushDrop at vout 0 and marker at vout 1)
+                            log::info!("   🔍 Attempting to adopt spending tx {} as current backup", &spending_txid[..16.min(spending_txid.len())]);
+                            adopt_onchain_backup(&client, spending_txid, &mut previous_pushdrop, &mut previous_marker).await;
+                        }
+                        Ok(resp) if resp.status().as_u16() == 404 => {
+                            // Output is unspent — DB is correct, WoC address query was likely a network blip
+                            log::info!("   ✅ DB backup PushDrop {}:{} confirmed unspent — trusting DB",
+                                &pd.0[..16.min(pd.0.len())], pd.1);
+                        }
+                        Ok(resp) => {
+                            log::warn!("   ⚠️  Unexpected WoC spent-check status {} — trusting DB", resp.status());
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️  WoC spent-check failed: {} — trusting DB", e);
+                        }
+                    }
+                }
+                if db_outputs_valid {
+                    log::warn!("   ⚠️  No markers found on-chain — trusting DB backup {}", &db_txid[..16.min(db_txid.len())]);
+                }
             }
         } else {
             // No backup in DB — discovery mode (first backup or recovered wallet)
@@ -12127,23 +12155,18 @@ pub async fn do_onchain_backup(
         Err(e) => {
             log::error!("   ❌ Backup broadcast failed: {} — rolling back placeholder", e);
 
-            // If double-spend/missing-inputs, the inputs are spent on-chain.
-            // Mark them so rollback_backup won't restore them.
-            let error_lower = e.to_lowercase();
-            let is_double_spend = error_lower.contains("double spend")
-                || error_lower.contains("double-spend")
-                || error_lower.contains("txn-mempool-conflict")
-                || error_lower.contains("missing inputs")
-                || error_lower.contains("missingorspent");
-            if is_double_spend {
+            // If double-spend/missing-inputs, the inputs may be spent on-chain.
+            // Mark as suspected (not confirmed) — TaskVerifyDoubleSpend will verify independently.
+            if crate::arc_status::is_double_spend_error(&e) {
+                let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, &txid);
                 let db = state.database.lock().unwrap();
                 let marked = db.connection().execute(
-                    "UPDATE outputs SET spending_description = 'double-spend-detected'
-                     WHERE spending_description = ?1 AND spendable = 0",
-                    rusqlite::params![&placeholder_txid],
+                    "UPDATE outputs SET spending_description = ?1
+                     WHERE spending_description = ?2 AND spendable = 0",
+                    rusqlite::params![&suspected_desc, &placeholder_txid],
                 ).unwrap_or(0);
                 if marked > 0 {
-                    log::warn!("   ⚠️  Double-spend detected: marked {} backup input(s) as externally spent", marked);
+                    log::warn!("   ⚠️  Suspected double-spend: marked {} backup input(s) for verification", marked);
                 }
                 drop(db);
             }
@@ -12255,6 +12278,13 @@ pub async fn do_onchain_backup(
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let _ = settings_repo.set_last_backup_at(now);
+
+        // Ensure backup address (index -3) is not monitored by TaskSyncPending.
+        // The backup system manages its own on-chain discovery in Step 5c.
+        let _ = db.connection().execute(
+            "UPDATE addresses SET pending_utxo_check = 0 WHERE wallet_id = 1 AND \"index\" = -3",
+            [],
+        );
     }
 
     log::info!("   ✅ On-chain wallet backup complete: {} (hash: {})", txid, &post_backup_hash[..16]);
@@ -12312,6 +12342,49 @@ fn extract_output_script(raw_tx: &[u8], target_vout: usize) -> Result<Vec<u8>, S
 
         if i == target_vout {
             return Ok(raw_tx[pos..pos + script_len as usize].to_vec());
+        }
+        pos += script_len as usize;
+    }
+
+    Err("Output not found".to_string())
+}
+
+/// Extract satoshi value and locking script for a specific output from raw transaction bytes.
+fn extract_output_value_and_script(raw_tx: &[u8], target_vout: usize) -> Result<(i64, Vec<u8>), String> {
+    use crate::transaction::decode_varint;
+
+    let mut pos = 4; // Skip version (4 bytes)
+
+    // Skip inputs
+    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("input count varint: {:?}", e))?;
+    pos += consumed;
+
+    for _ in 0..input_count {
+        pos += 32 + 4; // txid (32) + vout (4)
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("input script varint: {:?}", e))?;
+        pos += consumed + script_len as usize + 4; // script + sequence (4)
+    }
+
+    // Parse outputs
+    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
+        .map_err(|e| format!("output count varint: {:?}", e))?;
+    pos += consumed;
+
+    if target_vout >= output_count as usize {
+        return Err(format!("vout {} out of range ({} outputs)", target_vout, output_count));
+    }
+
+    for i in 0..output_count as usize {
+        let value = i64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
+        pos += 8;
+        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
+            .map_err(|e| format!("output script varint: {:?}", e))?;
+        pos += consumed;
+
+        if i == target_vout {
+            return Ok((value, raw_tx[pos..pos + script_len as usize].to_vec()));
         }
         pos += script_len as usize;
     }

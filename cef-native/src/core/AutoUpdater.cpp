@@ -89,8 +89,6 @@ void AutoUpdater::Initialize(const std::string& version, const std::string& appc
     win_sparkle_set_error_callback(UpdateErrorCallback);
 
     // DSA public key for signature verification.
-    // TODO: Enable once CI signs installers with the DSA private key.
-    // Until then, skip signature verification to allow unsigned updates.
     // The corresponding private key is stored as a GitHub Secret
     // (WINSPARKLE_DSA_PRIVATE_KEY) and used by CI/CD to sign release artifacts.
     static const char* DSA_PUB_KEY =

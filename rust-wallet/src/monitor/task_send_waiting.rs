@@ -119,7 +119,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                     "REJECTED" | "DOUBLE_SPEND_ATTEMPTED" => {
                         info!("   ❌ {} rejected by ARC ({}) — marking failed", short_txid, status);
                         if status == "DOUBLE_SPEND_ATTEMPTED" {
-                            cleanup_failed_sending_double_spend(state, &txid, *tx_id);
+                            // Mark as suspected — TaskVerifyDoubleSpend will verify independently.
+                            cleanup_failed_sending_suspected(state, &txid, *tx_id);
                         } else {
                             cleanup_failed_sending(state, &txid, *tx_id);
                         }
@@ -169,7 +170,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 if is_permanent_error(&e) {
                     warn!("   ❌ Permanent broadcast failure for {}: {}", short_txid, e);
                     if crate::arc_status::is_double_spend_error(&e) {
-                        cleanup_failed_sending_double_spend(state, &txid, *tx_id);
+                        // Mark as suspected — TaskVerifyDoubleSpend will verify independently.
+                        cleanup_failed_sending_suspected(state, &txid, *tx_id);
                     } else {
                         cleanup_failed_sending(state, &txid, *tx_id);
                     }
@@ -227,11 +229,10 @@ fn cleanup_failed_sending(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
     cleanup_failed_sending_impl(state, txid, tx_id, false);
 }
 
-/// Cleanup variant that knows inputs are double-spent (spent on-chain).
-/// When `is_double_spend` is true, marks inputs as externally spent instead
-/// of restoring them as spendable — prevents the wallet from re-selecting
-/// the same dead UTXOs.
-fn cleanup_failed_sending_double_spend(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
+/// Cleanup variant for suspected double-spends (awaiting independent verification).
+/// Marks inputs as 'dss:{txid}' instead of 'double-spend-detected'.
+/// TaskVerifyDoubleSpend will verify independently and either confirm or clear.
+fn cleanup_failed_sending_suspected(state: &web::Data<AppState>, txid: &str, tx_id: i64) {
     cleanup_failed_sending_impl(state, txid, tx_id, true);
 }
 
@@ -269,14 +270,15 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
 
         // 3. Handle inputs based on whether this is a double-spend
         if is_double_spend {
-            // Inputs ARE spent on-chain — mark as externally spent, do NOT restore.
+            // Mark as suspected — TaskVerifyDoubleSpend will verify independently.
+            let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, txid);
             let marked = conn.execute(
-                "UPDATE outputs SET spending_description = 'double-spend-detected'
-                 WHERE spending_description = ?1 AND spendable = 0",
-                rusqlite::params![txid],
+                "UPDATE outputs SET spending_description = ?1
+                 WHERE spending_description = ?2 AND spendable = 0",
+                rusqlite::params![&suspected_desc, txid],
             ).unwrap_or(0);
             if marked > 0 {
-                warn!("   ⚠️ Double-spend: marked {} input(s) as externally spent for {}", marked, short_txid);
+                warn!("   ⚠️ Suspected double-spend: marked {} input(s) for verification for {}", marked, short_txid);
             }
         } else {
             // Normal failure — restore inputs as spendable

@@ -75,8 +75,11 @@ pub async fn run(state: &web::Data<AppState>) -> BackupOutcome {
         .await
     {
         Ok(resp) => {
-            if resp.status().is_success() {
-                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+
+            if status.is_success() {
                 if body["success"].as_bool() == Some(true) {
                     let txid = body["txid"].as_str().unwrap_or("unknown").to_string();
                     info!("💾 TaskBackup: ✅ backup broadcast: {}", txid);
@@ -92,9 +95,11 @@ pub async fn run(state: &web::Data<AppState>) -> BackupOutcome {
                     }
                 }
             } else {
-                let status = resp.status();
-                warn!("💾 TaskBackup: ⚠️  HTTP {}", status);
-                BackupOutcome::Failed(format!("HTTP {}", status))
+                let err_detail = body["error"].as_str()
+                    .map(|e| format!("HTTP {} — {}", status, e))
+                    .unwrap_or_else(|| format!("HTTP {} — {}", status, &body_text[..body_text.len().min(200)]));
+                warn!("💾 TaskBackup: ⚠️  {}", err_detail);
+                BackupOutcome::Failed(err_detail)
             }
         }
         Err(e) => {

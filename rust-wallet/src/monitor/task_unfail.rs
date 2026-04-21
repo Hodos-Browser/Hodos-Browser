@@ -207,9 +207,23 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
                 Ok(input_outpoints) => {
                     let mut re_spent_count = 0;
                     for (prev_txid, prev_vout) in &input_outpoints {
+                        // First: clear any 'dss:*' suspected marking (spendable=0, so mark_spent won't match).
+                        // This handles the case where inputs were marked suspected by TaskSendWaiting
+                        // but the tx was actually mined.
+                        let dss_cleared = conn.execute(
+                            "UPDATE outputs SET spendable = 1, spending_description = NULL
+                             WHERE txid = ?1 AND vout = ?2 AND spending_description LIKE 'dss:%'",
+                            rusqlite::params![prev_txid, *prev_vout],
+                        ).unwrap_or(0);
+
                         match output_repo.mark_spent(prev_txid, *prev_vout, txid) {
                             Ok(n) if n > 0 => re_spent_count += n,
-                            _ => {}
+                            _ => {
+                                if dss_cleared > 0 {
+                                    // The dss clear + mark_spent should have worked together
+                                    re_spent_count += dss_cleared;
+                                }
+                            }
                         }
                     }
                     if re_spent_count > 0 {
