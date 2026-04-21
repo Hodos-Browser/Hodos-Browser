@@ -659,23 +659,23 @@ jobs:
           # Write EdDSA private key to temp file
           echo "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_priv.pem
 
-          # Use Sparkle's sign_update tool from the bundled framework
-          SIGN_TOOL="external/Sparkle.framework/Versions/B/Resources/sign_update"
-          if [ ! -f "$SIGN_TOOL" ]; then
-            # Fallback: try Versions/Current
-            SIGN_TOOL="external/Sparkle.framework/Resources/sign_update"
+          # Sparkle 2.x ships sign_update in sparkle-extract/bin/, NOT inside the framework
+          SIGN_TOOL="sparkle-extract/bin/sign_update"
+
+          if [ ! -x "$SIGN_TOOL" ]; then
+            echo "ERROR: Sparkle sign_update tool not found at $SIGN_TOOL"
+            echo "Contents of sparkle-extract/:"
+            ls -la sparkle-extract/ 2>/dev/null || echo "sparkle-extract/ missing"
+            exit 1
           fi
 
-          if [ -f "$SIGN_TOOL" ]; then
-            chmod +x "$SIGN_TOOL"
-            EDDSA_SIG=$("$SIGN_TOOL" "$DMG" --ed-key-file /tmp/ed25519_priv.pem 2>&1 | grep "sparkle:edSignature=" | cut -d'"' -f2)
-            echo "EdDSA signature: ${EDDSA_SIG:0:20}..."
-            echo "EDDSA_SIGNATURE=$EDDSA_SIG" >> $GITHUB_OUTPUT
-          else
-            echo "WARNING: Sparkle sign_update tool not found — skipping EdDSA signing"
-            ls -la external/Sparkle.framework/Versions/B/Resources/ 2>/dev/null || echo "No Resources dir"
-            echo "EDDSA_SIGNATURE=" >> $GITHUB_OUTPUT
+          EDDSA_SIG=$("$SIGN_TOOL" "$DMG" --ed-key-file /tmp/ed25519_priv.pem 2>&1 | grep "sparkle:edSignature=" | cut -d'"' -f2)
+          if [ -z "$EDDSA_SIG" ]; then
+            echo "ERROR: sign_update produced empty signature"
+            exit 1
           fi
+          echo "EdDSA signature: ${EDDSA_SIG:0:20}..."
+          echo "EDDSA_SIGNATURE=$EDDSA_SIG" >> $GITHUB_OUTPUT
 
           rm -f /tmp/ed25519_priv.pem
 
