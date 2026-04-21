@@ -193,6 +193,7 @@ impl<'a> AddressRepository<'a> {
             "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at
              FROM addresses
              WHERE wallet_id = ?1 AND (pending_utxo_check = 1 OR \"index\" = -1)
+               AND \"index\" != -3
              ORDER BY \"index\" ASC"
         )?;
 

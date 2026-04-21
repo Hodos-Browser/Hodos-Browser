@@ -11075,9 +11075,11 @@ pub async fn wallet_activity(
                     MIN(o.confirmed) as confirmed
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1
                AND o.satoshis > 0
                AND o.change = 0
+               AND (b.name IS NULL OR b.name != 'wallet-backup')
              GROUP BY COALESCE(o.txid, CAST(o.outputId AS TEXT))
              ORDER BY created_at DESC"
         ) {
