@@ -1337,12 +1337,27 @@ pub fn deserialize_from_onchain(
 /// Caller must have already created the wallet record (with mnemonic+PIN).
 /// This function handles all other entities in FK dependency order.
 pub fn import_to_db(conn: &Connection, payload: &BackupPayload) -> std::result::Result<(), String> {
-    info!("   Importing backup entities into database...");
+    // Default: remap to wallet_id=1, user_id=1 (standard single-user wallet)
+    import_to_db_with_ids(conn, payload, 1, 1)
+}
+
+/// Import backup entities with explicit ID remapping.
+///
+/// All wallet_id and user_id references in the payload are remapped to the
+/// provided target IDs. This ensures portability across backup/restore
+/// boundaries where autoincrement IDs may differ.
+pub fn import_to_db_with_ids(
+    conn: &Connection,
+    payload: &BackupPayload,
+    target_wallet_id: i64,
+    target_user_id: i64,
+) -> std::result::Result<(), String> {
+    info!("   Importing backup entities into database (wallet_id={}, user_id={})...", target_wallet_id, target_user_id);
 
     conn.execute("BEGIN TRANSACTION", [])
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
-    let result = import_entities(conn, payload);
+    let result = import_entities(conn, payload, target_wallet_id, target_user_id);
 
     match result {
         Ok(()) => {
@@ -1358,7 +1373,7 @@ pub fn import_to_db(conn: &Connection, payload: &BackupPayload) -> std::result::
     }
 }
 
-fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::Result<(), String> {
+fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id: i64, target_user_id: i64) -> std::result::Result<(), String> {
     // 1. proven_txs (no FKs)
     for pt in &payload.proven_txs {
         let merkle_path = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &pt.merkle_path)
@@ -1373,27 +1388,27 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert proven_txs: {}", e))?;
     }
 
-    // 2. users (no FKs)
+    // 2. users (no FKs) — remap user_id to target
     for u in &payload.users {
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![u.user_id, u.identity_key, u.active_storage, u.created_at, u.updated_at],
+            rusqlite::params![target_user_id, u.identity_key, u.active_storage, u.created_at, u.updated_at],
         ).map_err(|e| format!("Insert users: {}", e))?;
     }
 
-    // 3. output_baskets (FK → users)
+    // 3. output_baskets (FK → users) — remap user_id
     for b in &payload.output_baskets {
         conn.execute(
             "INSERT INTO output_baskets (basketId, user_id, name, number_of_desired_utxos, minimum_desired_utxo_value, \
              is_deleted, description, token_type, protocol_id, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![b.basket_id, b.user_id, b.name, b.number_of_desired_utxos,
+            rusqlite::params![b.basket_id, target_user_id, b.name, b.number_of_desired_utxos,
                              b.minimum_desired_utxo_value, b.is_deleted as i32, b.description,
                              b.token_type, b.protocol_id, b.created_at, b.updated_at],
         ).map_err(|e| format!("Insert output_baskets: {}", e))?;
     }
 
-    // 4. transactions (FK → users, proven_txs)
+    // 4. transactions (FK → users, proven_txs) — remap user_id
     for tx in &payload.transactions {
         let input_beef = match &tx.input_beef {
             Some(b64) => Some(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
@@ -1405,7 +1420,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
              status, is_outgoing, satoshis, input_beef, version, lock_time, block_height, confirmations, \
              failed_at, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            rusqlite::params![tx.id, tx.user_id, tx.proven_tx_id, tx.txid, tx.reference_number,
+            rusqlite::params![tx.id, target_user_id, tx.proven_tx_id, tx.txid, tx.reference_number,
                              tx.raw_tx, tx.description, tx.status, tx.is_outgoing as i32, tx.satoshis,
                              input_beef, tx.version, tx.lock_time, tx.block_height, tx.confirmations,
                              tx.failed_at, tx.created_at, tx.updated_at],
@@ -1431,7 +1446,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert proven_tx_reqs: {}", e))?;
     }
 
-    // 6. outputs (FK → users, transactions, output_baskets, spent_by → transactions)
+    // 6. outputs (FK → users, transactions, output_baskets, spent_by → transactions) — remap user_id
     for o in &payload.outputs {
         let locking_script = match &o.locking_script {
             Some(b64) => Some(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
@@ -1444,7 +1459,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
              derivation_suffix, custom_instructions, spent_by, sequence_number, spending_description, \
              script_length, script_offset, locking_script, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
-            rusqlite::params![o.output_id, o.user_id, o.transaction_id, o.basket_id,
+            rusqlite::params![o.output_id, target_user_id, o.transaction_id, o.basket_id,
                              o.spendable as i32, o.change as i32, o.vout, o.satoshis,
                              o.provided_by, o.purpose, o.output_type, o.output_description,
                              o.txid, o.sender_identity_key, o.derivation_prefix, o.derivation_suffix,
@@ -1453,14 +1468,14 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert outputs: {}", e))?;
     }
 
-    // 7. certificates (FK → users)
+    // 7. certificates (FK → users) — remap user_id
     for c in &payload.certificates {
         conn.execute(
             "INSERT INTO certificates (certificateId, user_id, type, serial_number, certifier, subject, verifier, \
              revocation_outpoint, signature, is_deleted, created_at, updated_at, \
              publish_status, publish_txid, publish_vout) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            rusqlite::params![c.certificate_id, c.user_id, c.cert_type, c.serial_number, c.certifier,
+            rusqlite::params![c.certificate_id, target_user_id, c.cert_type, c.serial_number, c.certifier,
                              c.subject, c.verifier, c.revocation_outpoint, c.signature,
                              c.is_deleted as i32, c.created_at, c.updated_at,
                              c.publish_status.as_deref().unwrap_or("unpublished"),
@@ -1468,22 +1483,22 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert certificates: {}", e))?;
     }
 
-    // 8. certificate_fields (FK → certificates, users)
+    // 8. certificate_fields (FK → certificates, users) — remap user_id
     for cf in &payload.certificate_fields {
         conn.execute(
             "INSERT INTO certificate_fields (certificateId, user_id, field_name, field_value, master_key, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![cf.certificate_id, cf.user_id, cf.field_name, cf.field_value,
+            rusqlite::params![cf.certificate_id, target_user_id, cf.field_name, cf.field_value,
                              cf.master_key, cf.created_at, cf.updated_at],
         ).map_err(|e| format!("Insert certificate_fields: {}", e))?;
     }
 
-    // 9. output_tags (FK → users)
+    // 9. output_tags (FK → users) — remap user_id
     for ot in &payload.output_tags {
         conn.execute(
             "INSERT INTO output_tags (id, user_id, tag, is_deleted, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![ot.id, ot.user_id, ot.tag, ot.is_deleted as i32, ot.created_at, ot.updated_at],
+            rusqlite::params![ot.id, target_user_id, ot.tag, ot.is_deleted as i32, ot.created_at, ot.updated_at],
         ).map_err(|e| format!("Insert output_tags: {}", e))?;
     }
 
@@ -1497,12 +1512,12 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert output_tag_map: {}", e))?;
     }
 
-    // 11. tx_labels (FK → users)
+    // 11. tx_labels (FK → users) — remap user_id
     for tl in &payload.tx_labels {
         conn.execute(
             "INSERT INTO tx_labels (txLabelId, user_id, label, is_deleted, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![tl.tx_label_id, tl.user_id, tl.label, tl.is_deleted as i32,
+            rusqlite::params![tl.tx_label_id, target_user_id, tl.label, tl.is_deleted as i32,
                              tl.created_at, tl.updated_at],
         ).map_err(|e| format!("Insert tx_labels: {}", e))?;
     }
@@ -1517,7 +1532,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert tx_labels_map: {}", e))?;
     }
 
-    // 13. commissions (FK → users, transactions)
+    // 13. commissions (FK → users, transactions) — remap user_id
     for cm in &payload.commissions {
         let locking_script = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cm.locking_script)
             .map_err(|e| format!("commissions locking_script base64: {}", e))?;
@@ -1525,34 +1540,32 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
             "INSERT INTO commissions (commissionId, user_id, transaction_id, satoshis, key_offset, \
              is_redeemed, locking_script, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![cm.commission_id, cm.user_id, cm.transaction_id, cm.satoshis,
+            rusqlite::params![cm.commission_id, target_user_id, cm.transaction_id, cm.satoshis,
                              cm.key_offset, cm.is_redeemed as i32, locking_script,
                              cm.created_at, cm.updated_at],
         ).map_err(|e| format!("Insert commissions: {}", e))?;
     }
 
-    // 14. sync_states (FK → users)
+    // 14. sync_states (FK → users) — remap user_id
     for ss in &payload.sync_states {
         conn.execute(
             "INSERT INTO sync_states (syncStateId, user_id, storage_identity_key, storage_name, status, init, \
              ref_num, sync_map, sync_when, satoshis, error_local, error_other, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            rusqlite::params![ss.sync_state_id, ss.user_id, ss.storage_identity_key, ss.storage_name,
+            rusqlite::params![ss.sync_state_id, target_user_id, ss.storage_identity_key, ss.storage_name,
                              ss.status, ss.init as i32, ss.ref_num, ss.sync_map, ss.sync_when,
                              ss.satoshis, ss.error_local, ss.error_other, ss.created_at, ss.updated_at],
         ).map_err(|e| format!("Insert sync_states: {}", e))?;
     }
 
-    // 15. domain_permissions (FK → users)
+    // 15. domain_permissions (FK → users) — remap user_id
     for dp in &payload.domain_permissions {
-        // Find user_id — default to 1 (single-user wallet)
-        let user_id: i64 = payload.users.first().map(|u| u.user_id).unwrap_or(1);
         conn.execute(
             "INSERT OR IGNORE INTO domain_permissions
              (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
               rate_limit_per_min, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![user_id, dp.domain, dp.trust_level, dp.per_tx_limit_cents,
+            rusqlite::params![target_user_id, dp.domain, dp.trust_level, dp.per_tx_limit_cents,
                              dp.per_session_limit_cents, dp.rate_limit_per_min,
                              dp.created_at, dp.updated_at],
         ).map_err(|e| format!("Insert domain_permissions: {}", e))?;
@@ -1586,12 +1599,12 @@ fn import_entities(conn: &Connection, payload: &BackupPayload) -> std::result::R
         ).map_err(|e| format!("Insert settings: {}", e))?;
     }
 
-    // 18. addresses (FK → wallets — wallet was created by caller)
+    // 18. addresses (FK → wallets) — remap wallet_id
     for a in &payload.addresses {
         conn.execute(
             "INSERT OR IGNORE INTO addresses (id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![a.id, a.wallet_id, a.index, a.address, a.public_key,
+            rusqlite::params![a.id, target_wallet_id, a.index, a.address, a.public_key,
                              a.used as i32, a.balance, a.pending_utxo_check as i32, a.created_at],
         ).map_err(|e| format!("Insert addresses: {}", e))?;
     }

@@ -149,6 +149,7 @@ export default function WalletPanelPage() {
     certificates: number;
     total_balance: number;
     spendable_utxos: number;
+    fromBackup: boolean;
   } | null>(null);
 
   // Backup import state
@@ -487,9 +488,37 @@ export default function WalletPanelPage() {
           certificates: restored.certificates || 0,
           total_balance: data.balance_satoshis || 0,
           spendable_utxos: data.spendable_utxos || 0,
+          fromBackup: true,
         });
+      } else if (data.backup_found === false) {
+        // No backup token — fall back to mnemonic-only recovery (gap-limit chain scan)
+        try {
+          const fallbackRes = await fetch('http://127.0.0.1:31301/wallet/recover', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mnemonic: mnemonicPhrase, pin, confirm: true }),
+          });
+          const fb = await fallbackRes.json();
+          if (fallbackRes.status === 409) {
+            setRecoveryError('A wallet already exists. Delete the existing wallet first.');
+          } else if (fb.success) {
+            setRecoveryResult({
+              transactions: 0,
+              outputs: fb.utxos_found || 0,
+              addresses: fb.addresses_found || 0,
+              certificates: 0,
+              total_balance: fb.total_balance || 0,
+              spendable_utxos: fb.utxos_found || 0,
+              fromBackup: false,
+            });
+          } else {
+            setRecoveryError(fb.error || fb.message || 'Mnemonic recovery failed.');
+          }
+        } catch {
+          setRecoveryError('Failed to connect to wallet server during chain scan fallback.');
+        }
       } else {
-        setRecoveryError(data.error || 'No Hodos wallet backup found for this mnemonic.');
+        setRecoveryError(data.error || 'Recovery failed.');
       }
     } catch {
       setRecoveryError('Failed to connect to wallet server');
@@ -846,7 +875,9 @@ export default function WalletPanelPage() {
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
             <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Wallet Recovered</h3>
             <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
-              Your wallet has been restored from on-chain backup.
+              {recoveryResult.fromBackup
+                ? 'Your wallet has been restored from on-chain backup.'
+                : 'No backup token found. Wallet recovered by scanning the blockchain for self-derived addresses only. Counterparty-derived outputs and identity certificates cannot be recovered without a backup.'}
             </p>
 
             <div style={{

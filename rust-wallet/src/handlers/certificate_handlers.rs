@@ -5083,9 +5083,11 @@ pub async fn admin_prepare_unpublish(
 /// certificates that are locally unpublished but still present on overlay.
 pub async fn cleanup_overlay_certificates(
     state: web::Data<AppState>,
-    _body: web::Bytes,
+    body: web::Json<serde_json::Value>,
+    _body_bytes: web::Bytes,
 ) -> HttpResponse {
-    log::info!("📋 Certificate overlay cleanup: starting");
+    let force_spend = body.get("force_spend").and_then(|v| v.as_bool()).unwrap_or(false);
+    log::info!("📋 Certificate overlay cleanup: starting (force_spend={})", force_spend);
 
     // Step 1: Get our identity key
     let master_pubkey_hex = {
@@ -5206,14 +5208,83 @@ pub async fn cleanup_overlay_certificates(
                             "message": "Spending tx found on-chain via WoC and re-submitted to overlay"
                         }));
                     }
+                    Ok(false) if force_spend => {
+                        // Publish tx not on-chain — use overlay BEEF to build spending tx
+                        match overlay_only_spend_pushdrop(
+                            &state,
+                            cert_output.publish_txid.as_deref().unwrap_or(""),
+                            cert_output.output_index,
+                            &cert_output.beef_bytes,
+                        ).await {
+                            Ok(true) => {
+                                resubmitted += 1;
+                                details.push(serde_json::json!({
+                                    "serial": serial_short,
+                                    "publish_txid": cert_output.publish_txid,
+                                    "status": "force_removed",
+                                    "message": "Overlay-only spending tx submitted (publish tx was never mined)"
+                                }));
+                            }
+                            Err(e) => {
+                                needs_attention += 1;
+                                details.push(serde_json::json!({
+                                    "serial": serial_short,
+                                    "publish_txid": cert_output.publish_txid,
+                                    "status": "force_spend_failed",
+                                    "message": format!("Overlay-only spend failed: {}", e)
+                                }));
+                            }
+                            _ => {
+                                needs_attention += 1;
+                                details.push(serde_json::json!({
+                                    "serial": serial_short,
+                                    "publish_txid": cert_output.publish_txid,
+                                    "status": "needs_attention",
+                                    "message": "Force spend returned unexpected result"
+                                }));
+                            }
+                        }
+                    }
                     Ok(false) => {
                         needs_attention += 1;
                         details.push(serde_json::json!({
                             "serial": serial_short,
                             "publish_txid": cert_output.publish_txid,
                             "status": "needs_attention",
-                            "message": "PushDrop UTXO still unspent on-chain — needs manual unpublish"
+                            "message": "PushDrop UTXO still unspent on-chain — needs manual unpublish or use force_spend=true"
                         }));
+                    }
+                    Err(e) if force_spend => {
+                        // WoC check failed (likely 404) — try overlay-only spend anyway
+                        log::info!("cleanup: WoC failed ({}), trying overlay-only spend for {}", e, serial_short);
+                        match overlay_only_spend_pushdrop(
+                            &state,
+                            cert_output.publish_txid.as_deref().unwrap_or(""),
+                            cert_output.output_index,
+                            &cert_output.beef_bytes,
+                        ).await {
+                            Ok(true) => {
+                                resubmitted += 1;
+                                details.push(serde_json::json!({
+                                    "serial": serial_short,
+                                    "publish_txid": cert_output.publish_txid,
+                                    "status": "force_removed",
+                                    "message": format!("Overlay-only spend succeeded (WoC was: {})", e)
+                                }));
+                            }
+                            Err(e2) => {
+                                needs_attention += 1;
+                                details.push(serde_json::json!({
+                                    "serial": serial_short,
+                                    "publish_txid": cert_output.publish_txid,
+                                    "status": "force_spend_failed",
+                                    "message": format!("WoC: {}, overlay spend: {}", e, e2)
+                                }));
+                            }
+                            _ => {
+                                needs_attention += 1;
+                            }
+                        }
                     }
                     Err(e) => {
                         needs_attention += 1;
@@ -5828,4 +5899,187 @@ async fn auto_spend_pushdrop(
     }
 
     Ok(true)
+}
+
+/// Overlay-only PushDrop spend: removes a stale certificate from the overlay network
+/// without touching the blockchain or local DB.
+///
+/// Used when the original publish tx was never mined (WoC 404) but the overlay
+/// still has the certificate entry. Builds a minimal spending tx using the publish
+/// tx from the overlay's own BEEF as the parent.
+///
+/// No funding UTXO, no miner broadcast, no DB writes.
+async fn overlay_only_spend_pushdrop(
+    state: &web::Data<AppState>,
+    publish_txid: &str,
+    output_index: usize,
+    overlay_beef_bytes: &[u8],
+) -> Result<bool, String> {
+    let txid_short = &publish_txid[..16.min(publish_txid.len())];
+    log::info!("cleanup/overlay-spend: building overlay-only spending tx for {}:{}", txid_short, output_index);
+
+    // Step 1: Extract the PushDrop output from the overlay BEEF
+    let beef = crate::beef::Beef::from_bytes(overlay_beef_bytes)
+        .map_err(|e| format!("Failed to parse overlay BEEF: {}", e))?;
+
+    // The publish tx is the last (or only) transaction in the overlay BEEF
+    let publish_tx_bytes = beef.transactions.last()
+        .ok_or("No transactions in overlay BEEF")?;
+    let parsed = crate::beef::ParsedTransaction::from_bytes(publish_tx_bytes)
+        .map_err(|e| format!("Failed to parse publish tx: {}", e))?;
+
+    if output_index >= parsed.outputs.len() {
+        return Err(format!("Output index {} out of range (tx has {} outputs)", output_index, parsed.outputs.len()));
+    }
+    let pushdrop_output = &parsed.outputs[output_index];
+    let locking_script = &pushdrop_output.script;
+    let pushdrop_sats = pushdrop_output.value;
+
+    log::info!("cleanup/overlay-spend: PushDrop script {} bytes, {} sats", locking_script.len(), pushdrop_sats);
+
+    // Step 2: Derive the identity signing key
+    let child_privkey = {
+        let db = state.database.lock().unwrap();
+        let master_priv = crate::database::get_master_private_key_from_db(&db)
+            .map_err(|e| format!("Failed to get master key: {}", e))?;
+        let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX)
+            .map_err(|_| "Invalid anyone pubkey".to_string())?;
+        crate::crypto::brc42::derive_child_private_key(
+            &master_priv, &anyone_pubkey, IDENTITY_INVOICE,
+        ).map_err(|e| format!("Key derivation failed: {}", e))?
+    };
+
+    // Verify derived key matches the locking script
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&child_privkey)
+        .map_err(|_| "Invalid derived private key".to_string())?;
+    let derived_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+
+    if locking_script.len() > 34 && locking_script[0] == 0x21 {
+        let locking_pubkey = &locking_script[1..34];
+        if derived_pubkey.as_slice() != locking_pubkey {
+            return Err(format!(
+                "Key mismatch: locking={} derived={}. Cannot sign — may belong to different wallet.",
+                hex::encode(locking_pubkey), hex::encode(&derived_pubkey)
+            ));
+        }
+        log::info!("cleanup/overlay-spend: ✅ signing key matches PushDrop locking key");
+    } else {
+        return Err("PushDrop script format unexpected".to_string());
+    }
+
+    // Step 3: Build a minimal spending tx (1 input, 0 outputs — just burns the dust)
+    let mut tx = Transaction::new();
+    tx.add_input(TxInput::new(OutPoint::new(publish_txid.to_string(), output_index as u32)));
+    // No outputs — the 1 sat is consumed as fee. This tx is never mined.
+
+    // Step 4: Sign the PushDrop input (P2PK: just <sig>)
+    {
+        let sighash = calculate_sighash(&tx, 0, locking_script, pushdrop_sats, SIGHASH_ALL_FORKID)
+            .map_err(|e| format!("Sighash failed: {}", e))?;
+        let message = Message::from_digest_slice(&sighash)
+            .map_err(|_| "Invalid sighash".to_string())?;
+        let sig = secp.sign_ecdsa(&message, &secret);
+        let mut sig_der = sig.serialize_der().to_vec();
+        sig_der.push(SIGHASH_ALL_FORKID as u8);
+        let mut unlocking = Vec::new();
+        unlocking.push(sig_der.len() as u8);
+        unlocking.extend_from_slice(&sig_der);
+        tx.inputs[0].set_script(unlocking);
+    }
+
+    // Step 5: Serialize
+    let raw_tx_hex = tx.to_hex().map_err(|e| format!("Serialize failed: {}", e))?;
+    let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+
+    let hash1 = Sha256::digest(&raw_tx_bytes);
+    let hash2 = Sha256::digest(&hash1);
+    let mut txid_bytes = hash2.to_vec();
+    txid_bytes.reverse();
+    let spend_txid = hex::encode(&txid_bytes);
+
+    log::info!("cleanup/overlay-spend: built spending tx {} ({} bytes, overlay-only)",
+        &spend_txid[..16], raw_tx_bytes.len());
+
+    // Step 6: Build BEEF with full ancestry chain
+    // The overlay needs: grandparent txs (with merkle proofs) → publish tx → spending tx
+    let mut out_beef = crate::beef::Beef::new();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    // 6a: Fetch the publish tx's parent transactions (the "grandparents") from WoC
+    // These should be confirmed on-chain since they're old funding UTXOs
+    let mut grandparents_added = 0usize;
+    for input in &parsed.inputs {
+        let parent_txid = &input.prev_txid;
+        let ptxid_short = &parent_txid[..16.min(parent_txid.len())];
+
+        // Fetch raw tx from WoC
+        let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", parent_txid);
+        match client.get(&tx_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(hex_str) = resp.text().await {
+                    if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                        out_beef.add_parent_transaction(bytes);
+                        log::info!("cleanup/overlay-spend: added grandparent tx {}", ptxid_short);
+
+                        // Fetch merkle proof for the grandparent
+                        let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", parent_txid);
+                        if let Ok(proof_resp) = client.get(&proof_url).send().await {
+                            if proof_resp.status().is_success() {
+                                if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
+                                    match resolve_and_add_tsc_proof_to_beef(
+                                        &mut out_beef, &proof_json, parent_txid, &client,
+                                    ).await {
+                                        Ok(()) => {
+                                            log::info!("cleanup/overlay-spend: added merkle proof for {}", ptxid_short);
+                                            grandparents_added += 1;
+                                        }
+                                        Err(e) => log::warn!("cleanup/overlay-spend: merkle proof failed for {}: {}", ptxid_short, e),
+                                    }
+                                }
+                            } else {
+                                log::warn!("cleanup/overlay-spend: no merkle proof available for {} (HTTP {})", ptxid_short, proof_resp.status());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                log::warn!("cleanup/overlay-spend: WoC returned {} for grandparent tx {}", resp.status(), ptxid_short);
+            }
+            Err(e) => {
+                log::warn!("cleanup/overlay-spend: failed to fetch grandparent tx {}: {}", ptxid_short, e);
+            }
+        }
+    }
+
+    log::info!("cleanup/overlay-spend: {} grandparent tx(es) with proofs added to BEEF", grandparents_added);
+
+    // 6b: Add publish tx (unconfirmed, but now its inputs have proven parents)
+    out_beef.add_parent_transaction(publish_tx_bytes.clone());
+
+    // 6c: Add our spending tx as the main transaction
+    out_beef.set_main_transaction(raw_tx_bytes);
+    out_beef.sort_topologically();
+
+    let beef_v1 = out_beef.to_v1_bytes()
+        .map_err(|e| format!("BEEF V1 serialization failed: {}", e))?;
+
+    log::info!("cleanup/overlay-spend: submitting to overlay ({} bytes, {} grandparents)", beef_v1.len(), grandparents_added);
+
+    // Step 7: Submit to overlay only — no miner broadcast
+    match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+        Ok(accepted) => {
+            log::info!("cleanup/overlay-spend: ✅ overlay accepted={}", accepted);
+            Ok(true)
+        }
+        Err(e) => {
+            log::warn!("cleanup/overlay-spend: ❌ overlay rejected: {}", e);
+            Err(format!("Overlay rejected: {}", e))
+        }
+    }
 }

@@ -12917,13 +12917,21 @@ pub async fn wallet_recover_onchain(
         }
     };
 
-    let backup_found = backup_result.is_some();
+    // Step 3b: Early exit if no backup found — don't create wallet records
+    // (avoids autoincrement advancement and stale current_user_id issues)
     let (backup_payload, backup_txid, backup_raw_tx) = match backup_result {
-        Some((p, t, r)) => (Some(p), Some(t), Some(r)),
-        None => (None, None, None),
+        Some((p, t, r)) => (p, t, r),
+        None => {
+            log::info!("   ℹ️  No on-chain backup found — returning without creating wallet");
+            return HttpResponse::Ok().json(serde_json::json!({
+                "success": false,
+                "error": "No Hodos wallet backup found for this mnemonic. If this is a new wallet, use Create New instead.",
+                "backup_found": false
+            }));
+        }
     };
 
-    // Step 4: Create wallet from mnemonic
+    // Step 4: Create wallet from mnemonic (only reached if backup exists)
     let (wallet_id, user_id) = {
         let mut db = state.database.lock().unwrap();
         match db.create_wallet_from_existing_mnemonic(&mnemonic_str, req.pin.as_deref()) {
@@ -12936,82 +12944,59 @@ pub async fn wallet_recover_onchain(
     log::info!("   ✅ Wallet created (id: {}, user: {})", wallet_id, user_id);
 
     // Step 5: Import backup
-    let mut restored_counts = serde_json::json!(null);
-    let mut refetch_result = serde_json::json!(null);
+    log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
+        backup_payload.transactions.len(), backup_payload.outputs.len(), backup_payload.certificates.len());
 
-    if let Some(payload) = &backup_payload {
-        log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
-            payload.transactions.len(), payload.outputs.len(), payload.certificates.len());
+    // Clean up auto-created records that conflict with backup import
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+        let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+        let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+        log::info!("   🧹 Cleaned up auto-created records before import");
+    }
 
-        // Clean up auto-created records that conflict with backup import
-        {
-            let db = state.database.lock().unwrap();
-            let conn = db.connection();
-            let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
-            let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
-            let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
-            log::info!("   🧹 Cleaned up auto-created records before import");
-        }
-
-        // Import all entities
-        {
-            let db = state.database.lock().unwrap();
-            match crate::backup::import_to_db(db.connection(), payload) {
-                Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
-                Err(e) => {
-                    log::error!("   ❌ Import failed: {}", e);
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Import failed: {}", e),
-                        "wallet_created": true,
-                        "backup_found": true
-                    }));
-                }
+    // Import all entities
+    {
+        let db = state.database.lock().unwrap();
+        match crate::backup::import_to_db_with_ids(db.connection(), &backup_payload, wallet_id, user_id) {
+            Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
+            Err(e) => {
+                log::error!("   ❌ Import failed: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Import failed: {}", e),
+                    "wallet_created": true,
+                    "backup_found": true
+                }));
             }
         }
+    }
 
-        restored_counts = serde_json::json!({
-            "transactions": payload.transactions.len(),
-            "outputs": payload.outputs.len(),
-            "addresses": payload.addresses.len(),
-            "certificates": payload.certificates.len(),
-            "proven_txs": payload.proven_txs.len(),
-        });
+    let restored_counts = serde_json::json!({
+        "transactions": backup_payload.transactions.len(),
+        "outputs": backup_payload.outputs.len(),
+        "addresses": backup_payload.addresses.len(),
+        "certificates": backup_payload.certificates.len(),
+        "proven_txs": backup_payload.proven_txs.len(),
+    });
 
-        // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
-        refetch_result = refetch_stripped_data(&state, payload).await;
+    // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
+    let refetch_result = refetch_stripped_data(&state, &backup_payload).await;
 
-        // Process backup transaction: the payload captures pre-backup state, so the
-        // funding UTXO spent by the backup tx is still spendable in the DB. Parse the
-        // backup tx to mark its inputs as spent and insert the change output.
-        if let (Some(ref bk_txid), Some(ref bk_raw)) = (&backup_txid, &backup_raw_tx) {
-            log::info!("   🔄 Processing backup tx {} to reconcile funding/change...", &bk_txid[..16]);
-            match reconcile_backup_tx(&state, bk_txid, bk_raw) {
-                Ok((inputs_marked, change_inserted)) => {
-                    log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
-                        inputs_marked, if change_inserted { "inserted" } else { "skipped" });
-                }
-                Err(e) => log::warn!("   ⚠️  Backup tx reconciliation failed: {} (sync will fix later)", e),
+    // Process backup transaction: the payload captures pre-backup state, so the
+    // funding UTXO spent by the backup tx is still spendable in the DB. Parse the
+    // backup tx to mark its inputs as spent and insert the change output.
+    {
+        log::info!("   🔄 Processing backup tx {} to reconcile funding/change...", &backup_txid[..16]);
+        match reconcile_backup_tx(&state, &backup_txid, &backup_raw_tx) {
+            Ok((inputs_marked, change_inserted)) => {
+                log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
+                    inputs_marked, if change_inserted { "inserted" } else { "skipped" });
             }
+            Err(e) => log::warn!("   ⚠️  Backup tx reconciliation failed: {} (sync will fix later)", e),
         }
-    } else {
-        // No on-chain backup found — clean up the wallet we just created at Step 4
-        log::info!("   ❌ No on-chain backup found for this mnemonic — rolling back wallet creation");
-        {
-            let mut db = state.database.lock().unwrap();
-            let conn = db.connection();
-            let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
-            let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
-            let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
-            let _ = conn.execute("DELETE FROM wallets WHERE id = ?1", rusqlite::params![wallet_id]);
-            db.clear_cached_mnemonic();
-            log::info!("   🧹 Rolled back wallet id={}, user id={}", wallet_id, user_id);
-        }
-        return HttpResponse::Ok().json(serde_json::json!({
-            "success": false,
-            "error": "No Hodos wallet backup found for this mnemonic. If this is a new wallet, use Create New instead.",
-            "backup_found": false
-        }));
     }
 
     // Step 6b: Store backup hash so TaskBackup doesn't overwrite the on-chain backup
@@ -15130,14 +15115,22 @@ pub async fn wallet_import(
             }
         }
 
-        // Delete auto-created user, basket, addresses so import_to_db can insert backup's entities
+        // Get wallet_id and user_id for import remapping
         let conn = db.connection();
-        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = (SELECT id FROM wallets LIMIT 1)", []);
+        let import_wallet_id: i64 = conn.query_row(
+            "SELECT id FROM wallets ORDER BY id ASC LIMIT 1", [], |row| row.get(0),
+        ).unwrap_or(1);
+        let import_user_id: i64 = conn.query_row(
+            "SELECT userId FROM users ORDER BY userId ASC LIMIT 1", [], |row| row.get(0),
+        ).unwrap_or(1);
+
+        // Delete auto-created user, basket, addresses so import_to_db can insert backup's entities
+        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![import_wallet_id]);
         let _ = conn.execute("DELETE FROM output_baskets", []);
         let _ = conn.execute("DELETE FROM users", []);
 
         // Import all backup entities
-        if let Err(e) = crate::backup::import_to_db(conn, &payload) {
+        if let Err(e) = crate::backup::import_to_db_with_ids(conn, &payload, import_wallet_id, import_user_id) {
             log::error!("   Import failed: {}", e);
             // Rollback: delete the wallet record too since import failed
             let _ = conn.execute("DELETE FROM wallets", []);
