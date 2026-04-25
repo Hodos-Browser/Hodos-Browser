@@ -92,6 +92,22 @@ pub async fn submit_to_identity_overlay(beef_bytes: &[u8]) -> Result<bool, Strin
     submit_to_topic(TOPIC_IDENTITY, beef_bytes).await
 }
 
+/// Get all known overlay lookup endpoints for identity resolution.
+/// Combines SHIP-discovered hosts with hardcoded fallbacks, deduplicates.
+/// Returns URLs with `/lookup` path appended.
+pub async fn get_identity_lookup_endpoints() -> Vec<String> {
+    let discovered = discover_hosts_for_topic(TOPIC_IDENTITY).await;
+    let fallbacks = fallback_hosts_for_topic(TOPIC_IDENTITY);
+
+    let mut host_set: HashSet<String> = HashSet::new();
+    for h in discovered { host_set.insert(h); }
+    for h in fallbacks { host_set.insert(h.to_string()); }
+
+    host_set.into_iter()
+        .map(|h| format!("{}/lookup", h))
+        .collect()
+}
+
 /// Submit a BEEF transaction to all overlay hosts serving a given topic.
 ///
 /// Uses SHIP discovery with hardcoded fallback.

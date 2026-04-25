@@ -22,10 +22,12 @@ use crate::beef::{Beef, ParsedTransaction};
 use crate::script::pushdrop;
 use crate::crypto::brc2::decrypt_certificate_field;
 
-/// Overlay lookup endpoints (US primary, EU + AP fallback)
-const OVERLAY_US: &str = "https://overlay-us-1.bsvb.tech/lookup";
-const OVERLAY_EU: &str = "https://overlay-eu-1.bsvb.tech/lookup";
-const OVERLAY_AP: &str = "https://overlay-ap-1.bsvb.tech/lookup";
+/// Static fallback overlay lookup endpoints (used if SHIP discovery returns nothing)
+const STATIC_OVERLAY_ENDPOINTS: &[&str] = &[
+    "https://overlay-us-1.bsvb.tech/lookup",
+    "https://overlay-eu-1.bsvb.tech/lookup",
+    "https://overlay-ap-1.bsvb.tech/lookup",
+];
 
 /// Cache TTL: 10 minutes
 const CACHE_TTL_SECS: u64 = 600;
@@ -63,10 +65,10 @@ pub struct IdentityResolver {
 }
 
 impl IdentityResolver {
-    /// Create a new IdentityResolver with a 15-second HTTP timeout
+    /// Create a new IdentityResolver with a 2-second HTTP timeout per endpoint
     pub fn new() -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -77,7 +79,8 @@ impl IdentityResolver {
     }
 
     /// Resolve an identity key to a name/avatar.
-    /// Returns None on any failure — resolution is best-effort.
+    /// Queries all known overlay hosts (SHIP discovered + fallbacks) and returns
+    /// the first successful result. Returns None on total failure.
     pub async fn resolve(&self, identity_key: &str) -> Option<ResolvedIdentity> {
         let key = identity_key.to_lowercase();
 
@@ -92,20 +95,13 @@ impl IdentityResolver {
             }
         }
 
-        // Try US overlay, fall back to EU, then AP
-        let result = match self.query_overlay(OVERLAY_US, &key).await {
-            Some(r) => Some(r),
-            None => {
-                debug!("IdentityResolver: US overlay failed, trying EU fallback");
-                match self.query_overlay(OVERLAY_EU, &key).await {
-                    Some(r) => Some(r),
-                    None => {
-                        debug!("IdentityResolver: EU overlay failed, trying AP fallback");
-                        self.query_overlay(OVERLAY_AP, &key).await
-                    }
-                }
-            }
-        };
+        // Query all 3 static endpoints in parallel, take first success
+        let (r_us, r_eu, r_ap) = tokio::join!(
+            self.query_overlay(STATIC_OVERLAY_ENDPOINTS[0], &key),
+            self.query_overlay(STATIC_OVERLAY_ENDPOINTS[1], &key),
+            self.query_overlay(STATIC_OVERLAY_ENDPOINTS[2], &key),
+        );
+        let result = r_us.or(r_eu).or(r_ap);
 
         // Cache result (even None — prevents re-querying failed lookups)
         {
@@ -124,28 +120,41 @@ impl IdentityResolver {
     /// Uses the `attributes: { any: query }` search which does fuzzy text matching
     /// across all publicly-revealed certificate fields (userName, email, name, etc.)
     ///
-    /// Returns multiple results (up to `limit`). Best-effort — returns empty vec on failure.
+    /// Queries all known overlay hosts and merges/deduplicates results by identity key.
+    /// Returns up to `limit` results. Best-effort — returns empty vec on total failure.
     pub async fn search(&self, query: &str, limit: usize) -> Vec<ResolvedIdentity> {
         if query.len() < 2 {
             return Vec::new();
         }
 
-        // Try US overlay, fall back to EU, then AP
-        let results = match self.search_overlay(OVERLAY_US, query, limit).await {
-            r if !r.is_empty() => r,
-            _ => {
-                debug!("IdentityResolver: US overlay search returned empty, trying EU fallback");
-                match self.search_overlay(OVERLAY_EU, query, limit).await {
-                    r if !r.is_empty() => r,
-                    _ => {
-                        debug!("IdentityResolver: EU overlay search returned empty, trying AP fallback");
-                        self.search_overlay(OVERLAY_AP, query, limit).await
-                    }
+        // Query all 3 static endpoints in parallel using tokio::join!
+        let (r_us, r_eu, r_ap) = tokio::join!(
+            self.search_overlay(STATIC_OVERLAY_ENDPOINTS[0], query, limit),
+            self.search_overlay(STATIC_OVERLAY_ENDPOINTS[1], query, limit),
+            self.search_overlay(STATIC_OVERLAY_ENDPOINTS[2], query, limit),
+        );
+
+        // Merge and dedup by identity_key
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut merged: Vec<ResolvedIdentity> = Vec::new();
+        for batch in [r_us, r_eu, r_ap] {
+            for identity in batch {
+                if seen_keys.insert(identity.identity_key.clone()) {
+                    merged.push(identity);
                 }
             }
-        };
+        }
+        merged.truncate(limit);
+        merged
+    }
 
-        results
+    /// Get overlay lookup endpoints for identity resolution.
+    /// Returns only the reliable static endpoints for fast interactive lookups.
+    /// SHIP-discovered hosts (projects.babbage.systems, projects.metanet.club)
+    /// are too unreliable/slow for interactive search — they're used for
+    /// publishing via overlay.rs where latency is acceptable.
+    fn get_lookup_endpoints(&self) -> Vec<String> {
+        STATIC_OVERLAY_ENDPOINTS.iter().map(|s| s.to_string()).collect()
     }
 
     /// Query a single overlay endpoint for identity certificates matching a search term
