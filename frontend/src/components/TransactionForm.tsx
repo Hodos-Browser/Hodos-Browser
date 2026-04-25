@@ -52,6 +52,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   const [isSuggestLoading, setIsSuggestLoading] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const suggestAbortRef = useRef<AbortController | null>(null);
+  const justSelectedRef = useRef(false);
 
   const convertUsdToSatoshis = useCallback((usdAmount: number, price: number): number => {
     if (price <= 0) return 0;
@@ -96,6 +97,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 
   // Debounced autocomplete suggestions
   useEffect(() => {
+    if (justSelectedRef.current) {
+      justSelectedRef.current = false;
+      return;
+    }
     const q = formData.recipient.trim();
     if (q.length < 1 || IDENTITY_KEY_REGEX.test(q) || BSV_ADDRESS_REGEX.test(q)) {
       setSuggestions([]);
@@ -142,6 +147,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   }, []);
 
   const handleSelectSuggestion = useCallback((suggestion: Suggestion) => {
+    justSelectedRef.current = true;
     setFormData(prev => ({ ...prev, recipient: suggestion.value }));
     setShowDropdown(false);
     setSuggestions([]);
