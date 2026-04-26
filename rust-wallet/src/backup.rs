@@ -387,7 +387,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
 
     // Users
     let users = {
-        let mut stmt = conn.prepare("SELECT userId, identity_key, active_storage, created_at, updated_at FROM users")?;
+        let mut stmt = conn.prepare("SELECT userId, identity_key, active_storage, created_at, updated_at FROM users ORDER BY userId ASC")?;
         let rows = stmt.query_map([], |row| Ok(BackupUser {
             user_id: row.get(0)?,
             identity_key: row.get(1)?,
@@ -401,7 +401,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Addresses
     let addresses = {
         let mut stmt = conn.prepare(
-            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at FROM addresses"
+            "SELECT id, wallet_id, \"index\", address, public_key, used, balance, pending_utxo_check, created_at FROM addresses ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupAddress {
             id: row.get(0)?,
@@ -421,7 +421,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let output_baskets = {
         let mut stmt = conn.prepare(
             "SELECT basketId, user_id, name, number_of_desired_utxos, minimum_desired_utxo_value, \
-             is_deleted, description, token_type, protocol_id, created_at, updated_at FROM output_baskets"
+             is_deleted, description, token_type, protocol_id, created_at, updated_at FROM output_baskets ORDER BY basketId ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupBasket {
             basket_id: row.get(0)?,
@@ -445,7 +445,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
             "SELECT id, user_id, proven_tx_id, txid, reference_number, raw_tx, description, \
              status, is_outgoing, satoshis, input_beef, version, lock_time, block_height, \
              confirmations, failed_at, created_at, updated_at FROM transactions \
-             WHERE reference_number NOT LIKE 'backup-%' AND status != 'failed'"
+             WHERE reference_number NOT LIKE 'backup-%' AND status != 'failed' ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| {
             let proven_tx_id: Option<i64> = row.get(2)?;
@@ -497,7 +497,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
              spending_description, script_length, script_offset, locking_script, created_at, updated_at FROM outputs \
              WHERE COALESCE(derivation_prefix, '') != '1-wallet-backup' \
              AND (spent_by IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.spent_by AND t.reference_number LIKE 'backup-%')) \
-             AND (transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.transaction_id AND t.status = 'failed'))"
+             AND (transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = outputs.transaction_id AND t.status = 'failed')) \
+             ORDER BY outputId ASC"
         )?;
         let rows = stmt.query_map([], |row| {
             let spendable = row.get::<_, i32>(4)? != 0;
@@ -543,7 +544,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         let mut stmt = conn.prepare(
             "SELECT provenTxId, txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root, \
              created_at, updated_at FROM proven_txs \
-             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_txs.txid AND t.reference_number LIKE 'backup-%')"
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_txs.txid AND t.reference_number LIKE 'backup-%') \
+             ORDER BY provenTxId ASC"
         )?;
         let rows = stmt.query_map([], |row| {
             let merkle_path: Vec<u8> = row.get(4)?;
@@ -569,7 +571,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         let mut stmt = conn.prepare(
             "SELECT provenTxReqId, proven_tx_id, txid, status, attempts, notified, batch, history, \
              notify, raw_tx, input_beef, created_at, updated_at FROM proven_tx_reqs \
-             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_tx_reqs.txid AND t.reference_number LIKE 'backup-%')"
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = proven_tx_reqs.txid AND t.reference_number LIKE 'backup-%') \
+             ORDER BY provenTxReqId ASC"
         )?;
         let rows = stmt.query_map([], |row| {
             let raw_tx: Vec<u8> = row.get(9)?;
@@ -598,7 +601,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         let mut stmt = conn.prepare(
             "SELECT certificateId, user_id, type, serial_number, certifier, subject, verifier, \
              revocation_outpoint, signature, is_deleted, created_at, updated_at, \
-             publish_status, publish_txid, publish_vout FROM certificates"
+             publish_status, publish_txid, publish_vout FROM certificates ORDER BY certificateId ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupCertificate {
             certificate_id: row.get(0)?,
@@ -623,7 +626,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Certificate fields
     let certificate_fields = {
         let mut stmt = conn.prepare(
-            "SELECT certificateId, user_id, field_name, field_value, master_key, created_at, updated_at FROM certificate_fields"
+            "SELECT certificateId, user_id, field_name, field_value, master_key, created_at, updated_at FROM certificate_fields ORDER BY certificateId ASC, field_name ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupCertificateField {
             certificate_id: row.get(0)?,
@@ -640,7 +643,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Output tags
     let output_tags = {
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, tag, is_deleted, created_at, updated_at FROM output_tags"
+            "SELECT id, user_id, tag, is_deleted, created_at, updated_at FROM output_tags ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupOutputTag {
             id: row.get(0)?,
@@ -656,7 +659,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Output tag map
     let output_tag_map = {
         let mut stmt = conn.prepare(
-            "SELECT id, output_id, output_tag_id, is_deleted, created_at, updated_at FROM output_tag_map"
+            "SELECT id, output_id, output_tag_id, is_deleted, created_at, updated_at FROM output_tag_map ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupOutputTagMap {
             id: row.get(0)?,
@@ -672,7 +675,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Tx labels
     let tx_labels = {
         let mut stmt = conn.prepare(
-            "SELECT txLabelId, user_id, label, is_deleted, created_at, updated_at FROM tx_labels"
+            "SELECT txLabelId, user_id, label, is_deleted, created_at, updated_at FROM tx_labels ORDER BY txLabelId ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupTxLabel {
             tx_label_id: row.get(0)?,
@@ -688,7 +691,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Tx labels map
     let tx_labels_map = {
         let mut stmt = conn.prepare(
-            "SELECT txLabelId, transaction_id, is_deleted, created_at, updated_at FROM tx_labels_map"
+            "SELECT txLabelId, transaction_id, is_deleted, created_at, updated_at FROM tx_labels_map ORDER BY txLabelId ASC, transaction_id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupTxLabelMap {
             tx_label_id: row.get(0)?,
@@ -704,7 +707,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let commissions = {
         let mut stmt = conn.prepare(
             "SELECT commissionId, user_id, transaction_id, satoshis, key_offset, is_redeemed, \
-             locking_script, created_at, updated_at FROM commissions"
+             locking_script, created_at, updated_at FROM commissions ORDER BY commissionId ASC"
         )?;
         let rows = stmt.query_map([], |row| {
             let locking_script: Vec<u8> = row.get(6)?;
@@ -744,7 +747,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let sync_states = {
         let mut stmt = conn.prepare(
             "SELECT syncStateId, user_id, storage_identity_key, storage_name, status, init, ref_num, \
-             sync_map, sync_when, satoshis, error_local, error_other, created_at, updated_at FROM sync_states"
+             sync_map, sync_when, satoshis, error_local, error_other, created_at, updated_at FROM sync_states ORDER BY syncStateId ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupSyncState {
             sync_state_id: row.get(0)?,
@@ -769,7 +772,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let parent_transactions = {
         let mut stmt = conn.prepare(
             "SELECT pt.id, pt.utxo_id, pt.txid, pt.raw_hex, pt.cached_at FROM parent_transactions pt \
-             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = pt.txid AND t.reference_number LIKE 'backup-%')"
+             WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.txid = pt.txid AND t.reference_number LIKE 'backup-%') \
+             ORDER BY pt.id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupParentTransaction {
             id: row.get(0)?,
@@ -784,7 +788,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     // Block headers
     let block_headers = {
         let mut stmt = conn.prepare(
-            "SELECT id, block_hash, height, header_hex, cached_at FROM block_headers"
+            "SELECT id, block_hash, height, header_hex, cached_at FROM block_headers ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupBlockHeader {
             id: row.get(0)?,
@@ -800,7 +804,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
     let domain_permissions = {
         let mut stmt = conn.prepare(
             "SELECT domain, trust_level, per_tx_limit_cents, per_session_limit_cents, \
-             rate_limit_per_min, created_at, updated_at FROM domain_permissions"
+             rate_limit_per_min, created_at, updated_at FROM domain_permissions ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupDomainPermission {
             domain: row.get(0)?,
@@ -819,7 +823,8 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         let mut stmt = conn.prepare(
             "SELECT dp.domain, cfp.cert_type, cfp.field_name, cfp.created_at \
              FROM cert_field_permissions cfp \
-             JOIN domain_permissions dp ON dp.id = cfp.domain_permission_id"
+             JOIN domain_permissions dp ON dp.id = cfp.domain_permission_id \
+             ORDER BY cfp.id ASC"
         )?;
         let rows = stmt.query_map([], |row| Ok(BackupCertFieldPermission {
             domain: row.get(0)?,

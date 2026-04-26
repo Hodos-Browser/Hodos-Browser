@@ -318,17 +318,43 @@ impl<'a> SettingsRepository<'a> {
             |row| row.get(0),
         );
         match result {
-            Ok(v) => Ok(v),
-            Err(_) => Ok(None), // Column may not exist yet
+            Ok(v) => {
+                log::debug!("   get_backup_hash: {:?}", v.as_deref().map(|h| &h[..h.len().min(16)]));
+                Ok(v)
+            }
+            Err(e) => {
+                log::warn!("   ⚠️ get_backup_hash error (returning None): {}", e);
+                Ok(None)
+            }
         }
     }
 
     /// Store the backup hash after successful backup
     pub fn set_backup_hash(&self, hash: &str) -> Result<()> {
-        let _ = self.conn.execute(
+        match self.conn.execute(
             "UPDATE settings SET backup_hash = ?1",
             rusqlite::params![hash],
-        );
+        ) {
+            Ok(rows) if rows > 0 => {
+                log::info!("   ✅ Stored backup hash: {}...", &hash[..hash.len().min(16)]);
+            }
+            Ok(_) => {
+                // No settings row exists — this is the root cause of hash not persisting
+                log::warn!("   ⚠️ set_backup_hash: UPDATE affected 0 rows (no settings row). Inserting default.");
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                self.conn.execute(
+                    "INSERT INTO settings (storage_identity_key, storage_name, chain, dbtype, max_output_script, backup_hash, created_at, updated_at) \
+                     VALUES ('', '', 'main', 'sqlite', 500000, ?1, ?2, ?3)",
+                    rusqlite::params![hash, now, now],
+                )?;
+                log::info!("   ✅ Created settings row with backup hash: {}...", &hash[..hash.len().min(16)]);
+            }
+            Err(e) => {
+                log::error!("   ❌ set_backup_hash failed: {}", e);
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
