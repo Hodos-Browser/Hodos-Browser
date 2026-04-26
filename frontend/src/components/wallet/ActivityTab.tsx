@@ -25,6 +25,8 @@ interface ActivityItem {
   labels?: string[];
   price_usd_cents?: number | null;
   source: string;
+  outbox_failed?: boolean;
+  outbox_retrying?: boolean;
 }
 
 interface ActivityResponse {
@@ -48,6 +50,7 @@ const ActivityTab: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<DirectionFilter>('all');
   const [copiedTxid, setCopiedTxid] = useState<string | null>(null);
+  const [retryingTxid, setRetryingTxid] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const pageRef = useRef(page);
@@ -139,6 +142,24 @@ const ActivityTab: React.FC = () => {
     const cef = (window as any).cefMessage;
     if (cef?.send) {
       cef.send('tab_create', `https://whatsonchain.com/tx/${txid}`);
+    }
+  };
+
+  const handleRetryNotification = async (txid: string) => {
+    setRetryingTxid(txid);
+    try {
+      const res = await fetch('http://127.0.0.1:31301/wallet/peerpay/outbox-retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ txid }),
+      });
+      if (res.ok) {
+        fetchActivity(page, filter, false);
+      }
+    } catch (err) {
+      console.error('Retry notification failed:', err);
+    } finally {
+      setRetryingTxid(null);
     }
   };
 
@@ -253,6 +274,24 @@ const ActivityTab: React.FC = () => {
                       >
                         <img src="/whatsonchain.png" alt="WoC" width="20" height="20" />
                       </HodosButton>
+                      {item.outbox_failed && (
+                        <HodosButton
+                          variant="ghost"
+                          size="small"
+                          className="wd-retry-btn"
+                          onClick={(e) => { e.stopPropagation(); handleRetryNotification(item.txid); }}
+                          disabled={retryingTxid === item.txid}
+                          title="Recipient wasn't notified. Retry sending the notification."
+                          style={{ color: '#ed6c02', fontSize: '11px' }}
+                        >
+                          {retryingTxid === item.txid ? 'Retrying...' : 'Retry notification'}
+                        </HodosButton>
+                      )}
+                      {item.outbox_retrying && (
+                        <span style={{ color: '#ed6c02', fontSize: '11px', marginLeft: '4px' }} title="Notification delivery in progress">
+                          Notifying...
+                        </span>
+                      )}
                     </>
                   )}
                   <span className="wd-activity-info-col">

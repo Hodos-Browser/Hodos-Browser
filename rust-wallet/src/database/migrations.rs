@@ -916,3 +916,27 @@ pub fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
     info!("   ✅ V15 migration applied (peerpay_pending_verification)");
     Ok(())
 }
+
+pub fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    info!("   Adding peerpay_outbox table for MessageBox delivery retry...");
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS peerpay_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            txid TEXT NOT NULL UNIQUE,
+            recipient_pubkey_hex TEXT NOT NULL,
+            payload_bytes BLOB NOT NULL,
+            amount_satoshis INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_peerpay_outbox_status ON peerpay_outbox(status);
+        CREATE INDEX IF NOT EXISTS idx_peerpay_outbox_next_retry ON peerpay_outbox(next_retry_at);
+    ")?;
+
+    info!("   ✅ V16 migration applied (peerpay_outbox)");
+    Ok(())
+}

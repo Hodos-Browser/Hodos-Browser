@@ -886,6 +886,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V15 applied");
         }
 
+        if current_version < 16 {
+            info!("   Applying migration V16 (peerpay_outbox)...");
+            migrations::migrate_v15_to_v16(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (16)", [])?;
+            info!("   ✅ Schema V16 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

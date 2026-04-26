@@ -88,7 +88,20 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         _ => {}
     }
 
-    // 4. Delete expired peerpay_pending_verification records (older than 24 hours)
+    // 4. Delete delivered peerpay_outbox entries (older than 7 days)
+    // Successfully retried outbox entries are kept for 7 days for audit, then purged.
+    match crate::database::PeerPayRepository::remove_delivered_outbox(conn, 7 * 24 * 60 * 60) {
+        Ok(count) if count > 0 => {
+            info!("🧹 TaskPurge: deleted {} delivered peerpay_outbox entries", count);
+            total_purged += count;
+        }
+        Err(e) => {
+            info!("   ℹ️ peerpay_outbox purge skipped: {}", e);
+        }
+        _ => {}
+    }
+
+    // 5. Delete expired peerpay_pending_verification records (older than 24 hours)
     // These are PeerPay messages that were parsed but never verified on-chain.
     // After 24h they're stale — either the message was acknowledged by other means
     // or the payment is genuinely invalid.

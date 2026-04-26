@@ -10999,6 +10999,23 @@ pub async fn wallet_activity(
 
     let db = state.database.lock().unwrap();
 
+    // 0. Pre-load outbox status for sent items (exhausted or pending MessageBox deliveries)
+    let outbox_exhausted: std::collections::HashSet<String> = db.connection()
+        .prepare("SELECT txid FROM peerpay_outbox WHERE status = 'exhausted'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+
+    let outbox_pending: std::collections::HashSet<String> = db.connection()
+        .prepare("SELECT txid FROM peerpay_outbox WHERE status = 'pending'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+
     // 1. Query sent transactions
     let mut sent_items: Vec<serde_json::Value> = Vec::new();
     if filter == "all" || filter == "sent" {
@@ -11040,7 +11057,7 @@ pub async fn wallet_activity(
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_default();
 
-                sent_items.push(serde_json::json!({
+                let mut item = serde_json::json!({
                     "txid": txid,
                     "direction": direction,
                     "satoshis": satoshis,
@@ -11050,7 +11067,19 @@ pub async fn wallet_activity(
                     "description": description.unwrap_or_else(|| if is_outgoing { "Sent BSV".to_string() } else { "Received BSV".to_string() }),
                     "price_usd_cents": price_usd_cents,
                     "source": "wallet"
-                }));
+                });
+
+                // Add outbox delivery status for sent PeerPay items
+                if is_outgoing {
+                    if outbox_exhausted.contains(&txid) {
+                        item["outbox_failed"] = serde_json::json!(true);
+                    }
+                    if outbox_pending.contains(&txid) {
+                        item["outbox_retrying"] = serde_json::json!(true);
+                    }
+                }
+
+                sent_items.push(item);
             }
         }
     }
@@ -15427,8 +15456,19 @@ pub async fn peerpay_send(
             log::info!("   ✅ PeerPay message sent via MessageBox (encrypted)");
         }
         Err(e) => {
-            // Non-fatal — transaction is already broadcast on-chain
-            log::warn!("   ⚠️  MessageBox delivery failed (tx still broadcast): {}", e);
+            // Non-fatal — transaction is already broadcast on-chain.
+            // Queue for background retry so recipient eventually gets notified.
+            log::warn!("   ⚠️  MessageBox delivery failed, queuing for retry: {}", e);
+            let db = state.database.lock().unwrap();
+            if let Err(db_err) = crate::database::PeerPayRepository::insert_outbox(
+                db.connection(),
+                &txid,
+                &hex::encode(&recipient_pubkey),
+                &payload_bytes,
+                req.amount_satoshis,
+            ) {
+                log::error!("   ❌ Failed to queue outbox entry: {}", db_err);
+            }
         }
     }
 
@@ -15508,6 +15548,10 @@ pub async fn peerpay_status(
     let (failure_count, failure_amount) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "failure")
         .unwrap_or((0, 0));
 
+    let (outbox_warning_count, outbox_warning_amount, outbox_pending_count) =
+        crate::database::PeerPayRepository::get_outbox_summary(conn)
+            .unwrap_or((0, 0, 0));
+
     HttpResponse::Ok().json(serde_json::json!({
         "unread_count": receive_count + failure_count,
         "unread_amount": receive_amount + failure_amount,
@@ -15515,6 +15559,9 @@ pub async fn peerpay_status(
         "receive_amount": receive_amount,
         "failure_count": failure_count,
         "failure_amount": failure_amount,
+        "outbox_warning_count": outbox_warning_count,
+        "outbox_warning_amount": outbox_warning_amount,
+        "outbox_pending_count": outbox_pending_count,
         "auto_accept": true,
     }))
 }
@@ -15533,6 +15580,39 @@ pub async fn peerpay_dismiss(
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+/// POST /wallet/peerpay/outbox-retry — Re-trigger MessageBox notification retry
+///
+/// Resets an exhausted outbox entry for the given txid, starting a new 30-minute
+/// retry cycle. Only works for entries in 'exhausted' status.
+pub async fn peerpay_outbox_retry(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    #[derive(Deserialize)]
+    struct RetryRequest { txid: String }
+
+    let req: RetryRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": format!("Invalid request: {}", e)
+        })),
+    };
+
+    let db = state.database.lock().unwrap();
+    match crate::database::PeerPayRepository::reset_outbox_for_retry(db.connection(), &req.txid) {
+        Ok(rows) if rows > 0 => {
+            log::info!("🔄 Outbox retry reset for txid={}", req.txid);
+            HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+        }
+        Ok(_) => HttpResponse::NotFound().json(serde_json::json!({
+            "success": false, "error": "No exhausted outbox entry found for this txid"
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": format!("DB error: {}", e)
+        })),
+    }
 }
 
 // ============================================================================

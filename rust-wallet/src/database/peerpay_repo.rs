@@ -23,6 +23,17 @@ pub struct ReceivedPayment {
     pub price_usd_cents: Option<i64>,
 }
 
+/// An outbox entry for a failed MessageBox delivery (sender side)
+#[derive(Debug, Clone)]
+pub struct OutboxEntry {
+    pub id: i64,
+    pub txid: String,
+    pub recipient_pubkey_hex: String,
+    pub payload_bytes: Vec<u8>,
+    pub amount_satoshis: i64,
+    pub retry_count: i32,
+}
+
 /// PeerPay database repository
 pub struct PeerPayRepository;
 
@@ -211,6 +222,149 @@ impl PeerPayRepository {
 
         let rows = conn.execute(
             "DELETE FROM peerpay_pending_verification WHERE first_seen_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(rows)
+    }
+
+    // --- Outbox: MessageBox delivery retry queue for sent PeerPay payments ---
+
+    /// Insert a failed MessageBox delivery into the outbox for background retry.
+    pub fn insert_outbox(
+        conn: &Connection,
+        txid: &str,
+        recipient_pubkey_hex: &str,
+        payload_bytes: &[u8],
+        amount_satoshis: i64,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO peerpay_outbox (
+                txid, recipient_pubkey_hex, payload_bytes, amount_satoshis,
+                status, retry_count, next_retry_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?6)",
+            params![txid, recipient_pubkey_hex, payload_bytes, amount_satoshis, now + 60, now],
+        )?;
+        Ok(())
+    }
+
+    /// Get outbox entries that are due for retry (status='pending' and next_retry_at <= now).
+    pub fn get_due_outbox_entries(conn: &Connection) -> Result<Vec<OutboxEntry>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, txid, recipient_pubkey_hex, payload_bytes, amount_satoshis, retry_count
+             FROM peerpay_outbox
+             WHERE status = 'pending' AND next_retry_at <= ?1
+             ORDER BY next_retry_at ASC"
+        )?;
+
+        let entries = stmt.query_map(params![now], |row| {
+            Ok(OutboxEntry {
+                id: row.get(0)?,
+                txid: row.get(1)?,
+                recipient_pubkey_hex: row.get(2)?,
+                payload_bytes: row.get(3)?,
+                amount_satoshis: row.get(4)?,
+                retry_count: row.get(5)?,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+
+        Ok(entries)
+    }
+
+    /// Update an outbox entry after a failed retry attempt.
+    /// Increments retry_count and computes next_retry_at based on the schedule:
+    ///   - retries 0-9: next in 60s (first 10 minutes)
+    ///   - retries 10-19: next in 120s (next 20 minutes)
+    ///   - retries >= 20: mark as 'exhausted' (give up)
+    pub fn update_outbox_retry_failed(conn: &Connection, id: i64, current_retry_count: i32) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let new_count = current_retry_count + 1;
+
+        if new_count >= 20 {
+            conn.execute(
+                "UPDATE peerpay_outbox SET status = 'exhausted', retry_count = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_count, now, id],
+            )?;
+        } else {
+            let delay = if new_count < 10 { 60 } else { 120 };
+            conn.execute(
+                "UPDATE peerpay_outbox SET retry_count = ?1, next_retry_at = ?2, updated_at = ?3 WHERE id = ?4",
+                params![new_count, now + delay, now, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Mark an outbox entry as successfully delivered.
+    pub fn mark_outbox_delivered(conn: &Connection, id: i64) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        conn.execute(
+            "UPDATE peerpay_outbox SET status = 'delivered', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Get summary of outbox entries: (exhausted_count, exhausted_total_sats, pending_count)
+    pub fn get_outbox_summary(conn: &Connection) -> Result<(i64, i64, i64)> {
+        let (exhausted_count, exhausted_amount) = conn.query_row(
+            "SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(amount_satoshis), 0)
+             FROM peerpay_outbox WHERE status = 'exhausted'",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+
+        let pending_count: i64 = conn.query_row(
+            "SELECT COALESCE(COUNT(*), 0) FROM peerpay_outbox WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok((exhausted_count, exhausted_amount, pending_count))
+    }
+
+    /// Reset an exhausted outbox entry for another retry cycle.
+    /// Returns the number of rows affected (0 if no exhausted entry found for this txid).
+    pub fn reset_outbox_for_retry(conn: &Connection, txid: &str) -> Result<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rows = conn.execute(
+            "UPDATE peerpay_outbox SET status = 'pending', retry_count = 0, next_retry_at = ?1, updated_at = ?1
+             WHERE txid = ?2 AND status = 'exhausted'",
+            params![now + 5, txid],
+        )?;
+        Ok(rows)
+    }
+
+    /// Remove delivered outbox entries older than max_age_secs.
+    pub fn remove_delivered_outbox(conn: &Connection, max_age_secs: i64) -> Result<usize> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - max_age_secs;
+
+        let rows = conn.execute(
+            "DELETE FROM peerpay_outbox WHERE status = 'delivered' AND updated_at < ?1",
             params![cutoff],
         )?;
         Ok(rows)

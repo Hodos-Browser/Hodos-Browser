@@ -29,6 +29,7 @@ pub mod task_backup;
 pub mod task_replay_overlay;
 pub mod task_consolidate_dust;
 pub mod task_verify_double_spend;
+pub mod task_retry_peerpay_outbox;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -54,6 +55,7 @@ struct TaskSchedule {
     replay_overlay: u64,
     consolidate_dust: u64,
     verify_double_spend: u64,
+    retry_peerpay_outbox: u64,
 }
 
 impl Default for TaskSchedule {
@@ -71,6 +73,7 @@ impl Default for TaskSchedule {
             replay_overlay: 300,      // 5 minutes — retry overlay notification for unpublished certs
             consolidate_dust: 86400,  // 24 hours — daily dust consolidation check
             verify_double_spend: 60,  // 1 minute — fast verification for suspected double-spends
+            retry_peerpay_outbox: 30, // 30 seconds — fast tick, actual retry governed by next_retry_at
         }
     }
 }
@@ -160,6 +163,7 @@ impl Monitor {
         let mut last_replay_overlay: u64 = 0; // 0 = check on first tick
         let mut last_consolidate_dust: u64 = Self::now_secs(); // Don't run on first tick — daily task
         let mut last_verify_double_spend: u64 = 0; // Check on first tick
+        let mut last_retry_peerpay_outbox: u64 = 0; // Check on first tick
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -318,6 +322,15 @@ impl Monitor {
                 if let Err(e) = task_verify_double_spend::run(&self.state, &self.client).await {
                     error!("   ❌ TaskVerifyDoubleSpend failed: {}", e);
                     self.log_event("TaskVerifyDoubleSpend:error", Some(&e));
+                }
+            }
+
+            // TaskRetryPeerPayOutbox — retry failed MessageBox deliveries for sent PeerPay payments
+            if now - last_retry_peerpay_outbox >= self.schedule.retry_peerpay_outbox {
+                last_retry_peerpay_outbox = now;
+                if let Err(e) = task_retry_peerpay_outbox::run(&self.state, &self.client).await {
+                    warn!("   ⚠️ TaskRetryPeerPayOutbox failed: {}", e);
+                    self.log_event("TaskRetryPeerPayOutbox:error", Some(&e));
                 }
             }
 

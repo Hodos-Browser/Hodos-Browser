@@ -194,9 +194,10 @@ const MainBrowserView: React.FC = () => {
     // Downloads — only need icon visibility state; overlay handles controls
     const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
 
-    // PeerPay notification state — dot on wallet button (green=receive, red=failure)
+    // PeerPay notification state — dot on wallet button (green=receive, red=failure, amber=outbox warning)
     const [hasUnreadPayments, setHasUnreadPayments] = useState(false);
     const [hasFailedPayments, setHasFailedPayments] = useState(false);
+    const [hasOutboxWarnings, setHasOutboxWarnings] = useState(false);
     const [unreadPaymentCount, setUnreadPaymentCount] = useState(0);
     const [unreadPaymentAmount, setUnreadPaymentAmount] = useState(0);
 
@@ -209,6 +210,7 @@ const MainBrowserView: React.FC = () => {
                     const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/status');
                     if (resp.ok) {
                         const data = await resp.json();
+                        setHasOutboxWarnings((data.outbox_warning_count || 0) > 0);
                         if (data.unread_count > 0) {
                             setHasUnreadPayments(true);
                             setUnreadPaymentCount(data.unread_count);
@@ -868,10 +870,10 @@ const MainBrowserView: React.FC = () => {
                 >
                     <Badge
                         variant="dot"
-                        invisible={!hasUnreadPayments}
+                        invisible={!hasUnreadPayments && !hasOutboxWarnings}
                         sx={{
                             '& .MuiBadge-badge': {
-                                backgroundColor: hasFailedPayments ? '#d32f2f' : '#2e7d32',
+                                backgroundColor: hasFailedPayments ? '#d32f2f' : hasOutboxWarnings ? '#ed6c02' : '#2e7d32',
                                 minWidth: 8,
                                 height: 8,
                                 borderRadius: '50%',

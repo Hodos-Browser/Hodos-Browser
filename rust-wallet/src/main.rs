@@ -880,6 +880,7 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/peerpay/check", web::post().to(handlers::peerpay_check))
             .route("/wallet/peerpay/status", web::get().to(handlers::peerpay_status))
             .route("/wallet/peerpay/dismiss", web::post().to(handlers::peerpay_dismiss))
+            .route("/wallet/peerpay/outbox-retry", web::post().to(handlers::peerpay_outbox_retry))
 
             // Paymail (bsvalias) endpoints
             .route("/wallet/paymail/send", web::post().to(handlers::paymail_send))
