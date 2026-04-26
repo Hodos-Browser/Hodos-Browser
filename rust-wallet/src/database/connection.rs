@@ -879,6 +879,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V14 applied");
         }
 
+        if current_version < 15 {
+            info!("   Applying migration V15 (peerpay_pending_verification)...");
+            migrations::migrate_v14_to_v15(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (15)", [])?;
+            info!("   ✅ Schema V15 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

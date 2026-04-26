@@ -5725,7 +5725,7 @@ async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), Strin
 /// Returns Ok(true) if tx exists (even with 0 confirmations - in mempool)
 /// Returns Ok(false) if tx doesn't exist (404)
 /// Returns Err if both APIs fail
-async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
+pub(crate) async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
     log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
 
     let client = reqwest::Client::new();

@@ -899,3 +899,20 @@ pub fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
     info!("   ✅ V14 migration applied (confirmed outputs + notification types)");
     Ok(())
 }
+
+pub fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
+    info!("   Adding peerpay_pending_verification table for chain validation tracking...");
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS peerpay_pending_verification (
+            message_id TEXT NOT NULL PRIMARY KEY,
+            txid TEXT NOT NULL,
+            first_seen_at INTEGER NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_retry_at INTEGER NOT NULL
+        );
+    ")?;
+
+    info!("   ✅ V15 migration applied (peerpay_pending_verification)");
+    Ok(())
+}

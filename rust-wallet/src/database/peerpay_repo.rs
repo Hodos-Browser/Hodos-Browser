@@ -157,6 +157,65 @@ impl PeerPayRepository {
         Ok(rows)
     }
 
+    // --- Pending verification tracking (chain validation before storing PeerPay UTXOs) ---
+
+    /// Get retry count and first_seen_at for a pending verification message.
+    /// Returns None if the message has no pending verification record.
+    pub fn get_pending_retry_count(conn: &Connection, message_id: &str) -> Result<Option<(i32, i64)>> {
+        let mut stmt = conn.prepare(
+            "SELECT retry_count, first_seen_at FROM peerpay_pending_verification WHERE message_id = ?1"
+        )?;
+        let result = stmt.query_row(params![message_id], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, i64>(1)?))
+        });
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Insert or update a pending verification record, incrementing retry_count.
+    pub fn upsert_pending_verification(conn: &Connection, message_id: &str, txid: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        conn.execute(
+            "INSERT INTO peerpay_pending_verification (message_id, txid, first_seen_at, retry_count, last_retry_at)
+             VALUES (?1, ?2, ?3, 0, ?3)
+             ON CONFLICT(message_id) DO UPDATE SET
+                retry_count = retry_count + 1,
+                last_retry_at = ?3",
+            params![message_id, txid, now],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a pending verification record after successful chain verification.
+    pub fn remove_pending_verification(conn: &Connection, message_id: &str) -> Result<()> {
+        conn.execute(
+            "DELETE FROM peerpay_pending_verification WHERE message_id = ?1",
+            params![message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clean up expired pending verification records older than max_age_secs.
+    pub fn cleanup_expired_pending(conn: &Connection, max_age_secs: i64) -> Result<usize> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - max_age_secs;
+
+        let rows = conn.execute(
+            "DELETE FROM peerpay_pending_verification WHERE first_seen_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(rows)
+    }
+
     /// Get summary of undismissed notifications filtered by type: (count, total_satoshis)
     pub fn get_undismissed_summary_by_type(conn: &Connection, notification_type: &str) -> Result<(i64, i64)> {
         let result = conn.query_row(

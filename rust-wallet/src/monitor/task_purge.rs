@@ -88,6 +88,22 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         _ => {}
     }
 
+    // 4. Delete expired peerpay_pending_verification records (older than 24 hours)
+    // These are PeerPay messages that were parsed but never verified on-chain.
+    // After 24h they're stale — either the message was acknowledged by other means
+    // or the payment is genuinely invalid.
+    const PENDING_VERIFICATION_RETENTION_SECS: i64 = 24 * 60 * 60;
+    match crate::database::PeerPayRepository::cleanup_expired_pending(conn, PENDING_VERIFICATION_RETENTION_SECS) {
+        Ok(count) if count > 0 => {
+            info!("🧹 TaskPurge: deleted {} expired peerpay_pending_verification(s)", count);
+            total_purged += count;
+        }
+        Err(e) => {
+            info!("   ℹ️ peerpay_pending_verification purge skipped: {}", e);
+        }
+        _ => {}
+    }
+
     if total_purged > 0 {
         super::log_monitor_event(state, "TaskPurge:completed", Some(&format!("{} records purged", total_purged)));
     }

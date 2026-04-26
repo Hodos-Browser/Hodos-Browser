@@ -291,6 +291,70 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
             continue;
         }
 
+        // ========================================================================
+        // SECURITY: Verify transaction exists on-chain before storing as spendable.
+        // This prevents phantom UTXOs from fabricated or never-broadcast BEEF.
+        // Mirrors the same check in internalize_action (handlers.rs:10397-10435).
+        // ========================================================================
+
+        // 4a. Check retry count (brief DB lock, then drop before async calls)
+        const MAX_PEERPAY_RETRIES: i32 = 10; // ~10 minutes at 60s intervals
+
+        let retry_info = {
+            let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+            PeerPayRepository::get_pending_retry_count(db.connection(), &msg.message_id)
+                .unwrap_or(None)
+        };
+
+        if let Some((count, _first_seen)) = retry_info {
+            if count >= MAX_PEERPAY_RETRIES {
+                warn!("TaskCheckPeerPay: message {} exceeded {} retries for txid {}, giving up — invalid payment",
+                    &msg.message_id[..16.min(msg.message_id.len())], MAX_PEERPAY_RETRIES, &subject_txid[..16]);
+                message_ids_to_ack.push(msg.message_id.clone());
+                continue;
+            }
+        }
+
+        // 4b. Verify on-chain (async — no DB lock held)
+        let tx_verified = match crate::handlers::check_tx_exists_on_chain(&subject_txid).await {
+            Ok(true) => {
+                info!("   ✅ PeerPay tx {} verified on-chain", &subject_txid[..16]);
+                true
+            }
+            Ok(false) => {
+                info!("   📡 PeerPay tx {} NOT on-chain, attempting broadcast...", &subject_txid[..16]);
+                let raw_tx_hex = hex::encode(&main_tx_bytes);
+                match crate::handlers::broadcast_transaction(
+                    &raw_tx_hex, Some(&state.database), Some(&subject_txid)
+                ).await {
+                    Ok(broadcast_msg) => {
+                        info!("   ✅ PeerPay tx broadcast succeeded: {}", broadcast_msg);
+                        true
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  PeerPay tx broadcast failed: {} — will retry next tick", e);
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("   ⚠️  Chain check failed for {}: {} — will retry next tick", &subject_txid[..16], e);
+                false
+            }
+        };
+
+        // 4c. Handle verification failure
+        if !tx_verified {
+            let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+            if let Err(e) = PeerPayRepository::upsert_pending_verification(
+                db.connection(), &msg.message_id, &subject_txid
+            ) {
+                warn!("   Failed to track pending verification: {}", e);
+            }
+            // Do NOT acknowledge — retry next tick
+            continue;
+        }
+
         info!("📬 TaskCheckPeerPay: accepting payment {} sats from {}...",
             found_satoshis, &msg.sender[..16.min(msg.sender.len())]);
 
@@ -316,6 +380,8 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
             ) {
                 Ok(_) => {
                     info!("   💾 Stored PeerPay output {}:{} ({} sats)", subject_txid, found_vout, found_satoshis);
+                    // Clean up pending verification record if it existed
+                    let _ = PeerPayRepository::remove_pending_verification(db.connection(), &msg.message_id);
                 }
                 Err(e) => {
                     error!("   ❌ Failed to store PeerPay output: {}", e);
