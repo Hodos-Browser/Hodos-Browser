@@ -124,6 +124,7 @@ namespace fs = std::filesystem;
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
 #include "include/core/SettingsManager.h"
+#include "include/core/AutoUpdater.h"
 #include "include/core/SyncHttpClient.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/FingerprintProtection.h"
@@ -4748,6 +4749,20 @@ int main(int argc, char* argv[]) {
         // TODO: Initialize HistoryManager on macOS
         // HistoryManager is currently Windows-only (uses SQLite with Windows APIs)
         LOG_INFO("🔧 HistoryManager not implemented on macOS yet");
+
+        // Initialize auto-updater (Sparkle 2)
+        {
+            auto& settings = SettingsManager::GetInstance();
+            auto browserSettings = settings.GetBrowserSettings();
+            bool autoCheck = browserSettings.autoUpdateEnabled;
+            std::string appVersion = APP_VERSION;
+            std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
+
+            auto& updater = AutoUpdater::GetInstance();
+            updater.Initialize(appVersion, appcastUrl, autoCheck);
+            LOG_INFO("Auto-updater initialized (version=" + appVersion +
+                     ", autoCheck=" + std::string(autoCheck ? "true" : "false") + ")");
+        }
 
         LOG_INFO("🚀 Entering CEF message loop...");
 
