@@ -208,7 +208,7 @@ Generator script: `frontend/scripts/generate-qr-test-images.cjs` (uses `qrcode` 
 | DOM scan — non-BSV filtered | **PASS** | Website URL, SegWit, random text all ignored |
 | DOM scan — multiple BSV | **PASS** | Picker shows 6 BSV results, each populates correctly on click |
 | DOM scan — SVG QR (our wallet) | **PASS** | Async SVG load fix works — detects our identity key + receive address QR |
-| DOM scan — whatsonchain.com | **PENDING** | Not yet tested |
+| DOM scan — whatsonchain.com | **PASS** | Auto-populates correct address from WoC address page QR |
 | DOM scan — video frame QR | **KNOWN LIMITATION** | YouTube CORS blocks `getImageData()`. Phase 2 screen capture handles this |
 | Pre-fill form opens from button | **PASS** | Scan QR button on wallet home opens send form with data |
 | Screen capture (Phase 2) | Not started | —
