@@ -2,11 +2,77 @@
 
 > Platform-specific details for macOS. See [QR_SCAN_OVERVIEW.md](./QR_SCAN_OVERVIEW.md) for architecture and Phase 1 (DOM scanning, cross-platform).
 
+## Status: NOT STARTED
+
+Phase 1 (DOM scan) is cross-platform and already works on macOS. Phase 2 (screen capture) needs macOS-native implementation.
+
+---
+
+## Turnover Instructions (for Claude on Mac)
+
+**Start here.** Pull `main` and work on branch `feature/qr-scan-phase1`.
+
+### What's already done (cross-platform + Windows)
+
+1. **Phase 1 DOM scan** — fully cross-platform, works on macOS already. User clicks "Scan QR" in wallet overlay → JS scanner injected into active tab → scans DOM elements → results forwarded to wallet via IPC.
+
+2. **Phase 2 Windows screen capture** — COMPLETE. When DOM scan returns 0 results, C++ auto-triggers screen capture. The trigger logic is in `simple_handler.cpp` in the `qr_found` handler — it checks `if (json == "[]")` and calls `StartQRScreenCapture()`. This is already wrapped in `#ifdef _WIN32`.
+
+3. **BIP21 extension** — BIP21 URIs accept paymail/identity key/$handle in the address position (not just BSV addresses). This is in the JS scanner logic and is cross-platform.
+
+### What you need to build (macOS only)
+
+Add the macOS `#elif defined(__APPLE__)` branch in the `qr_found` handler (simple_handler.cpp ~line 3390) that calls a macOS-native screen capture function. The function should:
+
+1. Hide wallet overlay via `HideWalletOverlay()` (already cross-platform in simple_app.cpp)
+2. Show a full-screen transparent NSWindow with crosshair cursor
+3. User drags rectangle to select a region
+4. Capture pixels via `CGWindowListCreateImage` (excludes the selection overlay)
+5. Decode QR via `CIDetector` with `CIDetectorTypeQRCode` (no third-party library needed — unlike Windows which uses quirc)
+6. Apply BSV pattern filter (same regexes — can reuse from QRScreenCapture.cpp or reimplement in ObjC)
+7. Show wallet overlay via `ShowWalletOverlay()`
+8. Deliver result via `SendProcessMessage(PID_RENDERER, "qr_screen_capture_result", json)`
+
+### Key patterns to follow
+
+- **Selection overlay**: Follow the ghost tab pattern in `WindowManager_mac.mm` (`ShowGhostTabMacOS`) — NSWindow with `NSWindowStyleMaskBorderless`, `NSFloatingWindowLevel`, `setOpaque:NO`
+- **Wallet hide/show**: `HideWalletOverlay()` / `ShowWalletOverlay()` are already cross-platform
+- **Result format**: JSON must match: `{"status":"found","result":{"type":"address","value":"1A1z...","address":"1A1z...","source":"screen"}}` or `{"status":"not_found"}` or `{"status":"cancelled"}`
+- **IPC delivery**: Use `g_qr_scan_requester` (extern in simple_handler.cpp) to route the result back to the wallet overlay's render process
+- **BSV types**: `address`, `bip21`, `identity_key`, `paymail` — same as Phase 1
+
+### Key files to read first
+
+| File | Why |
+|------|-----|
+| `cef-native/src/core/QRScreenCapture.cpp` | Windows reference implementation (~300 lines). Copy the BSV classification logic |
+| `cef-native/src/handlers/simple_handler.cpp` (~line 3383) | The `qr_found` handler with `#ifdef _WIN32` block — add `#elif defined(__APPLE__)` |
+| `cef-native/src/core/WindowManager_mac.mm` (~line 270) | Ghost tab pattern for NSWindow creation |
+| `cef-native/cef_browser_shell_mac.mm` | Where overlay creation functions live on macOS |
+| `cef-native/src/handlers/simple_render_process_handler.cpp` (~line 982) | IPC forwarders already done (cross-platform) |
+
+### Screen Recording Permission
+
+`CGWindowListCreateImage` requires Screen Recording permission on macOS 10.15+. Handle with:
+- `CGPreflightScreenCaptureAccess()` (macOS 11+) to check
+- `CGRequestScreenCaptureAccess()` to prompt
+- Graceful fallback if denied
+
+### Files to create/modify
+
+| File | Change |
+|------|--------|
+| `cef_browser_shell_mac.mm` | NEW: `QRSelectionView`, `QRSelectionWindow`, `StartQRScreenCaptureMacOS()`, `FinishQRScreenCaptureMacOS()` |
+| `simple_handler.cpp` | Add `#elif defined(__APPLE__)` in `qr_found` handler to call macOS capture |
+| No CMake changes needed | CIDetector and Core Graphics are system frameworks already linked |
+
+---
+
 ## Phase 1: DOM Scanning (No macOS-Specific Work)
 
 Phase 1 is pure JavaScript + C++ IPC. All work is cross-platform. See overview doc.
 
-Same consideration as Windows: ensure the scanner script's `getImageData()` calls don't get intercepted by the fingerprint farbling hook.
+The fingerprint farbling concern was a non-issue — jsQR's error correction handles canvas perturbation.
 
 ## Phase 2: Screen Region Capture
 

@@ -7,7 +7,8 @@
 | Phase | Status | Notes |
 |-------|--------|-------|
 | **Phase 1: DOM scan** | **COMPLETE** | `<img>`, `<canvas>`, `<svg>` (async), `<video>` (CORS-limited) |
-| **Phase 2: Screen capture** | Not started | Windows BitBlt + macOS Core Graphics |
+| **Phase 2 Windows: Screen capture** | **COMPLETE** | BitBlt + quirc. Auto-triggers when DOM scan returns 0 results |
+| **Phase 2 macOS: Screen capture** | **NOT STARTED** | Core Graphics + CIDetector. See [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md) |
 | **Phase 3: BIP21 generation** | Deferred | Our plain-address QR already works with HandCash/RockWallet |
 
 ## Goal
@@ -22,9 +23,14 @@
     +-- DOM scan (async, typically < 500ms)
     |   +-- 1 BSV result  --> opens send form, auto-populates recipient (+ amount for BIP21)
     |   +-- N BSV results --> picker overlay with type/address/amount previews
-    |   +-- 0 results     --> toast: "No payment QR found on page"
+    |   +-- 0 results     --> auto-triggers Phase 2 screen capture
     |
-    +-- Phase 2 (not yet): screen capture fallback for CORS-blocked images, video frames, non-web content
+    +-- Phase 2: screen capture (auto-triggered when DOM scan finds 0 results)
+        +-- C++ hides wallet overlay, shows full-screen selection overlay
+        +-- User drags rectangle over QR code on screen
+        +-- BitBlt (Win) / CGWindowListCreateImage (Mac) captures pixels
+        +-- quirc (Win) / CIDetector (Mac) decodes QR
+        +-- BSV pattern filter applied, wallet reopened with result
 ```
 
 ## Phase 1: DOM Scanning (Cross-Platform) — COMPLETE
@@ -129,32 +135,63 @@ Parser at `frontend/src/utils/bip21.ts`. Also duplicated inline in the injected 
 ## Phase 2: Screen Capture (Platform-Specific)
 
 See platform docs:
-- [QR_SCAN_WINDOWS.md](./QR_SCAN_WINDOWS.md) — WinAPI region selection + BitBlt capture
-- [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md) — Core Graphics capture + NSView region selection
+- [QR_SCAN_WINDOWS.md](./QR_SCAN_WINDOWS.md) — **COMPLETE** — BitBlt + quirc
+- [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md) — **NOT STARTED** — Core Graphics + CIDetector
 
-### Shared Architecture (Phase 2)
+### Shared Architecture (Phase 2 — Implemented on Windows)
 
 ```
 Wallet Overlay                    C++ Browser Shell              QR Decoder
-+------------------+    IPC      +----------------------+       +----------+
-| "Scan QR" button |----------->| Close wallet overlay |       |          |
-| (DOM scan: 0     |            | Show selection UI    |       |          |
-|  results)        |            | Capture region pixels|------>| jsQR or  |
-|                  |<-----------| Reopen wallet with   |       | zxing    |
-|  Form populated  |    IPC     | decoded QR data      |       |          |
++------------------+             +----------------------+       +----------+
+| "Scan QR" button |             | qr_found handler     |       |          |
+| (DOM scan runs)  |             | detects empty "[]"   |       |          |
+|                  |             | Auto-triggers:       |       |          |
+|                  |             |  1. Hide wallet      |       |          |
+|                  |             |  2. Show selection UI |       |          |
+|                  |             |  3. User drags rect  |       | quirc    |
+|                  |             |  4. BitBlt capture   |------>| (Win)    |
+|                  |<-----------+  5. Show wallet      |       | CIDetect |
+|  Form populated  |    IPC     |  6. Deliver result   |       | (Mac)    |
 +------------------+            +----------------------+       +----------+
 ```
 
-### Shared Flow
+### Shared Flow (Implemented)
 
-1. Wallet sends `qr_screen_capture_start` IPC
-2. C++ closes wallet overlay (with prevent-close flag to remember state)
-3. C++ shows platform-specific selection UI (full-screen transparent overlay with crosshair)
-4. User drags rectangle
-5. C++ captures pixels from screen within rectangle (platform API)
-6. C++ passes pixel buffer to QR decoder (could be JS via a hidden browser, or Rust/C++ library)
-7. C++ reopens wallet overlay with decoded data as URL params
-8. Wallet form populates from URL params
+1. User clicks "Scan QR" → DOM scan runs first (~500ms)
+2. If DOM scan returns results → Phase 1 handles it (auto-populate or picker)
+3. If DOM scan returns `"[]"` → `qr_found` handler auto-triggers screen capture:
+   a. Sends `qr_screen_capture_starting` IPC to wallet (React shows status briefly)
+   b. Calls `HideWalletOverlay()` (keeps CEF alive via keep-alive pattern)
+   c. Creates full-screen selection overlay (crosshair cursor, dark tint, gold border)
+   d. User drags rectangle over QR code
+   e. Captures pixels from screen (BitBlt on Windows, CGWindowListCreateImage on macOS)
+   f. Decodes QR (quirc on Windows, CIDetector on macOS)
+   g. Applies BSV pattern filter (same 4 regexes)
+   h. Calls `ShowWalletOverlay()`
+   i. Delivers result via `qr_screen_capture_result` IPC → React applies to form
+
+### Key Files (Phase 2 — Windows, Implemented)
+
+| File | Purpose |
+|------|---------|
+| `cef-native/include/core/QRScreenCapture.h` | Header: `StartQRScreenCapture()`, `FinishQRScreenCapture()` |
+| `cef-native/src/core/QRScreenCapture.cpp` | Core: selection overlay, BitBlt, quirc decode, BSV filter, result delivery |
+| `cef-native/third_party/quirc/` | Vendored quirc QR decoder (ISC license, 6 C files) |
+| `cef-native/src/handlers/simple_handler.cpp` | `qr_found` handler modified to auto-trigger screen capture on empty results |
+| `cef-native/src/handlers/simple_render_process_handler.cpp` | `qr_screen_capture_starting` + `qr_screen_capture_result` IPC forwarders |
+| `frontend/src/components/WalletPanel.tsx` | Message listeners for screen capture starting/result events |
+
+### BIP21 Extension (Implemented)
+
+BIP21 `bitcoin:` URIs now accept any BSV recipient pattern in the address position:
+- BSV address: `bitcoin:1A1z...?amount=0.001` (standard)
+- Paymail: `bitcoin:user@domain?amount=0.005` (extended)
+- Identity key: `bitcoin:02abc...?amount=0.01` (extended)
+- $handle: `bitcoin:$testhandle?amount=0.002` (extended)
+
+This allows paymails and identity keys to carry an amount via BIP21. `TransactionForm` detects the recipient type by regex regardless of how it arrived. No BRC standard exists for this yet — may propose one to the BSV community.
+
+Test page: `http://127.0.0.1:5137/qr-test-bip21.html`
 
 ## Phase 3: BIP21 Generation (Our QR Codes)
 
@@ -210,5 +247,12 @@ Generator script: `frontend/scripts/generate-qr-test-images.cjs` (uses `qrcode` 
 | DOM scan — SVG QR (our wallet) | **PASS** | Async SVG load fix works — detects our identity key + receive address QR |
 | DOM scan — whatsonchain.com | **PASS** | Auto-populates correct address from WoC address page QR |
 | DOM scan — video frame QR | **KNOWN LIMITATION** | YouTube CORS blocks `getImageData()`. Phase 2 screen capture handles this |
+| DOM scan — BIP21 with paymail | **PASS** | `bitcoin:user@handcash.io?amount=0.005` populates recipient + amount |
+| DOM scan — BIP21 with identity key | **PASS** | `bitcoin:02abc...?amount=0.01` populates recipient + amount |
+| DOM scan — BIP21 with $handle | **PASS** | `bitcoin:$testhandle?amount=0.002` populates recipient + amount |
 | Pre-fill form opens from button | **PASS** | Scan QR button on wallet home opens send form with data |
+| Screen capture — auto-trigger | **PASS** | DOM scan returns 0 → wallet hides → selection overlay appears |
+| Screen capture — selection + decode | **PASS** | Drag rectangle over QR → decoded → wallet reopens with result |
+| Screen capture — ESC cancel | **PASS** | Press ESC → overlay closes → wallet reopens, no result |
+| Screen capture — no QR in region | **PASS** | Select area with no QR → "No QR found in selected area" message |
 | Screen capture (Phase 2) | Not started | —

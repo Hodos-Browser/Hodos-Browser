@@ -1,18 +1,22 @@
-# QR Code Scanning — Windows Implementation
+# QR Code Scanning — Windows Implementation — COMPLETE
 
 > Platform-specific details for Windows. See [QR_SCAN_OVERVIEW.md](./QR_SCAN_OVERVIEW.md) for architecture and Phase 1 (DOM scanning, cross-platform).
+
+## Status: COMPLETE (2026-04-27)
+
+Both Phase 1 (DOM scan) and Phase 2 (screen capture) are implemented and tested on Windows.
 
 ## Phase 1: DOM Scanning (No Windows-Specific Work)
 
 Phase 1 is pure JavaScript + C++ IPC. All work is cross-platform. See overview doc.
 
-The only Windows-specific consideration: ensure the injected scanner script doesn't conflict with the fingerprint protection script's `getImageData()` override in `FingerprintScript.h`. The scanner should call the **original** `getImageData` (save a reference before fingerprint farbling wraps it) or run before the farbling hook is installed.
+The fingerprint farbling concern was a non-issue — jsQR's error correction handles LSB perturbation from our canvas farbling (QR codes are high-contrast black/white).
 
-## Phase 2: Screen Region Capture
+## Phase 2: Screen Region Capture — COMPLETE
 
 ### Overview
 
-When DOM scan finds zero results, the wallet triggers screen capture mode:
+When DOM scan finds zero results, screen capture auto-triggers (no extra button click):
 1. Close wallet overlay
 2. Show full-screen transparent overlay with crosshair cursor
 3. User drags to select region
