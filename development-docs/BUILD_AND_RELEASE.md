@@ -197,7 +197,25 @@ signtool verify /pa "HodosSetup-1.0.0.exe"
 
 **In CI/CD:** Store certificate as base64-encoded GitHub Secret, decode during workflow.
 
-**Pre-release:** Submit signed binaries to Microsoft's malware analysis portal before first public release. Chromium-based executables often trigger heuristic antivirus detections. Pre-submitting seeds reputation.
+**Pre-release antivirus / SmartScreen seeding:** Chromium-based installers and Rust binaries trigger heuristic AV detections. Each vendor maintains its own definitions, so submission to one does **not** propagate to others. Do all three steps below for every public release (skip on diag/internal builds):
+
+1. **VirusTotal (pre-flight check)** — https://www.virustotal.com/
+   - Upload `HodosSetup-x.x.x.exe` and review which engines flag it.
+   - This is a *scanner*, not a whitelist submission — it tells you who to chase, but doesn't clear anything.
+
+2. **Microsoft Defender (whitelist + reputation)** — https://www.microsoft.com/en-us/wdsi/filesubmission
+   - Submit signed binaries (installer + all signed exes/DLLs from §2.5).
+   - Choose "Software developer" submission type.
+   - Provide the cert thumbprint and a build/release URL so Microsoft can correlate future builds.
+   - This seeds SmartScreen reputation and clears Defender false positives.
+
+3. **Norton (only when Norton specifically flags us)** — https://submit.norton.com/
+   - Pick "False positive" → "File" (not URL) at the top of the form.
+   - Upload the installer in a ZIP or RAR (Norton requires the file to be archived; **must not be password-protected**; max 500 MB).
+   - Provide the **Detection name** and **Alert ID** from the affected user's alert popup if you have them — this is in the bottom-right of the Norton alert that fires when the user tries to install.
+   - Norton typically pushes updated definitions within ~48 hours. They send a tracking number you can use to follow up via the community portal.
+
+If a different vendor (BitDefender, ESET, Kaspersky, McAfee, etc.) flags us in the wild, look up that vendor's developer-submission portal — there's no shared whitelist across the industry. Track per-vendor submissions in the release issue.
 
 ### 2.6 Build Script
 
