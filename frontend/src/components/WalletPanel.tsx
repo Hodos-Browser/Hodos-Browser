@@ -1,12 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
 import type { TransactionResponse } from '../types/transaction';
 import { HodosButton } from './HodosButton';
+import { parseBIP21 } from '../utils/bip21';
 import './TransactionComponents.css';
 import './WalletPanel.css';
+
+interface QRScanResult {
+  type: string;
+  value: string;
+  address?: string;
+  amount?: number;
+  label?: string;
+  source?: string;
+}
 
 interface SyncStatusData {
   active: boolean;
@@ -98,6 +108,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         setAddressCopiedMessage(null);
         setShowIdentityKey(false);
         setIdentityKeyCopied(false);
+        setShowQrPicker(false);
+        setScanResults([]);
+        setScanMessage(null);
+        setQrRecipient(undefined);
+        setQrAmount(undefined);
       }
     };
     // Keep-alive: refresh balance and PeerPay on re-show
@@ -316,6 +331,90 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     }
   };
 
+  // ========== QR Scan State & Handlers ==========
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanResults, setScanResults] = useState<QRScanResult[]>([]);
+  const [showQrPicker, setShowQrPicker] = useState(false);
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const [qrRecipient, setQrRecipient] = useState<string | undefined>(undefined);
+  const [qrAmount, setQrAmount] = useState<string | undefined>(undefined);
+
+  const applyQrResult = useCallback((result: QRScanResult) => {
+    setShowQrPicker(false);
+    setScanResults([]);
+
+    if (result.type === 'bip21') {
+      const parsed = parseBIP21(result.value);
+      if (parsed) {
+        setQrRecipient(parsed.address);
+        if (parsed.amount !== undefined && parsed.amount > 0) {
+          setQrAmount(parsed.amount.toFixed(8));
+        } else {
+          setQrAmount(undefined);
+        }
+      }
+    } else {
+      setQrRecipient(result.value);
+      setQrAmount(undefined);
+    }
+
+    // Open the send form with the populated data
+    setShowReceiveAddress(false);
+    setShowIdentityKey(false);
+    setTransactionResult(null);
+    setShowSendForm(true);
+
+    setScanMessage('QR applied');
+    setTimeout(() => setScanMessage(null), 3000);
+  }, []);
+
+  // Listen for QR scan results from C++ IPC
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type !== 'qr_scan_result') return;
+      setIsScanning(false);
+
+      const results: QRScanResult[] = event.data.data || [];
+      if (results.length === 0) {
+        setScanMessage('No payment QR found on page');
+        setTimeout(() => setScanMessage(null), 3000);
+        return;
+      }
+
+      if (results.length === 1) {
+        applyQrResult(results[0]);
+        return;
+      }
+
+      // Multiple results — show picker
+      setScanResults(results);
+      setShowQrPicker(true);
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [applyQrResult]);
+
+  const handleScanQR = useCallback(() => {
+    setIsScanning(true);
+    setScanMessage(null);
+    setShowQrPicker(false);
+    setScanResults([]);
+    setQrRecipient(undefined);
+    setQrAmount(undefined);
+
+    try {
+      (window as any).cefMessage?.send('qr_scan_request', []);
+    } catch (e) {
+      console.error('QR scan request failed:', e);
+      setIsScanning(false);
+    }
+
+    // Timeout: if no response in 5s, clear scanning state
+    setTimeout(() => {
+      setIsScanning(false);
+    }, 5000);
+  }, []);
+
   const handleSendSubmit = (result: TransactionResponse) => {
     // Clear all other states first
     setShowReceiveAddress(false);
@@ -528,7 +627,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       )}
 
-      {/* Action Buttons — two Receive side-by-side, full-width Send below */}
+      {/* Action Buttons — 2x2 grid */}
       <div className="wallet-actions-light">
         <div className="wallet-actions-row">
           <HodosButton
@@ -547,14 +646,48 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             Receive BRC-100
           </HodosButton>
         </div>
-        <HodosButton
-          variant="primary"
-          className="wallet-button-light"
-          onClick={handleSendClick}
-        >
-          {showSendForm ? 'Close' : 'Send'}
-        </HodosButton>
+        <div className="wallet-actions-row">
+          <HodosButton
+            variant="primary"
+            className="wallet-button-light"
+            onClick={handleSendClick}
+          >
+            {showSendForm ? 'Close' : 'Send'}
+          </HodosButton>
+          <HodosButton
+            variant="primary"
+            className="wallet-button-light"
+            onClick={handleScanQR}
+            disabled={isScanning}
+          >
+            {isScanning ? 'Scanning...' : 'Scan QR'}
+          </HodosButton>
+        </div>
       </div>
+
+      {/* QR Scan feedback */}
+      {scanMessage && (
+        <div className={`qr-scan-message${scanMessage.includes('No ') ? ' qr-scan-error' : ' qr-scan-success'}`}>
+          {scanMessage}
+        </div>
+      )}
+      {showQrPicker && scanResults.length > 0 && (
+        <div className="qr-picker">
+          <div className="qr-picker-label">Multiple QR codes found — select one:</div>
+          {scanResults.map((r, i) => (
+            <button
+              key={i}
+              type="button"
+              className="qr-picker-item"
+              onClick={() => applyQrResult(r)}
+            >
+              <span className="qr-picker-type">{r.type === 'bip21' ? 'BIP21' : r.type === 'identity_key' ? 'BRC-100' : r.type === 'paymail' ? 'Paymail' : 'Address'}</span>
+              <span className="qr-picker-value">{r.address || r.value}</span>
+              {r.amount !== undefined && <span className="qr-picker-amount">{r.amount} BSV</span>}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* BRC-100 Identity Key Display (expanded) */}
       {showIdentityKey && identityKey && (
@@ -598,6 +731,8 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             onTransactionCreated={handleSendSubmit}
             balance={balance}
             bsvPrice={bsvPrice}
+            initialRecipient={qrRecipient}
+            initialAmount={qrAmount}
           />
         )}
 

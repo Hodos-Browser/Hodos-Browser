@@ -969,6 +969,17 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        if (message_name == "qr_scan_result") {
+            // QR scan results forwarded from the active page back to the wallet overlay.
+            // The JSON is a stringified array produced by our own scanner script (not user input).
+            std::string json = message->GetArgumentList()->GetString(0).ToString();
+            LOG_INFO_RENDER("📷 qr_scan_result dispatching to React (" + std::to_string(json.size()) + " chars)");
+
+            std::string js = "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_scan_result',data:" + json + "}}));";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "download_state_update") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string downloadsJson = args->GetString(0);

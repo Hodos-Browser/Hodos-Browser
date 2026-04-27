@@ -36,6 +36,7 @@
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/ProfileImporter.h"
+#include "../../include/core/QRScannerScript.h"
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -406,6 +407,9 @@ CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
 std::string SimpleHandler::pending_shield_domain_;
+
+// QR scan: tracks which overlay browser initiated the scan so results route back correctly
+static CefRefPtr<CefBrowser> g_qr_scan_requester = nullptr;
 
 CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
     return this;
@@ -3351,6 +3355,45 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern bool g_wallet_overlay_prevent_close;
         g_wallet_overlay_prevent_close = false;
         LOG_INFO_BROWSER("🔓 Wallet overlay close prevention DISABLED");
+        return true;
+    }
+
+    // ========== QR CODE SCANNING (Phase 1: DOM scan) ==========
+    if (message_name == "qr_scan_request") {
+        LOG_INFO_BROWSER("📷 QR scan requested from role: " + role_);
+        g_qr_scan_requester = browser;  // Remember who asked so we can route the result back
+
+        // Find the active tab's browser and inject the scanner script
+        Tab* active_tab = TabManager::GetInstance().GetActiveTab();
+        if (active_tab && active_tab->browser && active_tab->browser->GetMainFrame()) {
+            LOG_INFO_BROWSER("📷 Injecting QR scanner into active tab: " + active_tab->url);
+            active_tab->browser->GetMainFrame()->ExecuteJavaScript(
+                QR_SCANNER_SCRIPT, "qr-scanner://inject", 0);
+        } else {
+            // No active tab — send empty result back immediately
+            LOG_WARNING_BROWSER("📷 QR scan: no active tab found, returning empty results");
+            CefRefPtr<CefProcessMessage> resp = CefProcessMessage::Create("qr_scan_result");
+            resp->GetArgumentList()->SetString(0, "[]");
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, resp);
+            g_qr_scan_requester = nullptr;
+        }
+        return true;
+    }
+
+    if (message_name == "qr_found") {
+        // Results from the QR scanner script running in the active page.
+        // Forward to the overlay that initiated the scan.
+        std::string json = message->GetArgumentList()->GetString(0).ToString();
+        LOG_INFO_BROWSER("📷 QR scan results received: " + json.substr(0, 200));
+
+        if (g_qr_scan_requester && g_qr_scan_requester->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> resp = CefProcessMessage::Create("qr_scan_result");
+            resp->GetArgumentList()->SetString(0, json);
+            g_qr_scan_requester->GetMainFrame()->SendProcessMessage(PID_RENDERER, resp);
+        } else {
+            LOG_WARNING_BROWSER("📷 QR scan: no requester to forward results to");
+        }
+        g_qr_scan_requester = nullptr;
         return true;
     }
 

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Scan Test Page</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #eee; }
+        h1 { color: #c9a000; border-bottom: 2px solid #a67c00; padding-bottom: 8px; }
+        h2 { color: #888; margin-top: 32px; }
+        h3 { color: #aaa; margin-top: 16px; }
+        .test-card { background: #2a2a2a; border: 1px solid #444; border-radius: 8px; padding: 16px; margin: 12px 0; display: flex; align-items: center; gap: 16px; }
+        .test-card img { border-radius: 4px; background: white; padding: 4px; }
+        .test-info { flex: 1; }
+        .test-label { font-weight: 600; color: #c9a000; margin-bottom: 4px; }
+        .test-content { font-family: monospace; font-size: 13px; color: #999; word-break: break-all; }
+        .test-expect { font-size: 12px; color: #666; margin-top: 4px; }
+        .multi-section { display: flex; gap: 16px; flex-wrap: wrap; }
+        .multi-section .test-card { flex: 1; min-width: 300px; }
+        .badge { display: inline-block; font-size: 11px; padding: 2px 6px; border-radius: 3px; font-weight: 600; }
+        .badge-bsv { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+        .badge-ignore { background: rgba(158, 158, 158, 0.2); color: #999; }
+    </style>
+</head>
+<body>
+    <h1>QR Scan Test Page</h1>
+    <p>Open the wallet overlay and click "Scan QR" to test DOM scanning against these QR codes.</p>
+
+    <h2>BSV Payment QR Codes <span class="badge badge-bsv">Should be detected</span></h2>
+
+    <h3>Test 1: Plain BSV Address</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-bsv-address.png" width="150" height="150" alt="BSV Address QR" />
+        <div class="test-info">
+            <div class="test-label">Plain BSV Address</div>
+            <div class="test-content">1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</div>
+            <div class="test-expect">Expected: Populates recipient field with this address</div>
+        </div>
+    </div>
+
+    <h3>Test 2: BIP21 URI with Amount</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-amount.png" width="150" height="150" alt="BIP21 QR" />
+        <div class="test-info">
+            <div class="test-label">BIP21 URI (address + amount + label)</div>
+            <div class="test-content">bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.001&amp;label=Test</div>
+            <div class="test-expect">Expected: Populates recipient AND amount (0.001 BSV)</div>
+        </div>
+    </div>
+
+    <h3>Test 3: BIP21 URI (no amount)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-noamount.png" width="150" height="150" alt="BIP21 no amount QR" />
+        <div class="test-info">
+            <div class="test-label">BIP21 URI (address only)</div>
+            <div class="test-content">bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</div>
+            <div class="test-expect">Expected: Populates recipient only, amount stays blank</div>
+        </div>
+    </div>
+
+    <h3>Test 4: Identity Key (PeerPay)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-identity-key.png" width="150" height="150" alt="Identity Key QR" />
+        <div class="test-info">
+            <div class="test-label">Compressed Public Key (66 hex chars)</div>
+            <div class="test-content">02c0b24547a1b8d0c1702c2d9b0c82c10a55fb23c891ed91d5f8e44b9de2e6d3c1</div>
+            <div class="test-expect">Expected: Populates recipient, detected as PeerPay identity key</div>
+        </div>
+    </div>
+
+    <h3>Test 5: Paymail</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-paymail.png" width="150" height="150" alt="Paymail QR" />
+        <div class="test-info">
+            <div class="test-label">Paymail Address</div>
+            <div class="test-content">user@handcash.io</div>
+            <div class="test-expect">Expected: Populates recipient, triggers paymail resolution</div>
+        </div>
+    </div>
+
+    <h3>Test 6: HandCash Handle</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-handle.png" width="150" height="150" alt="Handle QR" />
+        <div class="test-info">
+            <div class="test-label">$handle</div>
+            <div class="test-content">$testhandle</div>
+            <div class="test-expect">Expected: Populates recipient, resolves via paymail</div>
+        </div>
+    </div>
+
+    <h2>Non-BSV QR Codes <span class="badge badge-ignore">Should be filtered out</span></h2>
+
+    <h3>Test 7: Website URL</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-website-url.png" width="150" height="150" alt="Website QR" />
+        <div class="test-info">
+            <div class="test-label">Website URL</div>
+            <div class="test-content">https://www.google.com</div>
+            <div class="test-expect">Expected: IGNORED (not a BSV pattern)</div>
+        </div>
+    </div>
+
+    <h3>Test 8: SegWit Address (not BSV)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-segwit.png" width="150" height="150" alt="SegWit QR" />
+        <div class="test-info">
+            <div class="test-label">SegWit bech32 Address</div>
+            <div class="test-content">bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4</div>
+            <div class="test-expect">Expected: IGNORED (not BSV format)</div>
+        </div>
+    </div>
+
+    <h3>Test 9: Random Text</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-random-text.png" width="150" height="150" alt="Random QR" />
+        <div class="test-info">
+            <div class="test-label">Plain Text</div>
+            <div class="test-content">Hello World</div>
+            <div class="test-expect">Expected: IGNORED (not a BSV pattern)</div>
+        </div>
+    </div>
+
+    <h2>Multi-QR Tests</h2>
+
+    <h3>Test 10: Multiple BSV QR Codes (should show picker)</h3>
+    <div class="multi-section">
+        <div class="test-card">
+            <img src="/qr-images/qr-bsv-address.png" width="120" height="120" alt="BSV Address" />
+            <div class="test-info">
+                <div class="test-label">BSV Address</div>
+                <div class="test-content">1A1zP1eP...DivfNa</div>
+            </div>
+        </div>
+        <div class="test-card">
+            <img src="/qr-images/qr-identity-key.png" width="120" height="120" alt="Identity Key" />
+            <div class="test-info">
+                <div class="test-label">Identity Key</div>
+                <div class="test-content">02c0b245...d3c1</div>
+            </div>
+        </div>
+    </div>
+    <p style="color: #888; font-size: 13px;">Expected: Picker appears with both results. Select one to populate.</p>
+
+    <h3>Test 11: Mixed BSV + Non-BSV (should find only BSV)</h3>
+    <div class="multi-section">
+        <div class="test-card">
+            <img src="/qr-images/qr-bsv-address.png" width="120" height="120" alt="BSV Address" />
+            <div class="test-info">
+                <div class="test-label badge badge-bsv">BSV Address</div>
+            </div>
+        </div>
+        <div class="test-card">
+            <img src="/qr-images/qr-website-url.png" width="120" height="120" alt="Website URL" />
+            <div class="test-info">
+                <div class="test-label badge badge-ignore">Website URL</div>
+            </div>
+        </div>
+    </div>
+    <p style="color: #888; font-size: 13px;">Expected: Only the BSV address is detected, auto-populates (no picker needed).</p>
+
+    <h3>Non-BSV Only Page Test</h3>
+    <p style="color: #888; font-size: 13px;">Navigate to a page with only non-BSV QR codes (tests 7-9 only). Expected: "No payment QR found on page" message.</p>
+</body>
+</html>

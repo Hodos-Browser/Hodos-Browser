@@ -173,13 +173,66 @@ This makes our QR codes scannable by other BSV wallets that support BIP21.
 
 ## Testing
 
+### Localhost Test Pages
+
+Create a `frontend/public/qr-test.html` page (served by Vite dev server at `http://127.0.0.1:5137/qr-test.html`) with QR codes for every format. Generate QR images using any online generator or the `qrcode` npm package.
+
+**Test QR codes to generate:**
+
+| # | QR Content | Type | Expected Result |
+|---|-----------|------|-----------------|
+| 1 | `1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa` | Plain BSV address | Populate recipient |
+| 2 | `bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.001&label=Test` | BIP21 URI | Populate recipient + amount |
+| 3 | `bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa` | BIP21 no amount | Populate recipient only |
+| 4 | `02abc...(real 66-char pubkey)` | Identity key | Populate recipient as PeerPay |
+| 5 | `user@handcash.io` | Paymail | Populate recipient, trigger paymail resolution |
+| 6 | `$testhandle` | HandCash handle | Populate recipient, resolve via paymail |
+| 7 | `https://www.google.com` | Website URL | Ignored (not BSV) |
+| 8 | `bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4` | SegWit address | Ignored (not BSV) |
+| 9 | `Hello World` | Random text | Ignored |
+
+Use the wallet's own identity key (from `/getPublicKey`) for test #4.
+
+**Test page structure:**
+```html
+<!-- frontend/public/qr-test.html -->
+<h2>QR Scan Test Page</h2>
+
+<!-- Single QR tests -->
+<h3>Test 1: Plain BSV Address</h3>
+<img src="qr-bsv-address.png" />
+
+<h3>Test 2: BIP21 with Amount</h3>
+<img src="qr-bip21-amount.png" />
+
+<!-- Multiple QR test (should show picker) -->
+<h3>Test: Multiple BSV QR Codes</h3>
+<img src="qr-bsv-address.png" />
+<img src="qr-identity-key.png" />
+
+<!-- Non-BSV (should be ignored) -->
+<h3>Non-BSV QR (should be filtered out)</h3>
+<img src="qr-website-url.png" />
+<img src="qr-segwit.png" />
+```
+
+Generate the QR PNG files with a script or use an online tool. Place them in `frontend/public/` so Vite serves them.
+
+### Test Matrix
+
 | Test | Method |
 |------|--------|
-| DOM scan — single QR on page | Navigate to whatsonchain.com address page (has QR), press Scan QR |
-| DOM scan — multiple QR codes | Create test page with 2 QR codes |
-| DOM scan — non-BSV QR | Page with URL QR code — should be ignored |
-| DOM scan — CORS blocked image | Cross-origin QR image — should fall through gracefully |
+| DOM scan — plain address | Test page #1, single QR, auto-populate |
+| DOM scan — BIP21 with amount | Test page #2, verify both recipient and amount fill |
+| DOM scan — BIP21 no amount | Test page #3, recipient fills, amount blank |
+| DOM scan — identity key | Test page #4, recipient fills, detected as PeerPay |
+| DOM scan — paymail | Test page #5, recipient fills, paymail resolution triggers |
+| DOM scan — HandCash handle | Test page #6, `$handle` resolves via paymail client |
+| DOM scan — non-BSV filtered | Test page #7-9 only on page, should get "no payment QR found" |
+| DOM scan — mixed BSV + non-BSV | Page with #1 + #7, should find only #1 |
+| DOM scan — multiple BSV | Page with #1 + #4, should show picker |
+| DOM scan — real site | whatsonchain.com address page (has QR code) |
+| DOM scan — CORS blocked image | Cross-origin QR image, should skip gracefully |
 | DOM scan — video frame QR | YouTube video paused on QR frame |
-| Screen capture — basic | QR code in a PDF or other app window |
-| BIP21 parsing | `bitcoin:1ABC...?amount=0.001&label=test` |
-| Pre-fill form | Verify recipient + amount populate correctly |
+| Pre-fill form | Verify recipient + amount populate and validation runs |
+| Screen capture — basic (Phase 2) | QR code in a PDF or other app window |

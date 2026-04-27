@@ -4,11 +4,11 @@ import type { TransactionData, TransactionResponse } from '../types/transaction'
 import { HodosButton } from './HodosButton';
 
 // Identity key: 66-char hex starting with 02 or 03 (compressed public key)
-const IDENTITY_KEY_REGEX = /^(02|03)[0-9a-fA-F]{64}$/;
+export const IDENTITY_KEY_REGEX = /^(02|03)[0-9a-fA-F]{64}$/;
 // Legacy BSV address: starts with 1 or 3
-const BSV_ADDRESS_REGEX = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/;
+export const BSV_ADDRESS_REGEX = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/;
 // Paymail: $handle or user@domain.tld
-const PAYMAIL_REGEX = /^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$/;
+export const PAYMAIL_REGEX = /^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$/;
 
 interface Suggestion {
   value: string;
@@ -25,6 +25,8 @@ interface TransactionFormProps {
   bsvPrice: number;
   isLoading?: boolean;
   error?: string | null;
+  initialRecipient?: string;
+  initialAmount?: string;
 }
 
 export const TransactionForm: React.FC<TransactionFormProps> = ({
@@ -32,7 +34,9 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   balance,
   bsvPrice,
   isLoading = false,
-  error
+  error,
+  initialRecipient,
+  initialAmount,
 }) => {
   const { sendTransaction } = useTransaction();
   const [formData, setFormData] = useState<TransactionData>({
@@ -145,6 +149,23 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Pre-fill form from initialRecipient/initialAmount props
+  useEffect(() => {
+    if (initialRecipient) {
+      setFormData(prev => ({ ...prev, recipient: initialRecipient }));
+    }
+  }, [initialRecipient]);
+
+  useEffect(() => {
+    if (initialAmount) {
+      setFormData(prev => ({ ...prev, amount: initialAmount }));
+      const parsed = parseFloat(initialAmount);
+      if (!isNaN(parsed) && parsed > 0 && bsvPrice > 0) {
+        setUsdInput(((parsed * 100000000 / 100000000) * bsvPrice).toFixed(2));
+      }
+    }
+  }, [initialAmount, bsvPrice]);
 
   const handleSelectSuggestion = useCallback((suggestion: Suggestion) => {
     justSelectedRef.current = true;
