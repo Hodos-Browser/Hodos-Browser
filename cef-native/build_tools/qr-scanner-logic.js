@@ -46,10 +46,13 @@
         if (!text || typeof text !== 'string') return null;
         text = text.trim();
 
-        // BIP21 URI
+        // BIP21 URI — accept any BSV recipient pattern in the address position
+        // (standard BSV address, identity key, paymail, or $handle)
         if (BIP21_RE.test(text)) {
             var parsed = parseBIP21(text);
-            if (parsed && BSV_ADDRESS_RE.test(parsed.address)) {
+            if (parsed && (BSV_ADDRESS_RE.test(parsed.address) ||
+                           IDENTITY_KEY_RE.test(parsed.address) ||
+                           PAYMAIL_RE.test(parsed.address))) {
                 return {
                     type: 'bip21',
                     value: text,
@@ -58,7 +61,7 @@
                     label: parsed.label
                 };
             }
-            return null; // BIP21 but invalid address
+            return null; // BIP21 but unrecognized recipient format
         }
 
         // Plain BSV address

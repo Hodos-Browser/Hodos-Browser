@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Test — BIP21 with Paymail &amp; Identity Key</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #eee; }
+        h1 { color: #c9a000; border-bottom: 2px solid #a67c00; padding-bottom: 8px; }
+        h2 { color: #888; margin-top: 32px; }
+        h3 { color: #aaa; margin-top: 16px; }
+        .test-card { background: #2a2a2a; border: 1px solid #444; border-radius: 8px; padding: 16px; margin: 12px 0; display: flex; align-items: center; gap: 16px; }
+        .test-card img { border-radius: 4px; background: white; padding: 4px; }
+        .test-info { flex: 1; }
+        .test-label { font-weight: 600; color: #c9a000; margin-bottom: 4px; }
+        .test-content { font-family: monospace; font-size: 13px; color: #999; word-break: break-all; }
+        .test-expect { font-size: 12px; color: #666; margin-top: 4px; }
+        .question { background: #332800; border: 1px solid #a67c00; border-radius: 8px; padding: 12px 16px; margin: 8px 0; color: #e0c060; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <h1>BIP21 Format Experiment</h1>
+    <p>Testing: Can we put a paymail or identity key in the BIP21 <code>bitcoin:</code> address position and still get recipient + amount?</p>
+
+    <h2>Test 1: BIP21 with Paymail + Amount</h2>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-paymail.png" width="150" height="150" alt="BIP21 Paymail QR" />
+        <div class="test-info">
+            <div class="test-label">bitcoin:user@handcash.io?amount=0.005&amp;label=Paymail BIP21 Test</div>
+            <div class="test-content">BIP21 URI with paymail in address position</div>
+            <div class="test-expect">Question: Does recipient populate as "user@handcash.io" AND amount as 0.005?</div>
+        </div>
+    </div>
+    <div class="question">What we want to see: recipient = user@handcash.io, amount = 0.005 BSV, paymail resolution triggers</div>
+
+    <h2>Test 2: BIP21 with Paymail (no amount)</h2>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-paymail-noamount.png" width="150" height="150" alt="BIP21 Paymail no amount QR" />
+        <div class="test-info">
+            <div class="test-label">bitcoin:user@handcash.io</div>
+            <div class="test-content">BIP21 URI with paymail only, no amount</div>
+            <div class="test-expect">Question: Does recipient populate as "user@handcash.io" with blank amount?</div>
+        </div>
+    </div>
+
+    <h2>Test 3: BIP21 with Identity Key + Amount</h2>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-identitykey.png" width="150" height="150" alt="BIP21 Identity Key QR" />
+        <div class="test-info">
+            <div class="test-label">bitcoin:02c0b24547...d3c1?amount=0.01&amp;label=Identity Key BIP21</div>
+            <div class="test-content">BIP21 URI with compressed public key (66 hex chars) in address position</div>
+            <div class="test-expect">Question: Does recipient populate as the identity key AND amount as 0.01?</div>
+        </div>
+    </div>
+    <div class="question">What we want to see: recipient = 02c0b245...d3c1 (full key), amount = 0.01 BSV, PeerPay route triggers</div>
+
+    <h2>Test 4: BIP21 with $handle + Amount</h2>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-handle.png" width="150" height="150" alt="BIP21 Handle QR" />
+        <div class="test-info">
+            <div class="test-label">bitcoin:$testhandle?amount=0.002&amp;label=Handle BIP21</div>
+            <div class="test-content">BIP21 URI with HandCash $handle in address position</div>
+            <div class="test-expect">Question: Does recipient populate as "$testhandle" AND amount as 0.002?</div>
+        </div>
+    </div>
+
+    <h2>Controls (existing tests — should still work)</h2>
+
+    <h3>Control A: Standard BIP21 (normal BSV address + amount)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-bip21-amount.png" width="150" height="150" alt="Standard BIP21 QR" />
+        <div class="test-info">
+            <div class="test-label">bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.001&amp;label=Test</div>
+            <div class="test-content">Standard BIP21 — this should always work</div>
+            <div class="test-expect">Expected: recipient = 1A1zP1eP...DivfNa, amount = 0.001</div>
+        </div>
+    </div>
+
+    <h3>Control B: Plain paymail (no BIP21 wrapper)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-paymail.png" width="150" height="150" alt="Plain Paymail QR" />
+        <div class="test-info">
+            <div class="test-label">user@handcash.io</div>
+            <div class="test-content">Plain paymail — no amount possible without BIP21 wrapper</div>
+            <div class="test-expect">Expected: recipient = user@handcash.io, no amount</div>
+        </div>
+    </div>
+
+    <h3>Control C: Plain identity key (no BIP21 wrapper)</h3>
+    <div class="test-card">
+        <img src="/qr-images/qr-identity-key.png" width="150" height="150" alt="Plain Identity Key QR" />
+        <div class="test-info">
+            <div class="test-label">02c0b24547a1b8d0c1702c2d9b0c82c10a55fb23c891ed91d5f8e44b9de2e6d3c1</div>
+            <div class="test-content">Plain identity key — no amount possible without BIP21 wrapper</div>
+            <div class="test-expect">Expected: recipient = 02c0b245...d3c1, no amount</div>
+        </div>
+    </div>
+</body>
+</html>
