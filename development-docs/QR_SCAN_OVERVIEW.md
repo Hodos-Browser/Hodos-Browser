@@ -8,7 +8,7 @@
 |-------|--------|-------|
 | **Phase 1: DOM scan** | **COMPLETE** | `<img>`, `<canvas>`, `<svg>` (async), `<video>` (CORS-limited) |
 | **Phase 2 Windows: Screen capture** | **COMPLETE** | BitBlt + quirc. Auto-triggers when DOM scan returns 0 results |
-| **Phase 2 macOS: Screen capture** | **NOT STARTED** | Core Graphics + CIDetector. See [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md) |
+| **Phase 2 macOS: Screen capture** | **COMPLETE** | CGWindowListCreateImage + CIDetector. See [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md) |
 | **Phase 3: BIP21 generation** | Deferred | Our plain-address QR already works with HandCash/RockWallet |
 
 ## Goal

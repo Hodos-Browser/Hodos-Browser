@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
 #import <mach-o/dyld.h>
 
 #include "include/cef_application_mac.h"
@@ -27,6 +28,8 @@
 #include "OverlayHelpers_mac.h"
 
 #include <atomic>
+#include <regex>
+#include <dlfcn.h>
 #include <iostream>
 #include <fstream>
 #include <chrono>
@@ -253,6 +256,10 @@ NSWindow* g_cookie_panel_overlay_window = nullptr;
 NSWindow* g_omnibox_overlay_window = nullptr;
 NSWindow* g_download_panel_overlay_window = nullptr;
 NSWindow* g_profile_panel_overlay_window = nullptr;
+
+// QR screen capture overlay
+static NSWindow* g_qr_selection_window = nullptr;
+static NSView*   g_qr_selection_view = nullptr;
 
 // OverlayBrowserRef instances for overlays using GenericOverlayView
 static OverlayBrowserRef* g_menu_overlay_browser_ref = nullptr;
@@ -2758,6 +2765,402 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     InstallClickOutsideMonitor(g_wallet_overlay_window);
 
     LOG_INFO("✅ Wallet overlay created successfully");
+}
+
+// ============================================================================
+// QR Screen Capture — Phase 2 macOS
+// ============================================================================
+
+// Forward declarations for QR screen capture
+void FinishQRScreenCaptureMacOS(bool cancelled, NSRect selection);
+
+void HideWalletOverlay() {
+    if (!g_wallet_overlay_window) return;
+    LOG_INFO("Hiding wallet overlay (macOS)");
+    RemoveClickOutsideMonitor(g_wallet_overlay_window);
+
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    if (wallet_browser) {
+        wallet_browser->GetMainFrame()->ExecuteJavaScript(
+            "window.postMessage({type:'wallet_hidden'},'*');", "", 0);
+        wallet_browser->GetHost()->SetFocus(false);
+    }
+
+    [g_wallet_overlay_window orderOut:nil];
+}
+
+void ShowWalletOverlay() {
+    if (!g_wallet_overlay_window) return;
+    LOG_INFO("Showing wallet overlay (macOS)");
+    [g_wallet_overlay_window makeKeyAndOrderFront:nil];
+    InstallClickOutsideMonitor(g_wallet_overlay_window);
+
+    CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
+    if (wallet_browser) {
+        wallet_browser->GetHost()->SetFocus(true);
+    }
+}
+
+// --- BSV pattern classification (mirrors QRScreenCapture.cpp) ---
+
+static const std::regex RE_BSV_ADDRESS(R"(^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$)");
+static const std::regex RE_IDENTITY_KEY(R"(^(02|03)[0-9a-fA-F]{64}$)");
+static const std::regex RE_PAYMAIL(R"(^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})$)");
+static const std::regex RE_BIP21(R"(^bitcoin:)", std::regex_constants::icase);
+
+static std::string QRUrlDecode(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = 0, lo = 0;
+            if (sscanf(s.c_str() + i + 1, "%1x%1x", &hi, &lo) == 2) {
+                result += static_cast<char>((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        if (s[i] == '+') { result += ' '; continue; }
+        result += s[i];
+    }
+    return result;
+}
+
+static std::string QRJsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+static std::string ClassifyBSVContent(const std::string& text) {
+    if (std::regex_search(text, RE_BIP21)) {
+        std::string address, amount, label;
+        size_t colon = text.find(':');
+        std::string rest = (colon != std::string::npos) ? text.substr(colon + 1) : text;
+
+        size_t q = rest.find('?');
+        address = (q != std::string::npos) ? rest.substr(0, q) : rest;
+
+        if (q != std::string::npos) {
+            std::string params = rest.substr(q + 1);
+            std::istringstream ps(params);
+            std::string pair;
+            while (std::getline(ps, pair, '&')) {
+                size_t eq = pair.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = pair.substr(0, eq);
+                std::string val = QRUrlDecode(pair.substr(eq + 1));
+                if (key == "amount") amount = val;
+                else if (key == "label") label = val;
+            }
+        }
+
+        std::string json = "{\"type\":\"bip21\",\"value\":\"" + QRJsonEscape(text) + "\"";
+        if (!address.empty()) json += ",\"address\":\"" + QRJsonEscape(address) + "\"";
+        if (!amount.empty())  json += ",\"amount\":" + amount;
+        if (!label.empty())   json += ",\"label\":\"" + QRJsonEscape(label) + "\"";
+        json += ",\"source\":\"screen\"}";
+        return json;
+    }
+
+    if (std::regex_match(text, RE_BSV_ADDRESS)) {
+        return "{\"type\":\"address\",\"value\":\"" + QRJsonEscape(text) +
+               "\",\"address\":\"" + QRJsonEscape(text) + "\",\"source\":\"screen\"}";
+    }
+
+    if (std::regex_match(text, RE_IDENTITY_KEY)) {
+        return "{\"type\":\"identity_key\",\"value\":\"" + QRJsonEscape(text) +
+               "\",\"source\":\"screen\"}";
+    }
+
+    if (std::regex_match(text, RE_PAYMAIL)) {
+        return "{\"type\":\"paymail\",\"value\":\"" + QRJsonEscape(text) +
+               "\",\"source\":\"screen\"}";
+    }
+
+    return "";
+}
+
+extern CefRefPtr<CefBrowser> g_qr_scan_requester;
+
+static void DeliverQRResultMacOS(const std::string& json) {
+    if (g_qr_scan_requester && g_qr_scan_requester->GetMainFrame()) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("qr_screen_capture_result");
+        msg->GetArgumentList()->SetString(0, json);
+        g_qr_scan_requester->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+        LOG_INFO("📷 Screen capture result delivered: " + json.substr(0, 200));
+    } else {
+        LOG_WARNING("📷 No QR scan requester to deliver result to");
+    }
+    g_qr_scan_requester = nullptr;
+}
+
+// --- QRSelectionView: drag-to-select overlay ---
+
+@interface QRSelectionView : NSView
+@property (nonatomic) BOOL isDragging;
+@property (nonatomic) NSPoint dragStart;
+@property (nonatomic) NSPoint dragCurrent;
+@end
+
+@implementation QRSelectionView
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent*)event {
+    self.dragStart = [self convertPoint:event.locationInWindow fromView:nil];
+    self.dragCurrent = self.dragStart;
+    self.isDragging = YES;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDragged:(NSEvent*)event {
+    if (self.isDragging) {
+        self.dragCurrent = [self convertPoint:event.locationInWindow fromView:nil];
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)mouseUp:(NSEvent*)event {
+    if (self.isDragging) {
+        self.isDragging = NO;
+        self.dragCurrent = [self convertPoint:event.locationInWindow fromView:nil];
+
+        CGFloat x1 = fmin(self.dragStart.x, self.dragCurrent.x);
+        CGFloat y1 = fmin(self.dragStart.y, self.dragCurrent.y);
+        CGFloat x2 = fmax(self.dragStart.x, self.dragCurrent.x);
+        CGFloat y2 = fmax(self.dragStart.y, self.dragCurrent.y);
+        NSRect selectionRect = NSMakeRect(x1, y1, x2 - x1, y2 - y1);
+
+        FinishQRScreenCaptureMacOS(false, selectionRect);
+    }
+}
+
+- (void)keyDown:(NSEvent*)event {
+    if (event.keyCode == 53) { // ESC
+        self.isDragging = NO;
+        FinishQRScreenCaptureMacOS(true, NSZeroRect);
+    }
+}
+
+- (void)rightMouseDown:(NSEvent*)event {
+    self.isDragging = NO;
+    FinishQRScreenCaptureMacOS(true, NSZeroRect);
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    // Semi-transparent black overlay
+    [[NSColor colorWithCalibratedWhite:0.0 alpha:0.6] set];
+    NSRectFill(self.bounds);
+
+    if (self.isDragging) {
+        CGFloat x1 = fmin(self.dragStart.x, self.dragCurrent.x);
+        CGFloat y1 = fmin(self.dragStart.y, self.dragCurrent.y);
+        CGFloat x2 = fmax(self.dragStart.x, self.dragCurrent.x);
+        CGFloat y2 = fmax(self.dragStart.y, self.dragCurrent.y);
+        NSRect selRect = NSMakeRect(x1, y1, x2 - x1, y2 - y1);
+
+        // Clear selection area (transparent cutout)
+        [[NSColor clearColor] set];
+        NSRectFillUsingOperation(selRect, NSCompositingOperationCopy);
+
+        // 2px gold border (#a67c00)
+        NSBezierPath* border = [NSBezierPath bezierPathWithRect:NSInsetRect(selRect, -1, -1)];
+        [border setLineWidth:2.0];
+        [[NSColor colorWithCalibratedRed:166.0/255.0 green:124.0/255.0 blue:0.0 alpha:1.0] set];
+        [border stroke];
+    } else {
+        // Instruction text when not dragging
+        NSString* text = @"Drag to select a QR code. Press ESC to cancel.";
+        NSDictionary* attrs = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:18 weight:NSFontWeightMedium],
+            NSForegroundColorAttributeName: [NSColor whiteColor]
+        };
+        NSSize textSize = [text sizeWithAttributes:attrs];
+        NSPoint textPoint = NSMakePoint(
+            (self.bounds.size.width - textSize.width) / 2,
+            (self.bounds.size.height - textSize.height) / 2
+        );
+        [text drawAtPoint:textPoint withAttributes:attrs];
+    }
+}
+
+@end
+
+// --- Screen capture lifecycle ---
+
+void StartQRScreenCaptureMacOS() {
+    LOG_INFO("📷 Starting QR screen capture (macOS)");
+
+    // Request Screen Recording permission if not yet granted (macOS 11+).
+    // Don't block — proceed with capture attempt anyway. CGWindowListCreateImage
+    // returns a blank/null image if denied, which we handle gracefully below.
+    if (@available(macOS 11.0, *)) {
+        if (!CGPreflightScreenCaptureAccess()) {
+            LOG_INFO("📷 Screen recording permission not yet granted — requesting");
+            CGRequestScreenCaptureAccess();
+        }
+    }
+
+    // Clean up any existing selection window
+    if (g_qr_selection_window) {
+        [g_qr_selection_window orderOut:nil];
+        [g_qr_selection_window close];
+        g_qr_selection_window = nullptr;
+        g_qr_selection_view = nullptr;
+    }
+
+    // Cover all screens
+    NSRect unionRect = NSZeroRect;
+    for (NSScreen* screen in [NSScreen screens]) {
+        unionRect = NSUnionRect(unionRect, [screen frame]);
+    }
+
+    LOG_INFO("📷 Selection overlay: " + std::to_string((int)unionRect.size.width) + "x" +
+             std::to_string((int)unionRect.size.height) + " at (" +
+             std::to_string((int)unionRect.origin.x) + "," +
+             std::to_string((int)unionRect.origin.y) + ")");
+
+    g_qr_selection_window = [[NSWindow alloc]
+        initWithContentRect:unionRect
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    [g_qr_selection_window setLevel:NSScreenSaverWindowLevel];
+    [g_qr_selection_window setOpaque:NO];
+    [g_qr_selection_window setBackgroundColor:[NSColor clearColor]];
+    [g_qr_selection_window setIgnoresMouseEvents:NO];
+    [g_qr_selection_window setAcceptsMouseMovedEvents:YES];
+    [g_qr_selection_window setReleasedWhenClosed:NO];
+
+    g_qr_selection_view = [[QRSelectionView alloc]
+        initWithFrame:NSMakeRect(0, 0, unionRect.size.width, unionRect.size.height)];
+    [g_qr_selection_window setContentView:g_qr_selection_view];
+    [g_qr_selection_window makeKeyAndOrderFront:nil];
+    [g_qr_selection_window makeFirstResponder:g_qr_selection_view];
+
+    [[NSCursor crosshairCursor] push];
+}
+
+void FinishQRScreenCaptureMacOS(bool cancelled, NSRect selection) {
+    LOG_INFO("📷 Finishing QR screen capture (macOS) cancelled=" +
+             std::string(cancelled ? "true" : "false"));
+
+    // Destroy selection window BEFORE capture (so it doesn't appear in screenshot)
+    if (g_qr_selection_window) {
+        [g_qr_selection_window orderOut:nil];
+        [g_qr_selection_window close];
+        g_qr_selection_window = nullptr;
+        g_qr_selection_view = nullptr;
+    }
+
+    [NSCursor pop];
+
+    if (cancelled) {
+        ShowWalletOverlay();
+        DeliverQRResultMacOS("{\"status\":\"cancelled\"}");
+        return;
+    }
+
+    CGFloat w = selection.size.width;
+    CGFloat h = selection.size.height;
+
+    if (w < 10 || h < 10) {
+        LOG_WARNING("📷 Selection too small (" + std::to_string((int)w) + "x" + std::to_string((int)h) + ")");
+        ShowWalletOverlay();
+        DeliverQRResultMacOS("{\"status\":\"not_found\"}");
+        return;
+    }
+
+    // Convert NSView coordinates (bottom-left origin) to CG coordinates (top-left origin)
+    // The selection window covered all screens starting from unionRect
+    NSRect unionRect = NSZeroRect;
+    for (NSScreen* screen in [NSScreen screens]) {
+        unionRect = NSUnionRect(unionRect, [screen frame]);
+    }
+
+    // selection is in the view's coordinate system (origin at bottom-left of union rect)
+    // CG display coordinates: origin at top-left of primary display
+    CGRect captureRect = CGRectMake(
+        unionRect.origin.x + selection.origin.x,
+        (unionRect.size.height + unionRect.origin.y) - (selection.origin.y + selection.size.height),
+        selection.size.width,
+        selection.size.height
+    );
+
+    LOG_INFO("📷 Capturing region: " + std::to_string((int)captureRect.size.width) + "x" +
+             std::to_string((int)captureRect.size.height) + " at (" +
+             std::to_string((int)captureRect.origin.x) + "," +
+             std::to_string((int)captureRect.origin.y) + ")");
+
+    // CGWindowListCreateImage is marked unavailable in macOS 15 SDK (replaced by
+    // ScreenCaptureKit), but still functions at runtime and is the only synchronous
+    // screen capture API. Use dlsym to bypass the SDK availability check.
+    typedef CGImageRef (*CGWindowListCreateImageFunc)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
+    static CGWindowListCreateImageFunc captureFunc = (CGWindowListCreateImageFunc)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
+    CGImageRef cgImage = captureFunc ? captureFunc(
+        captureRect,
+        kCGWindowListOptionOnScreenOnly,
+        kCGNullWindowID,
+        kCGWindowImageDefault
+    ) : nullptr;
+
+    if (!cgImage) {
+        LOG_WARNING("📷 CGWindowListCreateImage returned null");
+        ShowWalletOverlay();
+        DeliverQRResultMacOS("{\"status\":\"not_found\"}");
+        return;
+    }
+
+    // Decode QR via CIDetector
+    CIImage* ciImage = [CIImage imageWithCGImage:cgImage];
+    CGImageRelease(cgImage);
+
+    CIDetector* detector = [CIDetector detectorOfType:CIDetectorTypeQRCode
+                                              context:nil
+                                              options:@{CIDetectorAccuracy: CIDetectorAccuracyHigh}];
+    NSArray* features = [detector featuresInImage:ciImage];
+
+    LOG_INFO("📷 CIDetector found " + std::to_string((int)features.count) + " QR code(s)");
+
+    std::string bestResult;
+    for (CIFeature* feature in features) {
+        if ([feature isKindOfClass:[CIQRCodeFeature class]]) {
+            CIQRCodeFeature* qr = (CIQRCodeFeature*)feature;
+            if (qr.messageString) {
+                std::string payload = [qr.messageString UTF8String];
+                LOG_INFO("📷 QR payload: " + payload.substr(0, 200));
+                std::string json = ClassifyBSVContent(payload);
+                if (!json.empty()) {
+                    bestResult = json;
+                    break;
+                }
+            }
+        }
+    }
+
+    ShowWalletOverlay();
+
+    if (bestResult.empty()) {
+        LOG_INFO("📷 No BSV QR code found in selection");
+        DeliverQRResultMacOS("{\"status\":\"not_found\"}");
+    } else {
+        LOG_INFO("📷 BSV QR code found: " + bestResult.substr(0, 200));
+        DeliverQRResultMacOS("{\"status\":\"found\",\"result\":" + bestResult + "}");
+    }
 }
 
 void CreateBackupOverlayWithSeparateProcess() {

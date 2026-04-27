@@ -93,6 +93,9 @@ extern std::string g_pendingModalDomain;
     extern "C" void CloseOverlayWindow(void* window, void* parent);
     extern "C" void HideNotificationOverlayWindow();
     extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores);
+    extern void HideWalletOverlay();
+    extern void ShowWalletOverlay();
+    extern void StartQRScreenCaptureMacOS();
 #endif
 
 // Forward declaration for cross-platform tab creation helper (defined later in file)
@@ -3400,6 +3403,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern void HideWalletOverlay();
             HideWalletOverlay();
             StartQRScreenCapture();
+            return true;
+        }
+#elif defined(__APPLE__)
+        if (json == "[]" && g_qr_scan_requester && g_qr_scan_requester->GetMainFrame()) {
+            LOG_INFO_BROWSER("📷 DOM scan empty — falling through to screen capture (macOS)");
+            CefRefPtr<CefProcessMessage> notify = CefProcessMessage::Create("qr_screen_capture_starting");
+            g_qr_scan_requester->GetMainFrame()->SendProcessMessage(PID_RENDERER, notify);
+            HideWalletOverlay();
+            StartQRScreenCaptureMacOS();
             return true;
         }
 #endif

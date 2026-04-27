@@ -415,6 +415,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           setTimeout(() => setScanMessage(null), 3000);
           return;
         }
+        if (result.status === 'error') {
+          setScanMessage(result.message || 'Screen capture failed');
+          setTimeout(() => setScanMessage(null), 5000);
+          return;
+        }
         if (result.status === 'found' && result.result) {
           applyQrResult(result.result);
         }

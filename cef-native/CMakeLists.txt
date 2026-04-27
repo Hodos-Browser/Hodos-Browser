@@ -320,6 +320,7 @@ if(APPLE)
     find_library(FOUNDATION_LIBRARY Foundation)
     find_library(COREGRAPHICS_LIBRARY CoreGraphics)
     find_library(QUARTZCORE_LIBRARY QuartzCore)
+    find_library(COREIMAGE_LIBRARY CoreImage)
     find_library(CURL_LIBRARY curl)
     find_library(SECURITY_LIBRARY Security)
 
@@ -356,6 +357,7 @@ if(APPLE)
         ${FOUNDATION_LIBRARY}
         ${COREGRAPHICS_LIBRARY}
         ${QUARTZCORE_LIBRARY}
+        ${COREIMAGE_LIBRARY}
         ${CURL_LIBRARY}
         ${SECURITY_LIBRARY}
         OpenSSL::SSL
