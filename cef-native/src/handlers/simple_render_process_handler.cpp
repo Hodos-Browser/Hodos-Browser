@@ -980,6 +980,23 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // Phase 2: Screen capture starting notification
+        if (message_name == "qr_screen_capture_starting") {
+            LOG_INFO_RENDER("📷 qr_screen_capture_starting — notifying React");
+            std::string js = "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_screen_capture_starting'}}));";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
+        // Phase 2: Screen capture result delivery
+        if (message_name == "qr_screen_capture_result") {
+            std::string json = message->GetArgumentList()->GetString(0).ToString();
+            LOG_INFO_RENDER("📷 qr_screen_capture_result dispatching to React (" + std::to_string(json.size()) + " chars)");
+            std::string js = "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_screen_capture_result',data:" + json + "}}));";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         if (message_name == "download_state_update") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string downloadsJson = args->GetString(0);

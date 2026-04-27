@@ -63,6 +63,21 @@ if(APPLE)
     message(STATUS "macOS code signing: DISABLED (will sign post-build)")
 endif()
 
+# quirc QR decoder (vendored, ISC license)
+if(WIN32)
+    add_library(quirc STATIC
+        third_party/quirc/quirc.c
+        third_party/quirc/decode.c
+        third_party/quirc/version_db.c
+        third_party/quirc/identify.c
+    )
+    target_include_directories(quirc PUBLIC third_party/quirc)
+    set_target_properties(quirc PROPERTIES
+        C_STANDARD 99
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
+
 # Paths
 set(CEF_ROOT "../cef-binaries")
 set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
@@ -246,6 +261,8 @@ elseif(WIN32)
         include/core/LocalFileResourceHandler.h
         include/core/AutoUpdater.h
         src/core/AutoUpdater.cpp
+        include/core/QRScreenCapture.h
+        src/core/QRScreenCapture.cpp
         hodos.rc
     )
     message(STATUS "Adding Windows-specific source: cef_browser_shell.cpp + core modules")
@@ -379,6 +396,7 @@ elseif(WIN32)
         libcef
         libcef_dll_wrapper.lib
         cef_sandbox
+        quirc
         user32
         gdi32
         ole32

@@ -37,6 +37,9 @@
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/ProfileImporter.h"
 #include "../../include/core/QRScannerScript.h"
+#ifdef _WIN32
+#include "../../include/core/QRScreenCapture.h"
+#endif
 
 #ifdef __APPLE__
     // Forward declarations (no Cocoa.h in .cpp files)
@@ -409,7 +412,8 @@ CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
 std::string SimpleHandler::pending_shield_domain_;
 
 // QR scan: tracks which overlay browser initiated the scan so results route back correctly
-static CefRefPtr<CefBrowser> g_qr_scan_requester = nullptr;
+// Non-static — QRScreenCapture.cpp accesses this via extern to deliver results
+CefRefPtr<CefBrowser> g_qr_scan_requester = nullptr;
 
 CefRefPtr<CefDownloadHandler> SimpleHandler::GetDownloadHandler() {
     return this;
@@ -3382,10 +3386,25 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "qr_found") {
         // Results from the QR scanner script running in the active page.
-        // Forward to the overlay that initiated the scan.
         std::string json = message->GetArgumentList()->GetString(0).ToString();
         LOG_INFO_BROWSER("📷 QR scan results received: " + json.substr(0, 200));
 
+#ifdef _WIN32
+        // Phase 2: If DOM scan found nothing, auto-trigger screen capture fallback
+        if (json == "[]" && g_qr_scan_requester && g_qr_scan_requester->GetMainFrame()) {
+            LOG_INFO_BROWSER("📷 DOM scan empty — falling through to screen capture");
+            // Notify React that screen capture is starting (shown briefly before wallet hides)
+            CefRefPtr<CefProcessMessage> notify = CefProcessMessage::Create("qr_screen_capture_starting");
+            g_qr_scan_requester->GetMainFrame()->SendProcessMessage(PID_RENDERER, notify);
+            // Hide wallet and start selection overlay
+            extern void HideWalletOverlay();
+            HideWalletOverlay();
+            StartQRScreenCapture();
+            return true;
+        }
+#endif
+
+        // DOM scan found results — forward to requester (Phase 1 logic)
         if (g_qr_scan_requester && g_qr_scan_requester->GetMainFrame()) {
             CefRefPtr<CefProcessMessage> resp = CefProcessMessage::Create("qr_scan_result");
             resp->GetArgumentList()->SetString(0, json);

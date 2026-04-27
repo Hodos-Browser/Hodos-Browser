@@ -368,27 +368,58 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     setTimeout(() => setScanMessage(null), 3000);
   }, []);
 
-  // Listen for QR scan results from C++ IPC
+  // Listen for QR scan results from C++ IPC (Phase 1 DOM scan + Phase 2 screen capture)
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type !== 'qr_scan_result') return;
-      setIsScanning(false);
+      const type = event.data?.type;
 
-      const results: QRScanResult[] = event.data.data || [];
-      if (results.length === 0) {
-        setScanMessage('No payment QR found on page');
-        setTimeout(() => setScanMessage(null), 3000);
+      // Phase 1: DOM scan results
+      if (type === 'qr_scan_result') {
+        const results: QRScanResult[] = event.data.data || [];
+        if (results.length === 0) {
+          // Phase 2 auto-triggers from C++ — don't clear scanning state yet
+          return;
+        }
+        setIsScanning(false);
+
+        if (results.length === 1) {
+          applyQrResult(results[0]);
+          return;
+        }
+
+        // Multiple results — show picker
+        setScanResults(results);
+        setShowQrPicker(true);
         return;
       }
 
-      if (results.length === 1) {
-        applyQrResult(results[0]);
+      // Phase 2: Screen capture starting (shown briefly before wallet hides)
+      if (type === 'qr_screen_capture_starting') {
+        setScanMessage('Select QR code area on screen...');
         return;
       }
 
-      // Multiple results — show picker
-      setScanResults(results);
-      setShowQrPicker(true);
+      // Phase 2: Screen capture result
+      if (type === 'qr_screen_capture_result') {
+        setIsScanning(false);
+        const result = event.data.data;
+        if (!result) return;
+
+        if (result.status === 'cancelled') {
+          setScanMessage('Screen capture cancelled');
+          setTimeout(() => setScanMessage(null), 3000);
+          return;
+        }
+        if (result.status === 'not_found') {
+          setScanMessage('No QR found in selected area');
+          setTimeout(() => setScanMessage(null), 3000);
+          return;
+        }
+        if (result.status === 'found' && result.result) {
+          applyQrResult(result.result);
+        }
+        return;
+      }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
@@ -409,10 +440,11 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
       setIsScanning(false);
     }
 
-    // Timeout: if no response in 5s, clear scanning state
+    // Timeout: if no response in 30s, clear scanning state
+    // (Phase 2 screen capture may take time for user to select region)
     setTimeout(() => {
       setIsScanning(false);
-    }, 5000);
+    }, 30000);
   }, []);
 
   const handleSendSubmit = (result: TransactionResponse) => {
