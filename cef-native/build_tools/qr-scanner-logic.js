@@ -1,7 +1,8 @@
 // QR Scanner Logic — injected into page context after jsQR library
 // Scans DOM elements for QR codes, filters for BSV payment patterns,
 // and sends results back via cefMessage IPC.
-(function() {
+// Async to support SVG image loading.
+(async function() {
     'use strict';
 
     // jsQR is available as jsQRLib (or jsQRLib.default for UMD)
@@ -117,45 +118,48 @@
         } catch (e) { return null; } // CORS SecurityError
     }
 
+    // Async: loads SVG into an Image, waits for onload, then decodes
     function scanSVG(svg) {
-        try {
-            var svgRect = svg.getBoundingClientRect();
-            if (svgRect.width < 20 || svgRect.height < 20) return null;
-
-            var serializer = new XMLSerializer();
-            var svgStr = serializer.serializeToString(svg);
-            var blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
-            var url = URL.createObjectURL(blob);
-
-            // SVG rendering is async — we'll use a synchronous approach with a temp canvas
-            // Actually, we need to load the image first. Use a blocking approach.
-            var img = new Image();
-            img.src = url;
-
-            // For SVGs already in DOM, we can try drawing directly
-            var canvas = document.createElement('canvas');
-            canvas.width = Math.round(svgRect.width);
-            canvas.height = Math.round(svgRect.height);
-            if (canvas.width < 20 || canvas.height < 20) {
-                URL.revokeObjectURL(url);
-                return null;
-            }
-            var ctx = canvas.getContext('2d');
-            if (!ctx) { URL.revokeObjectURL(url); return null; }
-
-            // Try drawing the SVG as an image (may fail if not yet loaded)
+        return new Promise(function(resolve) {
             try {
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                URL.revokeObjectURL(url);
-                var result = decodeFromImageData(imageData);
-                if (result) result.source = 'svg';
-                return result;
-            } catch (e) {
-                URL.revokeObjectURL(url);
-                return null;
-            }
-        } catch (e) { return null; }
+                var svgRect = svg.getBoundingClientRect();
+                if (svgRect.width < 20 || svgRect.height < 20) { resolve(null); return; }
+
+                var serializer = new XMLSerializer();
+                var svgStr = serializer.serializeToString(svg);
+                var blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+                var url = URL.createObjectURL(blob);
+
+                var img = new Image();
+                img.onload = function() {
+                    try {
+                        var canvas = document.createElement('canvas');
+                        canvas.width = Math.round(svgRect.width);
+                        canvas.height = Math.round(svgRect.height);
+                        var ctx = canvas.getContext('2d');
+                        if (!ctx) { URL.revokeObjectURL(url); resolve(null); return; }
+
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        URL.revokeObjectURL(url);
+                        var result = decodeFromImageData(imageData);
+                        if (result) result.source = 'svg';
+                        resolve(result);
+                    } catch (e) {
+                        URL.revokeObjectURL(url);
+                        resolve(null);
+                    }
+                };
+                img.onerror = function() {
+                    URL.revokeObjectURL(url);
+                    resolve(null);
+                };
+                img.src = url;
+
+                // Safety timeout — don't wait more than 2s for any single SVG
+                setTimeout(function() { resolve(null); }, 2000);
+            } catch (e) { resolve(null); }
+        });
     }
 
     function scanVideo(video) {
@@ -190,13 +194,13 @@
         }
     }
 
-    // Scan <img> elements
+    // Scan <img> elements (sync)
     var imgs = document.querySelectorAll('img');
     for (var i = 0; i < imgs.length && scanned < MAX_ELEMENTS; i++, scanned++) {
         addResult(scanImage(imgs[i]));
     }
 
-    // Scan <canvas> elements
+    // Scan <canvas> elements (sync)
     var canvases = document.querySelectorAll('canvas');
     for (var i = 0; i < canvases.length && scanned < MAX_ELEMENTS; i++, scanned++) {
         var r = scanCanvas(canvases[i]);
@@ -204,13 +208,16 @@
         addResult(r);
     }
 
-    // Scan <svg> elements (QR codes rendered as SVG)
+    // Scan <svg> elements (async — each needs image load)
     var svgs = document.querySelectorAll('svg');
+    var svgPromises = [];
     for (var i = 0; i < svgs.length && scanned < MAX_ELEMENTS; i++, scanned++) {
-        addResult(scanSVG(svgs[i]));
+        svgPromises.push(scanSVG(svgs[i]));
     }
+    var svgResults = await Promise.all(svgPromises);
+    svgResults.forEach(function(r) { addResult(r); });
 
-    // Scan <video> elements (current frame)
+    // Scan <video> elements (sync — captures current frame)
     var videos = document.querySelectorAll('video');
     for (var i = 0; i < videos.length && scanned < MAX_ELEMENTS; i++, scanned++) {
         addResult(scanVideo(videos[i]));

@@ -2,56 +2,54 @@
 
 > Parent document for the QR scan sprint. Platform-specific implementation details in [QR_SCAN_WINDOWS.md](./QR_SCAN_WINDOWS.md) and [QR_SCAN_MACOS.md](./QR_SCAN_MACOS.md).
 
+## Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| **Phase 1: DOM scan** | **COMPLETE** | `<img>`, `<canvas>`, `<svg>` (async), `<video>` (CORS-limited) |
+| **Phase 2: Screen capture** | Not started | Windows BitBlt + macOS Core Graphics |
+| **Phase 3: BIP21 generation** | Deferred | Our plain-address QR already works with HandCash/RockWallet |
+
 ## Goal
 
-Add a "Scan QR" button to the light wallet send form. One button, two modes:
+"Scan QR" button on the light wallet home screen. Scans the active browser tab for QR codes containing BSV payment data and populates the send form.
 
-1. **DOM scan (Phase 1)** — instant, invisible, cross-platform JavaScript
-2. **Screen capture (Phase 2)** — manual region selection, platform-native C++
-
-The user never chooses between modes. The system tries DOM first, falls through to screen capture if nothing is found.
-
-## User Flow
+## User Flow (Phase 1 — Implemented)
 
 ```
-[Scan QR] button in light wallet send form
+[Scan QR] button on wallet home (2x2 grid: Receive Legacy | Receive BRC-100 | Send | Scan QR)
     |
-    +-- DOM scan (instant, < 100ms, invisible to user)
-    |   +-- 1 BSV result  --> auto-populate form + toast "Found QR on page"
-    |   +-- N BSV results --> picker: "Which one?" with address/amount previews
-    |   +-- 0 results     --> fall through to screen capture
+    +-- DOM scan (async, typically < 500ms)
+    |   +-- 1 BSV result  --> opens send form, auto-populates recipient (+ amount for BIP21)
+    |   +-- N BSV results --> picker overlay with type/address/amount previews
+    |   +-- 0 results     --> toast: "No payment QR found on page"
     |
-    +-- Screen capture mode (Phase 2)
-        +-- Brief instruction overlay: "Drag over a QR code"
-        +-- Wallet overlay closes, crosshair/selection UI appears
-        +-- User drags rectangle over QR code
-        +-- Decode captured region
-        +-- Wallet reopens with form populated
-        +-- If decode fails --> "No QR found in selection, try again"
+    +-- Phase 2 (not yet): screen capture fallback for CORS-blocked images, video frames, non-web content
 ```
 
-## Phase 1: DOM Scanning (Cross-Platform)
+## Phase 1: DOM Scanning (Cross-Platform) — COMPLETE
 
-All work is JavaScript + minimal C++ IPC wiring. Identical on Windows and macOS.
+JavaScript + C++ IPC. Identical on Windows and macOS.
 
-### Architecture
+### Architecture (Implemented)
 
 ```
-Page Context (renderer process)         Wallet Overlay (separate process)
+Page Context (renderer process)         Wallet Overlay (WalletPanel.tsx)
 +----------------------------------+    +-----------------------------+
-| Injected QR scanner script       |    | TransactionForm.tsx         |
-| - jsQR library (~50KB)          |    | - initialRecipient prop     |
-| - Scans <img>, <canvas>, <svg>  |    | - initialAmount prop        |
-| - Captures <video> current frame|    |                             |
-| - Filters by BSV patterns       |    |                             |
+| Injected QR scanner script       |    | Scan QR button              |
+| - jsQR library (130KB minified) |    | - QR result picker          |
+| - Scans <img>, <canvas>, <svg>  |    | - initialRecipient prop     |
+| - Captures <video> current frame|    | - initialAmount prop        |
+| - Filters by BSV patterns       |    | → opens TransactionForm     |
 +----------------------------------+    +-----------------------------+
          |                                        ^
-         | cefMessage.send('qr_found', data)      |
+         | cefMessage.send('qr_found', [json])    |
          v                                        |
 +----------------------------------+              |
 | SimpleHandler (browser process)  |--------------+
-| OnProcessMessageReceived()       |  Forward to wallet overlay
-| Route qr_found --> wallet        |  via IPC or URL params
+| g_qr_scan_requester tracking     |  qr_scan_result via
+| qr_scan_request → inject script  |  SendProcessMessage → postMessage
+| qr_found → forward to requester  |
 +----------------------------------+
 ```
 
@@ -91,39 +89,42 @@ If a page has a QR code as an `<img>` AND one playing in a `<video>`:
 - If both decode to BSV patterns, show the picker with source labels: "Image on page" vs "Video frame"
 - If the video QR is not on the current frame (already passed), DOM scan won't find it — user gets screen capture fallback where they can pause and select
 
-### Key Files to Modify (Phase 1)
+### Key Files (Phase 1 — Implemented)
 
-| File | Change |
-|------|--------|
-| `frontend/src/components/TransactionForm.tsx` | Add `initialRecipient`, `initialAmount` props; add "Scan QR" button |
-| `frontend/src/pages/WalletPanelPage.tsx` | Pass QR data to TransactionForm; handle `qr_scan_result` IPC |
-| `cef-native/src/handlers/simple_handler.cpp` | Handle `qr_scan_request` IPC → send scan command to active browser; handle `qr_found` IPC → forward to wallet overlay |
-| `cef-native/src/handlers/simple_render_process_handler.cpp` | Handle `qr_scan_execute` IPC → inject/trigger scanner script in page context |
-| New: `frontend/src/utils/qr-scanner.js` or embedded in C++ | jsQR library + DOM scanning logic, injected into pages |
+| File | Purpose |
+|------|---------|
+| `cef-native/include/core/QRScannerScript.h` | Auto-generated C++ header: jsQR (minified) + DOM scanner + BSV filter. 10 string chunks for MSVC compatibility |
+| `cef-native/build_tools/qr-scanner-logic.js` | Scanner IIFE source: async scan of img/canvas/svg/video, BSV pattern filter, BIP21 parser, IPC dispatch |
+| `cef-native/build_tools/generate-qr-header.js` | Node.js script: bundles jsqr.min.js + scanner logic → QRScannerScript.h |
+| `cef-native/build_tools/jsqr.min.js` | jsQR library minified via esbuild (130KB) |
+| `cef-native/src/handlers/simple_handler.cpp` | `qr_scan_request` (inject script into active tab) + `qr_found` (forward results to requester) |
+| `cef-native/src/handlers/simple_render_process_handler.cpp` | `qr_scan_result` → `window.dispatchEvent(MessageEvent)` to React |
+| `frontend/src/components/WalletPanel.tsx` | Scan QR button, result listener, picker UI, passes `initialRecipient`/`initialAmount` to TransactionForm |
+| `frontend/src/components/TransactionForm.tsx` | `initialRecipient`/`initialAmount` props for QR pre-fill. Exported regex constants |
+| `frontend/src/utils/bip21.ts` | BIP21 `bitcoin:` URI parser |
+| `frontend/src/components/TransactionComponents.css` | `.qr-scan-btn`, `.qr-picker`, `.qr-scan-message` styles |
+| `frontend/public/qr-test.html` | Test page with 9 QR codes covering all BSV + non-BSV patterns |
 
-### BIP21 URI Parsing
+### BIP21 URI Parsing — Implemented
 
-Need to add a parser for `bitcoin:` URIs. Simple function:
+Parser at `frontend/src/utils/bip21.ts`. Also duplicated inline in the injected scanner script (runs in page context, can't import from React).
 
-```typescript
-function parseBIP21(uri: string): { address: string; amount?: number; label?: string } | null {
-  if (!uri.startsWith('bitcoin:')) return null;
-  const [address, queryString] = uri.slice(8).split('?');
-  const params = new URLSearchParams(queryString || '');
-  return {
-    address,
-    amount: params.has('amount') ? parseFloat(params.get('amount')!) : undefined,
-    label: params.get('label') || undefined,
-  };
-}
-```
-
-Also update our own QR code generation (DashboardTab.tsx) to emit BIP21 URIs instead of plain addresses, so other wallets can scan ours.
+**Note on BIP21 generation (Phase 3):** Our receive QR codes currently use plain addresses (`value={currentAddress}`). This already works with HandCash and RockWallet. Changing to `bitcoin:` prefix was tested and reverted — it may break compatibility with some wallets. Phase 3 deferred until we have confirmation that BIP21 format is universally supported by BSV wallets we care about.
 
 ### Dependencies
 
-- `jsQR` npm package (~50KB, pure JS, no WASM) — or bundle as inline script for injection
+- `jsqr` npm package (130KB minified via esbuild, pure JS, no WASM) — bundled into C++ header as inline string
+- `qrcode` npm devDependency — used to generate test QR images
 - No native dependencies for Phase 1
+
+### Known Limitations (Phase 1)
+
+- **CORS-blocked images**: Cross-origin `<img>` elements throw `SecurityError` on `getImageData()`. Silently skipped. Phase 2 screen capture handles these.
+- **Video frames (YouTube etc.)**: CORS prevents reading pixel data from cross-origin `<video>`. Silently skipped. Phase 2 handles this.
+- **MSVC string literal limit**: jsQR + scanner (130KB) exceeds MSVC's 16380-char limit. Solved by splitting into 10 concatenated string chunks in QRScannerScript.h.
+- **Fingerprint farbling**: Canvas `getImageData()` is slightly perturbed by our fingerprint protection script. jsQR's error correction handles this — QR codes are high-contrast black/white so LSB perturbation doesn't affect decoding.
+- **50-element cap**: Scanner stops after 50 DOM elements to prevent hangs on image-heavy pages.
+- **SVG 2s timeout**: Each SVG scan has a 2-second timeout for image load. Pages with many SVGs may not scan all of them.
 
 ## Phase 2: Screen Capture (Platform-Specific)
 
@@ -191,48 +192,23 @@ Create a `frontend/public/qr-test.html` page (served by Vite dev server at `http
 | 8 | `bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4` | SegWit address | Ignored (not BSV) |
 | 9 | `Hello World` | Random text | Ignored |
 
-Use the wallet's own identity key (from `/getPublicKey`) for test #4.
+Test page: `http://127.0.0.1:5137/qr-test.html` — generated QR PNGs in `frontend/public/qr-images/`.
+Generator script: `frontend/scripts/generate-qr-test-images.cjs` (uses `qrcode` npm package).
 
-**Test page structure:**
-```html
-<!-- frontend/public/qr-test.html -->
-<h2>QR Scan Test Page</h2>
+### Test Results (Phase 1)
 
-<!-- Single QR tests -->
-<h3>Test 1: Plain BSV Address</h3>
-<img src="qr-bsv-address.png" />
-
-<h3>Test 2: BIP21 with Amount</h3>
-<img src="qr-bip21-amount.png" />
-
-<!-- Multiple QR test (should show picker) -->
-<h3>Test: Multiple BSV QR Codes</h3>
-<img src="qr-bsv-address.png" />
-<img src="qr-identity-key.png" />
-
-<!-- Non-BSV (should be ignored) -->
-<h3>Non-BSV QR (should be filtered out)</h3>
-<img src="qr-website-url.png" />
-<img src="qr-segwit.png" />
-```
-
-Generate the QR PNG files with a script or use an online tool. Place them in `frontend/public/` so Vite serves them.
-
-### Test Matrix
-
-| Test | Method |
-|------|--------|
-| DOM scan — plain address | Test page #1, single QR, auto-populate |
-| DOM scan — BIP21 with amount | Test page #2, verify both recipient and amount fill |
-| DOM scan — BIP21 no amount | Test page #3, recipient fills, amount blank |
-| DOM scan — identity key | Test page #4, recipient fills, detected as PeerPay |
-| DOM scan — paymail | Test page #5, recipient fills, paymail resolution triggers |
-| DOM scan — HandCash handle | Test page #6, `$handle` resolves via paymail client |
-| DOM scan — non-BSV filtered | Test page #7-9 only on page, should get "no payment QR found" |
-| DOM scan — mixed BSV + non-BSV | Page with #1 + #7, should find only #1 |
-| DOM scan — multiple BSV | Page with #1 + #4, should show picker |
-| DOM scan — real site | whatsonchain.com address page (has QR code) |
-| DOM scan — CORS blocked image | Cross-origin QR image, should skip gracefully |
-| DOM scan — video frame QR | YouTube video paused on QR frame |
-| Pre-fill form | Verify recipient + amount populate and validation runs |
-| Screen capture — basic (Phase 2) | QR code in a PDF or other app window |
+| Test | Status | Notes |
+|------|--------|-------|
+| DOM scan — plain address | **PASS** | Auto-populates recipient |
+| DOM scan — BIP21 with amount | **PASS** | Populates recipient + amount |
+| DOM scan — BIP21 no amount | **PASS** | Populates recipient, amount blank |
+| DOM scan — identity key (BRC-100) | **PASS** | Populates recipient, detected as BRC-100 |
+| DOM scan — paymail | **PASS** | Populates recipient |
+| DOM scan — HandCash handle | **PASS** | Populates recipient |
+| DOM scan — non-BSV filtered | **PASS** | Website URL, SegWit, random text all ignored |
+| DOM scan — multiple BSV | **PASS** | Picker shows 6 BSV results, each populates correctly on click |
+| DOM scan — SVG QR (our wallet) | **PASS** | Async SVG load fix works — detects our identity key + receive address QR |
+| DOM scan — whatsonchain.com | **PENDING** | Not yet tested |
+| DOM scan — video frame QR | **KNOWN LIMITATION** | YouTube CORS blocks `getImageData()`. Phase 2 screen capture handles this |
+| Pre-fill form opens from button | **PASS** | Scan QR button on wallet home opens send form with data |
+| Screen capture (Phase 2) | Not started | —
