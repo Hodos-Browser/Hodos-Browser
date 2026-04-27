@@ -217,6 +217,68 @@ signtool verify /pa "HodosSetup-1.0.0.exe"
 
 If a different vendor (BitDefender, ESET, Kaspersky, McAfee, etc.) flags us in the wild, look up that vendor's developer-submission portal — there's no shared whitelist across the industry. Track per-vendor submissions in the release issue.
 
+#### 2.5.1 Cert chain verification (run before every submission)
+
+Verify which intermediate CA signed the installer — useful to know whether you're on the regression-affected `EOC CA 03` cohort:
+
+```powershell
+$file = "$env:USERPROFILE\Downloads\HodosBrowser-X.Y.Z-setup.exe"
+$sig = Get-AuthenticodeSignature $file
+$chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+[void]$chain.Build($sig.SignerCertificate)
+$chain.ChainElements | ForEach-Object { Write-Host "  -> $($_.Certificate.Subject)" }
+```
+
+**As of March 2026**, Azure Trusted Signing transitioned new releases to the intermediate CA `Microsoft ID Verified CS EOC CA 03`. Files signed under this CA experienced a SmartScreen reputation regression — accumulated reputation from earlier CAs did **not** carry over. Reference: https://learn.microsoft.com/en-us/answers/questions/5855708/trusted-signing-regression-in-smartscreen-reputati
+
+If we land back on `EOC CA 02` (the pre-regression CA) on a future release, reputation should accrue normally again. Mention the regression in MS Defender submissions while we're stuck on `EOC CA 03`.
+
+#### 2.5.2 Per-release submission tracking
+
+Maintain a row in the release issue (or a separate tracking file) for every release:
+
+| Vendor | Submitted | Submission ID | File state | Outcome |
+|---|---|---|---|---|
+| VirusTotal | YYYY-MM-DD | (report URL) | raw .exe | X/72 engines flagged |
+| MS Defender | YYYY-MM-DD | uuid from email | raw .exe | pending → cleared |
+| Norton | only if flagged | tracking number | .zip (Norton requires) | pending → cleared |
+
+Submission IDs come from the confirmation email (Microsoft) or the success screen (Norton). The Microsoft portal's "submission details" page sometimes shows "Unable to access submission details" right after submit — that's a portal display bug; the email confirmation is authoritative.
+
+**Submission discipline:** submit to MS Defender for **every** public release, not only when flagged. This builds *publisher* reputation independently of *file* reputation.
+
+#### 2.5.3 Reputation-building strategy (per-release)
+
+Reputation in SmartScreen is keyed on file hash + cert thumbprint, accumulated via telemetry from real successful installs. To accelerate it:
+
+1. Within the first 24h after publish, get 5–10 trusted internal testers (different machines / networks) to download and install
+2. Have each tester click "Run anyway" past any SmartScreen warning and complete the install
+3. Early successful installs are weighted heavily; spreading them across machines/IPs helps more than one tester running it 10 times
+
+Don't fake telemetry by clicking through with a script — Microsoft does deduplicate suspicious patterns.
+
+#### 2.5.4 Required: VERSIONINFO in all signed exes (beta.8 forward)
+
+Empty version metadata is a heuristic red flag for AV engines and SmartScreen. **All** of our signed Windows binaries must embed `VERSIONINFO`:
+
+- `HodosBrowser.exe` — embed via `cef-native/hodos.rc` (currently has only an icon block; needs a `VERSIONINFO` block, version pulled from CMake `-DAPP_VERSION=`)
+- `hodos-wallet.exe` — add `winresource` build-dependency in `rust-wallet/Cargo.toml` + `build.rs` that calls `winresource::WindowsResource::new().set(...).compile()`
+- `hodos-adblock.exe` — same pattern in `adblock-engine/`
+
+Required fields per binary:
+
+| Field | Value |
+|---|---|
+| `FileDescription` | "Hodos Browser" / "Hodos Wallet Backend" / "Hodos Adblock Engine" |
+| `FileVersion` | `0.3.0.7` (Win32 4-part) for tag `v0.3.0-beta.7` |
+| `ProductName` | "Hodos Browser" |
+| `ProductVersion` | `0.3.0-beta.7` (semver string) |
+| `CompanyName` | "Marston Enterprises" |
+| `LegalCopyright` | "© 2026 Marston Enterprises. All rights reserved." |
+| `OriginalFilename` | matches the exe name |
+
+Verify post-build via `(Get-Item HodosBrowser.exe).VersionInfo` — every field should be populated, not "Unknown".
+
 ### 2.6 Build Script
 
 ```powershell
