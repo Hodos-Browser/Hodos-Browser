@@ -409,7 +409,7 @@ Maintain a row in the release issue (or a separate tracking file) for every rele
 | MS Defender | YYYY-MM-DD | uuid from email | raw .exe | pending → cleared |
 | Norton | only if flagged | tracking number | .zip (Norton requires) | pending → cleared |
 
-Submission IDs come from the confirmation email (Microsoft) or the success screen (Norton). The Microsoft portal's "submission details" page sometimes shows "Unable to access submission details" right after submit — that's a portal display bug; the email confirmation is authoritative.
+Submission IDs come from either the confirmation email or the portal's "submission details" page. Both have been intermittent: on beta.6 the portal showed "Unable to access submission details" while the email arrived; on beta.8 the portal worked but no email arrived. **Read the ID off whichever surface produces it first** and copy it into the tracking row immediately — Microsoft does not always re-send. (Norton's success screen is the only ID source on Norton's side.)
 
 **Submission discipline:** submit to MS Defender for **every** public release, not only when flagged. This builds *publisher* reputation independently of *file* reputation.
 
@@ -422,7 +422,7 @@ Submission IDs come from the confirmation email (Microsoft) or the success scree
 - Cert chain: signed via `Microsoft ID Verified CS EOC CA 04` (new intermediate — first release on this CA)
 - Installer SHA-256: `a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524`
 - VirusTotal: submitted 2026-04-28 — https://www.virustotal.com/gui/file/a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524
-- MS Defender: submitted 2026-04-28, ID `<TBD — paste from confirmation email>` — noted `EOC CA 04` rotation in submission comments
+- MS Defender: submitted 2026-04-28 08:15 MT, ID `d055010c-cec0-4216-8eae-c04d10a6c5ce` (status: Submitted) — noted `EOC CA 04` rotation in submission comments. Confirmation email never arrived; ID was readable directly on the portal's submission-details page.
 - Norton: skipped (not flagged in the wild; Norton portal expects a real detection name + alert ID, no benefit to preemptive submission)
 
 #### 2.5.3 Reputation-building strategy (per-release)
