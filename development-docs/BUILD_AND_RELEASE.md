@@ -8,10 +8,10 @@
 
 ---
 
-## Current Status (2026-04-27)
+## Current Status (2026-04-28)
 
 **Next release: TBD**
-**Last shipped: `v0.3.0-beta.7`**
+**Last shipped: `v0.3.0-beta.8`**
 
 | Component | Status |
 |-----------|--------|
@@ -19,12 +19,12 @@
 | Windows portable zip | WORKING |
 | macOS DMG | WORKING — signed + notarized + stapled in CI |
 | GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
-| Website (hodosbrowser.com) | LIVE — download links active for beta.7 |
+| Website (hodosbrowser.com) | LIVE — download links active for beta.8 |
 | Auto-update (Windows/WinSparkle) | WORKING — verified end-to-end on beta.4 → beta.5 |
-| Auto-update (macOS/Sparkle 2) | FIXED in beta.6 — Sparkle EdDSA signing path corrected; verify before each release |
+| Auto-update (macOS/Sparkle 2) | INIT FIX in beta.8 — beta.7 and earlier never called `AutoUpdater::Initialize()` on macOS, so Mac users on those versions cannot auto-update to beta.8 (one-time manual replace required). beta.8+ should auto-update normally; verify on beta.8 → beta.9. |
 | Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact |
 | Install directory | `{localappdata}\HodosBrowser` (per-user, no UAC for updates) |
-| AV reputation (SmartScreen) | DEGRADED — Microsoft transitioned us to `EOC CA 03` intermediate in March 2026; reputation accumulation regressed industry-wide. See §2.5.1. |
+| AV reputation (SmartScreen) | DEGRADED — Industry-wide SmartScreen regression in March 2026 when Microsoft rotated intermediate CAs. beta.7 signed via `EOC CA 03`; beta.8 via `EOC CA 04` (first release on this intermediate, behavior TBD). See §2.5.1. |
 
 ### How to Release a New Version — Complete Checklist
 
@@ -391,9 +391,13 @@ $chain.ChainElements | ForEach-Object { Write-Host "  -> $($_.Certificate.Subjec
 
 **As of March 2026**, Azure Trusted Signing transitioned new releases to the intermediate CA `Microsoft ID Verified CS EOC CA 03`. Files signed under this CA experienced a SmartScreen reputation regression — accumulated reputation from earlier CAs did **not** carry over. Reference: https://learn.microsoft.com/en-us/answers/questions/5855708/trusted-signing-regression-in-smartscreen-reputati
 
-If we land back on `EOC CA 02` (the pre-regression CA) on a future release, reputation should accrue normally again. Mention the regression in MS Defender submissions while we're stuck on `EOC CA 03`.
+Azure has continued to rotate intermediates: beta.8 is the first release we've seen signed under `Microsoft ID Verified CS EOC CA 04`. Whether `CA 04` inherits the `CA 03` regression, behaves like the pre-regression `CA 02`, or is a third independent reputation pool is **unknown** — we'll find out from real-world install telemetry over the next few releases. Continue mentioning the rotation context in MS Defender submissions until publisher reputation visibly stabilizes.
 
-**Confirmed for beta.7:** signed via `EOC CA 03` (regression cohort).
+If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release, reputation should accrue normally again.
+
+**Confirmed signing CA per release:**
+- beta.7 — `EOC CA 03` (regression cohort)
+- beta.8 — `EOC CA 04` (new intermediate, first release on this CA)
 
 #### 2.5.2 Per-release submission tracking
 
@@ -413,6 +417,13 @@ Submission IDs come from the confirmation email (Microsoft) or the success scree
 - VirusTotal: submitted 2026-04-26 (clean per scan)
 - MS Defender: submitted 2026-04-26, ID `d02ca5bc-d3af-4932-89b2-8a766a37ae90`
 - Norton: not yet flagged in beta.7 wild; portal was broken on beta.6, no submission landed
+
+**beta.8 submission record:**
+- Cert chain: signed via `Microsoft ID Verified CS EOC CA 04` (new intermediate — first release on this CA)
+- Installer SHA-256: `a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524`
+- VirusTotal: submitted 2026-04-28 — https://www.virustotal.com/gui/file/a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524
+- MS Defender: submitted 2026-04-28, ID `<TBD — paste from confirmation email>` — noted `EOC CA 04` rotation in submission comments
+- Norton: skipped (not flagged in the wild; Norton portal expects a real detection name + alert ID, no benefit to preemptive submission)
 
 #### 2.5.3 Reputation-building strategy (per-release)
 
