@@ -7,7 +7,7 @@
 // Browser settings (general browsing behavior)
 struct BrowserSettings {
     std::string homepage = "about:blank";
-    std::string searchEngine = "duckduckgo";  // duckduckgo, google
+    std::string searchEngine = "google";  // google, duckduckgo
     double zoomLevel = 0.0;
     bool showBookmarkBar = false;
     std::string downloadsPath;  // Empty = system default
