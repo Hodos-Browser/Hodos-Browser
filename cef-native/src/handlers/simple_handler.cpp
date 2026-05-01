@@ -35,6 +35,7 @@
 #include "../../include/core/AutoUpdater.h"
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/ProfileManager.h"
+#include "../../include/core/TaskbarProfile.h"
 #include "../../include/core/ProfileImporter.h"
 #include "../../include/core/QRScannerScript.h"
 #ifdef _WIN32
@@ -2168,13 +2169,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (IsWindowVisible(g_profile_panel_overlay_hwnd)) {
             HideProfilePanelOverlay();
         } else {
-            // Toggle race: if just hidden by WM_ACTIVATE, don't re-open
-            ULONGLONG elapsed = GetTickCount64() - g_profile_last_hide_tick;
-            if (elapsed < 200) {
-                LOG_DEBUG_BROWSER("Profile toggle suppressed — hidden " + std::to_string(elapsed) + "ms ago (race)");
-            } else {
-                ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
-            }
+            ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         LOG_DEBUG_BROWSER("Profile panel toggle handled");
@@ -2185,10 +2180,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern bool IsProfilePanelOverlayVisible();
         extern bool WasProfilePanelJustHidden();
 
-        if (IsProfilePanelOverlayVisible() || WasProfilePanelJustHidden()) {
-            if (IsProfilePanelOverlayVisible()) {
-                HideProfilePanelOverlayMacOS();
-            }
+        if (IsProfilePanelOverlayVisible()) {
+            HideProfilePanelOverlayMacOS();
             return true;
         }
         CreateProfilePanelOverlayMacOS(iconRightOffset);
@@ -2729,6 +2722,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string newName = args->GetString(1).ToString();
             ProfileManager::GetInstance().RenameProfile(id, newName);
             LOG_INFO_BROWSER("👤 Profile renamed: " + id + " -> " + newName);
+#ifdef _WIN32
+            if (id == ProfileManager::GetInstance().GetCurrentProfileId()) {
+                extern HWND g_hwnd;
+                extern HINSTANCE g_hInstance;
+                SetupTaskbarProfile(g_hwnd, g_hInstance);
+            }
+#endif
         }
         return true;
     }
@@ -2760,6 +2760,14 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string color = args->GetString(1).ToString();
             ProfileManager::GetInstance().SetProfileColor(id, color);
             LOG_INFO_BROWSER("Profile color set: " + id + " -> " + color);
+#ifdef _WIN32
+            // Refresh taskbar badge if this is the current profile
+            if (id == ProfileManager::GetInstance().GetCurrentProfileId()) {
+                extern HWND g_hwnd;
+                extern HINSTANCE g_hInstance;
+                SetupTaskbarProfile(g_hwnd, g_hInstance);
+            }
+#endif
         }
         return true;
     }
@@ -2771,6 +2779,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string avatarImage = args->GetString(1).ToString();
             ProfileManager::GetInstance().SetProfileAvatar(id, avatarImage);
             LOG_INFO_BROWSER("Profile avatar set: " + id);
+#ifdef _WIN32
+            if (id == ProfileManager::GetInstance().GetCurrentProfileId()) {
+                extern HWND g_hwnd;
+                extern HINSTANCE g_hInstance;
+                SetupTaskbarProfile(g_hwnd, g_hInstance);
+            }
+#endif
         }
         return true;
     }

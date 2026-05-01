@@ -2377,9 +2377,9 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
     RECT headerRect;
     GetWindowRect(g_header_hwnd, &headerRect);
 
-    // Calculate position - larger panel for profile management UI
-    int panelWidth = ScalePx(380, g_hwnd);   // Wide enough for profile list + create form
-    int panelHeight = ScalePx(380, g_hwnd);  // Reduced from 500 to match actual content height
+    // Calculate position - sized for profile list + inline edit form
+    int panelWidth = ScalePx(380, g_hwnd);
+    int panelHeight = ScalePx(520, g_hwnd);  // Tall enough for edit form (name + color + avatar + buttons)
     int overlayX = headerRect.right - iconRightOffset - panelWidth;
     int overlayY = headerRect.top + ScalePx(104, g_hwnd);
     // Clamp to main window bottom with margin
@@ -2494,13 +2494,13 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     GetWindowRect(posHwnd, &mainRect);
 
     int panelWidth = ScalePx(380, posHwnd);
-    int panelHeight = ScalePx(380, posHwnd);
+    int panelHeight = ScalePx(520, posHwnd);
     int overlayX = headerRect.right - g_profile_icon_right_offset - panelWidth;
     int overlayY = headerRect.top + ScalePx(104, posHwnd);
 
     if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, posHwnd)) {
         panelHeight = mainRect.bottom - overlayY - ScalePx(20, posHwnd);
-        if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
+        if (panelHeight < ScalePx(380, posHwnd)) panelHeight = ScalePx(380, posHwnd);
     }
 
     // Retarget handler before showing
@@ -2527,6 +2527,10 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         profile_browser->GetHost()->WasResized();
         profile_browser->GetHost()->Invalidate(PET_VIEW);
     }
+
+    // Record show timestamp — suppresses immediate WM_ACTIVATE hide from focus bounce
+    extern ULONGLONG g_profile_last_show_tick;
+    g_profile_last_show_tick = GetTickCount64();
 
     // Single focus transfer
     SetForegroundWindow(g_profile_panel_overlay_hwnd);

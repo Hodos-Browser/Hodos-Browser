@@ -94,6 +94,7 @@ bool g_wallet_overlay_prevent_close = false;
 // (WM_ACTIVATE hides overlay before toggle IPC arrives, causing re-open)
 ULONGLONG g_wallet_last_hide_tick = 0;
 ULONGLONG g_profile_last_hide_tick = 0;
+ULONGLONG g_profile_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
 
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
@@ -2569,7 +2570,15 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 ImmAssociateContext(hwnd, nullptr);
             } else {
                 if (g_file_dialog_active) return 0;
-                extern ULONGLONG g_profile_last_hide_tick;
+                // Suppress immediate hide if overlay was just shown (<200ms ago).
+                // SetForegroundWindow in ShowProfilePanelOverlay triggers a
+                // WM_ACTIVATE(WA_INACTIVE) as focus bounces — don't hide.
+                extern ULONGLONG g_profile_last_show_tick;
+                ULONGLONG elapsed = GetTickCount64() - g_profile_last_show_tick;
+                if (elapsed < 200) {
+                    LOG_INFO("Profile panel WM_ACTIVATE suppressed — shown " + std::to_string(elapsed) + "ms ago");
+                    return 0;
+                }
                 LOG_INFO("Hiding profile panel — lost activation (click-outside)");
                 extern void HideProfilePanelOverlay();
                 HideProfilePanelOverlay();

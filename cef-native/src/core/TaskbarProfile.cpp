@@ -11,7 +11,9 @@
 #include <objbase.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <wincodec.h>
 #include <string>
+#include <vector>
 
 #include "../../include/core/TaskbarProfile.h"
 #include "../../include/core/ProfileManager.h"
@@ -32,8 +34,169 @@ static COLORREF ParseHexColor(const std::string& hex) {
     return RGB(r, g, b);
 }
 
+// Decode base64 string to raw bytes
+static std::vector<BYTE> DecodeBase64(const std::string& base64) {
+    static const std::string chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::vector<BYTE> result;
+    int val = 0, bits = -8;
+    for (char c : base64) {
+        if (c == '=' || c == '\n' || c == '\r') continue;
+        size_t pos = chars.find(c);
+        if (pos == std::string::npos) continue;
+        val = (val << 6) + (int)pos;
+        bits += 6;
+        if (bits >= 0) {
+            result.push_back((BYTE)((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return result;
+}
+
+// Create a 16x16 HICON from a base64 data URL image using WIC
+static HICON CreateIconFromBase64(const std::string& dataUrl, int size) {
+    // Strip "data:image/...;base64," prefix
+    size_t commaPos = dataUrl.find(',');
+    if (commaPos == std::string::npos) return nullptr;
+    std::string base64Data = dataUrl.substr(commaPos + 1);
+
+    std::vector<BYTE> imageData = DecodeBase64(base64Data);
+    if (imageData.empty()) return nullptr;
+
+    // Create WIC factory
+    IWICImagingFactory* pFactory = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&pFactory));
+    if (FAILED(hr) || !pFactory) return nullptr;
+
+    // Create stream from memory
+    IWICStream* pStream = nullptr;
+    hr = pFactory->CreateStream(&pStream);
+    if (FAILED(hr) || !pStream) { pFactory->Release(); return nullptr; }
+
+    hr = pStream->InitializeFromMemory(imageData.data(), (DWORD)imageData.size());
+    if (FAILED(hr)) { pStream->Release(); pFactory->Release(); return nullptr; }
+
+    // Decode image
+    IWICBitmapDecoder* pDecoder = nullptr;
+    hr = pFactory->CreateDecoderFromStream(pStream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder);
+    if (FAILED(hr) || !pDecoder) { pStream->Release(); pFactory->Release(); return nullptr; }
+
+    IWICBitmapFrameDecode* pFrame = nullptr;
+    hr = pDecoder->GetFrame(0, &pFrame);
+    if (FAILED(hr) || !pFrame) { pDecoder->Release(); pStream->Release(); pFactory->Release(); return nullptr; }
+
+    // Scale to target size
+    IWICBitmapScaler* pScaler = nullptr;
+    hr = pFactory->CreateBitmapScaler(&pScaler);
+    if (FAILED(hr) || !pScaler) { pFrame->Release(); pDecoder->Release(); pStream->Release(); pFactory->Release(); return nullptr; }
+
+    hr = pScaler->Initialize(pFrame, size, size, WICBitmapInterpolationModeHighQualityCubic);
+    if (FAILED(hr)) { pScaler->Release(); pFrame->Release(); pDecoder->Release(); pStream->Release(); pFactory->Release(); return nullptr; }
+
+    // Convert to 32bpp BGRA
+    IWICFormatConverter* pConverter = nullptr;
+    hr = pFactory->CreateFormatConverter(&pConverter);
+    if (FAILED(hr) || !pConverter) { pScaler->Release(); pFrame->Release(); pDecoder->Release(); pStream->Release(); pFactory->Release(); return nullptr; }
+
+    hr = pConverter->Initialize(pScaler, GUID_WICPixelFormat32bppBGRA,
+                                 WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) { pConverter->Release(); pScaler->Release(); pFrame->Release(); pDecoder->Release(); pStream->Release(); pFactory->Release(); return nullptr; }
+
+    // Copy pixels to DIB section
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = -size; // Top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HDC screenDC = GetDC(nullptr);
+    HBITMAP hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hBitmap || !bits) {
+        ReleaseDC(nullptr, screenDC);
+        pConverter->Release(); pScaler->Release(); pFrame->Release(); pDecoder->Release(); pStream->Release(); pFactory->Release();
+        return nullptr;
+    }
+
+    UINT stride = size * 4;
+    hr = pConverter->CopyPixels(nullptr, stride, stride * size, (BYTE*)bits);
+
+    // Cleanup WIC
+    pConverter->Release();
+    pScaler->Release();
+    pFrame->Release();
+    pDecoder->Release();
+    pStream->Release();
+    pFactory->Release();
+
+    if (FAILED(hr)) {
+        DeleteObject(hBitmap);
+        ReleaseDC(nullptr, screenDC);
+        return nullptr;
+    }
+
+    // Apply circular clip — set alpha to 0 for pixels outside the circle
+    BYTE* pixelData = (BYTE*)bits;
+    float center = (float)size / 2.0f;
+    float radius = center;
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            float dx = (float)x + 0.5f - center;
+            float dy = (float)y + 0.5f - center;
+            if (dx * dx + dy * dy > radius * radius) {
+                int offset = (y * size + x) * 4;
+                pixelData[offset + 0] = 0; // B
+                pixelData[offset + 1] = 0; // G
+                pixelData[offset + 2] = 0; // R
+                pixelData[offset + 3] = 0; // A
+            }
+        }
+    }
+
+    // Create mask (pixelData already set above)
+    HBITMAP hMask = CreateBitmap(size, size, 1, 1, nullptr);
+    HDC maskDC = CreateCompatibleDC(screenDC);
+    HBITMAP oldMask = (HBITMAP)SelectObject(maskDC, hMask);
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int offset = (y * size + x) * 4;
+            if (pixelData[offset + 3] > 0) {
+                SetPixel(maskDC, x, y, RGB(0, 0, 0));
+            } else {
+                SetPixel(maskDC, x, y, RGB(255, 255, 255));
+            }
+        }
+    }
+    SelectObject(maskDC, oldMask);
+    DeleteDC(maskDC);
+    ReleaseDC(nullptr, screenDC);
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = TRUE;
+    iconInfo.hbmMask = hMask;
+    iconInfo.hbmColor = hBitmap;
+    HICON hIcon = CreateIconIndirect(&iconInfo);
+
+    DeleteObject(hBitmap);
+    DeleteObject(hMask);
+
+    return hIcon;
+}
+
 // Create a 16x16 HICON with a colored circle and a white initial letter
 static HICON CreateProfileBadgeIcon(const ProfileInfo& profile) {
+    // If profile has a custom avatar image, use it
+    if (!profile.avatarImage.empty()) {
+        HICON hIcon = CreateIconFromBase64(profile.avatarImage, 16);
+        if (hIcon) return hIcon;
+        // Fall through to initials if decode fails
+    }
+
     const int size = 16;
 
     // Create 32-bit ARGB DIB section
@@ -78,9 +241,8 @@ static HICON CreateProfileBadgeIcon(const ProfileInfo& profile) {
     BYTE* pixelData = (BYTE*)bits;
     for (int i = 0; i < size * size; i++) {
         int offset = i * 4;
-        // If any color channel is non-zero, pixel was drawn
         if (pixelData[offset] != 0 || pixelData[offset + 1] != 0 || pixelData[offset + 2] != 0) {
-            pixelData[offset + 3] = 255; // Set alpha to opaque
+            pixelData[offset + 3] = 255;
         }
     }
 
@@ -112,25 +274,23 @@ static HICON CreateProfileBadgeIcon(const ProfileInfo& profile) {
 
     SelectObject(memDC, oldBitmap);
 
-    // Create mask bitmap (all black = fully opaque where color bitmap has alpha)
+    // Create mask bitmap
     HBITMAP hMask = CreateBitmap(size, size, 1, 1, nullptr);
     HDC maskDC = CreateCompatibleDC(screenDC);
     HBITMAP oldMask = (HBITMAP)SelectObject(maskDC, hMask);
-    // Set mask: 0 = opaque, 1 = transparent
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
             int offset = (y * size + x) * 4;
             if (pixelData[offset + 3] > 0) {
-                SetPixel(maskDC, x, y, RGB(0, 0, 0));   // Opaque
+                SetPixel(maskDC, x, y, RGB(0, 0, 0));
             } else {
-                SetPixel(maskDC, x, y, RGB(255, 255, 255)); // Transparent
+                SetPixel(maskDC, x, y, RGB(255, 255, 255));
             }
         }
     }
     SelectObject(maskDC, oldMask);
     DeleteDC(maskDC);
 
-    // Create icon from color + mask bitmaps
     ICONINFO iconInfo = {};
     iconInfo.fIcon = TRUE;
     iconInfo.hbmMask = hMask;

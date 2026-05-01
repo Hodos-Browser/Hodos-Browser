@@ -58,6 +58,21 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     const editNameInputRef = useRef<HTMLInputElement>(null);
     const editFileInputRef = useRef<HTMLInputElement>(null);
 
+    // Reset edit/create state when overlay regains focus (re-shown after hide).
+    // CEF calls SetFocus(true) on show and SetFocus(false) on hide,
+    // which triggers window focus/blur events.
+    useEffect(() => {
+        const handleFocus = () => {
+            setEditingProfileId(null);
+            setShowCreateForm(false);
+            setNewProfileName('');
+            setAvatarImage(null);
+            fetchProfiles();
+        };
+        window.addEventListener('focus', handleFocus);
+        return () => window.removeEventListener('focus', handleFocus);
+    }, [fetchProfiles]);
+
     // Focus the input when create form shows
     useEffect(() => {
         if (showCreateForm && nameInputRef.current) {

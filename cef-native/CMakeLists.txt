@@ -412,6 +412,7 @@ elseif(WIN32)
         dbghelp
         delayimp
         shell32
+        windowscodecs
         advapi32
         dwmapi
         version

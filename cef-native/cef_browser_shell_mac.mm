@@ -3903,8 +3903,8 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-    CGFloat panelWidth = 300;
-    CGFloat panelHeight = 400;
+    CGFloat panelWidth = 380;
+    CGFloat panelHeight = 520;
     NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_profile_panel_overlay_window) {
