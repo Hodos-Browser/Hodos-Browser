@@ -1466,7 +1466,23 @@ bool SimpleHandler::OnBeforePopup(
         return false;  // Allow default popup behavior
     }
 
-    // Convert ALL popup requests to new tabs (including NEW_POPUP and NEW_WINDOW)
+    // OAuth/auth popups need real popup windows (window.opener + postMessage)
+    bool is_auth_popup = (
+        target_disposition == CEF_WOD_NEW_POPUP &&
+        (url.find("display=popup") != std::string::npos ||
+         url.find("ux_mode=popup") != std::string::npos ||
+         url.find("/oauth") != std::string::npos ||
+         url.find("/auth") != std::string::npos ||
+         url.find("/signin") != std::string::npos ||
+         url.find("/gsi/") != std::string::npos)
+    );
+
+    if (is_auth_popup) {
+        LOG_INFO_BROWSER("🔐 Allowing auth popup as real window: " + url);
+        return false;
+    }
+
+    // Convert ALL other popup requests to new tabs (including NEW_POPUP and NEW_WINDOW)
     // This ensures that right-click "Open in new tab", middle-click, Ctrl+Click,
     // and target="_blank" links all open in tabs instead of separate windows
     bool should_create_tab = (
@@ -1503,9 +1519,16 @@ bool SimpleHandler::OnBeforePopup(
         // Return true to cancel the popup window creation (we handled it with a new tab)
         return true;
 #else
-        // TODO(macOS): Implement tab creation for popup handling
-        LOG_DEBUG_BROWSER("📑 Popup to tab conversion not implemented on macOS: " + url);
-        return false;  // Allow default behavior for now
+        LOG_DEBUG_BROWSER("📑 Converting popup to new tab (macOS): " + url + " (disposition: " + disposition_str + ", role: " + role_ + ")");
+
+        BrowserWindow* popupWin = GetOwnerWindow();
+        void* parentView = (popupWin && popupWin->webview_view) ? popupWin->webview_view : g_webview_view;
+        int popupWid = popupWin ? popupWin->window_id : 0;
+
+        ViewDimensions dims = GetViewDimensions(parentView);
+        TabManager::GetInstance().CreateTab(url, parentView, 0, 0, dims.width, dims.height, popupWid);
+
+        return true;
 #endif
     }
 

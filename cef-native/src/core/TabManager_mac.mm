@@ -159,6 +159,10 @@ bool TabManager::CloseTab(int tab_id) {
     LOG_INFO("Total tabs: " + std::to_string(tabs_.size()));
     LOG_INFO("Is active tab: " + std::string(tab_id == active_tab_id_ ? "YES" : "NO"));
 
+    // Guard against close cascading to window via responder chain
+    extern bool g_closing_tab;
+    g_closing_tab = true;
+
     // Mark as closing
     tab.is_closing = true;
 
@@ -230,6 +234,7 @@ bool TabManager::CloseTab(int tab_id) {
 
     LOG_INFO("=== CLOSE TAB END ===");
 
+    g_closing_tab = false;
     return true;
 }
 
