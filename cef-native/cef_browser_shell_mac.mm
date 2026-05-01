@@ -995,6 +995,33 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     b->GetHost()->SendKeyEvent(key_event);
 }
 
+- (void)flagsChanged:(NSEvent *)event {
+    CefRefPtr<CefBrowser> b = [self overlayBrowser];
+    if (!b) return;
+
+    CefKeyEvent key_event;
+    key_event.native_key_code = [event keyCode];
+    key_event.modifiers = 0;
+    if ([event modifierFlags] & NSEventModifierFlagShift) key_event.modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagControl) key_event.modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagOption) key_event.modifiers |= EVENTFLAG_ALT_DOWN;
+    if ([event modifierFlags] & NSEventModifierFlagCommand) key_event.modifiers |= EVENTFLAG_COMMAND_DOWN;
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    unsigned short keyCode = [event keyCode];
+    bool isDown = false;
+    switch (keyCode) {
+        case 56: case 60: isDown = (flags & NSEventModifierFlagShift) != 0; break;
+        case 59: case 62: isDown = (flags & NSEventModifierFlagControl) != 0; break;
+        case 58: case 61: isDown = (flags & NSEventModifierFlagOption) != 0; break;
+        case 55: case 54: isDown = (flags & NSEventModifierFlagCommand) != 0; break;
+        default: isDown = true; break;
+    }
+
+    key_event.type = isDown ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
+    b->GetHost()->SendKeyEvent(key_event);
+}
+
 @end
 
 // Cookie Panel (Privacy Shield) Overlay View
@@ -3973,6 +4000,9 @@ static void InstallProfilePanelClickOutsideMonitor() {
     g_profile_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
         handler:^NSEvent*(NSEvent* event) {
             if (!g_profile_panel_overlay_window || ![g_profile_panel_overlay_window isVisible]) {
+                return event;
+            }
+            if (g_file_dialog_active) {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
