@@ -245,6 +245,12 @@ static bool g_content_fullscreen = false;
 static NSRect g_pre_fullscreen_frame = NSZeroRect;
 static id g_fullscreen_escape_monitor = nil;
 
+// Native macOS Space fullscreen state (green button / toggleFullScreen:)
+static bool g_native_fullscreen = false;
+
+// Guard against tab close cascading to window close via responder chain
+bool g_closing_tab = false;
+
 // Overlay windows (created on-demand)
 NSWindow* g_settings_overlay_window = nullptr;
 NSWindow* g_wallet_overlay_window = nullptr;
@@ -320,7 +326,9 @@ void HandleFullscreenChange(bool fullscreen) {
         if (!g_main_window || !g_header_view || !g_webview_view) return;
 
         if (fullscreen) {
-            g_pre_fullscreen_frame = [g_main_window frame];
+            if (!g_native_fullscreen) {
+                g_pre_fullscreen_frame = [g_main_window frame];
+            }
             g_content_fullscreen = true;
 
             [g_header_view setHidden:YES];
@@ -333,12 +341,14 @@ void HandleFullscreenChange(bool fullscreen) {
                 activeTab->browser->GetHost()->WasResized();
             }
 
-            [NSApp setPresentationOptions:
-                NSApplicationPresentationAutoHideMenuBar |
-                NSApplicationPresentationAutoHideDock];
+            if (!g_native_fullscreen) {
+                [NSApp setPresentationOptions:
+                    NSApplicationPresentationAutoHideMenuBar |
+                    NSApplicationPresentationAutoHideDock];
 
-            NSRect screenFrame = [[g_main_window screen] frame];
-            [g_main_window setFrame:screenFrame display:YES animate:YES];
+                NSRect screenFrame = [[g_main_window screen] frame];
+                [g_main_window setFrame:screenFrame display:YES animate:YES];
+            }
 
             // Catch Escape at the NSEvent level — macOS presentation
             // options can swallow keys before they reach the CEF view.
@@ -364,13 +374,15 @@ void HandleFullscreenChange(bool fullscreen) {
                 g_fullscreen_escape_monitor = nil;
             }
 
-            [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+            if (!g_native_fullscreen) {
+                [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+
+                if (!NSIsEmptyRect(g_pre_fullscreen_frame)) {
+                    [g_main_window setFrame:g_pre_fullscreen_frame display:YES animate:YES];
+                }
+            }
 
             [g_header_view setHidden:NO];
-
-            if (!NSIsEmptyRect(g_pre_fullscreen_frame)) {
-                [g_main_window setFrame:g_pre_fullscreen_frame display:YES animate:YES];
-            }
 
             NSRect contentRect = [[g_main_window contentView] bounds];
             int headerHeight = 96;
@@ -397,6 +409,10 @@ void HandleFullscreenChange(bool fullscreen) {
 
 // Toggle fullscreen for the main window (called from menu_action "fullscreen")
 void ToggleFullScreenMacOS() {
+    if (g_content_fullscreen) {
+        LOG_WARNING("Ignoring native fullscreen toggle — content fullscreen active");
+        return;
+    }
     if (g_main_window) {
         [g_main_window toggleFullScreen:nil];
     }
@@ -404,6 +420,10 @@ void ToggleFullScreenMacOS() {
 
 void ToggleMainWindowFullscreen() {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_content_fullscreen) {
+            LOG_WARNING("Ignoring native fullscreen toggle — content fullscreen active");
+            return;
+        }
         if (g_main_window) {
             [g_main_window toggleFullScreen:nil];
         }
@@ -591,6 +611,7 @@ ViewDimensions GetViewDimensions(void* nsview) {
 // Settings Overlay View
 @interface SettingsOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
 @end
 
 @implementation SettingsOverlayView
@@ -602,12 +623,34 @@ ViewDimensions GetViewDimensions(void* nsview) {
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
     }
     return self;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -793,7 +836,12 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 - (BOOL)canBecomeKeyView { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 - (BOOL)isOpaque { return NO; }
-- (NSView *)hitTest:(NSPoint)point { return self; }
+
+- (NSView *)hitTest:(NSPoint)point {
+    NSPoint localPoint = [self convertPoint:point fromView:[self superview]];
+    if (NSPointInRect(localPoint, [self bounds])) return self;
+    return nil;
+}
 
 - (CefRefPtr<CefBrowser>)overlayBrowser {
     return _browserAccessor ? _browserAccessor() : nullptr;
@@ -952,6 +1000,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 // Cookie Panel (Privacy Shield) Overlay View
 @interface CookiePanelOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
 @end
 
 @implementation CookiePanelOverlayView
@@ -963,12 +1012,34 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
     }
     return self;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -1139,38 +1210,10 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 - (BOOL)isOpaque { return NO; }
 
-// CRITICAL: Override hitTest to ensure this view ALWAYS receives mouse events
 - (NSView *)hitTest:(NSPoint)point {
-    // Log to file for diagnostics
-    static std::string hitLogPath;
-    if (hitLogPath.empty()) {
-        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-        NSString* appDirName = [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()];
-        NSString* logRelPath = [appDirName stringByAppendingPathComponent:@"wallet_events.log"];
-        hitLogPath = std::string([[appSup stringByAppendingPathComponent:logRelPath] UTF8String]);
-    }
-    static int hitCount = 0;
-    if (hitCount < 10) {
-        std::ofstream dbg(hitLogPath, std::ios::app);
-        dbg << "hitTest called: point=(" << point.x << "," << point.y
-            << ") bounds=(" << self.bounds.origin.x << "," << self.bounds.origin.y
-            << "," << self.bounds.size.width << "," << self.bounds.size.height
-            << ") subviews=" << [[self subviews] count]
-            << " self=" << (void*)self
-            << std::endl;
-        // Log subviews if any exist
-        for (NSView* sub in [self subviews]) {
-            NSRect f = [sub frame];
-            dbg << "  subview: " << [[sub className] UTF8String]
-                << " frame=(" << f.origin.x << "," << f.origin.y
-                << "," << f.size.width << "," << f.size.height
-                << ") hidden=" << [sub isHidden]
-                << std::endl;
-        }
-        dbg.close();
-        hitCount++;
-    }
-    return self;  // Always return self — we handle ALL events
+    NSPoint localPoint = [self convertPoint:point fromView:[self superview]];
+    if (NSPointInRect(localPoint, [self bounds])) return self;
+    return nil;
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -1181,29 +1224,12 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     mouse_event.y = (int)(self.bounds.size.height - location.y);
     mouse_event.modifiers = 0;
 
-    // Use file logging (NSLog doesn't appear in log show for unsigned apps)
-    static std::string mdLogPath;
-    if (mdLogPath.empty()) {
-        NSString* appSup = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-        NSString* mdAppDir = [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()];
-        NSString* mdLogRel = [mdAppDir stringByAppendingPathComponent:@"wallet_events.log"];
-        mdLogPath = std::string([[appSup stringByAppendingPathComponent:mdLogRel] UTF8String]);
-    }
-    std::ofstream dbg(mdLogPath, std::ios::app);
-    dbg << "VIEW mouseDown: NSView(" << location.x << "," << location.y
-        << ") → CEF(" << mouse_event.x << "," << mouse_event.y
-        << ") bounds=" << self.bounds.size.width << "x" << self.bounds.size.height << std::endl;
-
     CefRefPtr<CefBrowser> wallet = SimpleHandler::GetWalletBrowser();
     if (wallet) {
         wallet->GetHost()->SetFocus(true);
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
         wallet->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        dbg << "  → Click sent to wallet browser ID=" << wallet->GetIdentifier() << std::endl;
-    } else {
-        dbg << "  ❌ GetWalletBrowser() returned NULL!" << std::endl;
     }
-    dbg.close();
 }
 
 - (void)mouseUp:(NSEvent *)event {
@@ -1431,6 +1457,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 // Backup Overlay View
 @interface BackupOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
 @end
 
 @implementation BackupOverlayView
@@ -1442,12 +1469,34 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
     }
     return self;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -1558,6 +1607,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 // BRC-100 Auth Overlay View
 @interface BRC100AuthOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
 @end
 
 @implementation BRC100AuthOverlayView
@@ -1569,12 +1619,34 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
     }
     return self;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -1713,6 +1785,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
 @interface NotificationOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
+@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
 @end
 
 @implementation NotificationOverlayView
@@ -1724,12 +1797,34 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         _renderLayer.opaque = NO;
         [self setLayer:_renderLayer];
         [self setWantsLayer:YES];
+
+        _overlayTrackingArea = [[NSTrackingArea alloc]
+            initWithRect:self.bounds
+            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:self
+            userInfo:nil];
+        [self addTrackingArea:_overlayTrackingArea];
     }
     return self;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_overlayTrackingArea) {
+        [self removeTrackingArea:_overlayTrackingArea];
+    }
+    _overlayTrackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:_overlayTrackingArea];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -1875,7 +1970,9 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 - (BOOL)isOpaque { return NO; }
 
 - (NSView *)hitTest:(NSPoint)point {
-    return self;  // Always return self — we handle ALL events
+    NSPoint localPoint = [self convertPoint:point fromView:[self superview]];
+    if (NSPointInRect(localPoint, [self bounds])) return self;
+    return nil;
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -2175,9 +2272,16 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     WindowManager::GetInstance().SetActiveWindowId(0);
+    LOG_INFO("Main window became key");
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    // Reject close if it's a cascade from tab/browser teardown (not user-initiated)
+    if (g_closing_tab) {
+        LOG_WARNING("❌ Window close rejected — tab close in progress (responder chain cascade)");
+        return NO;
+    }
+
     // Close only this window's tabs and remove the window record. Do NOT call
     // ShutdownApplication() here — on macOS we follow the Chromium convention
     // (see chrome/browser/app_controller_mac.mm ScopedKeepAlive) where closing
@@ -2203,10 +2307,24 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
-    // Overlay close-on-focus-loss is now handled by InstallAppFocusLossHandler()
-    // in OverlayHelpers_mac.mm via NSApplicationDidResignActiveNotification.
-    // This method is intentionally empty -- keeping it for documentation.
-    LOG_DEBUG("Main window resigned key (overlay close handled by OverlayHelpers)");
+    NSResponder* firstResponder = [g_main_window firstResponder];
+    NSString* responderDesc = firstResponder ? [firstResponder description] : @"(nil)";
+    LOG_INFO("Main window resigned key — firstResponder: " + std::string([responderDesc UTF8String]));
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    g_native_fullscreen = true;
+    LOG_INFO("Native fullscreen ENTERED");
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    g_native_fullscreen = false;
+    LOG_INFO("Native fullscreen EXITED");
+    if (g_content_fullscreen) {
+        NSRect contentRect = [[g_main_window contentView] bounds];
+        [g_webview_view setFrame:contentRect];
+        [g_header_view setHidden:YES];
+    }
 }
 
 @end
