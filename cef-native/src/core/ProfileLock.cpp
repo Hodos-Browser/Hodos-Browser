@@ -14,23 +14,32 @@ static HANDLE g_profile_lock_handle = INVALID_HANDLE_VALUE;
 bool AcquireProfileLock(const std::string& profile_path) {
     std::string lock_file = profile_path + "\\profile.lock";
 
-    HANDLE handle = CreateFileA(
-        lock_file.c_str(),
-        GENERIC_WRITE,
-        0,  // No sharing — exclusive access
-        NULL,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,  // Auto-cleanup on crash
-        NULL
-    );
+    const int MAX_RETRIES = 6;
+    const DWORD RETRY_DELAY_MS = 500;
 
-    if (handle == INVALID_HANDLE_VALUE) {
-        // ERROR_SHARING_VIOLATION means another instance has it locked
-        return false;
+    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        HANDLE handle = CreateFileA(
+            lock_file.c_str(),
+            GENERIC_WRITE,
+            0,  // No sharing — exclusive access
+            NULL,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,  // Auto-cleanup on crash
+            NULL
+        );
+
+        if (handle != INVALID_HANDLE_VALUE) {
+            g_profile_lock_handle = handle;
+            return true;
+        }
+
+        // Retry after delay (previous instance may still be shutting down)
+        if (attempt < MAX_RETRIES - 1) {
+            Sleep(RETRY_DELAY_MS);
+        }
     }
 
-    g_profile_lock_handle = handle;
-    return true;
+    return false;
 }
 
 void ReleaseProfileLock() {
@@ -51,19 +60,34 @@ static int g_profile_lock_fd = -1;
 bool AcquireProfileLock(const std::string& profile_path) {
     std::string lock_file = profile_path + "/profile.lock";
 
-    int fd = open(lock_file.c_str(), O_WRONLY | O_CREAT, 0644);
-    if (fd < 0) {
-        return false;
-    }
+    const int MAX_RETRIES = 6;
+    const useconds_t RETRY_DELAY_US = 500000;  // 500ms
 
-    // Non-blocking exclusive lock
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        int fd = open(lock_file.c_str(), O_WRONLY | O_CREAT, 0644);
+        if (fd < 0) {
+            if (attempt < MAX_RETRIES - 1) {
+                usleep(RETRY_DELAY_US);
+                continue;
+            }
+            return false;
+        }
+
+        // Non-blocking exclusive lock
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            g_profile_lock_fd = fd;
+            return true;
+        }
+
         close(fd);
-        return false;
+
+        // Retry after delay (previous instance may still be shutting down)
+        if (attempt < MAX_RETRIES - 1) {
+            usleep(RETRY_DELAY_US);
+        }
     }
 
-    g_profile_lock_fd = fd;
-    return true;
+    return false;
 }
 
 void ReleaseProfileLock() {

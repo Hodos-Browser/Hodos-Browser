@@ -2681,9 +2681,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         
         auto profiles = ProfileManager::GetInstance().GetAllProfiles();
         auto current = ProfileManager::GetInstance().GetCurrentProfile();
-        
+        std::string defaultId = ProfileManager::GetInstance().GetDefaultProfileId();
+
         // Build JSON response
-        std::string json = "{\"currentProfileId\":\"" + current.id + "\",\"profiles\":[";
+        std::string json = "{\"currentProfileId\":\"" + current.id + "\",\"defaultProfileId\":\"" + defaultId + "\",\"profiles\":[";
         for (size_t i = 0; i < profiles.size(); i++) {
             if (i > 0) json += ",";
             json += "{\"id\":\"" + profiles[i].id + "\"";
@@ -2748,6 +2749,38 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string id = args->GetString(0).ToString();
             LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
             ProfileManager::GetInstance().LaunchWithProfile(id);
+        }
+        return true;
+    }
+
+    if (message_name == "profiles_set_color") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 2) {
+            std::string id = args->GetString(0).ToString();
+            std::string color = args->GetString(1).ToString();
+            ProfileManager::GetInstance().SetProfileColor(id, color);
+            LOG_INFO_BROWSER("Profile color set: " + id + " -> " + color);
+        }
+        return true;
+    }
+
+    if (message_name == "profiles_set_avatar") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 2) {
+            std::string id = args->GetString(0).ToString();
+            std::string avatarImage = args->GetString(1).ToString();
+            ProfileManager::GetInstance().SetProfileAvatar(id, avatarImage);
+            LOG_INFO_BROWSER("Profile avatar set: " + id);
+        }
+        return true;
+    }
+
+    if (message_name == "profiles_set_default") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() >= 1) {
+            std::string id = args->GetString(0).ToString();
+            ProfileManager::GetInstance().SetDefaultProfile(id);
+            LOG_INFO_BROWSER("Default profile set: " + id);
         }
         return true;
     }

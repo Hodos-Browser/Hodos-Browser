@@ -253,6 +253,8 @@ elseif(WIN32)
         src/core/SettingsManager.cpp
         include/core/ProfileLock.h
         src/core/ProfileLock.cpp
+        include/core/TaskbarProfile.h
+        src/core/TaskbarProfile.cpp
         include/core/SingleInstance.h
         src/core/SingleInstance.cpp
         include/core/ProfileImporter.h

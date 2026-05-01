@@ -161,6 +161,7 @@ bool BookmarkManager::OpenDatabase() {
 
 void BookmarkManager::CloseDatabase() {
     if (db_) {
+        sqlite3_exec(db_, "PRAGMA wal_checkpoint(RESTART)", nullptr, nullptr, nullptr);
         sqlite3_close(db_);
         db_ = nullptr;
     }

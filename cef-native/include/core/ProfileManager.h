@@ -29,6 +29,11 @@ public:
     bool DeleteProfile(const std::string& id);
     bool RenameProfile(const std::string& id, const std::string& newName);
     bool SetProfileColor(const std::string& id, const std::string& color);
+    bool SetProfileAvatar(const std::string& id, const std::string& avatarImage);
+
+    // Default profile
+    bool SetDefaultProfile(const std::string& id);
+    std::string GetDefaultProfileId() const;
 
     // Current profile management
     void SetCurrentProfileId(const std::string& id);
@@ -64,6 +69,7 @@ private:
     std::vector<ProfileInfo> profiles_;
     std::string currentProfileId_ = "Default";
     bool showPickerOnStartup_ = false;
+    std::string defaultProfileId_ = "Default";
     bool initialized_ = false;
 
     // Prevent copying

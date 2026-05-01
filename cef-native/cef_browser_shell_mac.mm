@@ -4488,7 +4488,7 @@ int main(int argc, char* argv[]) {
 
         // Parse --profile argument from command line
         // macOS: use argc/argv from main_args
-        std::string profileId = "Default";
+        std::string profileId = "";
         NSArray* arguments = [[NSProcessInfo processInfo] arguments];
         for (NSString* arg in arguments) {
             std::string argStr = [arg UTF8String];
@@ -4499,6 +4499,9 @@ int main(int argc, char* argv[]) {
                 if (!profileId.empty() && profileId.back() == '"') profileId.pop_back();
                 break;
             }
+        }
+        if (profileId.empty()) {
+            profileId = ProfileManager::GetInstance().GetDefaultProfileId();
         }
         ProfileManager::GetInstance().SetCurrentProfileId(profileId);
         LOG_INFO("Using profile: " + profileId);

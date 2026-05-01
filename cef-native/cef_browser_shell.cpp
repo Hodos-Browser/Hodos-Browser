@@ -38,6 +38,7 @@
 #include "include/core/FingerprintProtection.h"
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
+#include "include/core/TaskbarProfile.h"
 #include "include/core/SingleInstance.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
@@ -45,6 +46,8 @@
 #include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
+#include <objbase.h>   // CoInitializeEx for taskbar profile integration
+#include <shobjidl.h>  // SetCurrentProcessExplicitAppUserModelID
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -3129,6 +3132,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     g_hInstance = hInstance;
 
+    // Initialize COM for taskbar integration (AUMID, ITaskbarList3).
+    // CoInitializeEx is reference-counted; CEF's later COM init is compatible.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     // Dev safeguard: refuse to run from build directory without HODOS_DEV=1
     {
         char exe_path[MAX_PATH];
@@ -3192,10 +3199,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_ERROR("Failed to initialize ProfileManager");
     }
 
-    // Parse --profile argument from command line
+    // Parse --profile argument from command line (empty = no flag provided)
     std::string profileId = ProfileManager::ParseProfileArgument(GetCommandLineW());
+    if (profileId.empty()) {
+        profileId = ProfileManager::GetInstance().GetDefaultProfileId();
+    }
     ProfileManager::GetInstance().SetCurrentProfileId(profileId);
     LOG_INFO(elapsed() + "STARTUP: Profile parsed: " + profileId);
+
+    // Set process AUMID early (before window creation) so Windows groups
+    // taskbar buttons by profile from the start
+    if (ProfileManager::GetInstance().GetAllProfiles().size() > 1) {
+        std::wstring aumid = L"HodosBrowser";
+        if (profileId != "Default") {
+            std::wstring pw(profileId.begin(), profileId.end());
+            aumid += L"." + pw;
+        }
+        SetCurrentProcessExplicitAppUserModelID(aumid.c_str());
+        LOG_INFO("AUMID set: " + profileId);
+    }
 
     // Get profile-specific data directory
     std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
@@ -3534,6 +3556,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // This guarantees the skeleton toolbar is visible before CefInitialize blocks.
     DwmFlush();
     LOG_INFO(elapsed() + "STARTUP: Window shown + DwmFlush complete");
+
+    // Set per-profile taskbar grouping and icon badge (skips if single profile)
+    SetupTaskbarProfile(hwnd, hInstance);
 
     LOG_INFO(elapsed() + "STARTUP: CefInitialize starting...");
     bool success = CefInitialize(main_args, settings, app, nullptr);

@@ -111,6 +111,7 @@ bool HistoryManager::OpenDatabase() {
 
 void HistoryManager::CloseDatabase() {
     if (history_db_) {
+        sqlite3_exec(history_db_, "PRAGMA wal_checkpoint(RESTART)", nullptr, nullptr, nullptr);
         sqlite3_close(history_db_);
         history_db_ = nullptr;
         LOG_INFO_HISTORY("📚 History database closed");

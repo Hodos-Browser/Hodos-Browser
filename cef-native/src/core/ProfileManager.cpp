@@ -111,6 +111,7 @@ void ProfileManager::Load() {
         // Parse other settings
         currentProfileId_ = j.value("lastUsedProfile", "Default");
         showPickerOnStartup_ = j.value("showPickerOnStartup", false);
+        defaultProfileId_ = j.value("defaultProfileId", "Default");
 
         std::cout << "📁 Loaded " << profiles_.size() << " profiles from profiles.json" << std::endl;
 
@@ -139,6 +140,7 @@ void ProfileManager::Save() {
         j["version"] = 1;
         j["lastUsedProfile"] = currentProfileId_;
         j["showPickerOnStartup"] = showPickerOnStartup_;
+        j["defaultProfileId"] = defaultProfileId_;
 
         json profilesArray = json::array();
         for (const auto& p : profiles_) {
@@ -251,9 +253,9 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
         return false;
     }
 
-    // Can't delete Default profile
-    if (id == "Default") {
-        std::cerr << "❌ Cannot delete the Default profile" << std::endl;
+    // Can't delete the default profile
+    if (id == defaultProfileId_) {
+        std::cerr << "❌ Cannot delete the default profile" << std::endl;
         return false;
     }
 
@@ -270,9 +272,9 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
 
     profiles_.erase(it);
 
-    // If we deleted the current profile, switch to Default
+    // If we deleted the current profile, switch to default
     if (currentProfileId_ == id) {
-        currentProfileId_ = "Default";
+        currentProfileId_ = defaultProfileId_;
     }
 
     Save();
@@ -305,6 +307,37 @@ bool ProfileManager::SetProfileColor(const std::string& id, const std::string& c
         }
     }
     return false;
+}
+
+bool ProfileManager::SetProfileAvatar(const std::string& id, const std::string& avatarImage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& p : profiles_) {
+        if (p.id == id) {
+            p.avatarImage = avatarImage;
+            Save();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ProfileManager::SetDefaultProfile(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (const auto& p : profiles_) {
+        if (p.id == id) {
+            defaultProfileId_ = id;
+            Save();
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string ProfileManager::GetDefaultProfileId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return defaultProfileId_;
 }
 
 void ProfileManager::SetCurrentProfileId(const std::string& id) {
@@ -422,7 +455,7 @@ std::string ProfileManager::ParseProfileArgument(int argc, char* argv[]) {
             return arg.substr(10);  // Length of "--profile="
         }
     }
-    return "Default";
+    return "";  // Empty = no --profile flag; caller uses defaultProfileId
 }
 
 std::string ProfileManager::ParseProfileArgument(const std::wstring& cmdLine) {
@@ -453,7 +486,7 @@ std::string ProfileManager::ParseProfileArgument(const std::wstring& cmdLine) {
         }
         // Convert wstring to string properly (handles Unicode)
 #ifdef _WIN32
-        if (profileW.empty()) return "Default";
+        if (profileW.empty()) return "";
         int size_needed = WideCharToMultiByte(CP_UTF8, 0, profileW.c_str(), (int)profileW.size(), NULL, 0, NULL, NULL);
         std::string result(size_needed, 0);
         WideCharToMultiByte(CP_UTF8, 0, profileW.c_str(), (int)profileW.size(), &result[0], size_needed, NULL, NULL);
@@ -462,7 +495,7 @@ std::string ProfileManager::ParseProfileArgument(const std::wstring& cmdLine) {
         return std::string(profileW.begin(), profileW.end());
 #endif
     }
-    return "Default";
+    return "";  // Empty = no --profile flag; caller uses defaultProfileId
 }
 
 std::string ProfileManager::GenerateProfileId() {

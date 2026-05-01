@@ -8,12 +8,16 @@ import {
 import CloseIcon from '@mui/icons-material/Close';
 import AddIcon from '@mui/icons-material/Add';
 import CheckIcon from '@mui/icons-material/Check';
+import EditIcon from '@mui/icons-material/Edit';
+import StarIcon from '@mui/icons-material/Star';
+import StarBorderIcon from '@mui/icons-material/StarBorder';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import { useProfiles } from '../hooks/useProfiles';
 import { HodosButton } from '../components/HodosButton';
 
 // Predefined color palette for new profiles
 const PROFILE_COLORS = [
-    '#a67c00', // Blue
+    '#a67c00', // Gold
     '#188038', // Green
     '#a142f4', // Purple
     '#ea4335', // Red
@@ -27,10 +31,18 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     const {
         profiles,
         currentProfile,
+        defaultProfileId,
         switchProfile,
         createProfile,
+        renameProfile,
+        deleteProfile,
+        setProfileColor,
+        setProfileAvatar,
+        setDefaultProfile,
+        fetchProfiles,
     } = useProfiles();
 
+    // Create form state
     const [showCreateForm, setShowCreateForm] = useState(false);
     const [newProfileName, setNewProfileName] = useState('');
     const [selectedColor, setSelectedColor] = useState(PROFILE_COLORS[0]);
@@ -38,15 +50,31 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     const nameInputRef = useRef<HTMLInputElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Edit mode state
+    const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+    const [editName, setEditName] = useState('');
+    const [editColor, setEditColor] = useState('');
+    const [editAvatarImage, setEditAvatarImage] = useState<string | null>(null);
+    const editNameInputRef = useRef<HTMLInputElement>(null);
+    const editFileInputRef = useRef<HTMLInputElement>(null);
+
     // Focus the input when create form shows
     useEffect(() => {
         if (showCreateForm && nameInputRef.current) {
-            // Small delay to ensure DOM is ready in CEF
             setTimeout(() => {
                 nameInputRef.current?.focus();
             }, 50);
         }
     }, [showCreateForm]);
+
+    // Focus the input when edit form shows
+    useEffect(() => {
+        if (editingProfileId && editNameInputRef.current) {
+            setTimeout(() => {
+                editNameInputRef.current?.focus();
+            }, 50);
+        }
+    }, [editingProfileId]);
 
     const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -59,6 +87,17 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         }
     };
 
+    const handleEditImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                setEditAvatarImage(event.target?.result as string);
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
     const handleClose = () => {
         window.cefMessage?.send('profile_panel_hide');
     };
@@ -66,7 +105,6 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     const handleSwitchProfile = (profileId: string) => {
         if (profileId !== currentProfile?.id) {
             switchProfile(profileId);
-            // New window opens, user can close this one
         }
         handleClose();
     };
@@ -77,7 +115,6 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             setNewProfileName('');
             setAvatarImage(null);
             setShowCreateForm(false);
-            // Profile list will refresh via IPC callback
         }
     };
 
@@ -95,6 +132,60 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         setShowCreateForm(false);
         setNewProfileName('');
         setAvatarImage(null);
+    };
+
+    // Edit handlers
+    const handleEditProfile = (profile: typeof profiles[0]) => {
+        setEditingProfileId(profile.id);
+        setEditName(profile.name);
+        setEditColor(profile.color);
+        setEditAvatarImage(profile.avatarImage || null);
+        setShowCreateForm(false);
+    };
+
+    const handleCancelEdit = () => {
+        setEditingProfileId(null);
+        setEditName('');
+        setEditColor('');
+        setEditAvatarImage(null);
+    };
+
+    const handleSaveEdit = () => {
+        if (!editingProfileId || !editName.trim()) return;
+
+        const profile = profiles.find(p => p.id === editingProfileId);
+        if (!profile) return;
+
+        if (editName.trim() !== profile.name) {
+            renameProfile(editingProfileId, editName.trim());
+        }
+        if (editColor !== profile.color) {
+            setProfileColor(editingProfileId, editColor);
+        }
+        if (editAvatarImage !== (profile.avatarImage || null)) {
+            setProfileAvatar(editingProfileId, editAvatarImage || '');
+        }
+
+        setEditingProfileId(null);
+        // Refresh to get consistent state from backend
+        setTimeout(() => fetchProfiles(), 100);
+    };
+
+    const handleEditKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter' && editName.trim()) {
+            handleSaveEdit();
+        } else if (e.key === 'Escape') {
+            handleCancelEdit();
+        }
+    };
+
+    const handleDeleteProfile = (id: string) => {
+        deleteProfile(id);
+        setEditingProfileId(null);
+    };
+
+    const handleToggleDefault = (id: string) => {
+        setDefaultProfile(id);
     };
 
     return (
@@ -126,47 +217,218 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             {/* Profile List */}
             <Box sx={{ flex: 1, overflow: 'auto', p: 1 }}>
                 {profiles.map((profile) => (
-                    <Box
-                        key={profile.id}
-                        onClick={() => handleSwitchProfile(profile.id)}
-                        sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 1.5,
-                            p: 1,
-                            borderRadius: 1,
-                            cursor: 'pointer',
-                            bgcolor: profile.id === currentProfile?.id ? '#1a1a2e' : 'transparent',
-                            '&:hover': {
-                                bgcolor: '#1f2937',
-                            },
-                        }}
-                    >
-                        <Avatar
-                            src={profile.avatarImage || undefined}
+                    editingProfileId === profile.id ? (
+                        /* Edit Form (inline, replaces profile card) */
+                        <Box key={profile.id} sx={{ p: 1, bgcolor: '#111827', borderRadius: 1, mb: 0.5 }}>
+                            {/* Avatar Preview & Image Picker */}
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
+                                <Avatar
+                                    src={editAvatarImage || undefined}
+                                    sx={{
+                                        width: 48,
+                                        height: 48,
+                                        fontSize: 20,
+                                        bgcolor: editColor,
+                                    }}
+                                >
+                                    {!editAvatarImage && (editName.trim() ? editName[0].toUpperCase() : '?')}
+                                </Avatar>
+                                <Box sx={{ flex: 1 }}>
+                                    <div style={{
+                                        background: '#1a1d23',
+                                        border: `1px solid ${editAvatarImage ? '#a67c00' : '#2a2d35'}`,
+                                        borderRadius: '4px',
+                                        padding: '6px 8px',
+                                        marginBottom: editAvatarImage ? '4px' : '0',
+                                    }}>
+                                        <input
+                                            ref={editFileInputRef}
+                                            type="file"
+                                            accept="image/*"
+                                            onChange={handleEditImageSelect}
+                                            style={{
+                                                fontSize: '12px',
+                                                color: '#9ca3af',
+                                                width: '100%',
+                                                cursor: 'pointer',
+                                            }}
+                                        />
+                                    </div>
+                                    {editAvatarImage && (
+                                        <Typography
+                                            variant="caption"
+                                            sx={{ color: '#a67c00', cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
+                                            onClick={() => {
+                                                setEditAvatarImage(null);
+                                                if (editFileInputRef.current) editFileInputRef.current.value = '';
+                                            }}
+                                        >
+                                            Remove image
+                                        </Typography>
+                                    )}
+                                </Box>
+                            </Box>
+
+                            {/* Name Input */}
+                            <input
+                                ref={editNameInputRef}
+                                type="text"
+                                placeholder="Profile name"
+                                value={editName}
+                                onChange={(e) => setEditName(e.target.value)}
+                                onKeyDown={handleEditKeyDown}
+                                style={{
+                                    width: '100%',
+                                    padding: '8px 12px',
+                                    fontSize: '14px',
+                                    border: '1px solid #2a2d35',
+                                    borderRadius: '4px',
+                                    marginBottom: '12px',
+                                    boxSizing: 'border-box',
+                                    outline: 'none',
+                                    backgroundColor: '#1a1d23',
+                                    color: '#f0f0f0',
+                                }}
+                                onFocus={(e) => e.target.style.borderColor = '#a67c00'}
+                                onBlur={(e) => e.target.style.borderColor = '#2a2d35'}
+                            />
+
+                            {/* Color Picker */}
+                            <Typography variant="caption" sx={{ color: '#9ca3af', mb: 0.5, display: 'block' }}>
+                                Choose color
+                            </Typography>
+                            <Box sx={{ display: 'flex', gap: 0.5, mb: 1.5, flexWrap: 'wrap' }}>
+                                {PROFILE_COLORS.map((color) => (
+                                    <Box
+                                        key={color}
+                                        onClick={() => setEditColor(color)}
+                                        sx={{
+                                            width: 24,
+                                            height: 24,
+                                            borderRadius: '50%',
+                                            bgcolor: color,
+                                            cursor: 'pointer',
+                                            border: editColor === color ? '2px solid #f0f0f0' : '2px solid transparent',
+                                            '&:hover': { transform: 'scale(1.1)' },
+                                        }}
+                                    />
+                                ))}
+                            </Box>
+
+                            {/* Default Profile Toggle */}
+                            <Box
+                                onClick={() => handleToggleDefault(profile.id)}
+                                sx={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 1,
+                                    mb: 1.5,
+                                    p: 0.5,
+                                    borderRadius: 1,
+                                    cursor: 'pointer',
+                                    '&:hover': { bgcolor: '#1a1d23' },
+                                }}
+                            >
+                                {profile.id === defaultProfileId ? (
+                                    <StarIcon sx={{ fontSize: 18, color: '#a67c00' }} />
+                                ) : (
+                                    <StarBorderIcon sx={{ fontSize: 18, color: '#6b7280' }} />
+                                )}
+                                <Typography variant="caption" sx={{ color: '#9ca3af' }}>
+                                    {profile.id === defaultProfileId ? 'Default profile' : 'Set as default'}
+                                </Typography>
+                            </Box>
+
+                            {/* Action Buttons */}
+                            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                <HodosButton variant="secondary" onClick={handleCancelEdit}>
+                                    Cancel
+                                </HodosButton>
+                                <HodosButton variant="primary" onClick={handleSaveEdit} disabled={!editName.trim()}>
+                                    Save
+                                </HodosButton>
+                                <Box sx={{ flex: 1 }} />
+                                <HodosButton
+                                    variant="icon"
+                                    size="small"
+                                    onClick={() => handleDeleteProfile(profile.id)}
+                                    disabled={profiles.length <= 1 || profile.id === defaultProfileId}
+                                    aria-label="Delete profile"
+                                >
+                                    <DeleteOutlineIcon sx={{
+                                        fontSize: 18,
+                                        color: (profiles.length <= 1 || profile.id === defaultProfileId) ? '#4b5563' : '#ef4444',
+                                    }} />
+                                </HodosButton>
+                            </Box>
+                        </Box>
+                    ) : (
+                        /* Normal Profile Card */
+                        <Box
+                            key={profile.id}
+                            onClick={() => handleSwitchProfile(profile.id)}
                             sx={{
-                                width: 32,
-                                height: 32,
-                                fontSize: 14,
-                                bgcolor: profile.color,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 1.5,
+                                p: 1,
+                                borderRadius: 1,
+                                cursor: 'pointer',
+                                bgcolor: profile.id === currentProfile?.id ? '#1a1a2e' : 'transparent',
+                                '&:hover': {
+                                    bgcolor: '#1f2937',
+                                },
+                                '&:hover .edit-btn': {
+                                    opacity: 1,
+                                },
                             }}
                         >
-                            {!profile.avatarImage && profile.avatarInitial}
-                        </Avatar>
-                        <Typography
-                            variant="body2"
-                            sx={{
-                                flex: 1,
-                                fontWeight: profile.id === currentProfile?.id ? 600 : 400,
-                                color: '#f0f0f0',
-                            }}
-                        >
-                            {profile.name}
-                        </Typography>
-                        {profile.id === currentProfile?.id && (
-                            <CheckIcon sx={{ fontSize: 18, color: 'primary.main' }} />
-                        )}
-                    </Box>
+                            <Avatar
+                                src={profile.avatarImage || undefined}
+                                sx={{
+                                    width: 32,
+                                    height: 32,
+                                    fontSize: 14,
+                                    bgcolor: profile.color,
+                                }}
+                            >
+                                {!profile.avatarImage && profile.avatarInitial}
+                            </Avatar>
+                            <Typography
+                                variant="body2"
+                                sx={{
+                                    flex: 1,
+                                    fontWeight: profile.id === currentProfile?.id ? 600 : 400,
+                                    color: '#f0f0f0',
+                                }}
+                            >
+                                {profile.name}
+                            </Typography>
+                            {profile.id === defaultProfileId && (
+                                <StarIcon sx={{ fontSize: 14, color: '#a67c00' }} />
+                            )}
+                            {profile.id === currentProfile?.id && (
+                                <CheckIcon sx={{ fontSize: 18, color: 'primary.main' }} />
+                            )}
+                            <Box
+                                className="edit-btn"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleEditProfile(profile);
+                                }}
+                                sx={{
+                                    opacity: 0,
+                                    p: 0.5,
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    '&:hover': { bgcolor: '#374151' },
+                                }}
+                            >
+                                <EditIcon sx={{ fontSize: 14, color: '#9ca3af' }} />
+                            </Box>
+                        </Box>
+                    )
                 ))}
 
                 <Divider sx={{ my: 1, borderColor: '#2a2d35' }} />
@@ -174,7 +436,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                 {/* Add Profile Section */}
                 {!showCreateForm ? (
                     <Box
-                        onClick={() => setShowCreateForm(true)}
+                        onClick={() => { setShowCreateForm(true); setEditingProfileId(null); }}
                         sx={{
                             display: 'flex',
                             alignItems: 'center',
@@ -276,7 +538,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             onFocus={(e) => e.target.style.borderColor = '#a67c00'}
                             onBlur={(e) => e.target.style.borderColor = '#2a2d35'}
                         />
-                        
+
                         {/* Color Picker */}
                         <Typography variant="caption" sx={{ color: '#9ca3af', mb: 0.5, display: 'block' }}>
                             Choose color

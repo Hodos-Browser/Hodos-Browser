@@ -5,6 +5,7 @@
 #include "../../include/handlers/my_overlay_render_handler.h"
 #include "../../include/core/Logger.h"
 #include "../../include/core/LayoutHelpers.h"
+#include "../../include/core/TaskbarProfile.h"
 #include "include/cef_browser.h"
 #include "include/cef_request_context.h"
 #include <algorithm>
@@ -204,6 +205,9 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+
+    // Set per-profile taskbar grouping and icon badge (skips if single profile)
+    SetupTaskbarProfile(hwnd, g_hInstance);
 
     // --- Create header CEF browser ---
     CefWindowInfo headerInfo;
