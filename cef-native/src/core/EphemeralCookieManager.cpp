@@ -280,7 +280,32 @@ void EphemeralCookieManager::OnGraceExpired(const std::string& site) {
         return;
     }
 
+    // Auth provider domains whose cookies must survive ephemeral cleanup —
+    // these are needed for cross-site login (OAuth/SSO) to persist.
+    static const char* auth_providers[] = {
+        "google.com", "accounts.google.com", "googleapis.com",
+        "microsoftonline.com", "login.live.com", "login.microsoftonline.com",
+        "appleid.apple.com", "github.com",
+        nullptr
+    };
+
     for (const auto& domain : domains_to_delete) {
+        // Skip auth provider domains — their cookies are needed for login persistence
+        bool is_auth_provider = false;
+        for (int i = 0; auth_providers[i]; i++) {
+            if (domain == auth_providers[i] ||
+                (domain.length() > strlen(auth_providers[i]) &&
+                 domain[domain.length() - strlen(auth_providers[i]) - 1] == '.' &&
+                 domain.substr(domain.length() - strlen(auth_providers[i])) == auth_providers[i])) {
+                is_auth_provider = true;
+                break;
+            }
+        }
+        if (is_auth_provider) {
+            LOG_DEBUG_EPHEMERAL("Skipping auth provider cookie cleanup: " + domain);
+            continue;
+        }
+
         // DeleteCookies with URL and empty name deletes all cookies for that URL
         std::string cookie_url = "https://" + domain;
         manager->DeleteCookies(cookie_url, "",

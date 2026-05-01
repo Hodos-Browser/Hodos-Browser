@@ -1466,30 +1466,20 @@ bool SimpleHandler::OnBeforePopup(
         return false;  // Allow default popup behavior
     }
 
-    // OAuth/auth popups need real popup windows (window.opener + postMessage)
-    bool is_auth_popup = (
-        target_disposition == CEF_WOD_NEW_POPUP &&
-        (url.find("display=popup") != std::string::npos ||
-         url.find("ux_mode=popup") != std::string::npos ||
-         url.find("/oauth") != std::string::npos ||
-         url.find("/auth") != std::string::npos ||
-         url.find("/signin") != std::string::npos ||
-         url.find("/gsi/") != std::string::npos)
-    );
-
-    if (is_auth_popup) {
-        LOG_INFO_BROWSER("🔐 Allowing auth popup as real window: " + url);
+    // NEW_POPUP = window.open() was called — the site needs a real popup window
+    // with window.opener preserved for postMessage (OAuth, payment flows, etc.).
+    // Converting these to tabs breaks window.opener and kills auth callbacks.
+    if (target_disposition == CEF_WOD_NEW_POPUP) {
+        LOG_INFO_BROWSER("Allowing popup as real window (window.opener preserved): " + url);
         return false;
     }
 
-    // Convert ALL other popup requests to new tabs (including NEW_POPUP and NEW_WINDOW)
-    // This ensures that right-click "Open in new tab", middle-click, Ctrl+Click,
-    // and target="_blank" links all open in tabs instead of separate windows
+    // Convert other navigation types to new tabs (target="_blank", middle-click,
+    // right-click "Open in new tab", Ctrl+Click, etc.)
     bool should_create_tab = (
         target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
         target_disposition == CEF_WOD_NEW_BACKGROUND_TAB ||
         target_disposition == CEF_WOD_SINGLETON_TAB ||
-        target_disposition == CEF_WOD_NEW_POPUP ||
         target_disposition == CEF_WOD_NEW_WINDOW
     );
 

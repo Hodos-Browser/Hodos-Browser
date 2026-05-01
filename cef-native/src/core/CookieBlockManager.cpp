@@ -770,6 +770,31 @@ bool CookieBlockManager::IsThirdParty(const std::string& cookie_domain,
         return false;
     }
 
+    // Auth provider allowlist: identity providers set cross-site cookies during
+    // OAuth/SSO flows (e.g. accounts.google.com cookies when logging into x.com).
+    // These must not be blocked or the login flow breaks silently.
+    {
+        static const char* auth_providers[] = {
+            "google.com", "accounts.google.com", "googleapis.com",
+            "microsoftonline.com", "login.live.com", "login.microsoftonline.com",
+            "appleid.apple.com",
+            "github.com",
+            nullptr
+        };
+        std::string cd = cookie_domain;
+        // Strip leading dot (e.g. ".google.com" -> "google.com")
+        if (!cd.empty() && cd[0] == '.') cd = cd.substr(1);
+        for (int i = 0; auth_providers[i]; i++) {
+            std::string provider = auth_providers[i];
+            if (cd == provider ||
+                (cd.length() > provider.length() &&
+                 cd[cd.length() - provider.length() - 1] == '.' &&
+                 cd.substr(cd.length() - provider.length()) == provider)) {
+                return false;
+            }
+        }
+    }
+
     return true; // Different domains = third-party
 }
 
