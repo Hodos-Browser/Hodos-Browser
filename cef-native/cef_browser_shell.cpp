@@ -3302,8 +3302,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
     LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));
 
-    // Persist session cookies across browser restarts
-    // TEMPORARILY DISABLED - testing if this causes extra windows
+    // persist_session_cookies MUST stay disabled — enabling it causes CEF to spawn
+    // extra windows on startup (overlay URLs get restored as top-level windows).
+    // Tested and confirmed broken 2026-04-30. Session persistence for login sites
+    // is handled by the sites themselves via persistent cookies (explicit expiry).
     // settings.persist_session_cookies = true;
 
     // Enable CEF's runtime API for JavaScript communication

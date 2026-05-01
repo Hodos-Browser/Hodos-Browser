@@ -4450,6 +4450,10 @@ int main(int argc, char* argv[]) {
         // CRITICAL: Disable sandbox on macOS for development (requires code signing otherwise)
         settings.no_sandbox = true;
 
+        // persist_session_cookies MUST stay disabled — causes extra windows on startup.
+        // See cef_browser_shell.cpp for full explanation.
+        // settings.persist_session_cookies = true;
+
         // Set macOS bundle paths
         NSBundle* mainBundle = [NSBundle mainBundle];
         NSString* bundlePath = [mainBundle bundlePath];

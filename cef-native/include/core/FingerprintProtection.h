@@ -196,11 +196,10 @@ public:
         for (size_t i = 0; i < domain.size(); i++) {
             lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(domain[i])));
         }
-        // CAPTCHA / bot challenge domains where even subtle canvas farbling
-        // can interfere with verification. Auth, banking, e-commerce, and
-        // social domains are NOT listed here — the farbling is subtle enough
-        // (Brave-style LSB pixel noise, no hardware spoofing) that it does
-        // not trigger their anti-fraud systems.
+        // Auth and anti-fraud domains where canvas/WebGL/audio farbling
+        // can trigger bot detection or break login flows. Includes CAPTCHA
+        // services, major auth providers, banking, and e-commerce sites.
+        // Keep in sync with hodos-unbreak.txt auth domain exceptions.
         static const char* authDomains[] = {
             // --- Bot detection / CAPTCHA services ---
             "challenges.cloudflare.com",  // Cloudflare managed challenge
@@ -217,13 +216,52 @@ public:
             // Skipping only the challenge iframe is insufficient: Turnstile
             // reads the parent window's Canvas/WebGL/Audio fingerprints to
             // score the browser. Farbling the parent while leaving the iframe
-            // native produces an inconsistent signal that mac Turnstile rejects
+            // native produces an inconsistent signal that Turnstile rejects
             // (Brave hits the same problem — see brave/brave-browser#45608).
-            // Until we have a more general parent-frame-of-Turnstile detector,
-            // list BSV-explorer sites users hit here so farbling skips them too.
             "whatsonchain.com",           // WoC BSV explorer — uses Turnstile
             "www.whatsonchain.com",
             "test.whatsonchain.com",
+
+            // --- Google Auth ---
+            "accounts.google.com",        // Primary Google login
+            "accounts.youtube.com",       // YouTube login (Google SSO)
+            "myaccount.google.com",       // Account management
+
+            // --- Microsoft Auth ---
+            "login.microsoftonline.com",  // Azure AD / Microsoft 365
+            "login.live.com",             // Microsoft account
+            "login.microsoft.com",        // Microsoft login
+
+            // --- Apple Auth ---
+            "appleid.apple.com",          // Apple ID login
+
+            // --- Social Auth ---
+            "www.facebook.com",           // Facebook login / OAuth
+            "x.com",                      // X/Twitter — JS farbling detected as bot
+            "www.x.com",
+            "twitter.com",
+            "www.twitter.com",
+            "api.twitter.com",            // X/Twitter OAuth
+
+            // --- Developer Platforms ---
+            "github.com",                 // GitHub login + OAuth
+
+            // --- Financial ---
+            "chase.com",
+            "www.chase.com",
+            "bankofamerica.com",
+            "www.bankofamerica.com",
+            "wellsfargo.com",
+            "www.wellsfargo.com",
+            "paypal.com",
+            "www.paypal.com",
+
+            // --- E-commerce ---
+            "amazon.com",
+            "www.amazon.com",
+
+            // --- BSV ---
+            "sigmaidentity.com",
         };
         for (const auto& auth : authDomains) {
             if (lower == auth) return true;

@@ -709,6 +709,34 @@ bool CookieBlockManager::MatchesDomain(const std::string& cookie_domain) {
     return false;
 }
 
+// Same-entity domain groups where cookie sharing is needed for auth/functionality.
+// Intentionally NOT the full disconnect.me entity list — we exclude tracking/ad
+// domains (e.g. doubleclick.net) that share a parent org with auth domains.
+// Both inputs should be NormalizeDomain() output (eTLD+1, lowercase).
+static bool AreSameAuthEntity(const std::string& a, const std::string& b) {
+    struct EntityGroup {
+        const char* domains[8];  // null-terminated
+    };
+    static const EntityGroup groups[] = {
+        {{"x.com", "twitter.com", "twimg.com", nullptr}},
+        {{"google.com", "youtube.com", "googleapis.com", "gstatic.com", "googlevideo.com", nullptr}},
+        {{"facebook.com", "instagram.com", "fbcdn.net", "facebook.net", nullptr}},
+        {{"microsoft.com", "microsoftonline.com", "live.com", "msn.com", "bing.com", nullptr}},
+        {{"amazon.com", "amazonaws.com", nullptr}},
+        {{"apple.com", "icloud.com", "mzstatic.com", nullptr}},
+        {{"github.com", "githubassets.com", "githubusercontent.com", nullptr}},
+    };
+    for (const auto& group : groups) {
+        bool a_found = false, b_found = false;
+        for (int i = 0; group.domains[i] != nullptr; i++) {
+            if (a == group.domains[i]) a_found = true;
+            if (b == group.domains[i]) b_found = true;
+        }
+        if (a_found && b_found) return true;
+    }
+    return false;
+}
+
 bool CookieBlockManager::IsThirdParty(const std::string& cookie_domain,
                                        const std::string& page_domain) {
     // Same domain = first-party
@@ -734,6 +762,11 @@ bool CookieBlockManager::IsThirdParty(const std::string& cookie_domain,
             page_domain.substr(offset) == cookie_domain) {
             return false;
         }
+    }
+
+    // Same-entity check: e.g. twitter.com cookies on x.com are first-party
+    if (AreSameAuthEntity(cookie_domain, page_domain)) {
+        return false;
     }
 
     return true; // Different domains = third-party
