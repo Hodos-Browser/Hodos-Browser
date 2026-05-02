@@ -8,23 +8,23 @@
 
 ---
 
-## Current Status (2026-05-01)
+## Current Status (2026-05-02)
 
 **Next release: TBD**
-**Last shipped: `v0.3.0-beta.9`**
+**Last shipped: `v0.3.0-beta.10`**
 
 | Component | Status |
 |-----------|--------|
 | Windows installer (Inno Setup) | WORKING — signed via Azure Artifact Signing |
 | Windows portable zip | WORKING |
-| macOS DMG | WORKING — signed + notarized + stapled in CI |
+| macOS DMG | WORKING — signed + notarized + stapled in CI (DMG itself notarized + stapled as of beta.10) |
 | GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
-| Website (hodosbrowser.com) | LIVE — download links active for beta.9 |
+| Website (hodosbrowser.com) | LIVE — download links active for beta.10 |
 | Auto-update (Windows/WinSparkle) | WORKING — verified end-to-end on beta.4 → beta.5 |
-| Auto-update (macOS/Sparkle 2) | beta.8 init fix verified (Phase A); beta.8 → beta.9 end-to-end (Phase B) is the first real validation of the macOS update path. |
-| Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact |
+| Auto-update (macOS/Sparkle 2) | beta.9 attempt failed silently — Sparkle's nested XPC services failed to launch due to quarantine on Sparkle.framework. beta.10 disables XPC services via Info.plist (SUEnableInstallerLauncherService/SUEnableDownloaderService = false) AND notarizes+staples the DMG itself. beta.10 → beta.11 will be the validation test. |
+| Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact, items now include `<sparkle:channel>beta</sparkle:channel>` |
 | Install directory | `{localappdata}\HodosBrowser` (per-user, no UAC for updates) |
-| AV reputation (SmartScreen) | DEGRADED — Microsoft has rotated us through three different intermediate CAs in three releases (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9=`AOC CA 03`). Reputation cannot accumulate across these pools. See §2.5.1. |
+| AV reputation (SmartScreen) | DEGRADED — Microsoft rotated us through three intermediate CAs over four releases (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9=`AOC CA 03`, beta.10=`AOC CA 03` — first repeat). Reputation may finally start accumulating if we stay on AOC CA 03. See §2.5.1. |
 
 ### How to Release a New Version — Complete Checklist
 
@@ -399,6 +399,7 @@ If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release,
 - beta.7 — `EOC CA 03` (regression cohort)
 - beta.8 — `EOC CA 04` (new intermediate, first release on this CA)
 - beta.9 — `AOC CA 03` (yet another intermediate — Azure is rotating us through different CA families. AOC vs EOC appears to be a parallel certificate family rather than a successor; both share the same root and PCA 2021 issuer.)
+- beta.10 — `AOC CA 03` (FIRST REPEAT — staying on same CA between two consecutive releases. If Azure keeps us here for several more, publisher reputation should finally accrue against this thumbprint.)
 
 #### 2.5.2 Per-release submission tracking
 
@@ -432,6 +433,15 @@ Submission IDs come from either the confirmation email or the portal's "submissi
 - VirusTotal: submitted 2026-05-01 — `<TBD — paste report URL after upload>`
 - MS Defender: submitted 2026-05-01 15:18 MT, ID `9d0bfbbc-1c1f-4d20-a780-c6c57337d3d6` (status: Submitted). Note in submission comments: this is the third different intermediate CA in three releases; beta.8 (EOC CA 04) cleared as Completed; please ensure publisher reputation can accumulate across the AOC and EOC families.
 - Norton: skipped (not flagged in the wild)
+- **macOS auto-update outcome:** FAILED end-to-end. Sparkle initialized and fetched the appcast successfully, but silently failed before prompting due to XPC bootstrap-lookup errors (`failed to do a bootstrap look-up: No such process`) for `Downloader.xpc` and `Installer.xpc` inside the nested `Sparkle.framework`. Root cause: macOS quarantine on the framework after install, which can't be stripped post-install (`xattr -cr` returned "Operation not permitted"). Fix shipped in beta.10.
+
+**beta.10 submission record:**
+- Cert chain: signed via `Microsoft ID Verified CS AOC CA 03` (same as beta.9 — first repeat)
+- Installer SHA-256: `c49808aa297c6b2d078306262172c8ee8f424c988eadaeb92894a82b23db3435`
+- VirusTotal: submitted 2026-05-02 — `<TBD — paste report URL after upload>`
+- MS Defender: submitted 2026-05-02 — `<TBD — paste submission ID from portal>`. Note for submission comments: same publisher (Marston Enterprises) and intermediate CA as beta.9, please correlate. Build now includes DMG-level notarization+stapling and disables Sparkle XPC services to fix macOS auto-update.
+- Norton: skipped (not flagged in the wild)
+- **macOS auto-update outcome:** TBD — beta.10 is the first build with the XPC/quarantine fix. Existing macOS users on beta.7/beta.8/beta.9 need a one-time manual replace. The real validation comes with beta.10 → beta.11 (next release).
 
 #### 2.5.3 Reputation-building strategy (per-release)
 
