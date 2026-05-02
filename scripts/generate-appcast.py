@@ -45,6 +45,7 @@ def generate_appcast(args):
         ET.SubElement(item, 'pubDate').text = pub_date
         ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}version').text = args.version
         ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}os').text = 'windows'
+        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}channel').text = 'beta'
 
         enclosure_attrs = {
             'url': args.windows_url,
@@ -62,6 +63,7 @@ def generate_appcast(args):
         ET.SubElement(item, 'pubDate').text = pub_date
         ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}version').text = args.version
         ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}os').text = 'macos'
+        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}channel').text = 'beta'
 
         enclosure_attrs = {
             'url': args.macos_url,
