@@ -243,8 +243,18 @@ jobs:
         id: version
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # Build number = the integer suffix after "-beta." in the tag.
+          # Used as CFBundleVersion (which Apple's spec requires to be a
+          # monotonic integer; Sparkle 2's comparator silently misbehaves
+          # on suffixed strings like "0.3.0-beta.13"). Falls back to 0
+          # for non-beta tags (e.g. release candidates / final).
+          build_number=$(echo "$version" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
+          if [ -z "$build_number" ]; then
+            build_number=0
+          fi
           echo "VERSION=$version" >> $GITHUB_OUTPUT
-          echo "Building version: $version"
+          echo "BUILD_NUMBER=$build_number" >> $GITHUB_OUTPUT
+          echo "Building version: $version (build number: $build_number)"
 
       # Download CEF binaries
       - name: Download CEF binaries
@@ -344,7 +354,7 @@ jobs:
       - name: Configure and build CEF shell
         run: |
           cd cef-native
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="${{ steps.version.outputs.VERSION }}"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
           cmake --build build --config Release
 
           cd build/bin
@@ -818,6 +828,15 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           REPO_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
+          # Build number: integer suffix from "-beta.N" tag form. Used as
+          # macOS sparkle:version (matches CFBundleVersion in the .app)
+          # so Sparkle 2's comparator can do unambiguous integer compare.
+          BUILD_NUMBER=$(echo "$VERSION" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=0
+          fi
+          echo "Build number derived from tag: $BUILD_NUMBER"
+
           ls -la artifacts/ || true
           ls -la artifacts/*/ || true
 
@@ -834,6 +853,7 @@ jobs:
           MAC_SIG=$(cat artifacts/macos-eddsa-signature/eddsa_signature.txt 2>/dev/null || echo "")
 
           APPCAST_ARGS="--version $VERSION"
+          APPCAST_ARGS="$APPCAST_ARGS --build-number $BUILD_NUMBER"
           APPCAST_ARGS="$APPCAST_ARGS --windows-url ${REPO_URL}/HodosBrowser-${VERSION}-setup.exe"
           APPCAST_ARGS="$APPCAST_ARGS --windows-size $WIN_SIZE"
           APPCAST_ARGS="$APPCAST_ARGS --macos-url ${REPO_URL}/HodosBrowser-${VERSION}.dmg"

@@ -50,6 +50,23 @@ endif()
 add_definitions(-DAPP_VERSION="${APP_VERSION}")
 message(STATUS "App version: ${APP_VERSION}")
 
+# Build number — Apple's CFBundleVersion is supposed to be a monotonic
+# integer (build number), separate from the user-visible version string.
+# Sparkle 2's version comparator chokes on non-numeric CFBundleVersion
+# (it silently returns "you're up to date" when comparing versions like
+# "0.3.0-beta.12" vs "0.3.0-beta.13"). Pass APP_BUILD_NUMBER explicitly
+# from CI; otherwise extract from the beta suffix in APP_VERSION; fall
+# back to 0 for dev builds.
+if(NOT DEFINED APP_BUILD_NUMBER)
+    string(REGEX MATCH "-beta\\.([0-9]+)$" _beta_suffix "${APP_VERSION}")
+    if(CMAKE_MATCH_1)
+        set(APP_BUILD_NUMBER "${CMAKE_MATCH_1}")
+    else()
+        set(APP_BUILD_NUMBER "0")
+    endif()
+endif()
+message(STATUS "App build number (CFBundleVersion): ${APP_BUILD_NUMBER}")
+
 # macOS-specific settings
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version")
@@ -277,7 +294,7 @@ if(APPLE)
         OUTPUT_NAME "HodosBrowser"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
         MACOSX_BUNDLE_BUNDLE_NAME "HodosBrowser"
-        MACOSX_BUNDLE_BUNDLE_VERSION "${APP_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${APP_BUILD_NUMBER}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}"
     )
 elseif(WIN32)

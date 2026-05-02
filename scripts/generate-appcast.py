@@ -26,6 +26,8 @@ def generate_appcast(args):
     ET.register_namespace('sparkle', 'http://www.andymatuschak.org/xml-namespaces/sparkle')
     ET.register_namespace('dc', 'http://purl.org/dc/elements/1.1/')
 
+    SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
+
     rss = ET.Element('rss', {
         'version': '2.0',
     })
@@ -39,13 +41,14 @@ def generate_appcast(args):
     pub_date = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S +0000')
 
     # Windows item
+    # WinSparkle handles full version strings ("0.3.0-beta.X") in
+    # sparkle:version directly. Keeping that contract unchanged.
     if args.windows_url:
         item = ET.SubElement(channel, 'item')
         ET.SubElement(item, 'title').text = f'Version {args.version}'
         ET.SubElement(item, 'pubDate').text = pub_date
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}version').text = args.version
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}os').text = 'windows'
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}channel').text = 'beta'
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}version').text = args.version
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}os').text = 'windows'
 
         enclosure_attrs = {
             'url': args.windows_url,
@@ -53,17 +56,30 @@ def generate_appcast(args):
             'type': 'application/octet-stream',
         }
         if args.windows_signature:
-            enclosure_attrs['{http://www.andymatuschak.org/xml-namespaces/sparkle}dsaSignature'] = args.windows_signature
+            enclosure_attrs[f'{{{SPARKLE_NS}}}dsaSignature'] = args.windows_signature
         ET.SubElement(item, 'enclosure', enclosure_attrs)
 
     # macOS item
+    # Sparkle 2 compares sparkle:version against the running app's
+    # CFBundleVersion. Apple's spec is that CFBundleVersion is a
+    # monotonic integer (build number). Sparkle's SUStandardVersion
+    # Comparator silently fails on suffixed strings like
+    # "0.3.0-beta.12" vs "0.3.0-beta.13" — it returns "up to date"
+    # despite the higher number. So we emit the integer build number
+    # as sparkle:version (matches CFBundleVersion in the .app) and
+    # the human-readable string as sparkle:shortVersionString (matches
+    # CFBundleShortVersionString, used in the update dialog).
     if args.macos_url:
         item = ET.SubElement(channel, 'item')
         ET.SubElement(item, 'title').text = f'Version {args.version}'
         ET.SubElement(item, 'pubDate').text = pub_date
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}version').text = args.version
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}os').text = 'macos'
-        ET.SubElement(item, '{http://www.andymatuschak.org/xml-namespaces/sparkle}channel').text = 'beta'
+
+        # macOS-only: integer build number for comparison
+        macos_sparkle_version = str(args.build_number) if args.build_number else args.version
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}version').text = macos_sparkle_version
+        if args.build_number:
+            ET.SubElement(item, f'{{{SPARKLE_NS}}}shortVersionString').text = args.version
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}os').text = 'macos'
 
         enclosure_attrs = {
             'url': args.macos_url,
@@ -71,7 +87,7 @@ def generate_appcast(args):
             'type': 'application/octet-stream',
         }
         if args.macos_signature:
-            enclosure_attrs['{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature'] = args.macos_signature
+            enclosure_attrs[f'{{{SPARKLE_NS}}}edSignature'] = args.macos_signature
         ET.SubElement(item, 'enclosure', enclosure_attrs)
 
     # Write XML
@@ -90,7 +106,8 @@ def generate_appcast(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate Sparkle appcast.xml for auto-updates')
-    parser.add_argument('--version', required=True, help='Release version (e.g. 0.2.0-beta.1)')
+    parser.add_argument('--version', required=True, help='Release version string (e.g. 0.3.0-beta.14). Used directly for Windows sparkle:version and as macOS sparkle:shortVersionString (display name).')
+    parser.add_argument('--build-number', type=int, help='Monotonic integer build number (e.g. 14 for v0.3.0-beta.14). Emitted as macOS sparkle:version for comparison against CFBundleVersion. If omitted, falls back to --version.')
     parser.add_argument('--windows-url', help='Windows installer download URL')
     parser.add_argument('--windows-size', type=int, help='Windows installer file size in bytes')
     parser.add_argument('--windows-signature', help='Windows DSA signature')
