@@ -8,10 +8,10 @@
 
 ---
 
-## Current Status (2026-04-28)
+## Current Status (2026-05-01)
 
 **Next release: TBD**
-**Last shipped: `v0.3.0-beta.8`**
+**Last shipped: `v0.3.0-beta.9`**
 
 | Component | Status |
 |-----------|--------|
@@ -19,12 +19,12 @@
 | Windows portable zip | WORKING |
 | macOS DMG | WORKING — signed + notarized + stapled in CI |
 | GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
-| Website (hodosbrowser.com) | LIVE — download links active for beta.8 |
+| Website (hodosbrowser.com) | LIVE — download links active for beta.9 |
 | Auto-update (Windows/WinSparkle) | WORKING — verified end-to-end on beta.4 → beta.5 |
-| Auto-update (macOS/Sparkle 2) | INIT FIX in beta.8 — beta.7 and earlier never called `AutoUpdater::Initialize()` on macOS, so Mac users on those versions cannot auto-update to beta.8 (one-time manual replace required). beta.8+ should auto-update normally; verify on beta.8 → beta.9. |
+| Auto-update (macOS/Sparkle 2) | beta.8 init fix verified (Phase A); beta.8 → beta.9 end-to-end (Phase B) is the first real validation of the macOS update path. |
 | Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact |
 | Install directory | `{localappdata}\HodosBrowser` (per-user, no UAC for updates) |
-| AV reputation (SmartScreen) | DEGRADED — Industry-wide SmartScreen regression in March 2026 when Microsoft rotated intermediate CAs. beta.7 signed via `EOC CA 03`; beta.8 via `EOC CA 04` (first release on this intermediate, behavior TBD). See §2.5.1. |
+| AV reputation (SmartScreen) | DEGRADED — Microsoft has rotated us through three different intermediate CAs in three releases (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9=`AOC CA 03`). Reputation cannot accumulate across these pools. See §2.5.1. |
 
 ### How to Release a New Version — Complete Checklist
 
@@ -398,6 +398,7 @@ If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release,
 **Confirmed signing CA per release:**
 - beta.7 — `EOC CA 03` (regression cohort)
 - beta.8 — `EOC CA 04` (new intermediate, first release on this CA)
+- beta.9 — `AOC CA 03` (yet another intermediate — Azure is rotating us through different CA families. AOC vs EOC appears to be a parallel certificate family rather than a successor; both share the same root and PCA 2021 issuer.)
 
 #### 2.5.2 Per-release submission tracking
 
@@ -422,8 +423,15 @@ Submission IDs come from either the confirmation email or the portal's "submissi
 - Cert chain: signed via `Microsoft ID Verified CS EOC CA 04` (new intermediate — first release on this CA)
 - Installer SHA-256: `a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524`
 - VirusTotal: submitted 2026-04-28 — https://www.virustotal.com/gui/file/a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524
-- MS Defender: submitted 2026-04-28 08:15 MT, ID `d055010c-cec0-4216-8eae-c04d10a6c5ce` (status: Submitted) — noted `EOC CA 04` rotation in submission comments. Confirmation email never arrived; ID was readable directly on the portal's submission-details page.
+- MS Defender: submitted 2026-04-28 08:15 MT, ID `d055010c-cec0-4216-8eae-c04d10a6c5ce` — **Completed** (cleared by 2026-05-01). Confirmation email never arrived; status was readable directly on the portal's submission-history page.
 - Norton: skipped (not flagged in the wild; Norton portal expects a real detection name + alert ID, no benefit to preemptive submission)
+
+**beta.9 submission record:**
+- Cert chain: signed via `Microsoft ID Verified CS AOC CA 03` (third distinct intermediate in three releases)
+- Installer SHA-256: `3e6c85bfdbf726f519f9a6399792d7f9eb692cfdb1621c02b3ac43ed773e00d5`
+- VirusTotal: submitted 2026-05-01 — `<TBD — paste report URL after upload>`
+- MS Defender: submitted 2026-05-01 15:18 MT, ID `9d0bfbbc-1c1f-4d20-a780-c6c57337d3d6` (status: Submitted). Note in submission comments: this is the third different intermediate CA in three releases; beta.8 (EOC CA 04) cleared as Completed; please ensure publisher reputation can accumulate across the AOC and EOC families.
+- Norton: skipped (not flagged in the wild)
 
 #### 2.5.3 Reputation-building strategy (per-release)
 
