@@ -423,6 +423,17 @@ jobs:
               ln -s B "$SPARKLE_FW/Versions/Current"
             fi
 
+            # Remove Sparkle's XPC services. They are only needed for
+            # sandboxed (Mac App Store) apps. As a non-sandboxed Developer
+            # ID app we use Sparkle's in-process update path. Their
+            # bootstrap-launch fails when the framework carries quarantine
+            # post-install (which happens with browser-downloaded DMGs
+            # despite notarization+stapling), silently breaking auto-update.
+            # Sparkle 2 falls back to in-process when XPC services are
+            # absent — no Info.plist flag needed; just delete them.
+            echo "Removing Sparkle XPC services (not needed for non-sandboxed app)..."
+            rm -rf "$SPARKLE_FW/Versions/B/XPCServices"
+
             # Fix ALL top-level items → symlinks to Versions/Current/*
             # Any real file/dir at root level causes "unsealed contents" error
             for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources Modules PrivateHeaders; do
@@ -529,19 +540,18 @@ jobs:
             echo "Signing Sparkle framework (Brave/steipete pattern)..."
             SPARKLE_SIGN="codesign -f -s"
 
-            # 1. XPC services (innermost)
-            $SPARKLE_SIGN "$IDENTITY" -o runtime \
-              "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-            $SPARKLE_SIGN "$IDENTITY" -o runtime --preserve-metadata=entitlements \
-              "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+            # XPC services were removed earlier (see "Assemble app bundle"
+            # step). Sparkle 2 uses its in-process update path when they
+            # are absent — required for our non-sandboxed Developer ID app
+            # to avoid quarantine-driven bootstrap-launch failures.
 
-            # 2. Autoupdate + Updater.app
+            # 1. Autoupdate + Updater.app
             $SPARKLE_SIGN "$IDENTITY" -o runtime \
               "$SPARKLE/Versions/B/Autoupdate"
             $SPARKLE_SIGN "$IDENTITY" -o runtime \
               "$SPARKLE/Versions/B/Updater.app"
 
-            # 3. Top-level Sparkle.framework
+            # 2. Top-level Sparkle.framework
             $SPARKLE_SIGN "$IDENTITY" -o runtime \
               "$SPARKLE"
 
