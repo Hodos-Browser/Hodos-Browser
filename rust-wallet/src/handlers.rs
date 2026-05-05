@@ -11526,24 +11526,33 @@ pub async fn do_onchain_backup(
         (privkey, pubkey, id_hex)
     };
 
-    // Step 2: Compress wallet data and check hash to detect changes
-    let compressed = {
+    // Step 2: Compress wallet data and check hash to detect changes.
+    // Use last_backup_at as reference_timestamp so time-based stripping
+    // produces the same result as when the stored hash was computed.
+    // This prevents false positives from outputs/addresses aging past
+    // retention thresholds between backup runs.
+    let (compressed, stored_hash) = {
         let db = state.database.lock().unwrap();
-        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
-            Ok(bytes) => bytes,
+        let settings_repo = crate::database::SettingsRepository::new(db.connection());
+        let last_backup_at = settings_repo.get_last_backup_at().unwrap_or(0);
+        let stored = settings_repo.get_backup_hash().unwrap_or(None);
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Use last_backup_at if available, otherwise use now (first backup)
+        let ref_ts = if last_backup_at > 0 { last_backup_at } else { now_ts };
+        let bytes = match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex, ref_ts) {
+            Ok(b) => b,
             Err(e) => return Err(format!("Serialization failed: {}", e)),
-        }
+        };
+        (bytes, stored)
     };
 
     // Hash the compressed payload and compare with stored hash
     let new_hash = {
         use sha2::{Sha256, Digest as _};
         hex::encode(Sha256::digest(&compressed))
-    };
-    let stored_hash = {
-        let db = state.database.lock().unwrap();
-        crate::database::SettingsRepository::new(db.connection())
-            .get_backup_hash().unwrap_or(None)
     };
     if stored_hash.as_deref() == Some(new_hash.as_str()) {
         log::info!("   ⏭️  Backup hash unchanged — no changes since last backup, skipping");
@@ -12290,9 +12299,12 @@ pub async fn do_onchain_backup(
     // This captures the post-backup state so the next trigger sees an accurate baseline.
     // Without this, backup side effects (spent_by changes, new proven_tx_reqs, etc.)
     // would make the next hash different even though no user data changed.
+    // Use `now` as reference_timestamp to establish the new baseline for next check.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let post_backup_hash = {
         let db = state.database.lock().unwrap();
-        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex, now) {
             Ok(compressed) => {
                 use sha2::{Sha256, Digest as _};
                 hex::encode(Sha256::digest(&compressed))
@@ -12304,8 +12316,6 @@ pub async fn do_onchain_backup(
         let db = state.database.lock().unwrap();
         let settings_repo = crate::database::SettingsRepository::new(db.connection());
         let _ = settings_repo.set_backup_hash(&post_backup_hash);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let _ = settings_repo.set_last_backup_at(now);
 
         // Ensure backup address (index -3) is not monitored by TaskSyncPending.
@@ -13039,7 +13049,11 @@ pub async fn wallet_recover_onchain(
             user_repo.get_default().ok().flatten()
                 .map(|u| u.identity_key).unwrap_or_default()
         };
-        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        match crate::backup::compress_for_onchain(db.connection(), &identity_key_hex, now) {
             Ok(compressed) => {
                 use sha2::{Sha256, Digest as _};
                 let hash = hex::encode(Sha256::digest(&compressed));

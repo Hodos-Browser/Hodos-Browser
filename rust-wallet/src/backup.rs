@@ -978,8 +978,12 @@ pub fn serialize_for_onchain(
     identity_key: &str,
     master_privkey: &[u8],
 ) -> std::result::Result<Vec<u8>, String> {
-    // Collect, strip, and compress
-    let compressed = compress_for_onchain(conn, identity_key)?;
+    // Collect, strip, and compress (use current time for actual backup payload)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let compressed = compress_for_onchain(conn, identity_key, now)?;
 
     // Encrypt
     let encrypted = encrypt_compressed(master_privkey, &compressed)?;
@@ -991,9 +995,15 @@ pub fn serialize_for_onchain(
 
 /// Collect, strip, and compress the wallet payload (without encrypting).
 /// Returns the compressed bytes suitable for hashing to detect changes.
+///
+/// `reference_timestamp` controls time-based stripping (spent outputs >7d,
+/// dead addresses >30d, old transactions >60d). Pass `last_backup_at` when
+/// checking whether a backup is needed (so the hash matches the stored
+/// baseline), or pass `now` when establishing a new baseline after backup.
 pub fn compress_for_onchain(
     conn: &Connection,
     identity_key: &str,
+    reference_timestamp: i64,
 ) -> std::result::Result<Vec<u8>, String> {
     use std::io::Write;
 
@@ -1049,12 +1059,8 @@ pub fn compress_for_onchain(
     //
     // Six inclusion clauses; drop only if NONE match.
     {
-        use std::time::{SystemTime, UNIX_EPOCH};
         const SPENT_OUTPUT_BACKUP_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
-        let now: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = reference_timestamp;
 
         // Build set of HD indices whose owning address is still pending UTXO check.
         // payload.addresses was loaded by collect_payload above and reflects the live
@@ -1108,12 +1114,8 @@ pub fn compress_for_onchain(
     // auto-created then imports from payload). Kept addresses are imported normally.
     // Dropped addresses have no funds and no in-flight operations.
     {
-        use std::time::{SystemTime, UNIX_EPOCH};
         const ADDRESS_BACKUP_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
-        let now: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = reference_timestamp;
 
         // Build set of address indices that have spendable outputs
         let active_indices: std::collections::HashSet<i32> = payload.outputs.iter()
@@ -1163,12 +1165,8 @@ pub fn compress_for_onchain(
     // references that pointed to dropped transactions. proven_txs records are kept
     // as-is (unreferenced but harmless — they're immutable proof records).
     {
-        use std::time::{SystemTime, UNIX_EPOCH};
         const TX_BACKUP_RETENTION_SECS: i64 = 60 * 24 * 60 * 60; // 60 days
-        let now: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = reference_timestamp;
 
         // Build set of transaction IDs that have spendable outputs
         let tx_ids_with_spendable: std::collections::HashSet<i64> = payload.outputs.iter()
