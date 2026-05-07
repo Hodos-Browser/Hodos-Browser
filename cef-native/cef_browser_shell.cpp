@@ -521,6 +521,13 @@ void ShutdownApplication() {
     }
     LOG_INFO("🔄 Both servers stopped.");
 
+    // Release profile lock early — all profile data (session, settings, wallet)
+    // is already saved and servers are stopped. Everything after this is CEF
+    // browser teardown which doesn't touch the profile directory. Releasing here
+    // lets a new instance acquire the lock immediately instead of waiting for
+    // the slow CefShutdown() to complete.
+    ReleaseProfileLock();
+
     // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
     // Using CloseBrowser(true) = force close, skips beforeunload handlers.
     // All browsers must be closed before CefShutdown() or it hangs waiting
@@ -3720,7 +3727,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO("Stopping adblock engine...");
     StopAdblockServer();
 
-    ReleaseProfileLock();
+    // Profile lock already released in ShutdownApplication() after servers stopped.
 
     Logger::Shutdown();
     CefShutdown();
