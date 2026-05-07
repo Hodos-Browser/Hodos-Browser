@@ -12126,110 +12126,24 @@ pub async fn do_onchain_backup(
         let _ = parent_tx_repo.upsert(None, &txid, &raw_tx_hex);
     }
 
-    // Step 11: Build BEEF and broadcast BEFORE creating DB records.
-    // This prevents ghost outputs if the process is killed mid-backup —
-    // only the placeholder reservation remains, which is cleaned up at startup.
-    let beef_bytes = {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        let mut beef = crate::beef::Beef::new();
-
-        // Add ancestry for each input's parent tx
-        let mut ancestor_txids: Vec<String> = Vec::new();
-        if let Some((ref prev_txid, _, _, _)) = previous_pushdrop {
-            ancestor_txids.push(prev_txid.clone());
-        }
-        if let Some((ref prev_txid, _, _, _)) = previous_marker {
-            if !ancestor_txids.contains(prev_txid) {
-                ancestor_txids.push(prev_txid.clone());
-            }
-        }
-        for (ref extra_txid, _, _, _) in &extra_markers {
-            if !ancestor_txids.contains(extra_txid) {
-                ancestor_txids.push(extra_txid.clone());
-            }
-        }
-        for utxo in &funding_utxos {
-            if !ancestor_txids.contains(&utxo.txid) {
-                ancestor_txids.push(utxo.txid.clone());
-            }
-        }
-
-        for ancestor_txid in &ancestor_txids {
-            if beef.find_txid(ancestor_txid).is_some() {
-                continue;
-            }
-            match crate::beef_helpers::build_beef_for_txid(
-                ancestor_txid, &mut beef, &state.database, &client,
-            ).await {
-                Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
-                Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
-            }
-        }
-
-        beef.sort_topologically();
-        let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
-        beef.set_main_transaction(signed_tx_bytes);
-
-        match beef.to_bytes() {
-            Ok(b) => b,
-            Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
-                return Err(format!("BEEF serialization failed: {}", e));
-            }
-        }
-    };
-    log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
-
-    // Broadcast — if this fails, only the placeholder reservation exists (no ghost outputs)
-    let beef_hex = hex::encode(&beef_bytes);
-    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
-        Ok(_) => {
-            log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
-        }
-        Err(e) => {
-            log::error!("   ❌ Backup broadcast failed: {} — rolling back placeholder", e);
-
-            // If double-spend/missing-inputs, the inputs may be spent on-chain.
-            // Mark as suspected (not confirmed) — TaskVerifyDoubleSpend will verify independently.
-            if crate::arc_status::is_double_spend_error(&e) {
-                let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, &txid);
-                let db = state.database.lock().unwrap();
-                let marked = db.connection().execute(
-                    "UPDATE outputs SET spending_description = ?1
-                     WHERE spending_description = ?2 AND spendable = 0",
-                    rusqlite::params![&suspected_desc, &placeholder_txid],
-                ).unwrap_or(0);
-                if marked > 0 {
-                    log::warn!("   ⚠️  Suspected double-spend: marked {} backup input(s) for verification", marked);
-                }
-                drop(db);
-            }
-
-            rollback_backup(&state, &placeholder_txid, "").await;
-            return Err(format!("Broadcast failed: {}", e));
-        }
-    }
-
-    // Step 12: Broadcast succeeded — NOW create DB records in a single lock scope.
-    // If the process dies here, the tx is on-chain but DB doesn't know — TaskUnFail
-    // will recover it within 6 hours, and /wallet/sync will discover the change output.
+    // Step 10b: Create DB records BEFORE broadcast (status: sending).
+    // If broadcast fails, rollback_backup() sets status to failed and restores inputs.
+    // If broadcast succeeds but process dies, the "sending" record survives and
+    // TaskSendWaiting will re-broadcast or TaskCheckForProofs will confirm it.
+    // This closes the window where a broadcast tx could be invisible to the DB.
     let tx_record_id: Option<i64>;
     {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let db = state.database.lock().unwrap();
 
-        // Create transaction record (status: unproven — already broadcast)
+        // Create transaction record (status: sending — not yet broadcast)
         tx_record_id = match db.connection().execute(
             "INSERT OR IGNORE INTO transactions (
                 user_id, txid, status, reference_number,
                 description, raw_tx, is_outgoing, satoshis,
                 created_at, updated_at
-            ) VALUES (?1, ?2, 'unproven', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
             rusqlite::params![
                 1i64, txid,
                 format!("backup-{}", &txid[..8]),
@@ -12292,8 +12206,107 @@ pub async fn do_onchain_backup(
         let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
         let _ = ptx_repo.create(&txid, &raw_tx_bytes, None, "sending");
     }
-
     state.balance_cache.invalidate();
+
+    // Step 11: Build BEEF and broadcast. DB records already exist with status "sending".
+    // If broadcast fails, rollback_backup() will mark tx as failed and restore inputs.
+    let beef_bytes = {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let mut beef = crate::beef::Beef::new();
+
+        // Add ancestry for each input's parent tx
+        let mut ancestor_txids: Vec<String> = Vec::new();
+        if let Some((ref prev_txid, _, _, _)) = previous_pushdrop {
+            ancestor_txids.push(prev_txid.clone());
+        }
+        if let Some((ref prev_txid, _, _, _)) = previous_marker {
+            if !ancestor_txids.contains(prev_txid) {
+                ancestor_txids.push(prev_txid.clone());
+            }
+        }
+        for (ref extra_txid, _, _, _) in &extra_markers {
+            if !ancestor_txids.contains(extra_txid) {
+                ancestor_txids.push(extra_txid.clone());
+            }
+        }
+        for utxo in &funding_utxos {
+            if !ancestor_txids.contains(&utxo.txid) {
+                ancestor_txids.push(utxo.txid.clone());
+            }
+        }
+
+        for ancestor_txid in &ancestor_txids {
+            if beef.find_txid(ancestor_txid).is_some() {
+                continue;
+            }
+            match crate::beef_helpers::build_beef_for_txid(
+                ancestor_txid, &mut beef, &state.database, &client,
+            ).await {
+                Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
+                Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
+            }
+        }
+
+        beef.sort_topologically();
+        let signed_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
+        beef.set_main_transaction(signed_tx_bytes);
+
+        match beef.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                rollback_backup(&state, &placeholder_txid, &txid).await;
+                return Err(format!("BEEF serialization failed: {}", e));
+            }
+        }
+    };
+    log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
+
+    // Broadcast — if this fails, only the placeholder reservation exists (no ghost outputs)
+    let beef_hex = hex::encode(&beef_bytes);
+    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+        Ok(_) => {
+            log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
+        }
+        Err(e) => {
+            log::error!("   ❌ Backup broadcast failed: {} — rolling back", e);
+
+            // If double-spend/missing-inputs, the inputs may be spent on-chain.
+            // Mark as suspected (not confirmed) — TaskVerifyDoubleSpend will verify independently.
+            if crate::arc_status::is_double_spend_error(&e) {
+                let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, &txid);
+                let db = state.database.lock().unwrap();
+                let marked = db.connection().execute(
+                    "UPDATE outputs SET spending_description = ?1
+                     WHERE spending_description = ?2 AND spendable = 0",
+                    rusqlite::params![&suspected_desc, &txid],
+                ).unwrap_or(0);
+                if marked > 0 {
+                    log::warn!("   ⚠️  Suspected double-spend: marked {} backup input(s) for verification", marked);
+                }
+                drop(db);
+            }
+
+            rollback_backup(&state, &placeholder_txid, &txid).await;
+            return Err(format!("Broadcast failed: {}", e));
+        }
+    }
+
+    // Step 12: Broadcast succeeded — update status from "sending" to "unproven"
+    {
+        let db = state.database.lock().unwrap();
+        let _ = db.connection().execute(
+            "UPDATE transactions SET status = 'unproven', updated_at = ?1 WHERE txid = ?2",
+            rusqlite::params![
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
+                txid,
+            ],
+        );
+    }
 
     // Recompute hash AFTER the backup transaction has modified the DB.
     // This captures the post-backup state so the next trigger sees an accurate baseline.
