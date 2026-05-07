@@ -159,7 +159,14 @@ impl Monitor {
         let mut last_purge: u64 = 0;
         let mut last_sync_pending: u64 = 0;
         let mut last_check_peerpay: u64 = 0;
-        let mut last_backup: u64 = Self::now_secs(); // Don't run on first tick — wait for interval
+        // Seed from last_backup_at in settings so a backup triggers on the first cycle
+        // after a long shutdown, rather than waiting a full 3 hours from startup.
+        let mut last_backup: u64 = {
+            let db = self.state.database.lock().unwrap();
+            let settings_repo = crate::database::SettingsRepository::new(db.connection());
+            let stored = settings_repo.get_last_backup_at().unwrap_or(0) as u64;
+            if stored > 0 { stored } else { Self::now_secs() }
+        };
         let mut last_replay_overlay: u64 = 0; // 0 = check on first tick
         let mut last_consolidate_dust: u64 = Self::now_secs(); // Don't run on first tick — daily task
         let mut last_verify_double_spend: u64 = 0; // Check on first tick

@@ -184,38 +184,14 @@ pub async fn health() -> HttpResponse {
 }
 
 
-// Graceful shutdown — called by CEF browser before process termination
+// Graceful shutdown — called by CEF browser before process termination.
+// No on-chain backup here — the C++ side force-kills the process after 5 seconds,
+// which is not enough time for BEEF ancestry + multi-broadcaster broadcast (~60s).
+// A crash mid-backup leaves the DB in an inconsistent state (broadcast succeeded,
+// DB records never written). Backups are handled by the periodic Monitor task
+// (every 3 hours) and the "soon" flag for significant transactions.
 pub async fn shutdown(data: web::Data<crate::AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🛑 /shutdown received — initiating graceful shutdown");
-
-    // Attempt on-chain backup before shutting down.
-    // Hash comparison inside do_onchain_backup will skip if nothing changed.
-    {
-        let should_try = {
-            let db = match data.database.try_lock() {
-                Ok(db) => db,
-                Err(_) => {
-                    log::info!("   ⏭️  Shutdown backup skipped (DB locked)");
-                    data.shutdown.cancel();
-                    return HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }));
-                }
-            };
-            let wallet_exists = crate::database::WalletRepository::new(db.connection())
-                .get_primary_wallet().ok().flatten().is_some();
-            wallet_exists && db.is_unlocked()
-        };
-
-        if should_try {
-            match do_onchain_backup(&data).await {
-                Ok(txid) => log::info!("   ✅ Shutdown backup broadcast: {}", txid),
-                Err(e) if e.contains("skipped") => log::info!("   ⏭️  {}", e),
-                Err(e) => log::warn!("   ⚠️  Shutdown backup failed: {} (proceeding with shutdown)", e),
-            }
-        } else {
-            log::info!("   ⏭️  Shutdown backup skipped (no wallet or locked)");
-        }
-    }
-
     data.shutdown.cancel();
     HttpResponse::Ok().json(serde_json::json!({ "status": "shutting_down" }))
 }
