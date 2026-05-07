@@ -2,7 +2,7 @@
 ; Build with: ISCC.exe /DAppVersion=0.1.0-alpha.1 /DProjectRoot=... /DStagingDir=... /DDistDir=... hodos-browser.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0-beta.14"
+  #define AppVersion "0.3.0-beta.15"
 #endif
 
 #ifndef ProjectRoot
