@@ -8,23 +8,23 @@
 
 ---
 
-## Current Status (2026-05-02)
+## Current Status (2026-05-07)
 
 **Next release: TBD**
-**Last shipped: `v0.3.0-beta.10`**
+**Last shipped: `v0.3.0-beta.15`**
 
 | Component | Status |
 |-----------|--------|
 | Windows installer (Inno Setup) | WORKING — signed via Azure Artifact Signing |
 | Windows portable zip | WORKING |
-| macOS DMG | WORKING — signed + notarized + stapled in CI (DMG itself notarized + stapled as of beta.10) |
+| macOS DMG | WORKING — signed + notarized + stapled in CI; DMG itself notarized + stapled as of beta.10 |
 | GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
-| Website (hodosbrowser.com) | LIVE — download links active for beta.10 |
+| Website (hodosbrowser.com) | LIVE — download links active for beta.15 |
 | Auto-update (Windows/WinSparkle) | WORKING — verified end-to-end on beta.4 → beta.5 |
-| Auto-update (macOS/Sparkle 2) | beta.9 attempt failed silently — Sparkle's nested XPC services failed to launch due to quarantine on Sparkle.framework. beta.10 disables XPC services via Info.plist (SUEnableInstallerLauncherService/SUEnableDownloaderService = false) AND notarizes+staples the DMG itself. beta.10 → beta.11 will be the validation test. |
-| Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact, items now include `<sparkle:channel>beta</sparkle:channel>` |
+| Auto-update (macOS/Sparkle 2) | **WORKING** — verified end-to-end beta.12 → beta.14 → beta.15. Required: (1) DMG-level notarize+staple (beta.10), (2) deletion of Sparkle's nested XPC services from the framework before signing (beta.12), (3) integer `CFBundleVersion` + dual-field appcast (`sparkle:version` integer for comparison, `sparkle:shortVersionString` for display) (beta.14). On first auto-update, macOS shows a one-time **Privacy & Security → App Management** prompt; users approve once, all subsequent updates silent. |
+| Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact. macOS items use integer `sparkle:version` + `sparkle:shortVersionString`; Windows items use full version string in `sparkle:version`. |
 | Install directory | `{localappdata}\HodosBrowser` (per-user, no UAC for updates) |
-| AV reputation (SmartScreen) | DEGRADED — Microsoft rotated us through three intermediate CAs over four releases (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9=`AOC CA 03`, beta.10=`AOC CA 03` — first repeat). Reputation may finally start accumulating if we stay on AOC CA 03. See §2.5.1. |
+| AV reputation (SmartScreen) | Microsoft rotated us through multiple intermediate CAs (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9-11=`AOC CA 03`, beta.12=`EOC CA 04`, beta.15=`AOC CA 03`). Multiple releases now landing on `AOC CA 03` — reputation should be accumulating against that thumbprint. See §2.5.1. |
 
 ### How to Release a New Version — Complete Checklist
 
@@ -399,7 +399,12 @@ If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release,
 - beta.7 — `EOC CA 03` (regression cohort)
 - beta.8 — `EOC CA 04` (new intermediate, first release on this CA)
 - beta.9 — `AOC CA 03` (yet another intermediate — Azure is rotating us through different CA families. AOC vs EOC appears to be a parallel certificate family rather than a successor; both share the same root and PCA 2021 issuer.)
-- beta.10 — `AOC CA 03` (FIRST REPEAT — staying on same CA between two consecutive releases. If Azure keeps us here for several more, publisher reputation should finally accrue against this thumbprint.)
+- beta.10 — `AOC CA 03` (first repeat)
+- beta.11 — (not separately checked — this was a no-changes validation release for beta.10's macOS Sparkle fix; superseded by beta.12)
+- beta.12 — `EOC CA 04` (back to beta.8's CA after three on AOC CA 03)
+- beta.13 — (not separately checked — failed validation release for beta.12's XPC fix)
+- beta.14 — (not separately checked — shipped the integer-CFBundleVersion fix that made macOS auto-update finally work)
+- beta.15 — `AOC CA 03` (latest, shipped 2026-05-07 with backup-fix bundle on top of beta.14's auto-update foundation)
 
 #### 2.5.2 Per-release submission tracking
 
@@ -441,7 +446,22 @@ Submission IDs come from either the confirmation email or the portal's "submissi
 - VirusTotal: submitted 2026-05-02 — `<TBD — paste report URL after upload>`
 - MS Defender: submitted 2026-05-02 — `<TBD — paste submission ID from portal>`. Note for submission comments: same publisher (Marston Enterprises) and intermediate CA as beta.9, please correlate. Build now includes DMG-level notarization+stapling and disables Sparkle XPC services to fix macOS auto-update.
 - Norton: skipped (not flagged in the wild)
-- **macOS auto-update outcome:** TBD — beta.10 is the first build with the XPC/quarantine fix. Existing macOS users on beta.7/beta.8/beta.9 need a one-time manual replace. The real validation comes with beta.10 → beta.11 (next release).
+- **macOS auto-update outcome:** Smoke test passed (Sparkle init clean on launch, no XPC errors logged that affected flow). End-to-end auto-update test (beta.10 → beta.11) failed silently due to a different bug found later: Sparkle's standard version comparator chokes on suffixed strings like "0.3.0-beta.10" vs "0.3.0-beta.11". Fixed in beta.14 with integer CFBundleVersion.
+
+**beta.11–beta.13 submission record:**
+Skipped formal AV submissions for these — they were rapid iteration releases shipped 2026-05-02 during the macOS auto-update debugging arc. beta.11 was a no-changes validation release for beta.10's XPC fix (still failed). beta.12 attempted to remove Sparkle XPC services entirely from the framework before signing (still failed — version comparison bug remained). beta.13 was a no-changes validation for beta.12 (still failed). All three were superseded by beta.14's integer-CFBundleVersion fix the same day.
+
+**beta.14 submission record:**
+- Cert chain: not separately recorded (focus was on validating the auto-update fix)
+- macOS auto-update outcome: **WORKING** — first release where Sparkle 2 actually detected, downloaded, and installed an update on macOS without manual intervention beyond clicking Install. Validated by beta.12 → beta.14 manual trigger and again by beta.14 → beta.15 (real auto-update). The macOS Privacy & Security → App Management prompt is a one-time first-update papercut; once user approves, all subsequent updates are silent.
+
+**beta.15 submission record:**
+- Cert chain: signed via `Microsoft ID Verified CS AOC CA 03` (same as beta.9, beta.10)
+- Installer SHA-256: `8f4f9730b0bb5e61e17d18e13065da906f3435211001bd3e123134586fda1b09`
+- VirusTotal: submitted 2026-05-07 — https://www.virustotal.com/gui/file/8f4f9730b0bb5e61e17d18e13065da906f3435211001bd3e123134586fda1b09
+- MS Defender: submitted 2026-05-07 10:12 MT, ID `9c8774de-8094-4193-bd55-53005488aafb` (status: Submitted). Note in submission: multiple releases now signed under AOC CA 03; reputation should accrue against that thumbprint.
+- Norton: skipped (not flagged in the wild)
+- **macOS auto-update outcome:** Verified end-to-end. beta.14 install on test Mac auto-detected beta.15 via Sparkle (manual trigger via Settings → About → Check for updates; Sparkle's default 24h check interval delayed an unprompted notification). Download → EdDSA verify → install → relaunch all completed silently because the App Management permission was already granted in the beta.12 → beta.14 transition.
 
 #### 2.5.3 Reputation-building strategy (per-release)
 
