@@ -1,0 +1,110 @@
+# Sprint Checklist (revised 2026-05-07)
+
+Cross-phase checklist matching the phase structure in `README.md`. Per-phase detail lives in each phase folder.
+
+## Every phase begins with a kickoff review
+
+Per root `CLAUDE.md` "Phase kickoff workflow":
+- [ ] Re-read this phase's docs + linked sources
+- [ ] Verify cited file:line references are still current (don't trust prior session memory)
+- [ ] **Reuse-first audit:** map every change to existing functions/code. If tempted to write something new, first prove the equivalent doesn't exist
+- [ ] Risk assessment: what existing functionality could this touch? Especially the load-bearing UX safeguards (right-click manage permissions, `payment_success_indicator` animation, "Always notify" toggle, privacy perimeter)
+- [ ] Confirm the test plan is actionable for this phase
+- [ ] Hand back tight summary asking for confirmation before any code is written
+
+## Phase 0.1 — BRC-100 Audit ✅ COMPLETE (2026-05-06)
+- [x] Map each of the 28 canonical `WalletInterface` methods to existing Hodos handlers
+- [x] Document argument-shape match against `@bsv/sdk@2.0.13` for each method
+- [x] Identify gaps (`revealCounterpartyKeyLinkage`, `revealSpecificKeyLinkage` missing)
+- [x] Plan extension to BRC-100's permission model (per-protocol, basket, counterparty, certificate)
+- [x] Deliverable: `phase-0.1-brc100-audit/AUDIT_RESULTS.md`
+
+## Phase 0.2 — `window.yours` Shim Design ✅ COMPLETE (2026-05-06)
+- [x] signMessage protocolID/keyID convention (`yours-legacy-v1`, level 1, anyone counterparty)
+- [x] getAddresses fallback (Option C: BRC-42 fresh-address generator with `yours-legacy-receive`)
+- [x] encrypt/decrypt argument translation (multi-recipient verification deferred to v4.5.6 source check)
+- [x] sendBsv → createAction mapping (inscription-bearing → typed error)
+- [x] getBalance computation strategy (sum of `listOutputs({ basket: 'default' })`)
+- [x] Removed-methods handling (typed errors with explanation)
+- [x] Ordinal-method shim posture (typed `NOT_IMPLEMENTED_PRE_PHASE_3` error in v1)
+- [x] Deliverable: `phase-0.2-window-yours-shim-design/SHIM_TRANSLATION_SPEC.md`
+
+## Phase 1 — BRC-121
+**Reuse map (verify current before writing):** BRC-29 protocol ID `3241645161d8` (`handlers.rs:4348`), `peerpay_send` (`handlers.rs:15224`), `paymail_send` (`handlers.rs:15637`), `create_action_internal` (`handlers.rs:3577`), `OnResourceResponse` stub (`HttpRequestInterceptor.cpp:2056`), `payment_success_indicator` IPC (`HttpRequestInterceptor.cpp:1656-1681`).
+- [ ] Kickoff review (per cross-phase checklist above)
+- [ ] Rust handler `pay_402` in `rust-wallet/src/handlers.rs` — mirror `peerpay_send` shape; reuse BRC-29 invoice format
+- [ ] Route `/wallet/pay402` registered in `rust-wallet/src/main.rs`
+- [ ] CEF interception: fill `OnResourceResponse` stub in `cef-native/src/core/HttpRequestInterceptor.cpp`
+- [ ] Add `/wallet/pay402` to `isWalletEndpoint` route table
+- [ ] Auto-approve integration via existing `SessionManager` (do not duplicate)
+- [ ] Confirm `payment_success_indicator` fires on successful 402 payment
+- [ ] Localhost 402 demo server (minimal Express/Actix returning 402 + headers)
+- [ ] Acceptance: localhost 402 demo round-trip <2s on Windows AND macOS
+- [ ] Regression: existing PeerPay flow still works after merge
+
+## Phase 1.5 — BRC-100 Surface Completion (NEW)
+**Reuse map:** existing `domain_permissions` + `cert_field_permissions` tables (`migrations.rs:468, 486`), shared `notification_browser_` overlay (`simple_app.cpp::CreateNotificationOverlay`, `BRC100AuthOverlayRoot.tsx`), existing `DomainPermissionForm` "Always notify" toggle, `MENU_ID_MANAGE_PERMISSIONS` (`simple_handler.cpp:6696`).
+- [ ] Kickoff review
+- [ ] DB schema walkthrough — table-by-table review of three new child tables + `sensitivity` column (per CLAUDE.md invariant 2)
+- [ ] `revealCounterpartyKeyLinkage` + `revealSpecificKeyLinkage` Rust handlers + routes + `crypto/key_linkage.rs`
+- [ ] Three new child tables of `domain_permissions` (protocol/basket/counterparty) with `expires_at` + `revoked_at`
+- [ ] Optional `sensitivity` column on `cert_field_permissions`
+- [ ] Permission engine in C++ (decision logic, manifest fetcher)
+- [ ] Five new prompt types added to existing `notification_browser_` overlay (no new HWNDs/NSPanels)
+- [ ] Extend `DomainPermissionForm` with "Allow without limits" + Specific permissions + Cert fields sections
+- [ ] Extend `ApprovedSitesTab` with sensitivity classifier editor
+- [ ] Wire all 28 handlers through new permission gates (additive, bodies unchanged)
+- [ ] Manifest fetcher for `/.well-known/wallet-manifest.json`
+- [ ] Verify: right-click "Manage Site Permissions" still works
+- [ ] Verify: payment animation still fires through new engine
+- [ ] Acceptance: BRC-100-conforming demo dApp loads, manifest bundle prompt appears, post-grant calls silent
+
+## Phase 2 — `window.CWI` / `window.yours` / `window.panda` Shim
+- [ ] V8 injection in `simple_render_process_handler.cpp::OnContextCreated`
+- [ ] V8 Proxy wrapper with `apply` traps on each method
+- [ ] Non-writable, non-configurable descriptors for `window.CWI`
+- [ ] Writable descriptors for `window.yours`/`window.panda` (Brave isMetaMask lesson)
+- [ ] No injection in private/incognito tabs
+- [ ] Iframe Permissions Policy gating (`allow="bsv-wallet"`)
+- [ ] Secure-context-only check
+- [ ] Hide-until-user-gesture mode (stricter than Brave; default-on?)
+- [ ] IPC routing for all 28 BRC-100 methods → Rust handlers
+- [ ] IPC routing for legacy `window.yours` methods → translation layer → Rust handlers
+- [ ] Origin + favicon shown on every signing/spending prompt
+- [ ] BRC-100 sub-tier permission flows (per-protocol, grouped, per-counterparty)
+- [ ] EIP-6963-equivalent announce protocol (propose `metanet:announceProvider`?)
+- [ ] "Default wallet" setting for users with other BSV wallet extensions
+
+## Phase 3 — 1Sat Ordinals
+- [ ] UTXO classifier flagging ordinal vs fungible (1-sat with envelope)
+- [ ] `Ordinal` row type + repo
+- [ ] `OrdinalsIndexerClient` (REST + SSE wrapper for GorillaPool)
+- [ ] Basket-aware UTXO selection (don't accidentally spend ordinal UTXOs for fees)
+- [ ] Separate ordinal address derivation path (`m/44'/236'/1'/0/0` per Yours convention)
+- [ ] `createAction` extension for `basket: '1sat'` (recognize, classify outputs correctly)
+- [ ] Inscription envelope construction
+- [ ] Ordinal Lock covenant script (lock + unlock paths)
+- [ ] Signer accepts arbitrary lock scripts (not just P2PKH)
+- [ ] UI for inscriptions
+- [ ] Acceptance: 1sat.market purchase round-trip succeeds
+
+## Phase 4 — Demos + LLM Dev Guides
+- [ ] `demo-brc100-createaction`
+- [ ] `demo-brc121-402`
+- [ ] `demo-window-cwi-signin` (BRC-100 + Yours-style + Sigma OAuth + HandCash buttons)
+- [ ] `demo-1sat-ordinals` (mint + transfer + buy)
+- [ ] LLM-ready `.md` integration guides for each
+- [ ] Repo location decided (subdir vs separate repo) — Q3
+- [ ] Demo video script that explains:
+  - Three sign-in surfaces (BRC-100, Sigma OAuth, HandCash)
+  - Auto-approve model + why we differ from Brave (per `AUTO_APPROVE_RATIONALE.md`)
+  - Keys-in-Rust-process security advantage
+  - Domain whitelist + spend cap UX
+
+## Cross-cutting (every phase)
+- [ ] Standard verification basket regression tested after each phase
+- [ ] No DB schema changes outside Phase 3 (where ordinal classification requires it)
+- [ ] All new C++ uses cross-platform conditionals + `SyncHttpClient`
+- [ ] Private keys never leave Rust process (signing all Rust-side)
+- [ ] Every auto-approve fire produces visible notification
+- [ ] Origin + favicon on every prompt (Phase 2 onward)

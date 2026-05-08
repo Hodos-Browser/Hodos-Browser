@@ -154,11 +154,18 @@ const DomainPermissionsTab: React.FC = () => {
     if (!revokeTarget) return;
     try {
       setRevoking(true);
+      const domain = revokeTarget.domain;
       const res = await fetch(
-        `http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(revokeTarget.domain)}`,
+        `http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`,
         { method: 'DELETE' }
       );
       if (!res.ok) throw new Error(`Failed to revoke: ${res.statusText}`);
+      // Invalidate the C++ DomainPermissionCache so the next BRC-100 / BRC-121
+      // request for this domain re-reads from the wallet DB. Without this, the
+      // cache would still report trustLevel='approved' and the auto-approve
+      // gates would incorrectly let the request through.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).cefMessage?.send('domain_permission_invalidate', [domain]);
       setRevokeTarget(null);
       fetchPermissions();
     } catch (err) {
@@ -175,6 +182,10 @@ const DomainPermissionsTab: React.FC = () => {
         { method: 'DELETE' }
       );
       if (!res.ok) throw new Error(`Failed to revoke cert fields: ${res.statusText}`);
+      // Invalidate cached cert-field permissions for this domain too. The C++
+      // cache may have approved-fields state that needs to be re-read from DB.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).cefMessage?.send('domain_permission_invalidate', [domain]);
       fetchPermissions();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke cert fields');

@@ -1,0 +1,19 @@
+{
+  "name": "hodos-brc121-402-demo",
+  "version": "0.1.0",
+  "description": "BRC-121 Simple HTTP 402 Payment demo server. Returns 402 with x-bsv-sats and x-bsv-server headers; validates atomic BEEF on the retry's x-bsv-payment header and returns paid content.",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^1.7.3",
+    "express": "^4.21.2"
+  }
+}

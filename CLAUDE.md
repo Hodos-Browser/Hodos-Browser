@@ -4,6 +4,29 @@
 
 Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps.
 
+## Phase kickoff workflow (mandatory before any sprint-phase implementation)
+
+Sprint phases live in `development-docs/<sprint>/phase-*/` folders. Before writing **any code** for a phase, run a brief kickoff review:
+
+1. **Re-read the phase docs.** The phase's `README.md` plus every doc it links. Don't trust prior session memory or earlier summaries — code and line numbers may have moved.
+2. **Verify cited code is current.** For every file:line reference in the phase doc, grep/Read the cited code and confirm it still exists at that location with the documented shape. Update the doc inline if anything moved.
+3. **Reuse-first audit.** Map every change to existing functions/code/components. **Before writing anything new, prove the equivalent doesn't already exist** — grep for similar handlers, repos, components, IPC types. If something close exists, extend it rather than creating a parallel structure. Common reuse anchors:
+   - Rust handlers in `rust-wallet/src/handlers.rs` — most BRC-100 + payment primitives are already there (76+ handlers)
+   - C++ overlays — the shared `notification_browser_` overlay multiplexes prompt types via `BRC100AuthOverlayRoot.tsx`'s type dispatch; add new types as new cases, don't add new HWNDs without strong reason
+   - DB tables — extend via child tables joined by FK + CASCADE, mirroring the `cert_field_permissions` pattern (don't create parallel top-level tables)
+   - Permission gates — `check_domain_approved`, `SessionManager`, `domain_permissions` row already enforce per-tx / per-session / rate / max-tx-per-session limits
+   - HTTP interception — `isWalletEndpoint` route table is the entry point for all new wallet endpoints; new endpoints go through the table, never around it
+4. **Risk assessment.** What existing functionality could this change touch or break? Especially audit the **load-bearing UX safeguards**:
+   - **Tab payment badge animation** (`payment_success_indicator` IPC chain: `HttpRequestInterceptor.cpp:1656-1681` → `simple_render_process_handler.cpp:1020` → `useTabManager.ts:141`) — green-dot fires on every auto-approved payment; the user's primary visual safeguard against silent payment abuse
+   - **Right-click "Manage Site Permissions"** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) — quick revoke flow
+   - **`DomainPermissionForm` "Always notify" toggle** — zeros all limits; the cautious-user opt-in path
+   - **Privacy perimeter prompts** — identity-key reveal, key-linkage reveal, sensitive cert fields, large spends ALWAYS prompt regardless of any setting
+   - **Per-session counter behavior** (resets on tab close — kept by design)
+5. **Confirm the test plan** is actionable for this phase. Each phase needs unit + integration + smoke tests before merge, with explicit Windows/macOS parity verification per the Testing Standards table below.
+6. **Hand back a tight summary** to the user listing remaining open questions / assumptions / decisions before any code is written. Wait for confirmation before writing the first commit.
+
+The kickoff is meant to be ~15–30 minutes of work, not a re-plan. Its job is catching divergence between the plan and current reality before commits start landing.
+
 ## Testing Standards
 
 **Every feature must be tested against real-world sites.** Standard verification sites are listed below.
@@ -334,7 +357,7 @@ cmake --build build --config Release
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | 76+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), and more |
+| `rust-wallet/src/handlers.rs` | 78+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), domain permissions, price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), BRC-121 (`pay_402` mints nosend BRC-29 BEEF + emits 5 retry headers; `broadcast_nosend` broadcasts after the paid retry returns 200), and more |
 | `rust-wallet/src/crypto/` | 11 modules: `brc42`, `brc43`, `signing`, `aesgcm_custom`, `dpapi` (Windows DPAPI / macOS Keychain stub), `pin` (PBKDF2+AES-GCM), `keys`, `brc2`, `ghash`, plus tests |
 | `rust-wallet/src/authfetch.rs` | BRC-103 AuthFetch HTTP client: 401 challenge-response with ECDSA signing, server/client nonce exchange, authenticated requests to external BRC-103 servers (MessageBox) |
 | `rust-wallet/src/messagebox.rs` | MessageBox API client: BRC-2 encrypted message send/receive/acknowledge via `messagebox.babbage.systems`, deterministic HMAC message IDs, uses AuthFetch for authentication |
@@ -351,7 +374,7 @@ cmake --build build --config Release
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs`; scriptlet pre-cache (`s_scriptCache` + `OnContextCreated` early injection); cosmetic CSS/script IPC handlers; fingerprint seed cache (`s_domainSeeds`) + fingerprint script injection in `OnContextCreated` |
 | `cef-native/include/core/FingerprintProtection.h` | `FingerprintProtection` singleton: platform CSPRNG session token, per-domain seed generation via hash mixing, enable/disable toggle |
 | `cef-native/include/core/FingerprintScript.h` | Embedded JS constant `FINGERPRINT_PROTECTION_SCRIPT`: Mulberry32 PRNG, Canvas/WebGL/Navigator/AudioContext farbling (no screen resolution spoofing) |
-| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`; singleton: `PendingRequestManager` (in PendingAuthRequest.h) |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`, `Async402ResourceHandler` + `Async402HTTPClient` (BRC-121 paid retry handler with paid-retry context registry); functions: `TryHandleBrc121_402`, `InstallAsync402HandlerIfPending`; singleton: `PendingRequestManager` (in PendingAuthRequest.h) |
 | `cef-native/include/core/PendingAuthRequest.h` | `PendingRequestManager` singleton — thread-safe request tracking for auth/domain/payment/cert approvals |
 | `cef-native/include/core/SessionManager.h` | `SessionManager` singleton + `BrowserSession` — per-browser session spending/rate tracking for auto-approve |
 | `cef-native/include/core/ProfileManager.h` | `ProfileManager` singleton: multi-profile support, profile creation/switching, profile directory management |

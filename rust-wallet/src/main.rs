@@ -555,6 +555,10 @@ async fn main() -> std::io::Result<()> {
     println!("   GET  /wallet/peerpay/status");
     println!("   POST /wallet/peerpay/dismiss");
     println!();
+    println!("💳 BRC-121 Simple HTTP 402 Payment:");
+    println!("   POST /wallet/pay402");
+    println!("   POST /wallet/broadcast-nosend");
+    println!();
     println!("📧 Paymail (bsvalias) endpoints:");
     println!("   POST /wallet/paymail/send");
     println!("   GET  /wallet/paymail/resolve");
@@ -881,6 +885,10 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/peerpay/status", web::get().to(handlers::peerpay_status))
             .route("/wallet/peerpay/dismiss", web::post().to(handlers::peerpay_dismiss))
             .route("/wallet/peerpay/outbox-retry", web::post().to(handlers::peerpay_outbox_retry))
+
+            // BRC-121 Simple HTTP 402 Payment
+            .route("/wallet/pay402", web::post().to(handlers::pay_402))
+            .route("/wallet/broadcast-nosend", web::post().to(handlers::broadcast_nosend))
 
             // Paymail (bsvalias) endpoints
             .route("/wallet/paymail/send", web::post().to(handlers::paymail_send))

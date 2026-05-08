@@ -15606,6 +15606,436 @@ pub async fn peerpay_outbox_retry(
 }
 
 // ============================================================================
+// BRC-121 — Simple HTTP 402 Payment
+// ============================================================================
+//
+// HTTP servers respond `402 Payment Required` with `x-bsv-sats` (amount) and
+// `x-bsv-server` (server identity pubkey hex). This handler builds a BRC-29
+// payment to the server's pubkey via BRC-42 derivation (same protocol ID
+// "3241645161d8" as PeerPay), broadcasts it to BSV, and returns atomic BEEF
+// + the BRC-121 retry-header values for the CEF interceptor to attach to
+// the page's retried request.
+//
+// Differences from peerpay_send:
+//  - No MessageBox notification — server reads x-bsv-* headers instead.
+//  - Service fee output is added automatically by create_action_internal.
+//
+// Broadcast policy: we DO NOT broadcast at mint time (no_send=true). The
+// CEF-side Async402ResourceHandler broadcasts via /wallet/broadcast-nosend
+// only AFTER the server returns 200 to the BRC-121 retry, eliminating two
+// failure modes simultaneously:
+//   1. isMerge race — server's wallet would otherwise see our tx in
+//      ARC mempool BEFORE its internalizeAction call, then internalizeAction
+//      returns isMerge=true → @bsv/402-pay rejects as a "replayed transaction".
+//   2. nosend auto-fail race — Hodos's task_check_for_proofs marks nosend
+//      txs as failed after 10 minutes if not on-chain. With broadcast-after-200,
+//      we broadcast immediately on success, status moves to `sending` →
+//      `unproven` → `completed` via the normal Monitor pipeline.
+//
+// On retry failure (4xx from server), we do NOT broadcast — funds preserved.
+
+#[derive(Debug, Deserialize)]
+pub struct Pay402Request {
+    pub server_pubkey_hex: String,
+    pub satoshis: i64,
+    #[serde(default)]
+    pub original_url: Option<String>,
+}
+
+/// POST /wallet/pay402 — Build a BRC-121 payment for the requesting page.
+pub async fn pay_402(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("💸 /wallet/pay402 called (BRC-121)");
+
+    // Parse body
+    let req: Pay402Request = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse request: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid request: {}", e)
+            }));
+        }
+    };
+
+    if let Some(ref url) = req.original_url {
+        log::info!("   original_url: {}", url);
+    }
+
+    // Defense-in-depth: domain check via X-Requesting-Domain header.
+    // The CEF interceptor sets this; internal callers (no header) skip the gate.
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    // Validate server pubkey (33-byte compressed = 66 hex chars, prefix 02 or 03).
+    let server_key = &req.server_pubkey_hex;
+    if server_key.len() != 66 || (!server_key.starts_with("02") && !server_key.starts_with("03")) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid server pubkey. Must be 66-char hex starting with 02 or 03."
+        }));
+    }
+    let server_pubkey = match hex::decode(server_key) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid hex: {}", e)
+            }));
+        }
+    };
+
+    if req.satoshis <= 0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Amount must be greater than 0"
+        }));
+    }
+
+    // Get master private + public keys. Sender pubkey is sent in x-bsv-sender
+    // so the server can derive the matching child private key for internalizeAction.
+    let (master_privkey, master_pubkey) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("No wallet: {}", e)
+                }));
+            }
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Master pubkey unavailable: {}", e)
+                }));
+            }
+        };
+        (privkey, pubkey)
+    };
+
+    // BRC-121 nonces (per @bsv/402-pay canonical client):
+    //   derivation_prefix = base64(8 random bytes) — note: 8, not 16
+    //   derivation_suffix = base64(utf8 bytes of decimal time-ms string)
+    // The server reads x-bsv-time as a decimal string and reconstructs the
+    // suffix via Buffer.from(time).toString('base64'). x-bsv-time on the wire
+    // is the decimal string itself (NOT the base64 form).
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    let prefix_bytes: Vec<u8> = (0..8).map(|_| rand::random::<u8>()).collect();
+    let derivation_prefix = BASE64.encode(&prefix_bytes);
+    let time_ms: u128 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let time_ms_str = time_ms.to_string();
+    let derivation_suffix = BASE64.encode(time_ms_str.as_bytes());
+
+    // BRC-29 invoice: "2-3241645161d8-{prefix} {suffix}".
+    let invoice_number = format!("2-3241645161d8-{} {}", derivation_prefix, derivation_suffix);
+
+    // Derive child pubkey for the server via BRC-42.
+    let child_pubkey = match derive_child_public_key(&master_privkey, &server_pubkey, &invoice_number) {
+        Ok(k) => k,
+        Err(e) => {
+            log::error!("   BRC-42 derivation failed: {:?}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Key derivation failed: {:?}", e)
+            }));
+        }
+    };
+
+    // P2PKH locking script for the derived address.
+    let locking_script_hex = hex::encode(create_p2pkh_script_from_pubkey(&child_pubkey));
+
+    log::info!(
+        "   pay_402: {} sats → server {} (BRC-42 derived, vout 0)",
+        req.satoshis,
+        &server_key[..16]
+    );
+
+    // Build createAction request: no_send=true. The CEF Async402ResourceHandler
+    // calls /wallet/broadcast-nosend AFTER the server returns 200 to the retry,
+    // which eliminates both the isMerge race and the nosend auto-fail race.
+    // randomize_outputs=false so the BRC-121 payment deterministically lands at
+    // vout 0 (matches x-bsv-vout: "0").
+    let create_req = CreateActionRequest {
+        inputs: None,
+        outputs: vec![CreateActionOutput {
+            satoshis: Some(req.satoshis),
+            script: Some(locking_script_hex),
+            address: None,
+            custom_instructions: None,
+            output_description: Some(format!("BRC-121 402 payment to {}...", &server_key[..8])),
+            basket: None,
+            tags: None,
+        }],
+        description: Some(format!("BRC-121 {} sats", req.satoshis)),
+        labels: Some(vec!["brc121".to_string(), "pay402".to_string()]),
+        options: Some(CreateActionOptions {
+            sign_and_process: Some(true),
+            accept_delayed_broadcast: Some(false),
+            return_txid_only: Some(false),
+            no_send: Some(true),  // Don't broadcast — see header comment.
+            randomize_outputs: Some(false),
+            send_max: None,
+            send_with: None,
+        }),
+        input_beef: None,
+    };
+
+    let create_body = match serde_json::to_vec(&create_req) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Serialization failed: {}", e)
+            }));
+        }
+    };
+
+    // Skip create_action's domain check via TestRequest (we already gated above).
+    let internal_req = actix_web::test::TestRequest::default().to_http_request();
+    let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
+
+    if !create_response.status().is_success() {
+        let body_bytes = actix_web::body::to_bytes(create_response.into_body()).await.ok();
+        let error_msg = body_bytes
+            .and_then(|b| {
+                serde_json::from_slice::<serde_json::Value>(&b)
+                    .ok()
+                    .and_then(|j| j["error"].as_str().map(String::from))
+            })
+            .unwrap_or_else(|| "Transaction creation failed".to_string());
+        log::error!("   pay_402 createAction failed: {}", error_msg);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": error_msg
+        }));
+    }
+
+    let resp_bytes = match actix_web::body::to_bytes(create_response.into_body()).await {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response read failed: {}", e)
+            }));
+        }
+    };
+
+    let json_resp: serde_json::Value = match serde_json::from_slice(&resp_bytes) {
+        Ok(j) => j,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Response parse failed: {}", e)
+            }));
+        }
+    };
+
+    let txid = json_resp["txid"].as_str().unwrap_or("").to_string();
+    if txid.is_empty() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Missing txid in createAction response"
+        }));
+    }
+
+    // Atomic BEEF can come back as JSON byte array, hex string, or base64 string
+    // (peerpay_send pattern — we accept all three for forward compatibility).
+    let atomic_beef_bytes: Vec<u8> = if let Some(s) = json_resp["tx"].as_str() {
+        hex::decode(s).unwrap_or_else(|_| BASE64.decode(s).unwrap_or_default())
+    } else if let Some(arr) = json_resp["tx"].as_array() {
+        arr.iter()
+            .filter_map(|v| v.as_u64().map(|n| n as u8))
+            .collect()
+    } else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Missing tx data in createAction response"
+        }));
+    };
+
+    if atomic_beef_bytes.is_empty() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Empty BEEF returned from createAction"
+        }));
+    }
+
+    let beef_base64 = BASE64.encode(&atomic_beef_bytes);
+
+    // We deliberately do NOT broadcast here. CEF will call
+    // /wallet/broadcast-nosend with this txid only AFTER the server returns
+    // 200 to the BRC-121 retry. Local DB status is `nosend`; until broadcast
+    // the inputs are committed locally but no chain action has occurred. If
+    // the server rejects the retry, we never broadcast and no fees are spent.
+
+    state.balance_cache.invalidate();
+    state.request_backup_check_if_significant(req.satoshis);
+
+    log::info!(
+        "   ✅ pay_402 BEEF ready: txid={} ({} BEEF bytes, {} sats + {} sat fee)",
+        txid,
+        atomic_beef_bytes.len(),
+        req.satoshis,
+        HODOS_SERVICE_FEE_SATS
+    );
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "txid": txid,
+        "beef_base64": beef_base64,
+        "derivation_prefix": derivation_prefix,
+        "derivation_suffix": derivation_suffix,
+        "time_ms": time_ms_str,
+        "sender_pubkey_hex": hex::encode(&master_pubkey),
+        "vout": 0,
+        "satoshis": req.satoshis,
+    }))
+}
+
+/// Body shape for `/wallet/broadcast-nosend`.
+#[derive(Debug, Deserialize)]
+pub struct BroadcastNosendRequest {
+    pub txid: String,
+}
+
+/// POST /wallet/broadcast-nosend — Broadcast a previously-minted nosend tx.
+///
+/// Used by the CEF Async402ResourceHandler after the BRC-121 server returns 200
+/// to the retry. Splits the "create signed tx" step from the "commit on-chain"
+/// step so we can withhold broadcast until the server confirms acceptance —
+/// avoiding the isMerge race (server's wallet seeing our tx in mempool BEFORE
+/// internalizeAction) and the nosend auto-fail race (10-min timeout marking
+/// the tx failed before the server got a chance to broadcast it).
+///
+/// Looks up the local tx by txid, requires status='nosend', broadcasts via the
+/// existing broadcast_transaction helper. ARC dedupes if the server has already
+/// broadcast independently. Status moves nosend → sending → unproven →
+/// completed via the Monitor pipeline.
+pub async fn broadcast_nosend(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let req: BroadcastNosendRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid request: {}", e),
+            }));
+        }
+    };
+
+    log::info!("📡 /wallet/broadcast-nosend called: txid={}", &req.txid);
+
+    // Fetch the raw tx from the DB (must be in nosend status to be safe).
+    let raw_tx_hex = {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let mut stmt = match conn.prepare(
+            "SELECT raw_tx, status FROM transactions WHERE txid = ?1 LIMIT 1"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("DB prepare failed: {}", e),
+                }));
+            }
+        };
+        let row: Result<(Option<String>, String), _> = stmt.query_row(
+            rusqlite::params![&req.txid],
+            |r| Ok((r.get(0)?, r.get(1)?))
+        );
+        match row {
+            Ok((Some(rt), status)) if status == "nosend" => rt,
+            Ok((Some(_), status)) => {
+                log::info!("   ↪ tx {} already in status='{}' — skipping broadcast", &req.txid[..16.min(req.txid.len())], status);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": true,
+                    "skipped": true,
+                    "reason": format!("status is '{}', not 'nosend'", status),
+                }));
+            }
+            Ok((None, _)) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": "Transaction has no raw_tx",
+                }));
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Transaction {} not found", req.txid),
+                }));
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": format!("DB query failed: {}", e),
+                }));
+            }
+        }
+    };
+
+    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&req.txid)).await {
+        Ok(msg) => {
+            log::info!("   ✅ broadcast-nosend OK: {} - {}", req.txid, msg);
+            // Move nosend → sending so the Monitor's existing pipeline picks
+            // it up for proof acquisition.
+            {
+                let db = state.database.lock().unwrap();
+                let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                let _ = tx_repo.update_broadcast_status(&req.txid, "broadcast");
+                if let Err(e) = conn_update_status(db.connection(), &req.txid, "sending") {
+                    log::warn!("   ⚠️ broadcast-nosend: failed to update tx status: {}", e);
+                }
+            }
+            state.balance_cache.invalidate();
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "txid": req.txid,
+                "message": msg,
+            }))
+        }
+        Err(e) => {
+            log::error!("   ❌ broadcast-nosend failed for {}: {}", req.txid, e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Broadcast failed: {}", e),
+            }))
+        }
+    }
+}
+
+/// Helper: update a transaction's status column directly. Used by
+/// broadcast-nosend to promote nosend → sending.
+fn conn_update_status(
+    conn: &rusqlite::Connection,
+    txid: &str,
+    new_status: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE transactions SET status = ?1, updated_at = strftime('%s', 'now') WHERE txid = ?2",
+        rusqlite::params![new_status, txid],
+    )
+}
+
+// ============================================================================
 // Paymail (bsvalias) Endpoints — Phase 3b Sprint 1
 // ============================================================================
 

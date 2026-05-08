@@ -32,6 +32,7 @@ std::string g_pendingModalDomain = "";
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <unordered_map>
 #include <iomanip>
 #ifdef _WIN32
 #include <windows.h>
@@ -2053,12 +2054,834 @@ void HttpRequestInterceptor::OnResourceRedirect(CefRefPtr<CefBrowser> browser,
     LOG_DEBUG_HTTP("🌐 Resource redirect: " + new_url.ToString());
 }
 
+// ============================================================================
+// BRC-121 (Simple HTTP 402 Payment) — Phase 1 architecture
+// ============================================================================
+//
+// Server returns 402 + (x-bsv-sats, x-bsv-server). We respond by:
+//   1. Calling /wallet/pay402 (Rust) which mints a signed BRC-29 BEEF tx
+//      with no_send=true (NOT broadcast yet). Returns 5 BRC-121 retry
+//      headers: x-bsv-beef, x-bsv-sender, x-bsv-nonce, x-bsv-time, x-bsv-vout.
+//   2. Storing those headers in s_brc121_paid_retries keyed by (browserId, url).
+//   3. Programmatically reloading the page (frame->LoadURL).
+//   4. The reload navigation hits SimpleHandler::GetResourceRequestHandler,
+//      which checks the registry and returns a handler chain ending in
+//      Async402ResourceHandler. That handler issues a fresh CefURLRequest
+//      with all 5 headers attached (we control every byte → no CEF middleware
+//      can strip them) plus UR_FLAG_DISABLE_CACHE.
+//   5. On 200: the handler calls /wallet/broadcast-nosend (broadcasts the
+//      tx now that the server has confirmed acceptance — eliminates the
+//      isMerge race AND the nosend auto-fail race in one move), fires the
+//      payment_success_indicator IPC for the green-dot animation, and
+//      streams the response body back to the page. Article renders.
+//   6. On 4xx: handler delivers the error response, doesn't broadcast.
+//      Funds preserved (tx stays in nosend status; user can manually clear
+//      or it will eventually fail via the Monitor's 10-min timeout).
+//
+// Modal-approval path (unapproved domain): TryHandleBrc121_402 fires
+// triggerDomainApprovalModal as before, registering a context-less reload
+// in s_brc121_pending_reloads (URL only). On approval, the IPC handler in
+// simple_handler.cpp triggers a reload, which hits TryHandleBrc121_402 a
+// second time — now with domain approved — proceeding through the normal
+// auto-approve path and registering a paid retry context.
+
+namespace {
+// Paid retry context — populated when /wallet/pay402 returns successfully,
+// drained by GetResourceRequestHandler when the reload navigation arrives.
+struct PaidRetryContext {
+    std::string url;
+    std::string method;
+    CefRequest::HeaderMap originalHeaders;
+    // 5 BRC-121 retry headers from /wallet/pay402:
+    std::string beefBase64;
+    std::string senderPubkeyHex;
+    std::string nonceB64;
+    std::string timeMs;
+    std::string voutStr;
+    // Payment metadata:
+    std::string txid;
+    int64_t cents = 0;
+    int64_t satoshis = 0;
+    std::string domain;
+};
+
+std::string brc121RetryKey(int browserId, const std::string& url) {
+    return std::to_string(browserId) + "|" + url;
+}
+
+std::mutex s_brc121_paid_retries_mutex;
+std::unordered_map<std::string, PaidRetryContext> s_brc121_paid_retries;
+
+void registerPaidRetryContext(int browserId, const std::string& url, PaidRetryContext ctx) {
+    std::lock_guard<std::mutex> lock(s_brc121_paid_retries_mutex);
+    s_brc121_paid_retries[brc121RetryKey(browserId, url)] = std::move(ctx);
+}
+
+bool popPaidRetryContext(int browserId, const std::string& url, PaidRetryContext& out) {
+    std::lock_guard<std::mutex> lock(s_brc121_paid_retries_mutex);
+    auto it = s_brc121_paid_retries.find(brc121RetryKey(browserId, url));
+    if (it == s_brc121_paid_retries.end()) return false;
+    out = std::move(it->second);
+    s_brc121_paid_retries.erase(it);
+    return true;
+}
+
+// Modal-approval reload registry — URL-only, used when the user approves a
+// previously-unapproved domain via the modal flow. Drained by
+// TriggerPendingBrc121Reloads from simple_handler.cpp's approval IPC.
+struct PendingReload {
+    CefRefPtr<CefBrowser> browser;
+    std::string url;
+};
+std::mutex s_brc121_pending_reloads_mutex;
+std::unordered_map<std::string, std::vector<PendingReload>> s_brc121_pending_reloads;
+
+void registerPendingBrc121Reload(const std::string& domain,
+                                 CefRefPtr<CefBrowser> browser,
+                                 const std::string& url) {
+    if (!browser) return;
+    std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+    auto& v = s_brc121_pending_reloads[domain];
+    int browserId = browser->GetIdentifier();
+    for (const auto& p : v) {
+        if (p.browser && p.browser->GetIdentifier() == browserId && p.url == url) {
+            return;
+        }
+    }
+    v.push_back(PendingReload{browser, url});
+}
+
+class Brc121ReloadTask : public CefTask {
+public:
+    Brc121ReloadTask(CefRefPtr<CefBrowser> browser, std::string url)
+        : browser_(std::move(browser)), url_(std::move(url)) {}
+    void Execute() override {
+        if (!browser_) return;
+        auto frame = browser_->GetMainFrame();
+        if (!frame) return;
+        LOG_INFO_HTTP("💰 BRC-121: reloading " + url_);
+        frame->LoadURL(url_);
+    }
+private:
+    CefRefPtr<CefBrowser> browser_;
+    std::string url_;
+    IMPLEMENT_REFCOUNTING(Brc121ReloadTask);
+    DISALLOW_COPY_AND_ASSIGN(Brc121ReloadTask);
+};
+}  // namespace
+
+// ============================================================================
+// Async402ResourceHandler — the canonical Phase 1 architecture
+// ============================================================================
+
+class Async402ResourceHandler;  // forward
+
+class Async402HTTPClient : public CefURLRequestClient {
+public:
+    explicit Async402HTTPClient(CefRefPtr<Async402ResourceHandler> parent)
+        : parent_(parent) {}
+
+    void OnRequestComplete(CefRefPtr<CefURLRequest> request) override;
+    void OnDownloadData(CefRefPtr<CefURLRequest>, const void* data, size_t data_length) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        responseData_.append(static_cast<const char*>(data), data_length);
+    }
+    void OnUploadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
+    void OnDownloadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
+    bool GetAuthCredentials(bool, const CefString&, int, const CefString&,
+                            const CefString&, CefRefPtr<CefAuthCallback>) override { return false; }
+
+private:
+    CefRefPtr<Async402ResourceHandler> parent_;
+    std::mutex mutex_;
+    std::string responseData_;
+
+    IMPLEMENT_REFCOUNTING(Async402HTTPClient);
+    DISALLOW_COPY_AND_ASSIGN(Async402HTTPClient);
+};
+
+class Async402ResourceHandler : public CefResourceHandler {
+public:
+    Async402ResourceHandler(PaidRetryContext ctx, CefRefPtr<CefBrowser> browser)
+        : ctx_(std::move(ctx)), browser_(std::move(browser)),
+          responseStatus_(0), responseOffset_(0), completed_(false) {
+        LOG_DEBUG_HTTP("🌐 Async402ResourceHandler created for " + ctx_.url);
+    }
+
+    bool Open(CefRefPtr<CefRequest> /*request*/, bool& handle_request,
+              CefRefPtr<CefCallback> callback) override {
+        CEF_REQUIRE_IO_THREAD();
+        // Decide later — we need to wait for the upstream response before
+        // CEF calls GetResponseHeaders, otherwise we'd commit to a placeholder
+        // 502/text-plain and the browser would lock in plain-text rendering
+        // (manifests as <pre>-wrapped HTML in the page).
+        handle_request = false;
+        openCallback_ = callback;
+        CefPostTask(TID_IO, new StartTask(this));
+        return true;
+    }
+
+    void GetResponseHeaders(CefRefPtr<CefResponse> response,
+                           int64_t& response_length,
+                           CefString& redirectUrl) override {
+        CEF_REQUIRE_IO_THREAD();
+        std::string mimeSet;
+        if (responseStatus_ > 0) {
+            response->SetStatus(responseStatus_);
+            if (!responseStatusText_.empty()) {
+                response->SetStatusText(responseStatusText_);
+            }
+            if (!responseHeaders_.empty()) {
+                response->SetHeaderMap(responseHeaders_);
+            }
+            // Pull MIME type from received headers (browser uses this to
+            // decide how to render the body).
+            for (const auto& h : responseHeaders_) {
+                std::string n = h.first.ToString();
+                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+                if (n == "content-type") {
+                    std::string ct = h.second.ToString();
+                    auto semi = ct.find(';');
+                    mimeSet = (semi == std::string::npos ? ct : ct.substr(0, semi));
+                    response->SetMimeType(mimeSet);
+                    break;
+                }
+            }
+            if (mimeSet.empty()) {
+                // No Content-Type from upstream — default to text/html for
+                // BRC-121 paywalled pages (most common case). Without this,
+                // CEF defaults to binary download or text/plain.
+                response->SetMimeType("text/html");
+                mimeSet = "text/html (defaulted)";
+            }
+        } else {
+            response->SetStatus(502);
+            response->SetStatusText("Bad Gateway");
+            response->SetMimeType("text/plain");
+            mimeSet = "text/plain (502 fallback)";
+        }
+        response_length = completed_ ? static_cast<int64_t>(responseBody_.size()) : -1;
+        LOG_INFO_HTTP("🌐 Async402: GetResponseHeaders status=" + std::to_string(responseStatus_)
+                      + " mime='" + mimeSet + "' length=" + std::to_string(response_length));
+    }
+
+    bool ReadResponse(void* data_out, int bytes_to_read, int& bytes_read,
+                     CefRefPtr<CefCallback> callback) override {
+        CEF_REQUIRE_IO_THREAD();
+        if (!completed_) {
+            bytes_read = 0;
+            readCallback_ = callback;
+            return true;  // Wait for response.
+        }
+        if (responseOffset_ >= responseBody_.size()) {
+            bytes_read = 0;
+            return false;  // No more data.
+        }
+        size_t remaining = responseBody_.size() - responseOffset_;
+        size_t to_copy = static_cast<size_t>(bytes_to_read) < remaining
+                             ? static_cast<size_t>(bytes_to_read) : remaining;
+        memcpy(data_out, responseBody_.data() + responseOffset_, to_copy);
+        responseOffset_ += to_copy;
+        bytes_read = static_cast<int>(to_copy);
+        return true;
+    }
+
+    void Cancel() override {
+        CEF_REQUIRE_IO_THREAD();
+        if (urlRequest_) {
+            urlRequest_->Cancel();
+            urlRequest_ = nullptr;
+        }
+        // Release any held callbacks so CEF doesn't wait forever.
+        if (openCallback_) {
+            openCallback_->Cancel();
+            openCallback_ = nullptr;
+        }
+        if (readCallback_) {
+            readCallback_->Cancel();
+            readCallback_ = nullptr;
+        }
+    }
+
+    // Called by Async402HTTPClient when the upstream response completes.
+    void onUpstreamComplete(int status,
+                            CefResponse::HeaderMap headers,
+                            std::string statusText,
+                            std::string body) {
+        responseStatus_ = status;
+        responseStatusText_ = std::move(statusText);
+
+        // === DIAGNOSTIC LOGGING (page-rendering investigation 2026-05-08) ===
+        // Capture status, body shape, and ALL upstream headers so we can
+        // diagnose why the page renders as black/raw without burning more
+        // sats on test cycles.
+        {
+            LOG_INFO_HTTP("🌐 Async402: upstream complete — status=" + std::to_string(status)
+                          + " statusText='" + responseStatusText_ + "'"
+                          + " bodyBytes=" + std::to_string(body.size()));
+
+            // Log all upstream headers (before strip) so we can see exactly
+            // what the server sent.
+            for (const auto& h : headers) {
+                LOG_DEBUG_HTTP("🌐 Async402: upstream header [" + h.first.ToString()
+                               + "] = [" + h.second.ToString() + "]");
+            }
+
+            // Log body preview — first 256 bytes. If body starts with `<`
+            // it's HTML text; if it starts with 0x1f 0x8b it's still gzip;
+            // if it starts with 0x00 0x00 it's something else.
+            std::string preview;
+            preview.reserve(256);
+            size_t n = body.size() < 256 ? body.size() : 256;
+            bool printable = true;
+            for (size_t i = 0; i < n; ++i) {
+                unsigned char c = static_cast<unsigned char>(body[i]);
+                if (c < 0x09 || (c > 0x0d && c < 0x20) || c == 0x7f) {
+                    printable = false;
+                    break;
+                }
+            }
+            if (printable) {
+                preview = body.substr(0, n);
+                std::replace(preview.begin(), preview.end(), '\n', ' ');
+            } else {
+                // Hex-encode first 64 bytes for binary inspection
+                static const char hex[] = "0123456789abcdef";
+                size_t m = body.size() < 64 ? body.size() : 64;
+                for (size_t i = 0; i < m; ++i) {
+                    unsigned char c = static_cast<unsigned char>(body[i]);
+                    preview.push_back(hex[c >> 4]);
+                    preview.push_back(hex[c & 0x0f]);
+                }
+                preview = "[hex first 64B] " + preview;
+            }
+            LOG_INFO_HTTP("🌐 Async402: body preview: " + preview);
+        }
+        // === END DIAGNOSTIC LOGGING ===
+
+        // Strip transport-level headers that don't apply to the body we're
+        // about to deliver. CefURLRequest auto-decompresses gzip/brotli, so
+        // OnDownloadData gives us the DECODED body. If we forward the
+        // upstream's `Content-Encoding: gzip` (or br) to the page, the page's
+        // browser tries to decompress already-decompressed bytes → garbage
+        // (manifests as black screen / raw HTML). Same for Content-Length
+        // (the upstream value is the COMPRESSED length, not the decoded
+        // length we're delivering) and Transfer-Encoding (chunked framing
+        // is also unwound by the URL stack).
+        for (auto it = headers.begin(); it != headers.end();) {
+            std::string n = it->first.ToString();
+            std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+            if (n == "content-encoding" || n == "content-length" ||
+                n == "transfer-encoding") {
+                it = headers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        responseHeaders_ = std::move(headers);
+        responseBody_ = std::move(body);
+        completed_ = true;
+
+        // On success: broadcast our nosend tx (server confirmed acceptance,
+        // safe to commit on chain) and fire the payment animation IPC.
+        if (status >= 200 && status < 300) {
+            broadcastNosendAsync();
+            firePaymentSuccessIpc();
+        } else {
+            LOG_WARNING_HTTP("💰 BRC-121: server returned status=" + std::to_string(status)
+                             + " on retry — NOT broadcasting (funds preserved). txid="
+                             + ctx_.txid);
+        }
+
+        // Tell CEF we're ready: it will now call GetResponseHeaders (which
+        // sees real status + headers) and ReadResponse (which streams body).
+        if (openCallback_) {
+            openCallback_->Continue();
+            openCallback_ = nullptr;
+        }
+        if (readCallback_) {
+            readCallback_->Continue();
+        }
+    }
+
+private:
+    // CefPostTask wrapper for the upstream URL request kickoff.
+    class StartTask : public CefTask {
+    public:
+        explicit StartTask(CefRefPtr<Async402ResourceHandler> parent)
+            : parent_(std::move(parent)) {}
+        void Execute() override { parent_->startUpstreamRequest(); }
+    private:
+        CefRefPtr<Async402ResourceHandler> parent_;
+        IMPLEMENT_REFCOUNTING(StartTask);
+        DISALLOW_COPY_AND_ASSIGN(StartTask);
+    };
+
+    void startUpstreamRequest() {
+        LOG_INFO_HTTP("🌐 Async402ResourceHandler: issuing paid request to " + ctx_.url
+                      + " (txid=" + ctx_.txid.substr(0, std::min<size_t>(16, ctx_.txid.size())) + "...)");
+
+        CefRefPtr<CefRequest> req = CefRequest::Create();
+        req->SetURL(ctx_.url);
+        req->SetMethod(ctx_.method);
+        // Disable cache so we don't replay the previously-cached 402 response.
+        req->SetFlags(UR_FLAG_DISABLE_CACHE);
+
+        // Start with the page's original headers (User-Agent, Accept-Language,
+        // cookies, etc.) so the request looks browser-like to Cloudflare/WAF.
+        CefRequest::HeaderMap headers = ctx_.originalHeaders;
+        // Strip any pre-existing BRC-121 headers (shouldn't be there, but be safe).
+        for (auto it = headers.begin(); it != headers.end();) {
+            std::string n = it->first.ToString();
+            std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+            if (n == "x-bsv-beef" || n == "x-bsv-sender" || n == "x-bsv-nonce" ||
+                n == "x-bsv-time" || n == "x-bsv-vout") {
+                it = headers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        headers.insert({"x-bsv-beef",   ctx_.beefBase64});
+        headers.insert({"x-bsv-sender", ctx_.senderPubkeyHex});
+        headers.insert({"x-bsv-nonce",  ctx_.nonceB64});
+        headers.insert({"x-bsv-time",   ctx_.timeMs});
+        headers.insert({"x-bsv-vout",   ctx_.voutStr});
+        req->SetHeaderMap(headers);
+
+        CefRefPtr<Async402HTTPClient> client = new Async402HTTPClient(this);
+        // Use the page's own request context so the cookie jar is shared
+        // between the upstream paid retry and the page. In a multi-profile
+        // browser, profile-specific contexts have their own cookie jars; the
+        // global context's jar would be invisible to the page's next nav.
+        CefRefPtr<CefRequestContext> reqCtx = browser_
+            ? browser_->GetHost()->GetRequestContext()
+            : CefRequestContext::GetGlobalContext();
+        urlRequest_ = CefURLRequest::Create(req, client, reqCtx);
+    }
+
+    void firePaymentSuccessIpc() {
+        CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
+        if (!headerBrowser || !headerBrowser->GetMainFrame()) return;
+        nlohmann::json payload;
+        payload["browserId"] = browser_ ? browser_->GetIdentifier() : 0;
+        payload["domain"] = ctx_.domain;
+        payload["cents"] = ctx_.cents;
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
+        msg->GetArgumentList()->SetString(0, payload.dump());
+        headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+        LOG_DEBUG_HTTP("💰 BRC-121: payment_success_indicator fired ("
+                       + std::to_string(ctx_.cents) + " cents from " + ctx_.domain + ")");
+
+        // Auto-approve accounting — match the createAction success path.
+        int browserId = browser_ ? browser_->GetIdentifier() : 0;
+        SessionManager::GetInstance().recordSpending(browserId, ctx_.cents);
+        SessionManager::GetInstance().incrementRateCounter(browserId);
+        SessionManager::GetInstance().incrementPaymentCount(browserId);
+    }
+
+    void broadcastNosendAsync() {
+        // POST /wallet/broadcast-nosend with the txid we just paid.
+        // Uses the SyncHttpClient via a posted task so we don't block the IO
+        // thread that's about to deliver the response body to the page.
+        std::string txid = ctx_.txid;
+        CefPostTask(TID_FILE_USER_BLOCKING, new BroadcastTask(txid));
+    }
+
+    class BroadcastTask : public CefTask {
+    public:
+        explicit BroadcastTask(std::string txid) : txid_(std::move(txid)) {}
+        void Execute() override {
+            nlohmann::json body;
+            body["txid"] = txid_;
+            HttpResponse r = SyncHttpClient::Post(
+                "http://localhost:31301/wallet/broadcast-nosend",
+                body.dump(), "application/json", 30000);
+            if (!r.success) {
+                LOG_WARNING_HTTP("💰 BRC-121: broadcast-nosend failed (status="
+                                 + std::to_string(r.statusCode) + ") for txid=" + txid_
+                                 + " — Monitor's task_check_for_proofs will reconcile");
+            } else {
+                LOG_INFO_HTTP("💰 BRC-121: broadcast-nosend OK for txid=" + txid_);
+            }
+        }
+    private:
+        std::string txid_;
+        IMPLEMENT_REFCOUNTING(BroadcastTask);
+        DISALLOW_COPY_AND_ASSIGN(BroadcastTask);
+    };
+
+    PaidRetryContext ctx_;
+    CefRefPtr<CefBrowser> browser_;
+
+    int responseStatus_;
+    std::string responseStatusText_;
+    CefResponse::HeaderMap responseHeaders_;
+    std::string responseBody_;
+    size_t responseOffset_;
+    bool completed_;
+    CefRefPtr<CefCallback> openCallback_;   // Fired in onUpstreamComplete to release Open()
+    CefRefPtr<CefCallback> readCallback_;
+    CefRefPtr<CefURLRequest> urlRequest_;
+
+    IMPLEMENT_REFCOUNTING(Async402ResourceHandler);
+    DISALLOW_COPY_AND_ASSIGN(Async402ResourceHandler);
+};
+
+// Async402HTTPClient::OnRequestComplete — out-of-line because it references
+// Async402ResourceHandler which is forward-declared above the client.
+void Async402HTTPClient::OnRequestComplete(CefRefPtr<CefURLRequest> request) {
+    int status = 0;
+    std::string statusText;
+    CefResponse::HeaderMap headers;
+    auto resp = request->GetResponse();
+    if (resp) {
+        status = resp->GetStatus();
+        statusText = resp->GetStatusText().ToString();
+        resp->GetHeaderMap(headers);
+    }
+    std::string body;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        body = std::move(responseData_);
+    }
+    if (parent_) {
+        parent_->onUpstreamComplete(status, std::move(headers), std::move(statusText), std::move(body));
+    }
+}
+
+// Public hook used by SimpleHandler::GetResourceRequestHandler (and the
+// per-handler GetResourceHandler overrides) to install Async402ResourceHandler
+// when a navigation arrives that has a registered paid-retry context.
+CefRefPtr<CefResourceHandler> InstallAsync402HandlerIfPending(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefRequest> request) {
+    int browserId = browser ? browser->GetIdentifier() : 0;
+    std::string url = request ? request->GetURL().ToString() : "";
+    if (url.empty()) return nullptr;
+    PaidRetryContext ctx;
+    if (!popPaidRetryContext(browserId, url, ctx)) {
+        return nullptr;
+    }
+    LOG_INFO_HTTP("💰 BRC-121: installing Async402ResourceHandler for " + url
+                  + " (browser " + std::to_string(browserId) + ")");
+    return new Async402ResourceHandler(std::move(ctx), browser);
+}
+
+bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefFrame> frame,
+                         CefRefPtr<CefRequest> request,
+                         CefRefPtr<CefResponse> response) {
+    CEF_REQUIRE_IO_THREAD();
+
+    // Fast path: only consider 402 Payment Required responses.
+    if (response->GetStatus() != 402) {
+        return false;
+    }
+
+    // BRC-121 protocol headers.
+    std::string satsStr = response->GetHeaderByName("x-bsv-sats").ToString();
+    std::string serverPubkey = response->GetHeaderByName("x-bsv-server").ToString();
+    if (satsStr.empty() || serverPubkey.empty()) {
+        return false;  // Not a BRC-121 402 — let the page handle whatever it is.
+    }
+
+    int64_t satoshis = 0;
+    try {
+        satoshis = std::stoll(satsStr);
+    } catch (...) {
+        LOG_DEBUG_HTTP("💰 BRC-121: invalid x-bsv-sats value '" + satsStr + "' — falling through");
+        return false;
+    }
+    if (satoshis <= 0) {
+        return false;
+    }
+
+    // Server pubkey shape check: 33-byte compressed = 66 hex chars, prefix 02 or 03.
+    if (serverPubkey.size() != 66 ||
+        (serverPubkey[0] != '0') ||
+        (serverPubkey[1] != '2' && serverPubkey[1] != '3')) {
+        LOG_DEBUG_HTTP("💰 BRC-121: invalid x-bsv-server shape — falling through");
+        return false;
+    }
+
+    std::string url = request->GetURL().ToString();
+
+    // For BRC-121, the requesting "domain" is the HOST OF THE URL BEING FETCHED
+    // (the payee), not the page's main frame. Different from createAction-style
+    // wallet API calls where the embedding page is the actor — here the server
+    // demanding payment is what the user is approving / what gets logged in the
+    // approved-sites list. Without this distinction, an embedded 402 fetch from
+    // a page like google.com would falsely claim "google.com wants 100 sats"
+    // when really the payee is whatever host the request is going to.
+    std::string domain;
+    {
+        size_t schemeEnd = url.find("://");
+        if (schemeEnd == std::string::npos) {
+            LOG_DEBUG_HTTP("💰 BRC-121: malformed URL '" + url + "' — falling through");
+            return false;
+        }
+        size_t hostStart = schemeEnd + 3;
+        size_t pathStart = url.find('/', hostStart);
+        domain = (pathStart == std::string::npos)
+                     ? url.substr(hostStart)
+                     : url.substr(hostStart, pathStart - hostStart);
+    }
+    if (domain.empty()) {
+        LOG_DEBUG_HTTP("💰 BRC-121: empty request host — falling through");
+        return false;
+    }
+
+    LOG_INFO_HTTP("💰 BRC-121 402 detected: " + std::to_string(satoshis) + " sats from " + domain
+                  + " → server " + serverPubkey.substr(0, 16) + "...");
+
+    // No wallet → can't pay. Page sees the 402 (may show its own UI / sign-in).
+    if (!WalletStatusCache::GetInstance().walletExists()) {
+        LOG_DEBUG_HTTP("💰 BRC-121: no wallet — falling through to native 402");
+        return false;
+    }
+
+    auto perm = DomainPermissionCache::GetInstance().getPermission(domain);
+
+    // Unapproved domain → fire domain_approval modal (same as createAction).
+    if (perm.trustLevel != "approved") {
+        LOG_DEBUG_HTTP("💰 BRC-121: domain trust='" + perm.trustLevel
+                       + "' — firing domain_approval modal");
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, "domain_approval");
+        // Register this browser+url so simple_handler.cpp's approval IPC can
+        // navigate us back here after the user accepts. Without this, CEF
+        // shows its data:text/html ERR_HTTP_RESPONSE_CODE_FAILURE page and a
+        // manual refresh just refreshes the error page (the original URL is
+        // gone from the address bar). User would have to close+reopen the tab.
+        registerPendingBrc121Reload(domain, browser, url);
+        if (!modalAlreadyShowing) {
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
+        }
+        return false;  // Page sees 402 once; reload after approval auto-pays.
+    }
+
+    // Sats → USD cents. If BSV price is unavailable, fire payment_confirmation
+    // with exceededLimit=price_unavailable (same as createAction's safety branch).
+    double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+    int browserId = browser ? browser->GetIdentifier() : 0;
+    SessionManager::GetInstance().getSession(browserId, domain);
+
+    if (bsvPrice <= 0) {
+        LOG_DEBUG_HTTP("💰 BRC-121: BSV price unavailable — firing payment_confirmation modal");
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, "payment_confirmation");
+        if (!modalAlreadyShowing) {
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=0"
+                                    + "&bsvPrice=0"
+                                    + "&exceededLimit=price_unavailable"
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                    + "&sessionSpent=0";
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
+        }
+        return false;
+    }
+
+    int64_t cents = static_cast<int64_t>(
+        (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+    int64_t spent = SessionManager::GetInstance().getSpentCents(browserId, domain);
+    int txCount = SessionManager::GetInstance().getPaymentCount(browserId, domain);
+
+    // Helper lambda: fire payment_confirmation modal with limit context.
+    auto firePaymentModal = [&](const std::string& exceededLimit) {
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, "payment_confirmation");
+        if (!modalAlreadyShowing) {
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents)
+                                    + "&bsvPrice=" + std::to_string(bsvPrice)
+                                    + "&exceededLimit=" + exceededLimit
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                    + "&sessionSpent=" + std::to_string(spent);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
+        }
+    };
+
+    // Auto-approve gates (mirrors createAction logic at AsyncWalletResourceHandler::Open).
+    bool withinTxLimit = cents <= perm.perTxLimitCents;
+    bool withinSessionLimit = (spent + cents) <= perm.perSessionLimitCents;
+
+    if (!withinTxLimit || !withinSessionLimit) {
+        std::string exceeded = "both";
+        if (withinTxLimit && !withinSessionLimit) exceeded = "per_session";
+        else if (!withinTxLimit && withinSessionLimit) exceeded = "per_tx";
+        LOG_DEBUG_HTTP("💰 BRC-121: spend cap exceeded (" + exceeded
+                       + ") — firing payment_confirmation modal");
+        firePaymentModal(exceeded);
+        return false;
+    }
+
+    if (txCount >= perm.maxTxPerSession) {
+        LOG_DEBUG_HTTP("💰 BRC-121: max-tx-per-session reached — firing rate_limit_exceeded modal");
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, "rate_limit_exceeded");
+        if (!modalAlreadyShowing) {
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents)
+                                    + "&bsvPrice=" + std::to_string(bsvPrice)
+                                    + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                    + "&exceededLimit=session_tx_count"
+                                    + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
+                                    + "&txCount=" + std::to_string(txCount);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", domain, extraParams));
+        }
+        return false;
+    }
+
+    if (!SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
+        LOG_DEBUG_HTTP("💰 BRC-121: rate limit (" + std::to_string(perm.rateLimitPerMin)
+                       + "/min) exceeded — firing rate_limit_exceeded modal");
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, "rate_limit_exceeded");
+        if (!modalAlreadyShowing) {
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents)
+                                    + "&bsvPrice=" + std::to_string(bsvPrice)
+                                    + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", domain, extraParams));
+        }
+        return false;
+    }
+
+    // All gates passed — call the Rust wallet to build the BRC-29 BEEF.
+    nlohmann::json reqBody;
+    reqBody["server_pubkey_hex"] = serverPubkey;
+    reqBody["satoshis"] = satoshis;
+    reqBody["original_url"] = url;
+    std::string body = reqBody.dump();
+
+    LOG_INFO_HTTP("💰 BRC-121 auto-approved (" + std::to_string(cents) + " cents) — calling /wallet/pay402");
+
+    // Synchronous: localhost wallet, fast path. 10s ceiling — createAction may need
+    // to fetch BEEF ancestry from external indexers in worst cases.
+    HttpResponse rresp = SyncHttpClient::Post(
+        "http://localhost:31301/wallet/pay402",
+        body,
+        "application/json",
+        10000);
+
+    if (!rresp.success || rresp.statusCode != 200) {
+        LOG_WARNING_HTTP("💰 BRC-121: /wallet/pay402 failed (status="
+                         + std::to_string(rresp.statusCode) + ") — falling through to native 402");
+        return false;
+    }
+
+    std::string beefBase64;
+    std::string txid;
+    std::string nonceB64;
+    std::string timeMs;
+    std::string senderPubkeyHex;
+    int voutIdx = 0;
+    try {
+        auto rj = nlohmann::json::parse(rresp.body);
+        if (!rj.value("success", false)) {
+            std::string err = rj.value("error", "(no error message)");
+            LOG_WARNING_HTTP("💰 BRC-121: /wallet/pay402 success=false: " + err
+                             + " — falling through to native 402");
+            return false;
+        }
+        beefBase64       = rj.value("beef_base64", "");
+        txid             = rj.value("txid", "");
+        nonceB64         = rj.value("derivation_prefix", "");
+        timeMs           = rj.value("time_ms", "");
+        senderPubkeyHex  = rj.value("sender_pubkey_hex", "");
+        voutIdx          = rj.value("vout", 0);
+    } catch (const std::exception& e) {
+        LOG_WARNING_HTTP("💰 BRC-121: /wallet/pay402 response parse failed: "
+                         + std::string(e.what()) + " — falling through");
+        return false;
+    }
+
+    if (beefBase64.empty() || nonceB64.empty() || timeMs.empty() || senderPubkeyHex.empty()) {
+        LOG_WARNING_HTTP("💰 BRC-121: incomplete /wallet/pay402 response (missing beef/nonce/time/sender) — falling through");
+        return false;
+    }
+
+    // Capture the page's original headers for the paid retry. Async402ResourceHandler
+    // will use these (User-Agent, Accept-Language, cookies, etc.) so the retry
+    // looks browser-like to Cloudflare/WAF.
+    CefRequest::HeaderMap originalHeaders;
+    request->GetHeaderMap(originalHeaders);
+
+    // Register the paid retry context for this (browserId, url). On the
+    // reload that follows, SimpleHandler::GetResourceRequestHandler (or one
+    // of its handler subclasses) calls InstallAsync402HandlerIfPending,
+    // which pops this context and returns Async402ResourceHandler to take
+    // over the request lifecycle with all 5 BRC-121 headers attached.
+    PaidRetryContext ctx;
+    ctx.url = url;
+    ctx.method = request->GetMethod().ToString();
+    ctx.originalHeaders = std::move(originalHeaders);
+    ctx.beefBase64 = std::move(beefBase64);
+    ctx.senderPubkeyHex = std::move(senderPubkeyHex);
+    ctx.nonceB64 = std::move(nonceB64);
+    ctx.timeMs = std::move(timeMs);
+    ctx.voutStr = std::to_string(voutIdx);
+    ctx.txid = txid;
+    ctx.cents = cents;
+    ctx.satoshis = satoshis;
+    ctx.domain = domain;
+    registerPaidRetryContext(browserId, url, std::move(ctx));
+
+    LOG_INFO_HTTP("💰 BRC-121 paid (txid=" + txid.substr(0, std::min<size_t>(16, txid.size()))
+                  + "...) — registered paid retry; triggering reload to install handler");
+
+    // Trigger a reload of the URL on the UI thread. The reload's GetResourceRequestHandler
+    // chain will see the registered paid retry context and install
+    // Async402ResourceHandler, which issues the actual request with all 5 BRC-121
+    // headers and broadcasts the nosend tx after the server returns 200.
+    CefPostTask(TID_UI, new Brc121ReloadTask(browser, url));
+    return false;
+}
+
+// Thin wrapper — defers to the free function so the BRC-121 path is shared
+// with CookieFilterResourceHandler (which sees all non-wallet URLs).
 bool HttpRequestInterceptor::OnResourceResponse(CefRefPtr<CefBrowser> browser,
                                               CefRefPtr<CefFrame> frame,
                                               CefRefPtr<CefRequest> request,
                                               CefRefPtr<CefResponse> response) {
-    CEF_REQUIRE_IO_THREAD();
-    return false;
+    return TryHandleBrc121_402(browser, frame, request, response);
+}
+
+// Called from simple_handler.cpp's add_domain_permission(_advanced) IPC handlers
+// after the domain has been written to the DB and the cache has been
+// invalidated. Reloads any browsers that hit a BRC-121 402 for this domain
+// while it was unapproved — they're stuck on CEF's error page and won't
+// recover even on manual refresh because the address-bar URL is now data:text/html.
+void TriggerPendingBrc121Reloads(const std::string& domain) {
+    std::vector<PendingReload> drained;
+    {
+        std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+        auto it = s_brc121_pending_reloads.find(domain);
+        if (it == s_brc121_pending_reloads.end() || it->second.empty()) {
+            return;
+        }
+        drained = std::move(it->second);
+        s_brc121_pending_reloads.erase(it);
+    }
+    LOG_INFO_HTTP("💰 BRC-121: domain '" + domain + "' approved — reloading "
+                  + std::to_string(drained.size()) + " pending tab(s)");
+    for (auto& p : drained) {
+        if (!p.browser) continue;
+        // LoadURL must be called on the UI thread.
+        CefPostTask(TID_UI, new Brc121ReloadTask(p.browser, p.url));
+    }
 }
 
 

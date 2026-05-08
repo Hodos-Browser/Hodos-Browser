@@ -113,6 +113,16 @@ private:
 // DeferredAdblockHandler — defers adblock check to background thread
 // ============================================================================
 
+// Forward declaration — defined in HttpRequestInterceptor.cpp. Required because
+// DeferredAdblockHandler can be installed for arbitrary HTTP requests (any URL
+// not in adblock's positive-hit cache), which means BRC-121 402 detection
+// must dispatch from this handler too. Including HttpRequestInterceptor.h
+// here would create a circular header dependency, hence the forward decl.
+extern bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefRefPtr<CefRequest> request,
+                                CefRefPtr<CefResponse> response);
+
 class DeferredAdblockHandler : public CefResourceRequestHandler {
 public:
     DeferredAdblockHandler(const std::string& url, const std::string& sourceUrl,
@@ -131,6 +141,32 @@ public:
         CefPostTask(TID_FILE_USER_BLOCKING,
             new AdblockFetchTask(url_, sourceUrl_, resourceType_, browserId_, callback));
         return RV_CONTINUE_ASYNC;
+    }
+
+    // BRC-121 Simple HTTP 402 Payment detection. Most external first-visit
+    // requests land here (adblock cache MISS). Without this override, 402
+    // responses from real sites like now.bsvblockchain.tech surface as
+    // ERR_HTTP_RESPONSE_CODE_FAILURE and the user never sees the pay/approve
+    // popup. Logic itself is shared via the free function in HttpRequestInterceptor.cpp.
+    bool OnResourceResponse(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefRequest> request,
+                            CefRefPtr<CefResponse> response) override {
+        return TryHandleBrc121_402(browser, frame, request, response);
+    }
+
+    // Install Async402ResourceHandler if this navigation has a pending paid
+    // retry context. Same hook as CookieFilterResourceHandler — covers the
+    // case where the reload navigation lands on a URL that adblock hasn't
+    // yet cached (HIT_BLOCKED / HIT_ALLOWED) so DeferredAdblockHandler is
+    // the handler returned by GetResourceRequestHandler.
+    CefRefPtr<CefResourceHandler> GetResourceHandler(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> /*frame*/,
+        CefRefPtr<CefRequest> request) override {
+        extern CefRefPtr<CefResourceHandler> InstallAsync402HandlerIfPending(
+            CefRefPtr<CefBrowser>, CefRefPtr<CefRequest>);
+        return InstallAsync402HandlerIfPending(browser, request);
     }
 
     CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(

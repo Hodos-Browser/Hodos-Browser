@@ -113,6 +113,11 @@ const ApprovedSitesTab: React.FC = () => {
         }),
       });
       if (!res.ok) throw new Error('Failed to reset permissions');
+      // Reset-all touches every domain in the table, so clear the entire C++
+      // DomainPermissionCache. The IPC handler treats no-domain-arg as a
+      // full clear (see simple_handler.cpp::domain_permission_invalidate).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).cefMessage?.send('domain_permission_invalidate', []);
       setShowResetConfirm(false);
       setSaveResult({ type: 'success', message: 'All sites reset to default limits' });
       setTimeout(() => setSaveResult(null), 3000);

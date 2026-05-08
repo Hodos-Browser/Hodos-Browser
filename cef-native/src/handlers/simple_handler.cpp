@@ -4094,6 +4094,22 @@ bool SimpleHandler::OnProcessMessageReceived(
                 // Call the domain permission API
                 extern void addDomainPermission(const std::string& domain);
                 addDomainPermission(domain);
+
+                // Drain any pending requests for this domain that we added
+                // with nullptr handler (BRC-121 paths). The createAction-style
+                // path uses popAllForDomain elsewhere via handleAuthResponse,
+                // but BRC-121's nullptr-handler entries stay in the queue
+                // forever otherwise — blocking subsequent modal fires because
+                // hasPendingForDomain would return true on the next attempt.
+                auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                if (!drained.empty()) {
+                    LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
+                                      + " pending request(s) for " + domain + " after approval");
+                }
+
+                // Reload any browser stuck on the CEF error page after a
+                // BRC-121 402 → modal → approve flow for this domain.
+                TriggerPendingBrc121Reloads(domain);
             } catch (const std::exception& e) {
                 LOG_DEBUG_BROWSER("🔐 Error parsing permission JSON: " + std::string(e.what()));
             }
@@ -4129,6 +4145,17 @@ bool SimpleHandler::OnProcessMessageReceived(
                     int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin,
                     int64_t maxTxPerSession);
                 addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession);
+
+                // Drain stale pending entries (see add_domain_permission for rationale).
+                auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                if (!drained.empty()) {
+                    LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
+                                      + " pending request(s) for " + domain + " after advanced-approval");
+                }
+
+                // Reload any browser stuck on the CEF error page after a
+                // BRC-121 402 → modal → approve-with-custom-limits flow.
+                TriggerPendingBrc121Reloads(domain);
             } catch (const std::exception& e) {
                 LOG_DEBUG_BROWSER("🔐 Error parsing advanced permission JSON: " + std::string(e.what()));
             }
@@ -4145,7 +4172,13 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string domain = args->GetString(0).ToString();
             extern void invalidateDomainPermissionCache(const std::string& domain);
             invalidateDomainPermissionCache(domain);
-            LOG_DEBUG_BROWSER("🔐 Invalidated cached permission for: " + domain);
+            // Also drain any stale pending requests for this domain. Trust
+            // state changed (revoked, edited, etc.); leftover entries from
+            // previous modal cycles would falsely return true from
+            // hasPendingForDomain on the next attempt and suppress the modal.
+            auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+            LOG_DEBUG_BROWSER("🔐 Invalidated cached permission for: " + domain
+                              + " (drained " + std::to_string(drained.size()) + " stale pending request(s))");
         } else {
             extern void clearDomainPermissionCache();
             clearDomainPermissionCache();
@@ -6174,6 +6207,30 @@ public:
         return nullptr;
     }
 
+    // BRC-121 Simple HTTP 402 Payment detection. CookieFilterResourceHandler is
+    // installed for *every* external HTTP request that isn't a known wallet
+    // endpoint, so this is where 402 detection has to live for arbitrary
+    // sites (the dedicated HttpRequestInterceptor is only used for known
+    // wallet ports). Logic itself is shared via TryHandleBrc121_402.
+    bool OnResourceResponse(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefRequest> request,
+                            CefRefPtr<CefResponse> response) override {
+        return TryHandleBrc121_402(browser, frame, request, response);
+    }
+
+    // Install Async402ResourceHandler if this navigation has a pending
+    // paid retry context (set by TryHandleBrc121_402 on the previous
+    // navigation's 402 response). Returning a non-null handler here makes
+    // CEF use it for the entire request lifecycle — no other middleware
+    // can modify the request, headers reach the network exactly as set.
+    CefRefPtr<CefResourceHandler> GetResourceHandler(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request) override {
+        return InstallAsync402HandlerIfPending(browser, request);
+    }
+
     CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
         CefRefPtr<CefBrowser> browser,
         CefRefPtr<CefFrame> frame,
@@ -6319,14 +6376,14 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
         return new HttpRequestInterceptor();
     }
 
-    // For non-wallet requests, return CookieFilterResourceHandler
-    // to apply cookie blocking and ad response filtering (YouTube API/HTML stripping)
-    {
-        bool needsCookieFilter = CookieBlockManager::GetInstance().IsInitialized();
-        bool needsResponseFilter = g_adblockServerRunning;
-        if (needsCookieFilter || needsResponseFilter) {
-            return new CookieFilterResourceHandler();
-        }
+    // For non-wallet HTTP/HTTPS requests, always return CookieFilterResourceHandler.
+    // It applies cookie blocking + ad-response filtering (YouTube) when those are
+    // active, AND — importantly — runs BRC-121 OnResourceResponse detection on
+    // every response so 402 challenges from arbitrary sites (e.g.
+    // now.bsvblockchain.tech) trigger the pay_402 / approval flow. Returning
+    // nullptr here would mean no OnResourceResponse callback fires for the URL.
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+        return new CookieFilterResourceHandler();
     }
 
     return nullptr;
