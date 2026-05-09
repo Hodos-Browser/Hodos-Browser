@@ -30,6 +30,38 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
 // it back to the original URL so the auto-approve path can run.
 void TriggerPendingBrc121Reloads(const std::string& domain);
 
+// Reject counterpart. Called from simple_handler.cpp's brc100_auth_response
+// reject branch when the user declines a domain_approval modal for BRC-121.
+// Drains the pending reload queue for the domain and navigates each waiting
+// tab back (or to about:blank if no history), so the payment-pending
+// placeholder doesn't linger after rejection.
+void CancelPendingBrc121Reloads(const std::string& domain);
+
+// Called from simple_handler.cpp's OnLoadError to decide whether the failed
+// load is a BRC-121 402 awaiting user approval. If so, the OnLoadError
+// handler swaps the data:text/html "Failed to load" page for a clean
+// /payment-pending placeholder URL with the spinning Hodos logo.
+bool HasPendingBrc121ReloadForDomain(const std::string& domain);
+
+// Per-domain price snapshot stored when the most recent 402 is detected for
+// the unapproved-domain branch. Read by OnLoadError to build the placeholder
+// URL with the right "X sats" caption. 0 if no price has been stored.
+int64_t GetPendingBrc121PriceForDomain(const std::string& domain);
+
+// Phase 1 polish — failed-URL registry. Async402ResourceHandler registers a
+// URL after MAX_UPSTREAM_RETRIES with a non-2xx upstream status. OnLoadError
+// in simple_handler.cpp consumes the entry and swaps the failed-load page
+// for /payment-failed (Hodos error page with Retry button). One-shot.
+void RegisterBrc121FailedUrl(const std::string& url,
+                             const std::string& domain,
+                             int64_t satoshis,
+                             int upstreamStatus);
+
+bool ConsumeBrc121FailedUrl(const std::string& url,
+                            std::string& outDomain,
+                            int64_t& outSatoshis,
+                            int& outStatus);
+
 // Called from each CefResourceRequestHandler's GetResourceHandler. If the
 // (browserId, url) on this request has a registered paid retry context
 // (set by TryHandleBrc121_402 after a successful /wallet/pay402 call),

@@ -14,6 +14,7 @@
 
 #include "../../include/core/PendingAuthRequest.h"
 #include "../../include/core/SessionManager.h"
+#include "../../include/core/PaidContentCache.h"
 
 // Forward declaration
 class AsyncWalletResourceHandler;
@@ -2135,6 +2136,21 @@ struct PendingReload {
 };
 std::mutex s_brc121_pending_reloads_mutex;
 std::unordered_map<std::string, std::vector<PendingReload>> s_brc121_pending_reloads;
+// Per-domain price snapshot from the most recent 402 — used by OnLoadError
+// when building the /payment-pending placeholder URL so the placeholder can
+// show "X sats" alongside the spinning Hodos logo.
+std::unordered_map<std::string, int64_t> s_brc121_pending_sats;
+
+// Phase 1 polish — registry for upstream paid-retry failures that exhausted
+// MAX_UPSTREAM_RETRIES. Keyed by URL. Consumed by OnLoadError to swap the
+// failed-load page for /payment-failed (Hodos error page with Retry button).
+struct Brc121FailedEntry {
+    std::string domain;
+    int64_t satoshis;
+    int upstreamStatus;
+};
+std::mutex s_brc121_failed_urls_mutex;
+std::unordered_map<std::string, Brc121FailedEntry> s_brc121_failed_urls;
 
 void registerPendingBrc121Reload(const std::string& domain,
                                  CefRefPtr<CefBrowser> browser,
@@ -2151,20 +2167,57 @@ void registerPendingBrc121Reload(const std::string& domain,
     v.push_back(PendingReload{browser, url});
 }
 
+// SetPendingBrc121PriceForDomain stays in the anonymous namespace — it's
+// only called from TryHandleBrc121_402 within this translation unit. The
+// other two cross-TU helpers (Has…, GetPending…) move outside the namespace
+// at the bottom of this file so they get external linkage for
+// simple_handler.cpp's OnLoadError to call.
+void SetPendingBrc121PriceForDomain(const std::string& domain, int64_t sats) {
+    std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+    s_brc121_pending_sats[domain] = sats;
+}
+
 class Brc121ReloadTask : public CefTask {
 public:
-    Brc121ReloadTask(CefRefPtr<CefBrowser> browser, std::string url)
-        : browser_(std::move(browser)), url_(std::move(url)) {}
+    // replace_history=true uses window.location.replace so the current
+    // history entry (typically /payment-pending) is REPLACED instead of
+    // appended-then-pushed. Used by TriggerPendingBrc121Reloads from the
+    // user-approve modal flow so the back button after the article loads
+    // skips the placeholder and goes back to the real previous page.
+    // The auto-approve internal reload (post-pay_402) leaves replace_history
+    // false because it navigates to the SAME URL the page is already on
+    // (Chromium treats same-URL LoadURL as a reload, not a new entry).
+    Brc121ReloadTask(CefRefPtr<CefBrowser> browser, std::string url,
+                     bool replace_history = false)
+        : browser_(std::move(browser)), url_(std::move(url)),
+          replace_history_(replace_history) {}
     void Execute() override {
         if (!browser_) return;
         auto frame = browser_->GetMainFrame();
         if (!frame) return;
-        LOG_INFO_HTTP("💰 BRC-121: reloading " + url_);
-        frame->LoadURL(url_);
+        if (replace_history_) {
+            // JS-encode single quotes + backslashes; strip newlines (none
+            // expected in a URL but defense-in-depth).
+            std::string escaped;
+            escaped.reserve(url_.size());
+            for (char c : url_) {
+                if (c == '\\') { escaped += "\\\\"; }
+                else if (c == '\'') { escaped += "\\'"; }
+                else if (c == '\n' || c == '\r') { /* skip */ }
+                else { escaped += c; }
+            }
+            std::string js = "window.location.replace('" + escaped + "');";
+            LOG_INFO_HTTP("💰 BRC-121: location.replace " + url_);
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        } else {
+            LOG_INFO_HTTP("💰 BRC-121: reloading " + url_);
+            frame->LoadURL(url_);
+        }
     }
 private:
     CefRefPtr<CefBrowser> browser_;
     std::string url_;
+    bool replace_history_;
     IMPLEMENT_REFCOUNTING(Brc121ReloadTask);
     DISALLOW_COPY_AND_ASSIGN(Brc121ReloadTask);
 };
@@ -2202,9 +2255,18 @@ private:
 
 class Async402ResourceHandler : public CefResourceHandler {
 public:
+    // Phase 1 polish — retry budget for transient upstream rejections.
+    // Cloudflare in front of bsvblockchain.tech sometimes returns HTTP 431
+    // ("Request Header Fields Too Large") for the BEEF base64 retry header
+    // even though the same URL+headers will succeed seconds later. One
+    // automatic retry catches most of these without bothering the user.
+    static constexpr int MAX_UPSTREAM_RETRIES = 1;
+    static constexpr int RETRY_DELAY_MS = 250;
+
     Async402ResourceHandler(PaidRetryContext ctx, CefRefPtr<CefBrowser> browser)
         : ctx_(std::move(ctx)), browser_(std::move(browser)),
-          responseStatus_(0), responseOffset_(0), completed_(false) {
+          responseStatus_(0), responseOffset_(0), completed_(false),
+          retryAttempts_(0) {
         LOG_DEBUG_HTTP("🌐 Async402ResourceHandler created for " + ctx_.url);
     }
 
@@ -2382,15 +2444,57 @@ public:
         responseBody_ = std::move(body);
         completed_ = true;
 
+        // Phase 1 polish — auto-retry on transient upstream failures
+        // (Cloudflare 431 against the BEEF base64 header is the common
+        // case). The same paid retry context is reused; we don't recreate
+        // the nosend tx — the wallet still has it.
+        bool retryable = (status == 431) || (status >= 500 && status < 600);
+        if (retryable && retryAttempts_ < MAX_UPSTREAM_RETRIES) {
+            retryAttempts_++;
+            LOG_WARNING_HTTP("💰 BRC-121: server returned status="
+                             + std::to_string(status) + " — auto-retry "
+                             + std::to_string(retryAttempts_) + "/"
+                             + std::to_string(MAX_UPSTREAM_RETRIES)
+                             + " for " + ctx_.url);
+            // Reset response state so the retry's complete handler sees
+            // a clean slate. Keep openCallback_ / readCallback_ — they
+            // hold CEF open until the retry completes.
+            responseStatus_ = 0;
+            responseStatusText_.clear();
+            responseHeaders_.clear();
+            responseBody_.clear();
+            completed_ = false;
+            urlRequest_ = nullptr;
+            CefPostDelayedTask(TID_IO, new StartTask(this), RETRY_DELAY_MS);
+            return;
+        }
+
         // On success: broadcast our nosend tx (server confirmed acceptance,
         // safe to commit on chain) and fire the payment animation IPC.
         if (status >= 200 && status < 300) {
             broadcastNosendAsync();
             firePaymentSuccessIpc();
+
+            // Cache the paid response so reload doesn't re-pay. Order matters:
+            // run AFTER firePaymentSuccessIpc() so a cache-write failure
+            // (disk full, SQLite error) cannot silently break the green-dot
+            // animation or session accounting. Put() is best-effort and
+            // swallows exceptions internally — see PaidContentCache.cpp.
+            std::vector<uint8_t> body_bytes(responseBody_.begin(),
+                                            responseBody_.end());
+            auto expiresAt =
+                PaidContentCache::ParseCacheControl(responseHeaders_);
+            PaidContentCache::GetInstance().Put(
+                ctx_.url, status, responseHeaders_, body_bytes, expiresAt);
         } else {
             LOG_WARNING_HTTP("💰 BRC-121: server returned status=" + std::to_string(status)
                              + " on retry — NOT broadcasting (funds preserved). txid="
                              + ctx_.txid);
+            // Phase 1 polish — register the failure so OnLoadError can
+            // swap CEF's data:text/html "Failed to load" for a Hodos
+            // /payment-failed page with a Retry button.
+            RegisterBrc121FailedUrl(ctx_.url, ctx_.domain,
+                                    ctx_.satoshis, status);
         }
 
         // Tell CEF we're ready: it will now call GetResponseHeaders (which
@@ -2519,6 +2623,7 @@ private:
     std::string responseBody_;
     size_t responseOffset_;
     bool completed_;
+    int retryAttempts_;  // Phase 1 polish — see MAX_UPSTREAM_RETRIES
     CefRefPtr<CefCallback> openCallback_;   // Fired in onUpstreamComplete to release Open()
     CefRefPtr<CefCallback> readCallback_;
     CefRefPtr<CefURLRequest> urlRequest_;
@@ -2654,11 +2759,18 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         // shows its data:text/html ERR_HTTP_RESPONSE_CODE_FAILURE page and a
         // manual refresh just refreshes the error page (the original URL is
         // gone from the address bar). User would have to close+reopen the tab.
+        // Also acts as the marker for OnLoadError → /payment-pending placeholder
+        // (see HasPendingBrc121ReloadForDomain in HttpRequestInterceptor.h).
         registerPendingBrc121Reload(domain, browser, url);
+        // Stash the per-payment context (sats/server) so OnLoadError can build
+        // a proper placeholder URL with the right amount.
+        SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
             CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
         }
-        return false;  // Page sees 402 once; reload after approval auto-pays.
+        return false;  // Page sees 402 once; OnLoadError swaps the
+                       // failed-load page for /payment-pending; reload after
+                       // approval auto-pays.
     }
 
     // Sats → USD cents. If BSV price is unavailable, fire payment_confirmation
@@ -2864,6 +2976,51 @@ bool HttpRequestInterceptor::OnResourceResponse(CefRefPtr<CefBrowser> browser,
 // invalidated. Reloads any browsers that hit a BRC-121 402 for this domain
 // while it was unapproved — they're stuck on CEF's error page and won't
 // recover even on manual refresh because the address-bar URL is now data:text/html.
+// Cross-TU helpers for simple_handler.cpp's OnLoadError. Need external
+// linkage, so they live outside the file's anonymous namespace. Both
+// access the anonymous-namespace storage (visible at file scope).
+bool HasPendingBrc121ReloadForDomain(const std::string& domain) {
+    std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+    auto it = s_brc121_pending_reloads.find(domain);
+    return it != s_brc121_pending_reloads.end() && !it->second.empty();
+}
+
+int64_t GetPendingBrc121PriceForDomain(const std::string& domain) {
+    std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+    auto it = s_brc121_pending_sats.find(domain);
+    return it == s_brc121_pending_sats.end() ? 0 : it->second;
+}
+
+// Phase 1 polish — failed-URL registry. RegisterBrc121FailedUrl is called
+// from Async402ResourceHandler::onUpstreamComplete when the paid retry
+// exhausts MAX_UPSTREAM_RETRIES with a non-2xx status. ConsumeBrc121FailedUrl
+// is called from OnLoadError; if the failed load matches a registered URL,
+// the entry is returned and removed (one-shot — a new attempt re-registers
+// only if it also fails). HasBrc121FailedUrl peeks without consuming.
+void RegisterBrc121FailedUrl(const std::string& url,
+                             const std::string& domain,
+                             int64_t satoshis,
+                             int upstreamStatus) {
+    std::lock_guard<std::mutex> lock(s_brc121_failed_urls_mutex);
+    s_brc121_failed_urls[url] = Brc121FailedEntry{domain, satoshis, upstreamStatus};
+    LOG_INFO_HTTP("💰 BRC-121: failed URL registered for /payment-failed swap: "
+                  + url + " (status=" + std::to_string(upstreamStatus) + ")");
+}
+
+bool ConsumeBrc121FailedUrl(const std::string& url,
+                            std::string& outDomain,
+                            int64_t& outSatoshis,
+                            int& outStatus) {
+    std::lock_guard<std::mutex> lock(s_brc121_failed_urls_mutex);
+    auto it = s_brc121_failed_urls.find(url);
+    if (it == s_brc121_failed_urls.end()) return false;
+    outDomain = it->second.domain;
+    outSatoshis = it->second.satoshis;
+    outStatus = it->second.upstreamStatus;
+    s_brc121_failed_urls.erase(it);
+    return true;
+}
+
 void TriggerPendingBrc121Reloads(const std::string& domain) {
     std::vector<PendingReload> drained;
     {
@@ -2874,13 +3031,69 @@ void TriggerPendingBrc121Reloads(const std::string& domain) {
         }
         drained = std::move(it->second);
         s_brc121_pending_reloads.erase(it);
+        s_brc121_pending_sats.erase(domain);
     }
     LOG_INFO_HTTP("💰 BRC-121: domain '" + domain + "' approved — reloading "
                   + std::to_string(drained.size()) + " pending tab(s)");
     for (auto& p : drained) {
         if (!p.browser) continue;
-        // LoadURL must be called on the UI thread.
-        CefPostTask(TID_UI, new Brc121ReloadTask(p.browser, p.url));
+        // replace_history=true: the tab is currently on /payment-pending,
+        // and we want the eventually-loaded article to REPLACE the
+        // placeholder in history. Otherwise back-from-article lands on
+        // /payment-pending instead of whatever real page preceded the flow.
+        CefPostTask(TID_UI, new Brc121ReloadTask(p.browser, p.url, true));
+    }
+}
+
+// Reject counterpart to TriggerPendingBrc121Reloads. Called from the
+// brc100_auth_response reject branch in simple_handler.cpp when the user
+// declines a domain_approval modal. Drains the pending reload queue (so
+// stale entries don't leak) and navigates each waiting tab back so the
+// payment-pending placeholder doesn't linger after the user said no.
+namespace {
+class Brc121GoBackTask : public CefTask {
+public:
+    explicit Brc121GoBackTask(CefRefPtr<CefBrowser> browser)
+        : browser_(std::move(browser)) {}
+    void Execute() override {
+        if (!browser_) return;
+        if (browser_->CanGoBack()) {
+            LOG_INFO_HTTP("💰 BRC-121: rejected — going back");
+            browser_->GoBack();
+        } else {
+            // No history (user typed/pasted the URL or navigated from a new tab).
+            // Land them on about:blank rather than leaving the placeholder up.
+            auto frame = browser_->GetMainFrame();
+            if (frame) {
+                LOG_INFO_HTTP("💰 BRC-121: rejected, no back history — about:blank");
+                frame->LoadURL("about:blank");
+            }
+        }
+    }
+private:
+    CefRefPtr<CefBrowser> browser_;
+    IMPLEMENT_REFCOUNTING(Brc121GoBackTask);
+    DISALLOW_COPY_AND_ASSIGN(Brc121GoBackTask);
+};
+}  // namespace
+
+void CancelPendingBrc121Reloads(const std::string& domain) {
+    std::vector<PendingReload> drained;
+    {
+        std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
+        auto it = s_brc121_pending_reloads.find(domain);
+        if (it == s_brc121_pending_reloads.end() || it->second.empty()) {
+            return;
+        }
+        drained = std::move(it->second);
+        s_brc121_pending_reloads.erase(it);
+        s_brc121_pending_sats.erase(domain);
+    }
+    LOG_INFO_HTTP("💰 BRC-121: domain '" + domain + "' rejected — backing out "
+                  + std::to_string(drained.size()) + " pending tab(s)");
+    for (auto& p : drained) {
+        if (!p.browser) continue;
+        CefPostTask(TID_UI, new Brc121GoBackTask(p.browser));
     }
 }
 

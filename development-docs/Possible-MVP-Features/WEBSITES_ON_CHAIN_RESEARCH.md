@@ -114,6 +114,7 @@ Each section: what we know, what to dig into, links.
 
 **Source thread:** https://x.com/BSVSearch/status/2051433812115222849
 **Project site:** https://ordnet.io
+**Domain registrar (sub-app):** https://domains.ordnet.io — likely the `.web3` claim/registration UI; needs hands-on inspection to confirm whether registration is on-chain (UTXO/inscription), overlay-indexed, or a centralized DB. This is the most concrete artifact in the ORDnet stack to look at first.
 **Lead:** ARTaY (per site).
 
 **What we know now:**
@@ -130,6 +131,7 @@ Each section: what we know, what to dig into, links.
 
 **To dig into:**
 - Difference between ord-rtr-bsv.com (alleged copycat) and ordnet.io (alleged real).
+- **Visit https://domains.ordnet.io and inspect the registration flow** — does it require a wallet connect / on-chain payment, or is it a free centralized form? What does the resulting `.web3` record look like?
 - Whether `.web3` domain registration is on-chain, overlay-based, or centralized.
 - Whether Hodos can natively render `.web3` URLs without a separate client.
 - Tradeoffs between ORDnet's approach vs. React Onchain vs. Babbage's incoming scheme.

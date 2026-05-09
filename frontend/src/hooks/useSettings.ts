@@ -18,6 +18,7 @@ export interface PrivacySettings {
   doNotTrack: boolean;
   clearDataOnExit: boolean;
   fingerprintProtection: boolean;
+  paidContentCacheEnabled: boolean;
 }
 
 export interface WalletSettings {
@@ -53,6 +54,7 @@ const defaultSettings: AllSettings = {
     doNotTrack: false,
     clearDataOnExit: false,
     fingerprintProtection: true,
+    paidContentCacheEnabled: true,
   },
   wallet: {
     autoApproveEnabled: true,

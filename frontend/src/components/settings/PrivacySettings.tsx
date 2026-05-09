@@ -100,6 +100,20 @@ const PrivacySettings: React.FC = () => {
         />
       </SettingsCard>
 
+      <SettingsCard title="Paid Content (BRC-121)">
+        <SettingRow
+          label="Cache paid content for offline reuse"
+          description="Save bytes from BRC-121 paywalled responses so reloading the same page doesn't pay again. Hard reload (Ctrl+Shift+R) always re-fetches and re-pays."
+          control={
+            <Switch
+              checked={settings.privacy.paidContentCacheEnabled}
+              onChange={(e) => updateSetting('privacy.paidContentCacheEnabled', e.target.checked)}
+              size="small"
+            />
+          }
+        />
+      </SettingsCard>
+
       <SettingsCard title="Tracking">
         <SettingRow
           label="Send 'Do Not Track' request"

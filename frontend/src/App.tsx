@@ -3,6 +3,8 @@ import { Routes, Route } from 'react-router-dom';
 import MainBrowserView from './pages/MainBrowserView';
 import NewTabPage from './pages/NewTabPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
+import PaymentPendingPage from './pages/PaymentPendingPage';
+import PaymentFailedPage from './pages/PaymentFailedPage';
 import { brc100 } from './bridge/brc100';
 
 // Lazy-load overlay and secondary routes (each loads in its own CEF subprocess)
@@ -18,6 +20,8 @@ const MenuOverlayRoot = React.lazy(() => import('./pages/MenuOverlayRoot'));
 const HistoryPage = React.lazy(() => import('./pages/HistoryPage'));
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage'));
 const CertErrorPage = React.lazy(() => import('./pages/CertErrorPage'));
+// PaymentPendingPage + PaymentFailedPage are eager-loaded above so the
+// placeholder/error swap renders without a chunk-fetch flicker.
 const WalletPanelPage = React.lazy(() => import('./pages/WalletPanelPage'));
 
 const App = () => {
@@ -173,6 +177,8 @@ const App = () => {
           <Route path="/settings-page" element={<SettingsPage />} />
           <Route path="/settings-page/:section" element={<SettingsPage />} />
           <Route path="/cert-error" element={<CertErrorPage />} />
+          <Route path="/payment-pending" element={<PaymentPendingPage />} />
+          <Route path="/payment-failed" element={<PaymentFailedPage />} />
           <Route path="/wallet-panel" element={<WalletPanelPage />} />
           <Route path="/settings" element={<SettingsOverlayRoot />} />
           <Route path="/wallet" element={<WalletOverlayRoot />} />

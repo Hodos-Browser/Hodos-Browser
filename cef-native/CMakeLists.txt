@@ -176,6 +176,7 @@ set(SOURCES
     src/core/CookieManager.cpp
     src/core/CookieBlockManager.cpp
     src/core/BookmarkManager.cpp
+    src/core/PaidContentCache.cpp
     src/core/ProfileLock.cpp
     src/core/SingleInstance.cpp
     src/core/SyncHttpClient.cpp
@@ -266,6 +267,8 @@ elseif(WIN32)
         src/core/EphemeralCookieManager.cpp
         include/core/BookmarkManager.h
         src/core/BookmarkManager.cpp
+        include/core/PaidContentCache.h
+        include/core/CachedContentResourceHandler.h
         include/core/SettingsManager.h
         src/core/SettingsManager.cpp
         include/core/ProfileLock.h

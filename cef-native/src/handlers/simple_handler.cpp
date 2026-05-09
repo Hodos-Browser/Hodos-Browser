@@ -23,6 +23,8 @@
 #endif
 
 // Cross-platform includes (available on both platforms)
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include "../../include/core/TabManager.h"
 #include "../../include/core/HistoryManager.h"
@@ -77,6 +79,8 @@
 #define LOG_WARNING_BROWSER(msg) Logger::Log(msg, 2, 2)
 
 #include "../../include/core/PendingAuthRequest.h"
+#include "../../include/core/PaidContentCache.h"
+#include "../../include/core/CachedContentResourceHandler.h"
 extern std::string g_pendingModalDomain;
 #define LOG_ERROR_BROWSER(msg) Logger::Log(msg, 3, 2)
 
@@ -681,6 +685,76 @@ void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
     LOG_DEBUG_BROWSER("❌ Error code: " + std::to_string(errorCode));
 
     if (frame->IsMain()) {
+        // Phase 1 BRC-121 polish — if this load failed because of a 402 on
+        // an unapproved domain (TryHandleBrc121_402 fired the modal and
+        // returned false), the modal is now showing on top of what's about
+        // to become CEF's data:text/html "Failed to load" page. Swap that
+        // page for a clean Hodos /payment-pending placeholder before it
+        // ever renders, so the modal sits on a calm background.
+        size_t schemeEnd = failed_url_str.find("://");
+        std::string failed_domain;
+        if (schemeEnd != std::string::npos) {
+            size_t hostStart = schemeEnd + 3;
+            size_t pathStart = failed_url_str.find('/', hostStart);
+            failed_domain = (pathStart == std::string::npos)
+                ? failed_url_str.substr(hostStart)
+                : failed_url_str.substr(hostStart, pathStart - hostStart);
+        }
+        // Inline URL-encode helper used by both BRC-121 swap branches below
+        // (certUrlEncode is defined further down).
+        auto urlEncode = [](const std::string& s) {
+            std::string out;
+            out.reserve(s.size());
+            for (unsigned char c : s) {
+                if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                    out += static_cast<char>(c);
+                } else {
+                    char buf[4];
+                    snprintf(buf, sizeof(buf), "%%%02X", c);
+                    out += buf;
+                }
+            }
+            return out;
+        };
+
+        // Branch 1 — unapproved domain. The 402 hit a domain trust='unknown';
+        // TryHandleBrc121_402 fired the modal and returned false. Show the
+        // /payment-pending placeholder with the spinning Hodos icon while
+        // the user decides on the modal sitting over the page.
+        if (!failed_domain.empty()
+            && HasPendingBrc121ReloadForDomain(failed_domain)) {
+            int64_t sats = GetPendingBrc121PriceForDomain(failed_domain);
+            std::string placeholder_url =
+                "http://127.0.0.1:5137/payment-pending?domain="
+                + urlEncode(failed_domain) + "&sats=" + std::to_string(sats);
+            LOG_INFO_BROWSER("💰 BRC-121: swapping failed-load for placeholder ("
+                             + failed_domain + ", " + std::to_string(sats)
+                             + " sats)");
+            frame->LoadURL(placeholder_url);
+            return;
+        }
+
+        // Branch 2 — approved domain, paid retry exhausted MAX_UPSTREAM_RETRIES
+        // with a non-2xx (typically Cloudflare 431). Funds were preserved
+        // (no broadcast). Show the /payment-failed page with a Retry button.
+        std::string failedDomain, failedRetryStatus;
+        int64_t failedSats = 0;
+        int upstreamStatus = 0;
+        if (ConsumeBrc121FailedUrl(failed_url_str, failedDomain, failedSats,
+                                   upstreamStatus)) {
+            std::string failed_url =
+                "http://127.0.0.1:5137/payment-failed?domain="
+                + urlEncode(failedDomain)
+                + "&sats=" + std::to_string(failedSats)
+                + "&status=" + std::to_string(upstreamStatus)
+                + "&originalUrl=" + urlEncode(failed_url_str);
+            LOG_INFO_BROWSER("💰 BRC-121: swapping failed-load for /payment-failed ("
+                             + failedDomain + ", upstream=" + std::to_string(upstreamStatus)
+                             + ")");
+            frame->LoadURL(failed_url);
+            return;
+        }
+
         std::string html = "<html><body><h1>Failed to load</h1><p>URL: " +
                            failed_url_str + "</p><p>Error: " +
                            errorText.ToString() + "</p></body></html>";
@@ -2519,6 +2593,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (key == "privacy.fingerprintProtection") {
             settings.SetFingerprintProtection(value == "true");
             FingerprintProtection::GetInstance().SetEnabled(value == "true");
+        } else if (key == "privacy.paidContentCacheEnabled") {
+            // Setter syncs PaidContentCache::SetEnabled internally
+            // (see SettingsManager.cpp).
+            settings.SetPaidContentCacheEnabled(value == "true");
         }
         // Wallet settings
         else if (key == "wallet.autoApproveEnabled") {
@@ -4063,6 +4141,15 @@ bool SimpleHandler::OnProcessMessageReceived(
                         extern void handleAuthResponse(const std::string& responseData);
                         handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
                     }
+
+                    // BRC-121 polish: if this was a domain_approval modal, the
+                    // tab is sitting on /payment-pending. Navigate it back so
+                    // the placeholder doesn't linger after the user said no.
+                    if (found && pendingReq.type == "domain_approval"
+                        && !pendingReq.domain.empty()) {
+                        CancelPendingBrc121Reloads(pendingReq.domain);
+                    }
+
                     g_pendingModalDomain = "";
                 }
             } catch (const std::exception& e) {
@@ -4971,6 +5058,34 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "cache_get_size") {
         CookieManager::HandleGetCacheSize(browser);
+        return true;
+    }
+
+    // ========== PAID CONTENT CACHE (Phase 1 BRC-121) ==========
+
+    if (message_name == "paid_cache_clear") {
+        PaidContentCache::GetInstance().Clear();
+        nlohmann::json response;
+        response["success"] = true;
+        response["totalBytes"] = 0;
+        std::string json_str = response.dump();
+        CefRefPtr<CefProcessMessage> msg =
+            CefProcessMessage::Create("paid_cache_clear_response");
+        msg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+        return true;
+    }
+
+    if (message_name == "paid_cache_get_size") {
+        int64_t total = PaidContentCache::GetInstance().GetTotalSize();
+        nlohmann::json response;
+        response["totalBytes"] = total;
+        response["enabled"] = PaidContentCache::GetInstance().IsEnabled();
+        std::string json_str = response.dump();
+        CefRefPtr<CefProcessMessage> msg =
+            CefProcessMessage::Create("paid_cache_get_size_response");
+        msg->GetArgumentList()->SetString(0, json_str);
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
         return true;
     }
 
@@ -6308,6 +6423,45 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
         (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
         LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
         return nullptr;
+    }
+
+    // Phase 1 BRC-121 — Paid Content Cache read-side hook.
+    // If a previous BRC-121 round-trip already paid for this URL and the
+    // bytes are still in the SQLite cache, serve them from disk and
+    // short-circuit the entire 402 detection / Async402 chain. No payment
+    // IPC fires, no SessionManager state changes — cache hit is byte
+    // playback, not a new payment.
+    //
+    // Skip on:
+    //   - non-GET methods (only GETs are paid content; POSTs are wallet APIs)
+    //   - localhost (frontend / wallet / overlay traffic)
+    //   - hard reload (Chromium injects Cache-Control: no-cache on Ctrl+Shift+R)
+    //   - cache disabled in PrivacySettings
+    if (method == "GET" &&
+        url.find("127.0.0.1") == std::string::npos &&
+        url.find("localhost") == std::string::npos &&
+        PaidContentCache::GetInstance().IsEnabled()) {
+        std::string cache_control_req = request->GetHeaderByName("Cache-Control");
+        std::string pragma_req = request->GetHeaderByName("Pragma");
+        std::transform(cache_control_req.begin(), cache_control_req.end(),
+                       cache_control_req.begin(), ::tolower);
+        std::transform(pragma_req.begin(), pragma_req.end(),
+                       pragma_req.begin(), ::tolower);
+        bool hard_reload =
+            cache_control_req.find("no-cache") != std::string::npos ||
+            pragma_req.find("no-cache") != std::string::npos;
+
+        if (!hard_reload) {
+            PaidContentEntry entry;
+            if (PaidContentCache::GetInstance().Get(url, entry)) {
+                LOG_INFO_BROWSER("💰 PaidContentCache HIT: serving " +
+                                 std::to_string(entry.body.size()) +
+                                 " bytes from disk for " + url);
+                return new CachedContentRequestHandler(std::move(entry));
+            }
+        } else {
+            LOG_DEBUG_BROWSER("💰 PaidContentCache: hard-reload bypass for " + url);
+        }
     }
 
     // Sprint 11b: Inject Do Not Track headers if enabled

@@ -1,6 +1,7 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/Logger.h"
 #include "../../include/core/AppPaths.h"
+#include "../../include/core/PaidContentCache.h"
 #include <fstream>
 #include <cstdlib>
 #include <filesystem>
@@ -301,6 +302,17 @@ void SettingsManager::SetFingerprintProtection(bool enabled) {
         privacy_.fingerprintProtection = enabled;
     }
     Save();
+}
+
+void SettingsManager::SetPaidContentCacheEnabled(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        privacy_.paidContentCacheEnabled = enabled;
+    }
+    Save();
+    // Sync the live PaidContentCache singleton so the change takes effect
+    // immediately without requiring a restart. Forward declared in header.
+    PaidContentCache::GetInstance().SetEnabled(enabled);
 }
 
 // Wallet settings setters

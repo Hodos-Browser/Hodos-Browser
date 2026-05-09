@@ -23,6 +23,7 @@ struct PrivacySettings {
     bool doNotTrack = false;
     bool clearDataOnExit = false;
     bool fingerprintProtection = true;  // Sprint 12e
+    bool paidContentCacheEnabled = true;  // Phase 1 BRC-121 (Paid Content Cache)
 };
 
 // Wallet settings (auto-approve, spending limits, PeerPay)
@@ -42,7 +43,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
-    fingerprintProtection)
+    fingerprintProtection, paidContentCacheEnabled)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(WalletSettings,
     autoApproveEnabled, defaultPerTxLimitCents,
@@ -85,6 +86,7 @@ public:
     void SetDoNotTrack(bool enabled);
     void SetClearDataOnExit(bool clear);
     void SetFingerprintProtection(bool enabled);
+    void SetPaidContentCacheEnabled(bool enabled);
 
     // Wallet settings
     void SetAutoApproveEnabled(bool enabled);

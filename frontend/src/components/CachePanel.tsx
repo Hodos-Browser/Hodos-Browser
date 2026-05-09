@@ -13,8 +13,9 @@ import {
   Paper,
   Skeleton,
 } from '@mui/material';
-import { Storage, Delete, Cookie, Warning } from '@mui/icons-material';
+import { Storage, Delete, Cookie, Warning, Bolt } from '@mui/icons-material';
 import { useCookies } from '../hooks/useCookies';
+import { usePaidCache } from '../hooks/usePaidCache';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -34,9 +35,17 @@ export function CachePanel() {
     getCacheSize,
   } = useCookies();
 
+  const {
+    totalBytes: paidCacheBytes,
+    loading: paidCacheLoading,
+    refresh: refreshPaidCache,
+    clear: clearPaidCache,
+  } = usePaidCache();
+
   const [cacheSizeLoading, setCacheSizeLoading] = useState(true);
   const [confirmCacheClear, setConfirmCacheClear] = useState(false);
   const [confirmCookieClear, setConfirmCookieClear] = useState(false);
+  const [confirmPaidCacheClear, setConfirmPaidCacheClear] = useState(false);
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
@@ -79,6 +88,17 @@ export function CachePanel() {
       showToast('All cookies deleted');
     } catch {
       showToast('Failed to delete cookies');
+    }
+  };
+
+  const handleClearPaidCache = async () => {
+    setConfirmPaidCacheClear(false);
+    try {
+      await clearPaidCache();
+      await refreshPaidCache();
+      showToast('Paid content cache cleared');
+    } catch {
+      showToast('Failed to clear paid content cache');
     }
   };
 
@@ -164,6 +184,41 @@ export function CachePanel() {
               : `${cookies.length} ${cookies.length === 1 ? 'cookie' : 'cookies'} across ${uniqueDomainCount} ${uniqueDomainCount === 1 ? 'domain' : 'domains'}`}
           </Typography>
         </Paper>
+
+        {/* Paid Content card (BRC-121) */}
+        <Paper
+          variant="outlined"
+          sx={{
+            flex: 1,
+            minWidth: 240,
+            p: 3,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            textAlign: 'center',
+            borderRadius: 2,
+            bgcolor: '#1e1e1e',
+            borderColor: '#333',
+          }}
+        >
+          <Bolt sx={{ fontSize: 40, color: '#a67c00', mb: 1 }} />
+          <Typography variant="subtitle2" sx={{ mb: 1, color: '#888' }}>
+            Paid Content
+          </Typography>
+          {paidCacheLoading ? (
+            <Skeleton width={100} height={40} sx={{ bgcolor: '#2a2a2a' }} />
+          ) : (
+            <Typography variant="h4" sx={{ fontWeight: 600, color: '#e0e0e0' }}>
+              {formatBytes(paidCacheBytes)}
+            </Typography>
+          )}
+          <Typography
+            variant="caption"
+            sx={{ mt: 1, maxWidth: 200, color: '#666' }}
+          >
+            BRC-121 paid responses cached so reload doesn't re-pay
+          </Typography>
+        </Paper>
       </Box>
 
       {/* Action buttons */}
@@ -185,6 +240,16 @@ export function CachePanel() {
           size="large"
         >
           Delete All Cookies
+        </Button>
+        <Button
+          variant="outlined"
+          color="warning"
+          startIcon={<Bolt />}
+          onClick={() => setConfirmPaidCacheClear(true)}
+          size="large"
+          disabled={paidCacheBytes === 0}
+        >
+          Clear Paid Content
         </Button>
       </Box>
 
@@ -210,6 +275,35 @@ export function CachePanel() {
             variant="contained"
           >
             Clear Cache
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Clear Paid Content confirmation dialog */}
+      <Dialog
+        open={confirmPaidCacheClear}
+        onClose={() => setConfirmPaidCacheClear(false)}
+        PaperProps={{ sx: { bgcolor: '#1e1e1e' } }}
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#e0e0e0' }}>
+          <Warning color="warning" />
+          Clear paid content cache?
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ color: '#888' }}>
+            This will delete {formatBytes(paidCacheBytes)} of cached BRC-121 paid responses.
+            Visiting paywalled sites you've already paid for will require paying
+            again until the cache rebuilds. This does not refund prior payments.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmPaidCacheClear(false)}>Cancel</Button>
+          <Button
+            onClick={handleClearPaidCache}
+            color="warning"
+            variant="contained"
+          >
+            Clear Paid Content
           </Button>
         </DialogActions>
       </Dialog>

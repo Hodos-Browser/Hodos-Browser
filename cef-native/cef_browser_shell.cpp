@@ -34,6 +34,7 @@
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/PaidContentCache.h"
 #include "include/core/SettingsManager.h"
 #include "include/core/FingerprintProtection.h"
 #include "include/core/ProfileManager.h"
@@ -3615,6 +3616,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         }
     });
 
+    std::thread paidCacheThread([&profile_cache]() {
+        if (PaidContentCache::GetInstance().Initialize(profile_cache)) {
+            // Sync enabled flag from persisted settings (default true).
+            PaidContentCache::GetInstance().SetEnabled(
+                SettingsManager::GetInstance().GetPrivacySettings().paidContentCacheEnabled);
+            LOG_INFO("PaidContentCache initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize PaidContentCache");
+        }
+    });
+
     // Phase 2: health polling in detached threads — don't block startup.
     // The atomic g_walletServerRunning / g_adblockServerRunning flags are set
     // when healthy. Callers handle the "not yet ready" case gracefully.
@@ -3632,6 +3644,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     historyThread.join();
     cookieThread.join();
     bookmarkThread.join();
+    paidCacheThread.join();
 
     // Detach server health threads — they set atomic flags when done
     walletThread.detach();

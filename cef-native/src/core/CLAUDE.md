@@ -13,6 +13,7 @@ All files are cross-platform (Windows + macOS) unless noted. Windows uses WinHTT
 |------|---------|
 | `HttpRequestInterceptor.cpp` | **Largest file (~91KB).** HTTP request routing and auto-approve engine for wallet API calls. Contains `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache` (all singletons), and `AsyncWalletResourceHandler`. Intercepts `localhost:31301` requests, checks domain permissions, enforces per-tx/per-session/rate limits, and routes to Rust wallet. Also handles BRC-100 auth, domain permission, payment, and certificate approval flows via `PendingRequestManager`. |
 | `BookmarkManager.cpp` | Bookmark CRUD with SQLite. Singleton (`GetInstance()`). Tables: `bookmarks`, `bookmark_folders`, `bookmark_tags`. Methods: `AddBookmark`, `CreateFolder`, `GetAllBookmarks`, `SearchBookmarks`, `DeleteBookmark`, `MoveBookmark`, etc. Initialized with profile-specific `user_data_path`. |
+| `PaidContentCache.cpp` | Phase 1 BRC-121 paid response cache. Singleton (`GetInstance()`). SQLite table `paid_content` keyed by URL with status/headers/body/byte_size/paid_at/last_access/expires_at. Methods: `Get`, `Put`, `Clear`, `GetTotalSize`, `SetEnabled`, `IsEnabled`, `EvictIfOverCap`. Static helper `ParseCacheControl` extracts `max-age=N`. 500 MB LRU cap on `last_access`. Best-effort `Put` swallows exceptions so cache failures cannot break the green-dot animation. Read-side handler in `CachedContentResourceHandler.h` (header-only). |
 | `CookieBlockManager.cpp` | Third-party cookie blocking engine. Singleton. SQLite database (`cookie_blocks.db`) with tracker domain list, custom rules, and block log. Pre-populated from `DefaultTrackerList.h` on first run. Integrates with `EphemeralCookieManager` and `SettingsManager` for privacy settings. |
 | `CookieManager.cpp` | CEF cookie CRUD via `CefCookieManager`. Static methods: `HandleGetAllCookies`, `HandleDeleteCookie`, `HandleDeleteDomainCookies`, `HandleDeleteAllCookies`, `HandleClearCache`, `HandleGetCacheSize`. Uses `CookieCollector` (CefCookieVisitor) on IO thread, posts results to UI thread via `SendResponseTask`. |
 | `EphemeralCookieManager.cpp` | Ephemeral (session-only) cookie cleanup. Singleton with `shared_mutex` for thread safety. Tracks per-site tab reference counts; when last tab navigates away, starts 30-second grace period (`GraceExpiredTask` via `CefPostDelayedTask`), then deletes third-party cookies for that site. |
@@ -49,7 +50,7 @@ SettingsManager& SettingsManager::GetInstance() {
 }
 ```
 
-**Meyer's singletons (static local):** `HistoryManager`, `BookmarkManager`, `CookieBlockManager`, `EphemeralCookieManager`, `SettingsManager`, `ProfileManager`, `WindowManager`, `SessionManager`, `GoogleSuggestService`, `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`.
+**Meyer's singletons (static local):** `HistoryManager`, `BookmarkManager`, `PaidContentCache`, `CookieBlockManager`, `EphemeralCookieManager`, `SettingsManager`, `ProfileManager`, `WindowManager`, `SessionManager`, `GoogleSuggestService`, `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`.
 
 **`unique_ptr` singleton:** `TabManager` — uses `std::unique_ptr<TabManager>` with lazy init in `GetInstance()` (not Meyer's pattern).
 

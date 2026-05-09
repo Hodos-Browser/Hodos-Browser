@@ -130,6 +130,7 @@ namespace fs = std::filesystem;
 #include "include/core/FingerprintProtection.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/PaidContentCache.h"
 #include "include/core/WindowManager.h"
 
 // ============================================================================
@@ -4707,6 +4708,15 @@ int main(int argc, char* argv[]) {
         // Initialize BookmarkManager
         BookmarkManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("BookmarkManager initialized");
+
+        // Initialize PaidContentCache (BRC-121 paid response cache)
+        if (PaidContentCache::GetInstance().Initialize(profile_cache)) {
+            PaidContentCache::GetInstance().SetEnabled(
+                SettingsManager::GetInstance().GetPrivacySettings().paidContentCacheEnabled);
+            LOG_INFO("PaidContentCache initialized");
+        } else {
+            LOG_WARNING("PaidContentCache initialization failed");
+        }
 
         // Set root_cache_path AND cache_path to profile-specific directory.
         // CRITICAL: root_cache_path must be unique per CEF instance — two instances
