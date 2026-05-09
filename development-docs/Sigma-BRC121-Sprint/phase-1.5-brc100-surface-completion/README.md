@@ -8,6 +8,20 @@
 
 ---
 
+## Phase principles (set by user direction 2026-05-09)
+
+This phase is about the auto-approve engine's UX surface — where the engine talks to the user. Three principles ranking ahead of every UI/UX decision:
+
+1. **Trust** — every prompt should make it obvious the wallet is the actor (Hodos branding present, wallet icon visible) and which site is the counterparty (favicon visible). No "where did this come from?" moments.
+2. **Convenience** — minimize prompts. If a decision can be inferred from a previous answer or from sane defaults, don't ask. Bundle related grants into single prompts (manifest connect bundle is the canonical case).
+3. **Control** — power users can tune limits, sensitivity tiers, and per-site overrides without giving up the simple defaults that work for non-technical users.
+
+When trust and convenience tension, **trust wins on first contact**, **convenience wins on repeated contact**. When control and convenience tension, hide the control behind a disclosure (collapsed section, "Advanced" expander) — never leading with technical jargon.
+
+Anti-pattern this phase explicitly avoids: scaring/overwhelming non-technical users with security/privacy options that require domain expertise to evaluate. Every advanced control needs a sensible default and a plain-language label.
+
+---
+
 ## Why this phase exists
 
 Two gaps surfaced from `phase-0.1-brc100-audit/AUDIT_RESULTS.md`:
@@ -225,7 +239,76 @@ Stored as JSON in settings (e.g. `cert_field_sensitivity_classifier`). User can 
 
 ---
 
+## Auto-approve UI surfaces (full inventory — 14 surfaces)
+
+The cosmetic pre-flight (Step 0) and the new prompts added by Steps 1, 3, 5 all touch a defined set of surfaces. Inventoried here so kickoff can verify each one against current code and the styling pass doesn't miss any.
+
+**Notification overlay (existing — `BRC100AuthOverlayRoot.tsx` multiplexes by `type` query param):**
+
+| # | `type` | When fires | Domain-specific? | Phase 1.5 status |
+|---|---|---|---|---|
+| 1 | `domain_approval` | First visit, unknown domain wants something | Yes | Existing — restyle |
+| 2 | `payment_confirmation` | Approved domain wants a payment exceeding limits | Yes | Existing — restyle |
+| 3 | `rate_limit_exceeded` | Approved domain hit per-min rate limit | Yes | Existing — restyle |
+| 4 | `certificate_disclosure` | Site asks to read BRC-52 cert fields | Yes | Existing — extended in Step 5 (sensitivity tiers) |
+| 5 | `no_wallet` | Site hits BRC-100 endpoint with no wallet | No | Existing — restyle |
+| 6 | `edit_permissions` | Right-click "Manage Permissions" reuses overlay | Yes | Existing — restyle (and the `DomainPermissionForm` it hosts) |
+| 7 | `manifest_connect_bundle` | First-visit bundled manifest prompt | Yes | NEW in Step 5 — style from scratch with the same theme |
+| 8 | `identity_key_reveal` | `getPublicKey({ identityKey: true })` | Yes | NEW in Step 1 — privacy perimeter |
+| 9 | `key_linkage_reveal` | `revealCounterpartyKeyLinkage` / `revealSpecificKeyLinkage` | Yes | NEW in Step 1 — privacy perimeter |
+| 10 | `protocol_permission_prompt` | Manifest-less site requests new (origin, protocolID, keyID) | Yes | NEW in Step 5 |
+| 11 | `counterparty_permission_prompt` | Level-2 protocol asks about new counterparty | Yes | NEW in Step 5 |
+
+**Wallet panel (advanced wallet):**
+
+| # | Surface | File | Phase 1.5 status |
+|---|---|---|---|
+| 12 | `ApprovedSitesTab` list (Edit / Delete / Reset All buttons) | `frontend/src/components/wallet/ApprovedSitesTab.tsx` | Existing — restyle confirms; per `project_phase15_approved_sites_modal_theme` memory, modals here have wrong theme colors with unreadable text |
+| 13 | `ApprovedSitesTab` "Default settings" form (in-tab editor with apply-to-recommendations + apply-to-existing options) | `ApprovedSitesTab.tsx` | Existing — extended in Step 5 with sensitivity classifier editor |
+
+**Browser-level:**
+
+| # | Surface | File | Phase 1.5 status |
+|---|---|---|---|
+| 14 | Settings → Wallet section (global defaults: autoApprove toggle + perTx + perSession + rate + maxTxPerSession + peerpayAutoAccept) | `frontend/src/components/settings/WalletSettings.tsx` (currently unused per `components/settings/CLAUDE.md`; Settings sidebar routes Wallet to the wallet overlay instead) | **Open question — see "Open questions for kickoff" below.** Keep separate, merge into in-tab editor (#13), or restore the inline page? |
+
+**From Phase 1 polish (need styling pass too — same theme):**
+
+| # | Surface | File |
+|---|---|---|
+| 15 | `PaymentPendingPage` placeholder (top-left spinner during approval modal) | `frontend/src/pages/PaymentPendingPage.tsx` |
+| 16 | `PaymentFailedPage` (Try Again / Go Back when paid retry exhausts) | `frontend/src/pages/PaymentFailedPage.tsx` |
+
+**Right-click context menu** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) is an entry point to #6 — no form of its own, but verified untouched per "Explicitly DO NOT change" list.
+
+---
+
 ## Implementation order (each step is independently mergeable)
+
+### Step 0 — Cosmetic pre-flight sweep (do this first)
+
+Run BEFORE the architectural work below. Risk-free UI polish that:
+- Sets the styling foundation that Steps 1, 5, 7 inherit (new prompt types automatically pick up the pattern)
+- Surfaces existing UX gaps before adding more modals on top
+- Lets architectural commits land without cosmetic noise mixed in
+
+**Scope:**
+
+1. **Centralize theme tokens.** Currently `#1a1a1a` / `#e0e0e0` / `#a67c00` / `Inter` are scattered as inline strings across overlay files. Hoist to a shared module (e.g. `frontend/src/styles/hodosTheme.ts`) so future theme changes are one place. Apply across all 16 surfaces above.
+2. **Hodos branding on every auto-approve modal.** Add `Hodos_Gold_Wallet_Icon.svg` (`frontend/public/`) to the header of every notification overlay type (#1–#11) and every wallet-panel form (#12, #13). Signals "the wallet is making a decision here." Same icon, same position (top-left of card), same size — consistency matters more than per-prompt cleverness.
+3. **Domain favicon on every domain-specific modal.** Mirror the existing pattern in `BRC100AuthOverlayRoot.tsx` for `domain_approval` (uses `https://t0.gstatic.com/faviconV2?...` with Google fallback). Apply to all surfaces marked "Domain-specific? Yes" above. Reuse the same fetch helper — don't reinvent.
+4. **Fix the `ApprovedSitesTab` modal theme bug** (per `project_phase15_approved_sites_modal_theme` memory). Edit/delete confirms have wrong theme colors with unreadable text — falls naturally into the same styling pass.
+5. **Style the Phase 1 polish pages** (#15, #16) with the same theme tokens. They currently use inline strings; bring them into the central theme module.
+6. **Fix payment animation domain-match race.** `useTabManager.ts:148-167` matches `payment_success_indicator` IPC by `tabDomain === domain`, but when the BRC-121 paid retry succeeds the tab URL may still be on `/payment-pending` or the failed-load data URL → match fails → badge doesn't render anywhere. The IPC payload already includes `browserId` (per `HttpRequestInterceptor.cpp:2466`); match by `tab.id === browserId` instead (or in addition). Optional: pass `originalUrl` in the IPC for URL-exact matching as a fallback.
+7. **Optional — visual tuning of payment badge** (`TabComponent.tsx:204-232`). Current 6-second fade with bottom-center 10px badge is subtle. Consider larger font, brighter color burst at 0%, slight bounce on entry, OR top-center positioning. Verify by demo with a non-technical user — is the visual obvious enough to count as "you spent X" feedback? Don't tune unless the match-by-browserId fix alone doesn't help.
+
+**Deliverables:**
+- One commit per logical group (theme module, branding pass, favicon pass, Phase 1 page styling, animation fix, animation tuning if needed). Easy to review, easy to revert.
+- Updated CSS conventions doc (or new `frontend/src/styles/CLAUDE.md`) describing the theme tokens + when to use which.
+
+**Test:** every surface above renders correctly on Win + Mac with Hodos icon visible, domain favicon visible (where applicable), and theme colors readable. Smoke against auth-category sites (x.com, google.com, github.com) — modals fire and look right. **Critical:** payment animation fires visibly on every auto-approved BRC-121 payment to bsvblockchain.tech (verify in log: `payment_success_indicator fired`; verify in UI: badge actually appears on the article tab).
+
+**Sizing: ~1 day.** Lower-risk than the architectural steps; should land cleanly before Step 1 starts.
 
 ### Step 1 — Missing handlers + privacy-perimeter overlays
 
@@ -369,6 +452,7 @@ Smoke-test sites (per root `CLAUDE.md`):
 
 | Step | Days |
 |---|---|
+| 0 — Cosmetic pre-flight sweep (theme + branding + favicon + animation fix) | 1 |
 | 1 — Missing handlers + privacy perimeter prompt types (shared overlay) | 0.75 |
 | 2 — DB migration + repos | 1 |
 | 3 — Permission engine + IPC + Rust gate calls | 1.5 |
@@ -377,9 +461,24 @@ Smoke-test sites (per root `CLAUDE.md`):
 | 6 — Rewire existing handlers through engine | 0.5 |
 | 7 — Demo prep | 0.5 |
 | Cross-platform parity testing (smaller surface — shared overlay) | 0.5 |
-| **Total** | **~6.25 days** |
+| **Total** | **~7.25 days** |
 
-Buffer to 8–10 days for integration / debugging / platform quirks. Shared-overlay refactor saved ~1.5 days vs the original draft.
+Buffer to 9–11 days for integration / debugging / platform quirks. Shared-overlay refactor saved ~1.5 days vs the original draft. Cosmetic pre-flight adds 1 day but pays back in Steps 1, 5, 7 (no per-step styling work, new prompts inherit the foundation).
+
+---
+
+## Open questions for kickoff
+
+These need user direction before Step 0/1 ships, but can be reviewed in parallel.
+
+1. **Settings → Wallet vs in-tab Default settings (#14 vs #13).** Two separate UI surfaces edit overlapping data (autoApproveEnabled, perTx limit, perSession limit, rate, peerpayAutoAccept). Three options:
+   - **Keep both** (current): Settings is the chrome-level overlay, Approved Sites tab has its own in-tab editor for "default for new sites" + "apply to all approved." Risk: drift between the two.
+   - **Merge into Approved Sites tab**: delete `WalletSettings.tsx` (already unused per `components/settings/CLAUDE.md`), make Approved Sites the single source of truth. Risk: less discoverable from chrome settings.
+   - **Restore the inline page**: re-route Settings → Wallet to render `WalletSettings.tsx` inline. Risk: yet more clicks to find the controls.
+2. **Sensitivity classifier UX disclosure** (Step 5). Editing regex per cert-field tier is power-user territory. Should the editor be visible by default, hidden behind an "Advanced" expander, or hidden behind a chrome-level "Show advanced controls" preference? Per phase principle 3, hide-behind-disclosure unless the user opts in.
+3. **"Allow without limits" friction** (Step 5). Today's `DomainPermissionForm` has an "Always notify" toggle (limits = 0 = always prompt). The new "Allow without limits" button is the opposite extreme (limits = $1000/tx). Worth verifying: are these two enough, or do users need a middle "Trust this site (large limits)" preset? Per phase principle 1, lean conservative — make trust grants explicit, not preset.
+4. **Per-session counter visibility.** Today the per-session spend counter is invisible to the user. They only see it indirectly when they hit a `payment_confirmation` modal saying "this would exceed your session limit." Should the counter be surfaced anywhere (status bar in wallet panel, inline in `DomainPermissionForm`, both)? Defer if scope-creep, surface as a Phase 1.5b polish item.
+5. **Privacy-perimeter prompt warning prominence.** `identity_key_reveal` and `key_linkage_reveal` are always-prompt by design (#8, #9 above). Should they have a visually distinct "extra-prominent warning" treatment (red accent, larger header, more text) versus the standard auto-approve modal style? Per phase principle 1, yes — but balance with principle 3 (don't overwhelm).
 
 ---
 
