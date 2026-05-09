@@ -174,3 +174,73 @@ The Rust changes need a `cargo build --release` on Mac. Frontend changes auto-lo
 The risks are all "behavior should be the same but is unverified" — chief among them whether macOS CEF auto-decompresses zstd. That's a single empirical test (`body preview:` log line on Mac) and if it fails the fix is small (probe Accept-Encoding negotiation or per-encoding header-strip).
 
 Worth one focused 30-minute Mac test pass once everything else is settled. Don't preemptively write Mac code; just verify and patch only what surfaces.
+
+---
+
+# Polish-pass additions (2026-05-09)
+
+The polish work shipped on top of original scope (cache, placeholder, failure page, auto-retry, reuse-don't-recreate, WalletStatusCache hardening — see `README.md` "Polish work shipped on top of original scope") added six new files and modified ~10 more. Same "no Mac-specific code" verdict, plus a few new things to verify.
+
+## Polish files — platform impact
+
+| File | Lines | Platform impact |
+|---|---|---|
+| `cef-native/include/core/PaidContentCache.h` | new ~85 | None — header-only, std::sqlite3 + std::mutex |
+| `cef-native/src/core/PaidContentCache.cpp` | new ~310 | None — pure C++, sqlite3 (already cross-platform per CMakeLists) |
+| `cef-native/include/core/CachedContentResourceHandler.h` | new ~125 | None — header-only, CefResourceHandler/CefResourceRequestHandler (cross-platform CEF API) |
+| `frontend/src/pages/PaymentPendingPage.tsx` | new ~70 | None — React |
+| `frontend/src/pages/PaymentFailedPage.tsx` | new ~115 | None — React |
+| `frontend/src/hooks/usePaidCache.ts` | new ~95 | None — React/IPC |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | +~150 (Async402 retry, registries, WalletStatusCache enum, Pay402ReuseEntry) | Cross-platform CEF/std only. WalletStatusCache fetch already had `#ifdef _WIN32` (WinHTTP) / else (libcurl via SyncHttpClient) — both branches updated to return Status enum. |
+| `cef-native/src/handlers/simple_handler.cpp` | +~80 (OnLoadError swap branches, paid_cache IPC handlers) | Cross-platform |
+| `cef-native/cef_browser_shell.cpp` (Win) + `cef_browser_shell_mac.mm` (Mac) | +~10 each | Both platforms updated identically — `PaidContentCache::Initialize(profile_cache)` alongside BookmarkManager |
+| `rust-wallet/src/handlers.rs` | +~80 (Pay402ReuseEntry, lookup/storage in pay_402, drain in broadcast_nosend) | None — pure Rust |
+| `rust-wallet/src/main.rs` | +1 field on AppState, +1 init line | None — pure Rust |
+
+**No new platform-conditional blocks.** PaidContentCache uses `#ifdef _WIN32` only for the path separator (same pattern as BookmarkManager); SQLite + mutex + chrono are cross-platform.
+
+## New risks worth verifying on macOS
+
+### Polish Risk 1: SQLite path resolution on macOS (very low)
+
+`PaidContentCache::Initialize(profile_path)` builds the DB path as `profile_path + "/paid_content_cache.db"` on non-Windows. The Mac launcher calls `Initialize(profile_cache)` from `cef_browser_shell_mac.mm:4710` (next to `BookmarkManager::Initialize`), and `profile_cache` is the same `~/Library/Application Support/HodosBrowserDev/Default` path that BookmarkManager uses. If BookmarkManager works on Mac, PaidContentCache will too — they share the path resolution. Verify by checking the log line `Initializing PaidContentCache at: ...` on Mac startup.
+
+### Polish Risk 2: CefResponse::HeaderMap iteration order (very low)
+
+The cache stores response headers as a JSON object via `HeadersToJson`. Multimap iteration order is implementation-defined; we concatenate same-name values with `, ` to merge. Should produce equivalent output on both platforms but worth a sanity check that cached pages render identically on Mac after a reload.
+
+### Polish Risk 3: `frame->ExecuteJavaScript` for `window.location.replace` (low)
+
+The back-button history fix uses `frame->ExecuteJavaScript("window.location.replace(...)", frame->GetURL(), 0)` on UI thread. CEF's ExecuteJavaScript is cross-platform but works on the live document; if `/payment-pending` hasn't fully committed when approval fires, the JS might execute against an old document. Worth verifying on Mac by checking the log: `💰 BRC-121: location.replace ...` should appear after approval and the tab should navigate to the article without the placeholder lingering.
+
+## macOS smoke test plan — polish coverage
+
+After running the Phase 1 baseline smoke (above), run these polish-specific checks:
+
+### Cache (5 minutes)
+1. Visit `https://now.bsvblockchain.tech/articles/<slug>` → article loads, log shows `PaidContentCache PUT: <url> (... bytes)`.
+2. Soft reload (Cmd+R) → article renders **without** `payment_success_indicator fired` in the log; cache hit shows `💰 PaidContentCache HIT: serving ... bytes from disk for <url>`. No new tx.
+3. Hard reload (Cmd+Shift+R) → log does NOT show cache HIT (Chromium adds `Cache-Control: no-cache`); article re-fetches, re-pays, re-broadcasts.
+4. Settings → Privacy → toggle "Cache paid content" off → soft reload → re-pays.
+5. Cache & Storage → "Clear Paid Content" → soft reload → re-pays.
+
+### Placeholder + reject (3 minutes)
+1. Revoke the domain in Approved Sites.
+2. Visit a paid article → expect dark Hodos placeholder (small spinning gold logo top-left + "Waiting for your approval"), modal centered. **NO** "Failed to load" text. Log: `💰 BRC-121: swapping failed-load for placeholder (...)`.
+3. Click Reject → tab navigates back (or `about:blank` if no history). Log: `💰 BRC-121: rejected — going back`.
+
+### Auto-retry + failure page + Try Again with reuse (5 minutes)
+1. Revoke the domain again. Visit a paid article. Approve.
+2. If upstream returns 431 (Cloudflare flakiness), expect log: `💰 BRC-121: server returned status=431 — auto-retry 1/1 for ...`. ~50% of the time the retry succeeds and the article loads silently.
+3. If both attempts fail (rare), tab navigates to `/payment-failed`. Page shows "{domain} rejected the payment. Your sats are safe..." with Try Again + Go Back buttons.
+4. Click Try Again **within 25 seconds** → log: `💸 pay_402 REUSE: returning existing nosend tx <txid> for <url> (... sats, age <Nms>)`. Same txid as the failed attempt. No new nosend tx in the wallet activity.
+5. Click Try Again **after 30+ seconds** → log: `💸 pay_402` (no REUSE line). New txid minted. Acceptable — past freshness window.
+
+### WalletStatusCache (passive — observe in production)
+- Look for `💰 BRC-121: no wallet — falling through to native 402` in the log when a 402 is detected. Before the polish fix, this could persist for 30 s after a single transient timeout. After the fix, only persists 2 s if the cause was a fetch failure (timeout, network error). Hard to trigger deliberately on Mac — observe over time.
+
+## Things NOT new on Mac
+
+- Notification overlay path is unchanged — same `BRC100AuthOverlayRoot.tsx` handles the modal.
+- IPC routing (`paid_cache_clear`, `paid_cache_get_size`) goes through the same `simple_handler.cpp::OnProcessMessageReceived` dispatch + render-process JS injection as cookie/cache IPCs — both already work on Mac.
+- React Router routes (`/payment-pending`, `/payment-failed`) are eager-loaded, so no chunk-fetch race on first hit.

@@ -91,6 +91,7 @@ pub struct AppState {
     pub sync_status: Arc<std::sync::RwLock<handlers::SyncStatus>>,  // Recovery sync progress
     pub backup_check_needed: Arc<Mutex<Option<(i64, i64)>>>,  // (first_event_ts, latest_event_ts) — backup runs 3 min after latest, hard cap 10 min from first
     pub recovery_just_completed: Arc<std::sync::atomic::AtomicBool>,  // Set after on-chain recovery — triggers immediate TaskCheckForProofs + TaskValidateUtxos
+    pub pay402_reuse: Arc<Mutex<HashMap<(String, i64), handlers::Pay402ReuseEntry>>>,  // (URL, sats) → unbroadcast retry context, ~25s TTL — see pay_402
 }
 
 impl AppState {
@@ -524,6 +525,7 @@ async fn main() -> std::io::Result<()> {
         sync_status: Arc::new(std::sync::RwLock::new(handlers::SyncStatus::default())),
         backup_check_needed: Arc::new(Mutex::new(None)),
         recovery_just_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pay402_reuse: Arc::new(Mutex::new(HashMap::new())),
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");

@@ -216,23 +216,45 @@ public:
         return instance;
     }
 
+    // Phase 1 polish — distinguish the three outcomes of a /wallet/status
+    // call so we can apply DIFFERENT cache TTLs:
+    //
+    //   Exists       — wallet is present. Cache 30s (positive TTL).
+    //   DoesNotExist — Rust returned {exists:false}. Cache 30s (a fresh
+    //                  wallet is unlikely to appear in 30s).
+    //   FetchFailed  — network/timeout/parse error. The wallet IS likely
+    //                  alive; we just couldn't talk to it this instant.
+    //                  Cache only 2s so the next 402 retries cleanly.
+    //
+    // Before this fix, a single transient timeout would poison BRC-121 for
+    // 30s with "no wallet" — observed during testing where /wallet/status
+    // hit the 1s WinHTTP timeout while the wallet was responsive on a
+    // different code path 2.7s later.
+    enum class Status { Exists, DoesNotExist, FetchFailed };
+
+    static constexpr int FETCH_TIMEOUT_MS = 3000;       // up from 1000
+    static constexpr int POSITIVE_CACHE_SECS = 30;      // Exists / DoesNotExist
+    static constexpr int TRANSIENT_CACHE_SECS = 2;      // FetchFailed
+
     // P2 perf fix: mutex released before blocking I/O to allow concurrent cached reads
     bool walletExists() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto now = std::chrono::steady_clock::now();
-            if (valid_ && (now - lastCheck_) < std::chrono::seconds(30)) {
-                return exists_;
+            int ttl_secs = (lastStatus_ == Status::FetchFailed)
+                ? TRANSIENT_CACHE_SECS : POSITIVE_CACHE_SECS;
+            if (valid_ && (now - lastCheck_) < std::chrono::seconds(ttl_secs)) {
+                return lastStatus_ == Status::Exists;
             }
         }
-        bool result = fetchWalletStatus();
+        Status s = fetchWalletStatus();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            exists_ = result;
+            lastStatus_ = s;
             valid_ = true;
             lastCheck_ = std::chrono::steady_clock::now();
         }
-        return result;
+        return s == Status::Exists;
     }
 
     void invalidate() {
@@ -246,7 +268,7 @@ private:
     WalletStatusCache& operator=(const WalletStatusCache&) = delete;
 
     std::mutex mutex_;
-    bool exists_ = false;
+    Status lastStatus_ = Status::FetchFailed;
     bool valid_ = false;
     std::chrono::steady_clock::time_point lastCheck_;
 
@@ -263,12 +285,12 @@ private:
         return hSession_;
     }
 
-    bool fetchWalletStatus() {
+    Status fetchWalletStatus() {
         HINTERNET hSession = getSession();
-        if (!hSession) return false;
+        if (!hSession) return Status::FetchFailed;
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
-        if (!hConnect) return false;
+        if (!hConnect) return Status::FetchFailed;
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
                                                 L"/wallet/status",
@@ -277,10 +299,10 @@ private:
                                                 WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
-            return false;
+            return Status::FetchFailed;
         }
 
-        DWORD timeout = 1000;
+        DWORD timeout = FETCH_TIMEOUT_MS;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -289,7 +311,7 @@ private:
             !WinHttpReceiveResponse(hRequest, nullptr)) {
             WinHttpCloseHandle(hRequest);
             WinHttpCloseHandle(hConnect);
-            return false;
+            return Status::FetchFailed;
         }
 
         std::string responseBody;
@@ -306,21 +328,22 @@ private:
 
         try {
             auto json = nlohmann::json::parse(responseBody);
-            return json.value("exists", false);
+            return json.value("exists", false) ? Status::Exists : Status::DoesNotExist;
         } catch (...) {
-            return false;
+            return Status::FetchFailed;
         }
     }
 #else
-    bool fetchWalletStatus() {
-        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status", 1000);
-        if (!resp.success) return false;
+    Status fetchWalletStatus() {
+        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status",
+                                                FETCH_TIMEOUT_MS);
+        if (!resp.success) return Status::FetchFailed;
 
         try {
             auto json = nlohmann::json::parse(resp.body);
-            return json.value("exists", false);
+            return json.value("exists", false) ? Status::Exists : Status::DoesNotExist;
         } catch (...) {
-            return false;
+            return Status::FetchFailed;
         }
     }
 #endif

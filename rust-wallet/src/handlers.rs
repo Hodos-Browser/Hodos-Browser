@@ -15642,6 +15642,28 @@ pub struct Pay402Request {
     pub original_url: Option<String>,
 }
 
+/// In-memory entry on AppState.pay402_reuse — captures the full BRC-121 retry
+/// context so a Try-Again-within-window for the same (URL, sats) re-fires the
+/// SAME tx instead of creating a new one. Critical: derivation_prefix/suffix/
+/// time_ms are baked into the tx (they parameterize the BRC-42 derivation
+/// that produces the locking script), so we MUST replay them. Reuse window is
+/// bounded by the BRC-121 server-side `x-bsv-time` freshness window (30s).
+#[derive(Debug, Clone)]
+pub struct Pay402ReuseEntry {
+    pub txid: String,
+    pub beef_base64: String,
+    pub derivation_prefix: String,
+    pub derivation_suffix: String,
+    pub time_ms: String,
+    pub sender_pubkey_hex: String,
+    pub vout: u32,
+    pub satoshis: i64,
+    pub created_at_ms: u128,
+}
+
+/// Reuse TTL — conservative within the BRC-121 30s freshness window.
+const PAY402_REUSE_TTL_MS: u128 = 25_000;
+
 /// POST /wallet/pay402 — Build a BRC-121 payment for the requesting page.
 pub async fn pay_402(
     state: web::Data<AppState>,
@@ -15698,6 +15720,70 @@ pub async fn pay_402(
             "success": false,
             "error": "Amount must be greater than 0"
         }));
+    }
+
+    // Reuse-don't-recreate (Phase 1 polish). If we just paid for this exact
+    // (URL, sats) within the last 25 seconds and the tx is still in nosend
+    // status (i.e. the server returned non-2xx so we never broadcast), reuse
+    // the existing retry context instead of creating a new tx. Saves the
+    // user from leaking orphan unbroadcast transactions on every Try Again.
+    // Bounded by the BRC-121 server-side x-bsv-time 30s freshness window.
+    if let Some(ref orig_url) = req.original_url {
+        let key = (orig_url.clone(), req.satoshis);
+        let now_ms_check: u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let candidate = {
+            let map = state.pay402_reuse.lock().unwrap();
+            map.get(&key).cloned()
+        };
+        if let Some(entry) = candidate {
+            if now_ms_check.saturating_sub(entry.created_at_ms) <= PAY402_REUSE_TTL_MS {
+                // Verify the tx is still in nosend status — if it broadcast
+                // (success on a different attempt) or got marked failed,
+                // the entry is stale and we fall through to create a new tx.
+                let still_nosend = {
+                    let db = state.database.lock().unwrap();
+                    let conn = db.connection();
+                    conn.query_row(
+                        "SELECT new_status FROM transactions WHERE txid = ?1 LIMIT 1",
+                        rusqlite::params![&entry.txid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map(|s| s == "nosend")
+                    .unwrap_or(false)
+                };
+                if still_nosend {
+                    let age_ms = now_ms_check.saturating_sub(entry.created_at_ms);
+                    log::info!(
+                        "💸 pay_402 REUSE: returning existing nosend tx {} for {} ({} sats, age {}ms)",
+                        &entry.txid[..16.min(entry.txid.len())],
+                        orig_url,
+                        req.satoshis,
+                        age_ms
+                    );
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "success": true,
+                        "txid": entry.txid,
+                        "beef_base64": entry.beef_base64,
+                        "derivation_prefix": entry.derivation_prefix,
+                        "derivation_suffix": entry.derivation_suffix,
+                        "time_ms": entry.time_ms,
+                        "sender_pubkey_hex": entry.sender_pubkey_hex,
+                        "vout": entry.vout,
+                        "satoshis": entry.satoshis,
+                        "reused": true,
+                    }));
+                } else {
+                    // Tx is no longer reusable — drop the cache entry.
+                    state.pay402_reuse.lock().unwrap().remove(&key);
+                }
+            } else {
+                // Past the freshness window — drop and create new.
+                state.pay402_reuse.lock().unwrap().remove(&key);
+            }
+        }
     }
 
     // Get master private + public keys. Sender pubkey is sent in x-bsv-sender
@@ -15894,6 +15980,30 @@ pub async fn pay_402(
         HODOS_SERVICE_FEE_SATS
     );
 
+    let sender_pubkey_hex = hex::encode(&master_pubkey);
+
+    // Cache for reuse-don't-recreate (Phase 1 polish). If a Try Again for the
+    // same (URL, sats) hits within PAY402_REUSE_TTL_MS we re-fire this same
+    // tx instead of paying again. Only cache when we have an original_url.
+    if let Some(ref orig_url) = req.original_url {
+        let entry = Pay402ReuseEntry {
+            txid: txid.clone(),
+            beef_base64: beef_base64.clone(),
+            derivation_prefix: derivation_prefix.clone(),
+            derivation_suffix: derivation_suffix.clone(),
+            time_ms: time_ms_str.clone(),
+            sender_pubkey_hex: sender_pubkey_hex.clone(),
+            vout: 0,
+            satoshis: req.satoshis,
+            created_at_ms: time_ms,
+        };
+        state
+            .pay402_reuse
+            .lock()
+            .unwrap()
+            .insert((orig_url.clone(), req.satoshis), entry);
+    }
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "txid": txid,
@@ -15901,7 +16011,7 @@ pub async fn pay_402(
         "derivation_prefix": derivation_prefix,
         "derivation_suffix": derivation_suffix,
         "time_ms": time_ms_str,
-        "sender_pubkey_hex": hex::encode(&master_pubkey),
+        "sender_pubkey_hex": sender_pubkey_hex,
         "vout": 0,
         "satoshis": req.satoshis,
     }))
@@ -16005,6 +16115,10 @@ pub async fn broadcast_nosend(
                     log::warn!("   ⚠️ broadcast-nosend: failed to update tx status: {}", e);
                 }
             }
+            // Drain pay402 reuse entries pointing at this txid — once it's
+            // broadcast it can't be replayed; a future pay_402 must mint a
+            // new tx. (Phase 1 polish — see Pay402ReuseEntry.)
+            state.pay402_reuse.lock().unwrap().retain(|_, e| e.txid != req.txid);
             state.balance_cache.invalidate();
             HttpResponse::Ok().json(serde_json::json!({
                 "success": true,

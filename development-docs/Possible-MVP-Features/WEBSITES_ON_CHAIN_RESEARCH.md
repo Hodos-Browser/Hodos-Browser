@@ -137,6 +137,52 @@ Each section: what we know, what to dig into, links.
 - Tradeoffs between ORDnet's approach vs. React Onchain vs. Babbage's incoming scheme.
 - Identity of @BullRushClub (CryptoClub) — credibility assessment before quoting their guidance.
 
+#### 6a. ORDnet — what we figured out (2026-05-09 web inspection)
+
+**Architecture, in plain terms:** ORDnet is doing two genuinely separate things that are easy to conflate.
+
+| Layer | On-chain? | Who controls it |
+|---|---|---|
+| Website CONTENT (HTML/CSS/JS bytes) | **Yes — real BSV inscriptions.** Bytes are in transaction payloads, recoverable from any BSV node forever. | Wallet that signed the transaction. Truly self-sovereign. |
+| Name → TXID lookup (`yourname.web3` → a TXID) | **No — centralized in ORDnet's database.** | ORDnet (ARTaY). If they go away, your name stops resolving. |
+
+**What `.web3` actually is:**
+- **NOT an ICANN-delegated TLD.** Not in the DNS root zone. Type `mysite.web3` into vanilla Chrome/Firefox/Safari → nothing resolves; the browser falls through to a search.
+- A label inside ORDnet's private resolver. They picked the string and run a service that maps those names to TXIDs.
+- Same architectural shape as ENS `.eth`, Unstoppable Domains `.crypto`, Handshake — alt-DNS namespaces that exist parallel to ICANN.
+
+**Resolves only through:**
+- ORDnet's own `ORD/browser` sub-product
+- Any tool that explicitly knows to call ORDnet's resolver (none today outside their own stack)
+
+**Pricing for `.web3` registration (paid in BSV):**
+- 1–5 chars: $5 equivalent
+- 6–9 chars: $1 equivalent
+- 10+ chars: free
+- Marketed as "lifetime, no annual renewal"
+
+**Wallet binding:** registration ties the name to a BSV wallet address. Whether that's transferable as an ordinal/token is **not stated** on their pages — likely a centralized record keyed by wallet, not a BSV-side transferable token. Confirmation needs hands-on registration.
+
+**Inscription protocol:** they say "blockchain inscription" generically. **No mention of 1Sat Ordinals, OrdFS, or B Protocol** anywhere on their pages. Could be 1Sat-compatible under the hood or their own scheme — unconfirmed.
+
+**ICANN risk:** anyone (including a `.web3` applicant we've never heard of) could apply through ICANN's New gTLD Program for `.web3` as a real TLD. If ICANN delegates it, all standard browsers start resolving `.web3` via the real DNS — ORDnet's parallel namespace becomes invisible to them. Same risk hovers over ENS's `.eth` and every other alt-namespace. ICANN has so far chosen not to step on these, but there's no agreement preventing them.
+
+**Implications for Hodos:**
+1. **Resolution requires cooperation.** To render `.web3` URLs natively, Hodos either (a) calls ORDnet's resolver as a service, or (b) waits for ORDnet to publish a spec/dataset so we can resolve independently. As of today, only ORDnet's stack resolves these names.
+2. **Rendering the content is easy.** Once you have a TXID, pulling the inscription off-chain and rendering it in a Chromium-based browser is straightforward. We could do it today as a custom URL scheme handler.
+3. **The "decentralization" pitch is partial.** Content layer = decentralized (real BSV inscription). Name layer = fully centralized at ORDnet. Be careful not to oversell `.web3` as fully decentralized — informed users will catch it.
+4. **Don't over-invest in `.web3` specifically yet.** Babbage's incoming Metanet URI scheme uses a "pubkey in DNS records" hybrid model that's more interoperable (works over real DNS). The ecosystem may converge on a different convention; ORDnet might pivot or stay parallel — uncertain.
+
+**Comparable alt-namespaces for reference:**
+- **ENS (`.eth`)** — Ethereum smart contract registry. Far larger user base. Same fundamental architecture (name → on-chain pointer, via centralized-feeling but technically smart-contract-decentralized resolver).
+- **Unstoppable Domains (`.crypto`, `.nft`, `.x`, etc.)** — multiple TLDs, polygon-based, similar story.
+- **Handshake (HNS)** — actually tries to be a decentralized root zone replacement; only works through HNS-aware clients or DNS-over-HTTPS gateways.
+
+**Open questions still worth answering on the next inspection pass:**
+- Is the wallet binding a transferable on-chain artifact (1Sat ordinal, etc.) or just a DB entry?
+- What does the registration transaction look like on-chain? (search whatsonchain for transactions to ORDnet's wallet around a registration to see)
+- Is there a published spec for the resolver protocol, or only ORDnet's client?
+
 ---
 
 ## Cross-cutting questions for Hodos product design
