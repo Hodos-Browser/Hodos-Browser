@@ -27,6 +27,34 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import DomainPermissionForm, { type DomainPermissionSettings } from './DomainPermissionForm';
 import { HodosButton } from './HodosButton';
+import { colors as hodosColors } from '../styles/hodosTheme';
+
+// Phase 1.5 Step 0 — shared dark-theme overrides for the Edit and Revoke
+// MUI Dialogs in this file. Default MUI Dialog renders white-on-white text
+// on a dark backdrop, which made the Edit form and Revoke confirmation
+// nearly unreadable (memory: project_phase15_approved_sites_modal_theme).
+// Centralized here so both Dialogs stay consistent if/when the palette
+// shifts again. Tokens come from `frontend/src/styles/hodosTheme.ts`.
+const dialogPaperSx = {
+  backgroundColor: hodosColors.bgSurface,
+  color: hodosColors.textPrimary,
+  border: `1px solid ${hodosColors.borderDefault}`,
+  borderRadius: 2,
+  backgroundImage: 'none', // override MUI's default elevation gradient
+};
+const dialogTitleSx = {
+  color: hodosColors.goldPrimary,
+  fontWeight: 600,
+  fontSize: '1rem',
+  paddingBottom: 1,
+  borderBottom: `1px solid ${hodosColors.borderSubtle}`,
+};
+const dialogContentTextSx = {
+  color: hodosColors.textPrimary,
+};
+const dialogContentMutedSx = {
+  color: hodosColors.textMuted,
+};
 
 interface CertFieldPermission {
   certType: string;
@@ -400,11 +428,12 @@ const DomainPermissionsTab: React.FC = () => {
         onClose={() => setEditingDomain(null)}
         maxWidth="xs"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle>Edit Limits</DialogTitle>
+        <DialogTitle sx={dialogTitleSx}>Edit Limits</DialogTitle>
         <DialogContent>
           {editingDomain && (
-            <Box sx={{ pt: 1 }}>
+            <Box sx={{ pt: 2 }}>
               <DomainPermissionForm
                 domain={editingDomain.domain}
                 currentSettings={{
@@ -425,13 +454,14 @@ const DomainPermissionsTab: React.FC = () => {
       <Dialog
         open={revokeTarget !== null}
         onClose={() => setRevokeTarget(null)}
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle>Revoke Site Access</DialogTitle>
+        <DialogTitle sx={dialogTitleSx}>Revoke Site Access</DialogTitle>
         <DialogContent>
-          <Typography>
-            Are you sure you want to revoke access for <strong>{revokeTarget?.domain}</strong>?
+          <Typography sx={dialogContentTextSx}>
+            Are you sure you want to revoke access for <strong style={{ color: hodosColors.goldPrimary }}>{revokeTarget?.domain}</strong>?
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          <Typography variant="body2" sx={{ ...dialogContentMutedSx, mt: 1 }}>
             This site will need to request approval again the next time it tries to interact with your wallet.
           </Typography>
         </DialogContent>

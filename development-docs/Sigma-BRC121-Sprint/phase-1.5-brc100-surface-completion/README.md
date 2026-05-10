@@ -207,11 +207,11 @@ The existing `notification_browser_` overlay (HWND on Windows, NSPanel on macOS)
 
 ### What we explicitly DO NOT change
 
-- **Right-click "Manage Site Permissions"** context menu (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) — preserved exactly as-is. We test that it still opens the form correctly after every UI change.
+- **Right-click "Manage Site Permissions"** context menu (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6907`) — preserved exactly as-is. We test that it still opens the form correctly after every UI change.
 - **Payment success animation pipeline** — every auto-approved payment fires the **tab payment badge animation** so the user has a visible signal even when no prompt appears. Pipeline:
-  - `HttpRequestInterceptor.cpp:1656-1681` sends `payment_success_indicator` IPC after `UR_SUCCESS` on auto-approved payments, with `{ browserId, domain, cents }`.
+  - `HttpRequestInterceptor.cpp` — `firePaymentSuccessIpc` at `2589-2607` (BRC-121 paid retry path) and inline at `1697-1706` (auto-approved createAction path) send `payment_success_indicator` IPC with `{ browserId, domain, cents }`.
   - `simple_render_process_handler.cpp:1020` receives and dispatches via `window.postMessage`.
-  - `useTabManager.ts:141` listens and triggers the green-dot animation on the tab.
+  - `useTabManager.ts:141` listens; **as of Phase 1.5 Step 0, matches by `tab.id === browserId`** (not domain — the previous domain match was poisoned by `/payment-pending` and `data:` URLs). Triggers the green-dot animation on the matched tab.
   - **Phase 1.5 must keep this firing** when handlers are rewired through the new permission engine. Engine's silent-approve path MUST send the same IPC. Add a regression test that asserts the animation fires for an auto-approved payment going through the engine.
   - **Phase 2 (V8 shim) must also fire this** for `window.CWI` / `window.yours` / `window.panda` payments. As long as shim methods route through the canonical IPC path (per `SHIM_TRANSLATION_SPEC.md` permission-gate routing diagram), the indicator fires automatically — but call it out explicitly in the shim acceptance test.
 - Per-session counter behavior (resets on tab close). Per user direction, no change.
@@ -279,7 +279,7 @@ The cosmetic pre-flight (Step 0) and the new prompts added by Steps 1, 3, 5 all 
 | 15 | `PaymentPendingPage` placeholder (top-left spinner during approval modal) | `frontend/src/pages/PaymentPendingPage.tsx` |
 | 16 | `PaymentFailedPage` (Try Again / Go Back when paid retry exhausts) | `frontend/src/pages/PaymentFailedPage.tsx` |
 
-**Right-click context menu** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) is an entry point to #6 — no form of its own, but verified untouched per "Explicitly DO NOT change" list.
+**Right-click context menu** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6907`) is an entry point to #6 — no form of its own, but verified untouched per "Explicitly DO NOT change" list.
 
 ---
 

@@ -30,7 +30,7 @@ Per root `CLAUDE.md` "Phase kickoff workflow":
 - [x] Deliverable: `phase-0.2-window-yours-shim-design/SHIM_TRANSLATION_SPEC.md`
 
 ## Phase 1 — BRC-121 ✅ COMPLETE (initial scope shipped 2026-05-08 at `0a73b98`; polish pass 2026-05-09 at `c11afbf` + this commit)
-**Reuse map (verified at kickoff):** BRC-29 protocol ID `3241645161d8` (`handlers.rs:4348`), `peerpay_send` (`handlers.rs:15224`), `paymail_send` (`handlers.rs:15637`), `create_action_internal` (`handlers.rs:3577`), `OnResourceResponse` stub (`HttpRequestInterceptor.cpp:2056`), `payment_success_indicator` IPC (`HttpRequestInterceptor.cpp:1656-1681`).
+**Reuse map (verified at kickoff):** BRC-29 protocol ID `3241645161d8` (`handlers.rs:4348`), `peerpay_send` (`handlers.rs:15224`), `paymail_send` (`handlers.rs:15637`), `create_action_internal` (`handlers.rs:3577`), `OnResourceResponse` stub (`HttpRequestInterceptor.cpp:2056`), `payment_success_indicator` IPC fired by `firePaymentSuccessIpc` at `HttpRequestInterceptor.cpp:2589-2607` and inline at `1697-1706` (re-verified Phase 1.5 Step 0 kickoff 2026-05-09).
 - [x] Kickoff review (per cross-phase checklist above)
 - [x] Rust handler `pay_402` in `rust-wallet/src/handlers.rs` — mirrors `peerpay_send` shape; reuses BRC-29 invoice format
 - [x] Route `/wallet/pay402` registered in `rust-wallet/src/main.rs`
@@ -54,7 +54,7 @@ Per root `CLAUDE.md` "Phase kickoff workflow":
 - [x] **Back-button history fix (partial)** — `TriggerPendingBrc121Reloads` uses `window.location.replace` so `/payment-pending` is replaced in history rather than appended. **Known limitation:** the rest of the BRC-121 reload chain (`pay_402` reload, paid-retry reload, `/payment-failed` swap, Try Again navigation) still appends, so back-from-article still walks through 3-5 intermediate entries before reaching the previous real page. Filed as a Phase 1.5 polish task.
 
 ## Phase 1.5 — BRC-100 Surface Completion (NEW)
-**Reuse map:** existing `domain_permissions` + `cert_field_permissions` tables (`migrations.rs:468, 486`), shared `notification_browser_` overlay (`simple_app.cpp::CreateNotificationOverlay`, `BRC100AuthOverlayRoot.tsx`), existing `DomainPermissionForm` "Always notify" toggle, `MENU_ID_MANAGE_PERMISSIONS` (`simple_handler.cpp:6696`).
+**Reuse map:** existing `domain_permissions` + `cert_field_permissions` tables (`migrations.rs:468, 486`), shared `notification_browser_` overlay (`simple_app.cpp::CreateNotificationOverlay`, `BRC100AuthOverlayRoot.tsx`), existing `DomainPermissionForm` "Always notify" toggle, `MENU_ID_MANAGE_PERMISSIONS` (`simple_handler.cpp:6907` definition, `6991` menu dispatch, `7200` handler — re-verified Phase 1.5 Step 0 kickoff 2026-05-09).
 **Phase principles** (per user 2026-05-09): Trust > Convenience > Control on first contact; Convenience > Control on repeat. Hide power-user controls behind disclosures. Never overwhelm non-technical users with security/privacy decisions that need domain expertise. See README.md "Phase principles".
 
 ### Step 0 — Cosmetic pre-flight sweep (do first)

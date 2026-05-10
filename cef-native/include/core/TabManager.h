@@ -129,6 +129,23 @@ public:
     std::vector<Tab*> GetAllTabs();
 
     /**
+     * @brief Find a tab by its underlying CEF browser identifier.
+     *
+     * `Tab::id` (an integer assigned by TabManager's own counter) and
+     * `CefBrowser::GetIdentifier()` (CEF's global per-browser counter that
+     * includes overlays, devtools, etc.) are two DIFFERENT ID schemes.
+     * Code that has a `CefBrowser*` and wants to find the `Tab::id` that
+     * React knows about should call this method.
+     *
+     * Used by the BRC-121 / auto-approve payment_success_indicator IPC
+     * payload so React's tab badge match-by-tab.id works.
+     *
+     * @param cef_browser_id CEF's `browser->GetIdentifier()` value
+     * @return The matching `Tab::id`, or 0 if no tab owns that CEF browser
+     */
+    int GetTabIdForBrowserIdentifier(int cef_browser_id);
+
+    /**
      * @brief Reorder tabs to match the given ID sequence
      * @param order Vector of tab IDs in desired display order
      * @return true if all IDs exist and reorder succeeded

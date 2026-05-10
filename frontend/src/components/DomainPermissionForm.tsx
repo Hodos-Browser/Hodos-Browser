@@ -8,6 +8,7 @@ const COLORS = {
   textDark: '#f0f0f0',
   textMuted: '#9ca3af',
   borderLight: '#2a2d35',
+  borderInput: '#555',         // brighter than borderLight — used for text input + checkbox outlines (Step 0 legibility bump)
   white: '#1a1d23',
   inputBg: '#111827',
   warningBg: 'rgba(166, 124, 0, 0.1)',
@@ -82,7 +83,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   const inputStyle: React.CSSProperties = {
     width: '80px',
     padding: '6px 8px',
-    border: `1px solid ${COLORS.borderLight}`,
+    border: `1.5px solid ${COLORS.borderInput}`,
     borderRadius: '6px',
     fontSize: '13px',
     fontFamily: FONT_FAMILY,
@@ -132,16 +133,16 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        gap: '8px',
+        gap: '10px',
         marginBottom: '16px',
         cursor: 'pointer',
         userSelect: 'none',
       }} onClick={handleAlwaysNotifyToggle}>
         <div style={{
-          width: '16px',
-          height: '16px',
-          borderRadius: '3px',
-          border: `1.5px solid ${isAlwaysNotify ? COLORS.gold : COLORS.borderLight}`,
+          width: '18px',
+          height: '18px',
+          borderRadius: '4px',
+          border: `2px solid ${isAlwaysNotify ? COLORS.gold : COLORS.borderInput}`,
           background: isAlwaysNotify ? COLORS.gold : 'transparent',
           display: 'flex',
           alignItems: 'center',
@@ -150,11 +151,11 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           transition: 'all 0.15s',
         }}>
           {isAlwaysNotify && (
-            <span style={{ color: '#0f1117', fontSize: '11px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+            <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
           )}
         </div>
         <div>
-          <div style={{ fontSize: '13px', color: COLORS.textDark, fontWeight: 500 }}>
+          <div style={{ fontSize: '13px', color: COLORS.textDark, fontWeight: 600 }}>
             Always notify me
           </div>
           <div style={{ fontSize: '11px', color: COLORS.textMuted }}>

@@ -140,31 +140,32 @@ export const useTabManager = () => {
     const handlePaymentIndicator = (event: MessageEvent) => {
       if (event.data?.type === 'payment_success_indicator') {
         try {
-          const { cents, domain } = JSON.parse(event.data.data);
+          // Phase 1.5 Step 0 — the `browserId` field in the payload is
+          // actually `Tab::id` from TabManager, NOT `CefBrowser::GetIdentifier()`.
+          // C++ (`HttpRequestInterceptor.cpp::firePaymentSuccessIpc` +
+          // the inline auto-approve fire in `AsyncHTTPClient::OnRequestComplete`)
+          // translates the CEF browser identifier to Tab::id via
+          // `TabManager::GetTabIdForBrowserIdentifier()` before sending.
+          // The two are different ID schemes (`Tab::id` is a TabManager-local
+          // counter; `CefBrowser::GetIdentifier()` is a CEF-global counter
+          // that includes overlays, devtools, etc.). The payload field name
+          // is kept as "browserId" for historical compat — read it but
+          // remember it's a Tab::id.
+          const { cents, browserId } = JSON.parse(event.data.data);
           const amount = cents > 0 ? `$${(cents / 100).toFixed(2)}` : '< $0.01';
 
-          // Match payment to the specific tab that made the request.
-          // Only badge ONE tab — find the first match by domain (tab.id != CEF browserId).
-          setState(prev => {
-            let matched = false;
-            return {
-              ...prev,
-              tabs: prev.tabs.map(tab => {
-                if (matched) return tab;
-                const tabDomain = (() => {
-                  try { return new URL(tab.url).hostname; } catch { return ''; }
-                })();
-                if (tabDomain === domain || ('.' + tabDomain).endsWith('.' + domain)) {
-                  matched = true;
-                  return {
-                    ...tab,
-                    paymentIndicator: { amount, timestamp: Date.now() },
-                  };
-                }
-                return tab;
-              }),
-            };
-          });
+          setState(prev => ({
+            ...prev,
+            tabs: prev.tabs.map(tab => {
+              if (typeof browserId === 'number' && browserId > 0 && tab.id === browserId) {
+                return {
+                  ...tab,
+                  paymentIndicator: { amount, timestamp: Date.now() },
+                };
+              }
+              return tab;
+            }),
+          }));
 
           // Auto-clear the indicator after badge duration
           setTimeout(() => {
@@ -201,10 +202,28 @@ export const useTabManager = () => {
           // If C++ no longer includes the tab, clear it from the suppression set
           const serverIds = new Set(response.tabs.map(t => t.id));
           closed.forEach(id => { if (!serverIds.has(id)) closed.delete(id); });
-          setState({
-            tabs: filteredTabs,
-            activeTabId: response.activeTabId,
-            isLoading: false,
+          // Phase 1.5 Step 0 — merge instead of replace. C++ doesn't know about
+          // `paymentIndicator` (React-only transient state for the green-dot/gold-pill
+          // tab badge animation). If we wholesale-replace tabs from C++, the badge
+          // gets wiped the moment C++ pushes any tab update (title change, loading
+          // state, etc.) — which happens during the same article load that just
+          // triggered the badge. Preserve paymentIndicator on tabs whose id is in
+          // both old and new lists. The badge's own auto-clear setTimeout still
+          // handles eventual cleanup after 6s.
+          setState(prev => {
+            const prevById = new Map(prev.tabs.map(t => [t.id, t]));
+            const mergedTabs = filteredTabs.map(t => {
+              const prevTab = prevById.get(t.id);
+              if (prevTab?.paymentIndicator) {
+                return { ...t, paymentIndicator: prevTab.paymentIndicator };
+              }
+              return t;
+            });
+            return {
+              tabs: mergedTabs,
+              activeTabId: response.activeTabId,
+              isLoading: false,
+            };
           });
         } catch (error) {
           console.error('Failed to parse tab list response:', error);

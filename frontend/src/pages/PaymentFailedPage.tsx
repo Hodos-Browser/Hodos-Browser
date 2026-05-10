@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { colors, fonts } from '../styles/hodosTheme';
 
 // Phase 1 BRC-121 polish — shown when Async402ResourceHandler exhausts its
 // auto-retries (typically due to Cloudflare 431 "Request Header Fields Too
@@ -34,46 +35,55 @@ const PaymentFailedPage: React.FC = () => {
     <div
       style={{
         minHeight: '100vh',
-        background: '#1a1a1a',
-        color: '#e0e0e0',
+        background: colors.bgPrimary,
+        color: colors.textPrimary,
         display: 'flex',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         justifyContent: 'center',
-        padding: 24,
-        fontFamily: 'Inter, system-ui, sans-serif',
+        padding: '28vh 24px 24px',
+        fontFamily: fonts.sans,
       }}
     >
       <div
         style={{
           maxWidth: 480,
           width: '100%',
-          background: '#252525',
-          border: '1px solid #333',
+          background: colors.bgSurface,
+          border: `1px solid ${colors.borderDefault}`,
           borderRadius: 12,
-          padding: '32px 28px',
+          padding: '24px 28px 32px',
           textAlign: 'center',
         }}
       >
-        <img
-          src="/Hodos_Gold_Icon.svg"
-          alt="Hodos"
-          width={48}
-          height={48}
-          style={{ display: 'inline-block', marginBottom: 16, opacity: 0.85 }}
-        />
-        <h2 style={{ margin: '0 0 8px 0', fontSize: 20, color: '#e0e0e0' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            paddingBottom: 14,
+            marginBottom: 20,
+            borderBottom: `1px solid ${colors.borderDefault}`,
+          }}
+        >
+          <img
+            src="/Hodos_Gold_Wallet_Icon.svg"
+            alt="Hodos Wallet"
+            height={36}
+            style={{ display: 'block', flexShrink: 0, width: 'auto' }}
+          />
+        </div>
+        <h2 style={{ margin: '0 0 8px 0', fontSize: 20, color: colors.textPrimary }}>
           {domain} rejected the payment
         </h2>
         <p
           style={{
             margin: '0 0 20px 0',
             fontSize: 14,
-            color: '#aaa',
+            color: colors.textDim,
             lineHeight: 1.5,
           }}
         >
           Your sats are safe — the transaction was{' '}
-          <strong style={{ color: '#d4a017' }}>not broadcast</strong> because
+          <strong style={{ color: colors.goldBright }}>not broadcast</strong> because
           the site refused our payment headers
           {status && ` (HTTP ${status})`}.
           {sats && (
@@ -96,8 +106,8 @@ const PaymentFailedPage: React.FC = () => {
             onClick={handleRetry}
             disabled={!originalUrl}
             style={{
-              background: '#d4a017',
-              color: '#1a1a1a',
+              background: colors.goldBright,
+              color: colors.bgPrimary,
               border: 'none',
               padding: '10px 24px',
               borderRadius: 6,
@@ -113,8 +123,8 @@ const PaymentFailedPage: React.FC = () => {
             onClick={handleGoBack}
             style={{
               background: 'transparent',
-              color: '#888',
-              border: '1px solid #444',
+              color: colors.textSecondary,
+              border: `1px solid ${colors.borderInput}`,
               padding: '10px 24px',
               borderRadius: 6,
               fontSize: 14,

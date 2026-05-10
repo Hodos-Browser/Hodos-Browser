@@ -25,6 +25,7 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
   const [currentSettings, setCurrentSettings] = useState<DomainPermissionSettings | undefined>();
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
+  const [revoked, setRevoked] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -80,11 +81,32 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
     } catch { /* ignore */ }
     // Invalidate C++ DomainPermissionCache so revocation takes effect immediately
     window.cefMessage?.send('domain_permission_invalidate', [domain]);
-    onClose();
+    setRevoked(true);
+    // No auto-dismiss — destructive action gets explicit acknowledgement.
   };
+
+  const cleanDomainShort = domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
 
   if (saved) {
     return <div style={{ textAlign: 'center', padding: '16px 0', color: '#4ade80', fontSize: '14px' }}>Permissions saved</div>;
+  }
+  if (revoked) {
+    return (
+      <div style={{ padding: '4px 0' }}>
+        <div style={{ color: '#4ade80', fontSize: '15px', fontWeight: 600, marginBottom: '10px', textAlign: 'center' }}>
+          Permissions revoked
+        </div>
+        <div style={{ color: '#e0e0e0', fontSize: '13px', lineHeight: 1.55, marginBottom: '18px', textAlign: 'center' }}>
+          <strong>{cleanDomainShort}</strong> has been removed from your approved sites.
+          You'll be asked to approve again the next time it requests a wallet action.
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <HodosButton variant="primary" size="small" onClick={onClose}>
+            OK
+          </HodosButton>
+        </div>
+      </div>
+    );
   }
   if (loading) {
     return <div style={{ textAlign: 'center', padding: '16px 0', color: '#9ca3af', fontSize: '13px' }}>Loading...</div>;
@@ -108,6 +130,32 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
     </>
   );
 };
+
+// Phase 1.5 Step 0 — Hodos wallet attribution header. Renders the
+// Hodos_Gold_Wallet_Icon.svg at the top of every auth/payment/cert/
+// permission prompt so the user can immediately tell the wallet (not the
+// site) is the actor asking. Phase principle #1: Trust on first contact.
+// The SVG already contains the "Hodos Wallet" wordmark, so no separate
+// text label is rendered. Sits ABOVE the existing favicon + domain row so
+// the hierarchy is "Hodos Wallet → talking about → [site]".
+const HodosWalletHeader: React.FC = () => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      paddingBottom: '14px',
+      marginBottom: '16px',
+      borderBottom: `1px solid ${COLORS.borderLight}`,
+    }}
+  >
+    <img
+      src="/Hodos_Gold_Wallet_Icon.svg"
+      alt="Hodos Wallet"
+      height={36}
+      style={{ display: 'block', flexShrink: 0, width: 'auto' }}
+    />
+  </div>
+);
 
 const BRC100AuthOverlayRoot: React.FC = () => {
   const [notificationType, setNotificationType] = useState<string>('');
@@ -463,6 +511,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
             {!faviconError ? (
@@ -525,6 +574,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
             {!faviconError ? (
@@ -629,6 +679,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
             {!faviconError ? (
@@ -737,6 +788,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
             {!faviconError ? (
@@ -871,6 +923,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
             {!faviconError ? (
@@ -987,6 +1040,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop} onClick={() => window.cefMessage?.send('overlay_close', [])}>
         <div style={cardStyle} onClick={(e) => e.stopPropagation()}>
+          <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
             {!faviconError ? (

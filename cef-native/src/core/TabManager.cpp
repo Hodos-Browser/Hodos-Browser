@@ -341,6 +341,17 @@ std::vector<Tab*> TabManager::GetAllTabs() {
     return all_tabs;
 }
 
+int TabManager::GetTabIdForBrowserIdentifier(int cef_browser_id) {
+    if (cef_browser_id <= 0) return 0;
+    for (auto& pair : tabs_) {
+        Tab& tab = pair.second;
+        if (tab.browser && tab.browser->GetIdentifier() == cef_browser_id) {
+            return tab.id;
+        }
+    }
+    return 0;
+}
+
 bool TabManager::ReorderTabs(const std::vector<int>& order) {
     // Validate: all IDs in the order must exist in tabs_
     for (int id : order) {

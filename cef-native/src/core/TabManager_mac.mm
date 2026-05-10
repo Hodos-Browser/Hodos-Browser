@@ -331,6 +331,21 @@ std::vector<Tab*> TabManager::GetAllTabs() {
     return all_tabs;
 }
 
+int TabManager::GetTabIdForBrowserIdentifier(int cef_browser_id) {
+    // Phase 1.5 Step 0 — Tab::id (TabManager counter) and CefBrowser::GetIdentifier()
+    // (CEF global counter incl. overlays/devtools) are different ID schemes.
+    // Callers that have a CefBrowser* and want React's tab.id should use this.
+    // Cross-platform: identical to Windows TabManager.cpp impl.
+    if (cef_browser_id <= 0) return 0;
+    for (auto& pair : tabs_) {
+        Tab& tab = pair.second;
+        if (tab.browser && tab.browser->GetIdentifier() == cef_browser_id) {
+            return tab.id;
+        }
+    }
+    return 0;
+}
+
 bool TabManager::ReorderTabs(const std::vector<int>& order) {
     // Validate: all IDs must exist and count must match
     if (order.size() != tabs_.size()) {

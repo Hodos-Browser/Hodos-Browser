@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { colors, fonts } from '../styles/hodosTheme';
 
 // Phase 1 BRC-121 polish — background placeholder shown while the user decides
 // on a domain_approval modal for a paywalled article. Replaces the CEF
@@ -18,9 +19,9 @@ const PaymentPendingPage: React.FC = () => {
       style={{
         position: 'fixed',
         inset: 0,
-        background: '#1a1a1a',
-        color: '#e0e0e0',
-        fontFamily: 'Inter, system-ui, sans-serif',
+        background: colors.bgPrimary,
+        color: colors.textPrimary,
+        fontFamily: fonts.sans,
       }}
     >
       <style>{`
@@ -51,11 +52,11 @@ const PaymentPendingPage: React.FC = () => {
           }}
         />
         <div style={{ lineHeight: 1.2 }}>
-          <div style={{ fontSize: 13, color: '#e0e0e0' }}>
+          <div style={{ fontSize: 13, color: colors.textPrimary }}>
             Waiting for your approval
           </div>
           {domain && (
-            <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2 }}>
               {domain}
               {sats ? ` · ${sats} sats` : ''}
             </div>

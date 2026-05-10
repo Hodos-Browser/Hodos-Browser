@@ -15,6 +15,7 @@
 #include "../../include/core/PendingAuthRequest.h"
 #include "../../include/core/SessionManager.h"
 #include "../../include/core/PaidContentCache.h"
+#include "../../include/core/TabManager.h"
 
 // Forward declaration
 class AsyncWalletResourceHandler;
@@ -1694,15 +1695,20 @@ public:
                     // Notify header browser for tab payment badge animation
                     CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
                     if (headerBrowser && headerBrowser->GetMainFrame()) {
+                        // Phase 1.5 Step 0 — translate CEF browser identifier to
+                        // TabManager's Tab::id before sending. React's tab list keys
+                        // by Tab::id, NOT CEF browser identifier (different counters).
+                        int tabId = TabManager::GetInstance().GetTabIdForBrowserIdentifier(browserId);
                         nlohmann::json payload;
-                        payload["browserId"] = browserId;
+                        payload["browserId"] = tabId;  // field kept as "browserId" for React compat
                         payload["domain"] = parent_->getRequestDomain();
                         payload["cents"] = cents;
 
                         CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
                         msg->GetArgumentList()->SetString(0, payload.dump());
                         headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
-                        LOG_DEBUG_HTTP("💰 Sent payment indicator to header: " + std::to_string(cents) + " cents from " + parent_->getRequestDomain());
+                        LOG_DEBUG_HTTP("💰 Sent payment indicator to header: " + std::to_string(cents) + " cents from " + parent_->getRequestDomain()
+                                       + " (cefBrowserId=" + std::to_string(browserId) + " -> tabId=" + std::to_string(tabId) + ")");
                     }
                 }
             }
@@ -2589,21 +2595,27 @@ private:
     void firePaymentSuccessIpc() {
         CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
         if (!headerBrowser || !headerBrowser->GetMainFrame()) return;
+        // Phase 1.5 Step 0 — translate CEF browser identifier to TabManager's
+        // Tab::id before sending. React's tab list keys by Tab::id, NOT CEF
+        // browser identifier (they are different counters).
+        int cefBrowserId = browser_ ? browser_->GetIdentifier() : 0;
+        int tabId = TabManager::GetInstance().GetTabIdForBrowserIdentifier(cefBrowserId);
         nlohmann::json payload;
-        payload["browserId"] = browser_ ? browser_->GetIdentifier() : 0;
+        payload["browserId"] = tabId;  // field kept as "browserId" for React compat
         payload["domain"] = ctx_.domain;
         payload["cents"] = ctx_.cents;
         CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
         msg->GetArgumentList()->SetString(0, payload.dump());
         headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
         LOG_DEBUG_HTTP("💰 BRC-121: payment_success_indicator fired ("
-                       + std::to_string(ctx_.cents) + " cents from " + ctx_.domain + ")");
+                       + std::to_string(ctx_.cents) + " cents from " + ctx_.domain
+                       + ", cefBrowserId=" + std::to_string(cefBrowserId)
+                       + " -> tabId=" + std::to_string(tabId) + ")");
 
         // Auto-approve accounting — match the createAction success path.
-        int browserId = browser_ ? browser_->GetIdentifier() : 0;
-        SessionManager::GetInstance().recordSpending(browserId, ctx_.cents);
-        SessionManager::GetInstance().incrementRateCounter(browserId);
-        SessionManager::GetInstance().incrementPaymentCount(browserId);
+        SessionManager::GetInstance().recordSpending(cefBrowserId, ctx_.cents);
+        SessionManager::GetInstance().incrementRateCounter(cefBrowserId);
+        SessionManager::GetInstance().incrementPaymentCount(cefBrowserId);
     }
 
     void broadcastNosendAsync() {

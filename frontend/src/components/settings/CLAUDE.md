@@ -16,8 +16,9 @@ The settings overlay runs as a separate CEF subprocess (see root CLAUDE.md overl
 | `GeneralSettings` | Startup behavior, search engine selection | `browser.restoreSessionOnStart`, `browser.searchEngine` |
 | `PrivacySettings` | Ad blocking, cookies, fingerprinting, DNT, browsing data | `privacy.adBlockEnabled`, `privacy.thirdPartyCookieBlocking`, `privacy.fingerprintProtection`, `privacy.doNotTrack`, `privacy.clearDataOnExit` |
 | `DownloadSettings` | Download folder picker, save prompt toggle | `browser.downloadsPath`, `browser.askWhereToSave` |
-| `WalletSettings` | Auto-approve toggle and spending/rate limits | `wallet.autoApproveEnabled`, `wallet.defaultPerTxLimitCents`, `wallet.defaultPerSessionLimitCents`, `wallet.defaultRateLimitPerMin` |
 | `AboutSettings` | Static version info and project description | (none — read-only) |
+
+> **Note on Wallet defaults:** there is no `WalletSettings` section here. The "Wallet" sidebar entry in `SettingsPage.tsx` has `externalAction: 'wallet'` so clicking it opens the wallet overlay, where the canonical default-limits editor lives at `wallet/ApprovedSitesTab.tsx` (Default Limits section). A previous `WalletSettings.tsx` component was deleted in Phase 1.5 Step 0 (2026-05-09) — it had been written but never wired up, so removing it eliminated dead code and a potential drift surface.
 
 ## Exports
 
@@ -28,7 +29,6 @@ The settings overlay runs as a separate CEF subprocess (see root CLAUDE.md overl
 | `GeneralSettings.tsx` | `GeneralSettings` | Default |
 | `PrivacySettings.tsx` | `PrivacySettings` | Default |
 | `DownloadSettings.tsx` | `DownloadSettings` | Default |
-| `WalletSettings.tsx` | `WalletSettings` | Default |
 | `AboutSettings.tsx` | `AboutSettings` | Default |
 
 ## Component Details
@@ -64,12 +64,6 @@ The settings overlay runs as a separate CEF subprocess (see root CLAUDE.md overl
 - **Global declaration:** Extends `Window` interface with optional `onDownloadFolderSelected?: (path: string) => void`
 - **Notes:** Registers `window.onDownloadFolderSelected` on mount via `useCallback` + `useEffect`. Cleans up (sets to `undefined`) on unmount. The `handleBrowse` function guards on `window.cefMessage?.send` existence before calling.
 
-### WalletSettings
-- **Hooks:** `useSettings()`
-- **Cards:** Auto-Approve (enable toggle), Spending Limits (per-tx cents, per-session cents, rate limit per minute)
-- **Helper:** `formatCents()` — inline function that converts cents to dollar display (e.g., `1000` → `$10.00`). Used in `description` prop of each spending limit row.
-- **Notes:** Uses native `<input type="number">` elements per CEF input guidelines (see root CLAUDE.md). Values are in cents. The "Wallet" sidebar entry in `SettingsPage.tsx` has `externalAction: 'wallet'` so it opens the wallet overlay instead of rendering `WalletSettings` inline — this component is currently unused in production but exists for a future inline settings option.
-
 ### AboutSettings
 - **Hooks:** None (static content)
 - **Cards:** Version Information (browser, engine, wallet backend, protocol), About (description + link)
@@ -88,8 +82,10 @@ SettingsPage.tsx
        ├─ GeneralSettings    (browser.*)
        ├─ PrivacySettings    (privacy.* + useCookieBlocking)
        ├─ DownloadSettings   (browser.downloads* + folder picker IPC)
-       ├─ WalletSettings     (wallet.*)
        └─ AboutSettings      (static)
+                              (Wallet sidebar entry is externalAction —
+                               opens wallet overlay; defaults edited in
+                               wallet/ApprovedSitesTab.tsx)
 ```
 
 Settings are optimistically updated in local React state for responsiveness, then persisted by C++ backend.
@@ -99,7 +95,7 @@ Settings are optimistically updated in local React state for responsiveness, the
 - **Layout composition:** Every section uses `SettingsCard` > `SettingRow` for consistent spacing and styling. Exception: `AboutSettings` uses raw `Box` layout since it displays key-value pairs, not toggle/input rows.
 - **Settings keys:** Dot-notation strings like `'privacy.adBlockEnabled'` passed to `updateSetting()` which splits on `.` to update the correct nested field.
 - **Dark theme:** Hardcoded dark colors (`#121212` bg, `#1e1e1e` cards, `#a67c00` gold accent, `#e0e0e0` text, `#888` secondary text, `#333` borders). No theme provider — inline MUI `sx` props throughout.
-- **Native inputs for number fields:** `WalletSettings` uses `<input type="number">` instead of MUI `TextField`, following CEF overlay input guidelines. Styled inline with focus/blur border color changes.
+- **Native inputs for number fields:** when a settings section needs numeric input, use `<input type="number">` instead of MUI `TextField`, following CEF overlay input guidelines. Style inline with focus/blur border color changes (see `DownloadSettings` for an example).
 - **Collapsible sections:** PrivacySettings uses MUI `Collapse` with click-to-expand headers for blocked domains and block log lists. Expand icon rotates 180deg via CSS transition.
 - **IPC callbacks:** DownloadSettings registers `window.onDownloadFolderSelected` — a pattern where C++ calls a globally-registered JS function after a native dialog completes.
 
@@ -126,7 +122,7 @@ These components use MUI components where CEF compatibility allows:
 | `Paper` | `SettingsCard` | Card container |
 | `Typography` | All | Text rendering |
 | `Box` | All | Layout |
-| `Switch` | General, Privacy, Download, Wallet | Toggle controls |
+| `Switch` | General, Privacy, Download | Toggle controls |
 | `Select` + `MenuItem` | General | Search engine dropdown |
 | `Button` | Download, Privacy | Folder browse, unblock, clear log |
 | `Chip` | Privacy | Source tags on blocked domains and log entries |
@@ -140,5 +136,5 @@ These components use MUI components where CEF compatibility allows:
 
 - `../../../CLAUDE.md` — Root project docs, overlay architecture, CEF input patterns
 - `../../pages/SettingsPage.tsx` — Parent page that renders these components via sidebar navigation
-- `../../hooks/useSettings.ts` — Settings state hook (`AllSettings`, `BrowserSettings`, `PrivacySettings`, `WalletSettings` interfaces)
+- `../../hooks/useSettings.ts` — Settings state hook (`AllSettings`, `BrowserSettings`, `PrivacySettings`, `WalletSettings` interfaces — note the `WalletSettings` *interface* still exists in this hook; only the React component file of the same name was removed)
 - `../../hooks/useCookieBlocking.ts` — Cookie blocking hook used by `PrivacySettings`
