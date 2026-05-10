@@ -1,0 +1,128 @@
+{
+  "name": "@xanaverse/contracts",
+  "version": "1.3.0",
+  "description": "BSV smart contracts for trustless social media - covenant-enforced posts, upvotes, and replies",
+  "author": "XanaVerse",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/esm/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "prebuild": "npm run clean:dist",
+    "build": "npm run compile && npm run build:ts",
+    "build:ts": "tsc && tsc -p tsconfig.esm.json && npm run copy:artifacts",
+    "build:publish": "rimraf dist && tsc && npm run copy:artifacts",
+    "deploy": "npx ts-node ./deploy.ts",
+    "clean": "rimraf scrypt.index.json && rimraf dist && rimraf artifacts",
+    "clean:dist": "rimraf dist",
+    "compile": "npx ts-patch install -s && rimraf scrypt.index.json artifacts && mkdir -p artifacts && npx scrypt-cli compile -t tsconfig-scryptTS.json",
+    "copy:artifacts": "mkdir -p dist/artifacts dist/esm/artifacts && cp artifacts/contracts/*.json dist/artifacts/ && cp artifacts/contracts/*.json dist/esm/artifacts/",
+    "pretest": "npm run build",
+    "test": "npm run test:mocha",
+    "test:mocha": "cross-env NETWORK=local mocha",
+    "pretest:testnet": "npm run build",
+    "test:testnet": "cross-env NETWORK=testnet mocha --no-timeouts",
+    "genprivkey": "npx ts-node tests/utils/privateKey.ts",
+    "gen:identities": "npx tsx scripts/wallet/generateTestIdentities.ts",
+    "show:identities": "npx tsx scripts/wallet/showIdentities.ts",
+    "makeenv": "npx tsx scripts/wallet/makeEnv.ts",
+    "wallet:info": "npx ts-node scripts/wallet/showWalletInfo.ts",
+    "wallet:deposit": "npx ts-node scripts/wallet/generateDepositAddress.ts",
+    "wallet:protocol": "npx ts-node scripts/wallet/generateProtocolAddress.ts",
+    "wallet:import": "npx ts-node scripts/wallet/importExternal.ts",
+    "wallet:send": "npx ts-node scripts/wallet/sendBSV.ts",
+    "wallet:all-deposits": "npx tsx scripts/wallet/showAllDepositAddresses.ts",
+    "wallet:add-identities": "npx tsx scripts/wallet/addIdentities.ts",
+    "wallet:check-all": "npx ts-node scripts/wallet/checkAndImportAll.ts",
+    "dev:list-outputs": "npx ts-node scripts/dev/listAllOutputs.ts",
+    "dev:janitor": "npx ts-node scripts/dev/janitor.ts list",
+    "dev:janitor-release": "npx ts-node scripts/dev/janitor.ts release",
+    "lint": "eslint . --ext .js,.ts --fix && prettier --write --ignore-unknown \"**/*\"",
+    "lint-check": "eslint . --ext .js,.ts && prettier --check --ignore-unknown \"**/*\"",
+    "prepublishOnly": "npm run build",
+    "1-post:deploy": "npx ts-node ./scripts/wallet-toolbox/1-deployPostAnchor-privacy-simplified.ts",
+    "2-post:publish": "npx ts-node ./scripts/wallet-toolbox/2-publishPostAnchor-privacy.ts",
+    "3-upvote": "npx ts-node ./scripts/wallet-toolbox/3-executeUpvote-privacy.ts",
+    "4-downvote": "npx ts-node ./scripts/wallet-toolbox/4-executeDownvote-privacy.ts",
+    "4-reply": "npx ts-node ./scripts/wallet-toolbox/5-executeReply-privacy.ts",
+    "5-reclaim:post": "npx ts-node ./scripts/wallet-toolbox/6-reclaimPostAnchor.ts",
+    "6-reclaim:upvote": "npx ts-node ./scripts/wallet-toolbox/7-reclaimUpvoteProof.ts",
+    "7-reclaim:reply": "npx ts-node ./scripts/wallet-toolbox/8-reclaimReplyProof.ts",
+    "8-reclaim:downvote": "npx ts-node ./scripts/wallet-toolbox/9-reclaimDownvoteProof.ts",
+    "check": "npx ts-node ./scripts/wallet-toolbox/2-checkConfirmation.ts",
+    "registry:deploy": "npx ts-node ./scripts/wallet-toolbox/0-deploy-registry.ts",
+    "register": "npx ts-node ./scripts/wallet-toolbox/register-user.ts",
+    "market:list": "npx ts-node ./scripts/wallet-toolbox/marketplace-list.ts",
+    "market:buy": "npx ts-node ./scripts/wallet-toolbox/marketplace-buy.ts",
+    "market:browse": "npx ts-node ./scripts/wallet-toolbox/marketplace-browse.ts",
+    "market:update-price": "npx ts-node ./scripts/wallet-toolbox/marketplace-update-price.ts",
+    "market:delist": "npx ts-node ./scripts/wallet-toolbox/marketplace-delist.ts",
+    "transfer": "npx ts-node ./scripts/wallet-toolbox/transfer-user-proof.ts",
+    "verify": "npx ts-node ./scripts/wallet-toolbox/verify-user.ts",
+    "registry:info": "npx ts-node ./scripts/wallet-toolbox/marketplace-browse.ts",
+    "registry:status": "npx ts-node ./scripts/wallet-toolbox/registry-status.ts"
+  },
+  "lint-staged": {
+    "**/*": [
+      "prettier --write --ignore-unknown"
+    ],
+    "**/*.{ts,js}": [
+      "eslint --cache --fix"
+    ]
+  },
+  "keywords": [
+    "bitcoin",
+    "bsv",
+    "scrypt",
+    "smart-contracts",
+    "covenants",
+    "social-media",
+    "xanaverse",
+    "trustless",
+    "decentralized"
+  ],
+  "peerDependencies": {
+    "scrypt-ts": "^1.4.0"
+  },
+  "dependencies": {
+    "scrypt-ts-lib": "^0.1.0"
+  },
+  "devDependencies": {
+    "@bsv/sdk": "^1.8.8",
+    "@bsv/wallet-toolbox": "^1.2.48",
+    "@types/chai": "^4.3.20",
+    "@types/chai-as-promised": "^7.1.5",
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^18.11.10",
+    "@typescript-eslint/eslint-plugin": "^6.5.0",
+    "@typescript-eslint/parser": "^6.5.0",
+    "axios": "^1.12.2",
+    "chai": "^4.5.0",
+    "chai-as-promised": "^7.1.1",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.0.3",
+    "eslint": "^8.48.0",
+    "eslint-config-prettier": "^8.6.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^13.1.0",
+    "mocha": "^10.1.0",
+    "prettier": "^2.8.2",
+    "rimraf": "^3.0.2",
+    "scrypt-cli": "^0.2.3",
+    "scrypt-ts": "^1.4.5",
+    "scrypt-ts-transpiler": "^1.2.29",
+    "ts-node": "^10.9.1",
+    "ts-patch": "^3.3.0",
+    "typescript": "~5.3.3"
+  }
+}
