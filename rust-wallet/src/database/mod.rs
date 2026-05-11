@@ -35,6 +35,12 @@ pub use models::{Wallet, User, Address, Output, ParentTransaction, BlockHeader, 
 pub use models::{TxLabel, TxLabelMap, Commission, Setting, SyncState};
 // Phase 2.1 models
 pub use models::{DomainPermission, CertFieldPermission};
+// Phase 1.5 Step 2 — domain sub-permission child tables (V18)
+pub use models::{
+    DomainProtocolPermission,
+    DomainBasketPermission,
+    DomainCounterpartyPermission,
+};
 pub use wallet_repo::WalletRepository;
 pub use address_repo::AddressRepository;
 pub use transaction_repo::TransactionRepository;

@@ -149,7 +149,41 @@ No new platform-specific APIs introduced. No new `#ifdef _WIN32` / `#elif define
 - `KeyLinkageApprovalCache` is in-memory only (no DB persistence in Step 1 per user direction). On Mac this means restarting the browser re-prompts for key-linkage revelation — same as Windows. If a Mac user reports this surprises them, surface as a Step 5+ ask.
 
 ### Step 2 — DB schema
-_To be filled in. Three new child tables of `domain_permissions` + optional `sensitivity` column on `cert_field_permissions`. Pure SQLite/Rust — no platform impact._
+
+**Landed:** 2026-05-11
+**Branch:** `feature/brc121-phase1`
+**TL;DR:** **No macOS-specific implementation work.** Pure SQLite + Rust. Three new child tables of `domain_permissions` + idempotent migration runner addition. No code reads the new tables yet (Step 6 wires them through the new permission engine). The sensitivity column originally proposed for `cert_field_permissions` was dropped per `feedback_simplify_sensitivity_classifier.md`.
+
+#### Files modified — platform impact matrix
+
+| File | Change summary | Platform impact |
+|---|---|---|
+| `rust-wallet/src/database/migrations.rs` | New `migrate_v17_to_v18` creates three child tables (`domain_protocol_permissions`, `domain_basket_permissions`, `domain_counterparty_permissions`) with FK + CASCADE + UNIQUE + companion indexes. Idempotent (CREATE TABLE IF NOT EXISTS). | None — SQLite |
+| `rust-wallet/src/database/connection.rs` | Wire V18 into migrate() runner | None — pure Rust |
+| `rust-wallet/src/database/models.rs` | Three new structs: `DomainProtocolPermission`, `DomainBasketPermission`, `DomainCounterpartyPermission`. All carry `revoked_at: Option<i64>` for soft-delete (chosen over `is_deleted INTEGER` because it captures both fact AND timestamp in one column, staying in Unix-epoch convention) | None — pure Rust |
+| `rust-wallet/src/database/mod.rs` | Re-export the three new types | None — pure Rust |
+| `rust-wallet/src/database/domain_permission_repo.rs` | Three groups of CRUD methods (grant / revoke / list active / list all / is_granted) appended to the existing `DomainPermissionRepository` impl. Re-grant after revoke clears `revoked_at` via UPDATE rather than INSERT conflict. 10 new inline unit tests cover CASCADE delete, UNIQUE constraints, expiry, wildcard key_id, basket access-level escalation, and re-grant. | None — pure Rust |
+
+#### macOS verification checklist (Step 2)
+
+**Migration verification:**
+
+- [ ] First launch with a V17 dev DB on macOS shows in log: `Applying migration V18 (domain sub-permission child tables)... ✅ Schema V18 applied`
+- [ ] `sqlite3 ~/Library/Application\ Support/HodosBrowserDev/wallet/wallet.db ".schema domain_protocol_permissions"` returns the table definition with FK + UNIQUE
+- [ ] Same for `domain_basket_permissions` and `domain_counterparty_permissions`
+- [ ] `SELECT MAX(version) FROM schema_version;` returns 18
+
+**Behavioral (no UX change in this step):**
+
+- [ ] Existing wallet flows still work (domain approval, payment, identity-key reveal from Step 1) — tables sit empty; no handler consumes them yet
+- [ ] BRC-121 payment animation non-regression on `now.bsvblockchain.tech`
+
+**Build verification:**
+
+- [ ] `cargo build --release` clean on macOS
+- [ ] `cargo test --release --lib database::domain_permission_repo` — 10 new tests pass on macOS (same in-memory SQLite path, no platform difference)
+
+**No frontend or C++ changes in this step — nothing to smoke beyond the migration log line and the empty tables.**
 
 ### Step 3 — Permission engine
 _To be filled in. New `PermissionEngine.h/.cpp` in `cef-native/src/core/`. Should be cross-platform C++; verify no Win-specific APIs added._

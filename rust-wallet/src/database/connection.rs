@@ -900,6 +900,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V17 applied");
         }
 
+        if current_version < 18 {
+            info!("   Applying migration V18 (domain sub-permission child tables)...");
+            migrations::migrate_v17_to_v18(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (18)", [])?;
+            info!("   ✅ Schema V18 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

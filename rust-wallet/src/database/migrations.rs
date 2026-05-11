@@ -972,3 +972,80 @@ pub fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
     info!("   ✅ V17 migration applied (identity_key_disclosure_allowed)");
     Ok(())
 }
+
+/// Migrate V17 → V18: Three child tables of domain_permissions for BRC-100
+/// fine-grained sub-permissions (protocol / basket / counterparty).
+///
+/// Phase 1.5 Step 2. Each table mirrors the cert_field_permissions pattern:
+///   - FK to domain_permissions(id) ON DELETE CASCADE (revoking a site nukes
+///     all its sub-permissions)
+///   - UNIQUE constraint on the logical key for idempotent INSERT-or-update
+///   - expires_at INTEGER nullable (NULL = never; matches @bsv/wallet-toolbox
+///     cert lifecycle convention)
+///   - revoked_at INTEGER nullable (NULL = active; Unix epoch when revoked)
+///     -- chosen over is_deleted INTEGER because it captures both fact AND
+///     timestamp in one column, staying in the project's Unix-epoch convention
+///     used by created_at/updated_at/failed_at
+///   - Companion index on domain_permission_id for FK join performance
+///
+/// No handlers consume these tables yet; Step 6 wires them through the new
+/// permission engine. Empty tables sitting on existing dev DBs is by design.
+pub fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    info!("   Adding three child tables of domain_permissions (protocol / basket / counterparty)...");
+
+    // Idempotent: SQLite's IF NOT EXISTS guards each CREATE.
+    conn.execute_batch("
+        -- Per-protocol grants (BRC-100 PermissionRequest type='protocol').
+        -- key_id default '*' = wildcard for any keyID under this protocol.
+        -- counterparty NULL = any counterparty.
+        CREATE TABLE IF NOT EXISTS domain_protocol_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            protocol_security_level INTEGER NOT NULL,
+            protocol_name TEXT NOT NULL,
+            key_id TEXT NOT NULL DEFAULT '*',
+            counterparty TEXT,
+            expires_at INTEGER,
+            revoked_at INTEGER,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE,
+            UNIQUE(domain_permission_id, protocol_security_level, protocol_name, key_id, counterparty)
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_protocol_perms_domain
+            ON domain_protocol_permissions(domain_permission_id);
+
+        -- Per-basket grants (BRC-100 PermissionRequest type='basket').
+        -- access: 'read' | 'read_write'
+        CREATE TABLE IF NOT EXISTS domain_basket_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            basket TEXT NOT NULL,
+            access TEXT NOT NULL,
+            expires_at INTEGER,
+            revoked_at INTEGER,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE,
+            UNIQUE(domain_permission_id, basket)
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_basket_perms_domain
+            ON domain_basket_permissions(domain_permission_id);
+
+        -- Per-counterparty grants (BRC-100 CounterpartyPermissionRequest, level-2 protocols).
+        -- counterparty: hex compressed pubkey (33 bytes = 66 hex chars)
+        CREATE TABLE IF NOT EXISTS domain_counterparty_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            counterparty TEXT NOT NULL,
+            expires_at INTEGER,
+            revoked_at INTEGER,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE,
+            UNIQUE(domain_permission_id, counterparty)
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_counterparty_perms_domain
+            ON domain_counterparty_permissions(domain_permission_id);
+    ")?;
+
+    info!("   ✅ V18 migration applied (three child tables: protocol / basket / counterparty)");
+    Ok(())
+}

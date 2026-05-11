@@ -293,6 +293,51 @@ pub struct CertFieldPermission {
     pub created_at: i64,
 }
 
+/// Phase 1.5 Step 2 — per-protocol grant for a domain.
+/// Mirrors `domain_protocol_permissions` table (V18).
+///
+/// `key_id = "*"` is the wildcard meaning "any keyID under this protocol."
+/// `counterparty = None` means "any counterparty"; specific hex pubkey otherwise.
+/// `revoked_at = None` means active; Some(unix_secs) means soft-deleted.
+#[derive(Debug, Clone)]
+pub struct DomainProtocolPermission {
+    pub id: Option<i64>,
+    pub domain_permission_id: i64,
+    pub protocol_security_level: u8,   // 0, 1, or 2 per BRC-43
+    pub protocol_name: String,
+    pub key_id: String,                // "*" = wildcard
+    pub counterparty: Option<String>,  // None = any
+    pub expires_at: Option<i64>,       // None = never
+    pub revoked_at: Option<i64>,       // None = active
+    pub created_at: i64,
+}
+
+/// Phase 1.5 Step 2 — per-basket grant for a domain.
+/// Mirrors `domain_basket_permissions` table (V18).
+#[derive(Debug, Clone)]
+pub struct DomainBasketPermission {
+    pub id: Option<i64>,
+    pub domain_permission_id: i64,
+    pub basket: String,
+    pub access: String,                // "read" | "read_write"
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Phase 1.5 Step 2 — per-counterparty grant for a domain.
+/// Used by level-2 BRC-100 CounterpartyPermissionRequest.
+/// Mirrors `domain_counterparty_permissions` table (V18).
+#[derive(Debug, Clone)]
+pub struct DomainCounterpartyPermission {
+    pub id: Option<i64>,
+    pub domain_permission_id: i64,
+    pub counterparty: String,          // hex compressed pubkey (33 bytes / 66 chars)
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub created_at: i64,
+}
+
 /// Sync state model matching the `sync_states` table.
 /// Tracks multi-device synchronization state per user.
 #[derive(Debug, Clone)]
