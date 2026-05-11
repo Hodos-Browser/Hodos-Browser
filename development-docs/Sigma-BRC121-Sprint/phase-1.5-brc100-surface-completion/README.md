@@ -526,6 +526,7 @@ These need user direction before Step 0/1 ships, but can be reviewed in parallel
 - [x] **Step 0 landed (2026-05-10):** Cosmetic pre-flight + payment animation chain fix. Commit `2134234`.
 - [x] **Step 1 landed (2026-05-11):** Privacy-perimeter handlers + bundled identity-key approval + V17 migration. Smoke validated on Win; Mac smoke deferred to sprint-end batch.
 - [x] **Step 2 landed (2026-05-11):** V18 schema (three child tables of `domain_permissions`) + repo CRUD + 10 inline tests. `revoked_at INTEGER` soft-delete chosen over `is_deleted INTEGER` for audit-friendly timestamps. Sensitivity column dropped. No handlers consume the tables yet — Step 6 wires them through the permission engine.
+- [x] **Step 3 landed (2026-05-11):** `PermissionEngine` C++ class + 9 new `/domain/permissions/{protocol,basket,counterparty}` Rust endpoints + first C++ test infrastructure in the project (GoogleTest via CMake FetchContent, 25 tests covering Matrix C). Stand-alone — engine exists and is unit-tested but no production traffic flows through it yet (Step 6 wires it in).
 - [ ] Step 3 — Permission engine (C++).
 - [ ] Step 4 — Manifest fetcher.
 - [ ] Step 5 — Extend existing UI (carries the deferred Step 1 UX work: info icon, list column, form toggle, default setting).

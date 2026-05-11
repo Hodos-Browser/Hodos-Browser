@@ -186,7 +186,40 @@ No new platform-specific APIs introduced. No new `#ifdef _WIN32` / `#elif define
 **No frontend or C++ changes in this step — nothing to smoke beyond the migration log line and the empty tables.**
 
 ### Step 3 — Permission engine
-_To be filled in. New `PermissionEngine.h/.cpp` in `cef-native/src/core/`. Should be cross-platform C++; verify no Win-specific APIs added._
+
+**Landed:** 2026-05-11
+**Branch:** `feature/brc121-phase1`
+**TL;DR:** **No macOS-specific implementation work.** `PermissionEngine` is pure C++ with no platform conditionals — no CEF, no HTTP, no globals, just decision logic over plain data structs. The 9 new Rust endpoints follow the established `/domain/permissions/certificate` pattern. The new GoogleTest test target is CMake-driven via `FetchContent` and works identically on Windows and macOS.
+
+#### Files modified — platform impact matrix
+
+| File | Change summary | Platform impact |
+|---|---|---|
+| `rust-wallet/src/handlers.rs` | 9 new handlers (grant/revoke/list × {protocol, basket, counterparty}) + `ensure_domain_permission_row` helper. Each calls into Step 2 repo methods; `check_domain_approved` defense-in-depth on all. | None — pure Rust |
+| `rust-wallet/src/main.rs` | Register 9 new routes under `/domain/permissions/{protocol,basket,counterparty}` POST/DELETE/GET each | None — pure Rust |
+| `cef-native/include/core/PermissionEngine.h` (NEW) | `PermissionEngine` class + `PermissionContext` (plain data input) + `PermissionDecision` (Silent/Prompt/Deny + promptType + reason) + `PermissionCallKind` enum | None — pure C++, no CEF includes |
+| `cef-native/src/core/PermissionEngine.cpp` (NEW) | Decision matrix implementation: domain trust → privacy perimeter → scoped grants → payment caps → cert disclosure → generic. Pure function over `PermissionContext`. | None — pure C++ |
+| `cef-native/CMakeLists.txt` | Added `PermissionEngine.cpp` to Win + Mac source lists. Added optional `HODOS_BUILD_TESTS` flag + `add_subdirectory(tests)` guard. | None — CMake works on both |
+| `cef-native/tests/CMakeLists.txt` (NEW) | First test target. FetchContent pulls GoogleTest v1.14; explicit source list; CTest integration | None — works on both via FetchContent |
+| `cef-native/tests/permission_engine_test.cpp` (NEW) | 25 tests covering all 6 Matrix C branches + boundary conditions + branch ordering | None — pure C++ |
+| `cef-native/tests/CLAUDE.md` (NEW) | Documents test conventions, how to add a new test, build/run commands. Reference for future C++ tests. | None — docs |
+
+#### macOS verification checklist (Step 3)
+
+**Build verification:**
+
+- [ ] `cargo build --release` clean on macOS (new endpoints compile)
+- [ ] `cmake -S cef-native -B cef-native/build -G "Unix Makefiles" && cmake --build cef-native/build --config Release` builds the shell with `PermissionEngine.cpp` included — no warnings about missing platform conditionals
+- [ ] `cmake -S cef-native -B cef-native/build -DHODOS_BUILD_TESTS=ON && cmake --build cef-native/build --target hodos_tests` builds the test binary. FetchContent fetches GoogleTest on first run (network required)
+- [ ] `./cef-native/build/tests/hodos_tests` runs all 25 tests and reports `25 PASSED`
+
+**Functional verification (no UX change — empty endpoints + dormant engine):**
+
+- [ ] Existing wallet flows still work — Step 1 bundle approval, Step 2 schema migration log, BRC-121 payment animation. The engine class exists but `Open()` doesn't call it yet (Step 6 does the rewire).
+- [ ] `curl http://localhost:31301/domain/permissions/protocol?domain=example.com` returns `{"permissions": []}` (empty, expected — no grants yet)
+- [ ] `curl -X POST http://localhost:31301/domain/permissions/protocol -d '{...}'` from an external domain WITHOUT `X-Requesting-Domain: <approved>` returns 403 (defense-in-depth working — `check_domain_approved` rejects)
+
+**No frontend changes in this step.** No new UX surface; the new prompt types (`protocol_permission_prompt`, `basket_permission_prompt`, `counterparty_permission_prompt`) will be wired into `BRC100AuthOverlayRoot.tsx` in Step 5 when the new UI flows ship.
 
 ### Step 4 — Manifest fetcher
 _To be filled in. Likely uses `SyncHttpClient` which is already cross-platform (WinHTTP / libcurl)._

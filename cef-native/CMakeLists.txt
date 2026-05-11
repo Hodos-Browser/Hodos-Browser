@@ -210,6 +210,7 @@ if(APPLE)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
+        src/core/PermissionEngine.cpp
         src/core/AutoUpdater_mac.mm
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
@@ -250,6 +251,8 @@ elseif(WIN32)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
+        include/core/PermissionEngine.h
+        src/core/PermissionEngine.cpp
         include/core/SessionManager.h
         src/core/SessionManager.cpp
         include/core/Tab.h
@@ -618,4 +621,14 @@ elseif(APPLE)
 endif()
 
 # add_subdirectory(src/core) # Removed - wallet library no longer needed
-# add_subdirectory(tests) # Removed - test files deleted
+
+# ============================================================================
+# Optional C++ unit tests (Phase 1.5 Step 3 — first one).
+# Off by default so the regular shell build is unaffected. Configure with
+# -DHODOS_BUILD_TESTS=ON to enable. See cef-native/tests/CLAUDE.md.
+# ============================================================================
+option(HODOS_BUILD_TESTS "Build C++ unit tests (requires network for FetchContent)" OFF)
+if(HODOS_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

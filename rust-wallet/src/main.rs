@@ -875,6 +875,16 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/certificate", web::get().to(handlers::check_cert_permissions))
             .route("/domain/permissions/certificate", web::post().to(handlers::approve_cert_fields))
             .route("/domain/permissions/certificate", web::delete().to(handlers::revoke_cert_fields))
+            // Phase 1.5 Step 3 — domain sub-permission CRUD (V18 child tables)
+            .route("/domain/permissions/protocol", web::post().to(handlers::grant_protocol_permission))
+            .route("/domain/permissions/protocol", web::delete().to(handlers::revoke_protocol_permission))
+            .route("/domain/permissions/protocol", web::get().to(handlers::list_protocol_permissions))
+            .route("/domain/permissions/basket", web::post().to(handlers::grant_basket_permission))
+            .route("/domain/permissions/basket", web::delete().to(handlers::revoke_basket_permission))
+            .route("/domain/permissions/basket", web::get().to(handlers::list_basket_permissions))
+            .route("/domain/permissions/counterparty", web::post().to(handlers::grant_counterparty_permission))
+            .route("/domain/permissions/counterparty", web::delete().to(handlers::revoke_counterparty_permission))
+            .route("/domain/permissions/counterparty", web::get().to(handlers::list_counterparty_permissions))
 
             // NOTE: Adblock per-site toggles moved to C++ AdblockCache (JSON file in profile dir).
             // No longer served by wallet backend — see AdblockCache.h.

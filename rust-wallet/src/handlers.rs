@@ -10094,6 +10094,458 @@ pub async fn revoke_cert_fields(
     }
 }
 
+// ============================================================================
+// Phase 1.5 Step 3 — Domain sub-permission CRUD endpoints (V18 child tables)
+// ============================================================================
+// Three endpoint groups mirroring the established /domain/permissions/certificate
+// pattern: POST grant / DELETE revoke / GET list. Wallet-internal — called by
+// the C++ shell and the wallet UI to persist user permission decisions; NOT
+// part of the BRC-100 protocol surface (dApps don't call these directly).
+//
+// Each handler:
+//   1. Runs check_domain_approved() defense-in-depth (matches createHmac etc.)
+//      so external sites cannot enumerate or manipulate other domains' grants.
+//   2. Looks up the parent domain_permissions row, auto-creating it with
+//      sensible defaults if absent (mirrors approve_cert_fields).
+//   3. Calls into the Step 2 DomainPermissionRepository methods.
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantProtocolPermissionRequest {
+    pub domain: String,
+    pub security_level: u8,           // 0, 1, or 2 per BRC-43
+    pub protocol_name: String,
+    #[serde(default = "default_wildcard_key_id")]
+    pub key_id: String,               // "*" = wildcard (default)
+    pub counterparty: Option<String>, // None = any
+    pub expires_at: Option<i64>,      // None = never
+}
+
+fn default_wildcard_key_id() -> String { "*".to_string() }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantBasketPermissionRequest {
+    pub domain: String,
+    pub basket: String,
+    pub access: String,               // "read" | "read_write"
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantCounterpartyPermissionRequest {
+    pub domain: String,
+    pub counterparty: String,
+    pub expires_at: Option<i64>,
+}
+
+/// Helper: get or auto-create the domain_permissions row for a domain, returning its id.
+/// Auto-create uses "approved" trust + the user's configured default limits, matching
+/// the approve_cert_fields pattern.
+fn ensure_domain_permission_row(
+    db: &crate::database::WalletDatabase,
+    user_id: i64,
+    domain: &str,
+) -> Result<i64, String> {
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    if let Ok(Some(p)) = repo.get_by_domain(user_id, domain) {
+        return Ok(p.id.unwrap());
+    }
+
+    let mut perm = crate::database::DomainPermission::defaults(user_id, domain);
+    perm.trust_level = "approved".to_string();
+    let settings_repo = crate::database::SettingsRepository::new(db.connection());
+    if let Ok((per_tx, per_session, rate)) = settings_repo.get_default_limits() {
+        perm.per_tx_limit_cents = per_tx;
+        perm.per_session_limit_cents = per_session;
+        perm.rate_limit_per_min = rate;
+    }
+    repo.upsert(&perm).map_err(|e| format!("Failed to create domain permission: {}", e))
+}
+
+// ---------------------------------------------------------------------------
+// Protocol sub-permissions
+// ---------------------------------------------------------------------------
+
+/// POST /domain/permissions/protocol
+pub async fn grant_protocol_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    req: web::Json<GrantProtocolPermissionRequest>,
+) -> HttpResponse {
+    log::info!("📋 POST /domain/permissions/protocol domain={} proto={} keyID={} counterparty={:?}",
+        req.domain, req.protocol_name, req.key_id, req.counterparty);
+
+    if req.domain.is_empty() || req.protocol_name.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain and protocolName are required"
+        }));
+    }
+    if req.security_level > 2 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "securityLevel must be 0, 1, or 2"
+        }));
+    }
+
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let db = state.database.lock().unwrap();
+    let dp_id = match ensure_domain_permission_row(&db, state.current_user_id, &req.domain) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    };
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.grant_protocol(
+        dp_id,
+        req.security_level,
+        &req.protocol_name,
+        &req.key_id,
+        req.counterparty.as_deref(),
+        req.expires_at,
+    ) {
+        Ok(id) => HttpResponse::Ok().json(serde_json::json!({
+            "granted": true,
+            "id": id,
+            "domainPermissionId": dp_id,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// DELETE /domain/permissions/protocol?id=N
+pub async fn revoke_protocol_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let id: i64 = match query.get("id").and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "id parameter is required (numeric)"
+        })),
+    };
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.revoke_protocol(id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"revoked": 1, "id": id})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// GET /domain/permissions/protocol?domain=X[&includeRevoked=true]
+pub async fn list_protocol_permissions(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain parameter is required"
+        })),
+    };
+    let include_revoked = query.get("includeRevoked").map(|v| v == "true").unwrap_or(false);
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    let perm = match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({"permissions": []})),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    };
+    let dp_id = perm.id.unwrap();
+    let rows = if include_revoked {
+        repo.list_protocols_all(dp_id)
+    } else {
+        repo.list_protocols(dp_id)
+    };
+    match rows {
+        Ok(perms) => {
+            let items: Vec<_> = perms.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "securityLevel": p.protocol_security_level,
+                "protocolName": p.protocol_name,
+                "keyId": p.key_id,
+                "counterparty": p.counterparty,
+                "expiresAt": p.expires_at,
+                "revokedAt": p.revoked_at,
+                "createdAt": p.created_at,
+            })).collect();
+            HttpResponse::Ok().json(serde_json::json!({"permissions": items, "count": items.len()}))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Basket sub-permissions
+// ---------------------------------------------------------------------------
+
+/// POST /domain/permissions/basket
+pub async fn grant_basket_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    req: web::Json<GrantBasketPermissionRequest>,
+) -> HttpResponse {
+    log::info!("📋 POST /domain/permissions/basket domain={} basket={} access={}",
+        req.domain, req.basket, req.access);
+
+    if req.domain.is_empty() || req.basket.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "domain and basket are required"}));
+    }
+    if req.access != "read" && req.access != "read_write" {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "access must be 'read' or 'read_write'"}));
+    }
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let db = state.database.lock().unwrap();
+    let dp_id = match ensure_domain_permission_row(&db, state.current_user_id, &req.domain) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    };
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.grant_basket(dp_id, &req.basket, &req.access, req.expires_at) {
+        Ok(id) => HttpResponse::Ok().json(serde_json::json!({
+            "granted": true,
+            "id": id,
+            "domainPermissionId": dp_id,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// DELETE /domain/permissions/basket?id=N
+pub async fn revoke_basket_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let id: i64 = match query.get("id").and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "id parameter is required (numeric)"
+        })),
+    };
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.revoke_basket(id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"revoked": 1, "id": id})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// GET /domain/permissions/basket?domain=X[&includeRevoked=true]
+pub async fn list_basket_permissions(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "domain parameter is required"})),
+    };
+    let include_revoked = query.get("includeRevoked").map(|v| v == "true").unwrap_or(false);
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    let perm = match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({"permissions": []})),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    };
+    let dp_id = perm.id.unwrap();
+    let rows = if include_revoked {
+        repo.list_baskets_all(dp_id)
+    } else {
+        repo.list_baskets(dp_id)
+    };
+    match rows {
+        Ok(perms) => {
+            let items: Vec<_> = perms.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "basket": p.basket,
+                "access": p.access,
+                "expiresAt": p.expires_at,
+                "revokedAt": p.revoked_at,
+                "createdAt": p.created_at,
+            })).collect();
+            HttpResponse::Ok().json(serde_json::json!({"permissions": items, "count": items.len()}))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Counterparty sub-permissions
+// ---------------------------------------------------------------------------
+
+/// POST /domain/permissions/counterparty
+pub async fn grant_counterparty_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    req: web::Json<GrantCounterpartyPermissionRequest>,
+) -> HttpResponse {
+    log::info!("📋 POST /domain/permissions/counterparty domain={} counterparty={}",
+        req.domain, req.counterparty);
+
+    if req.domain.is_empty() || req.counterparty.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "domain and counterparty are required"}));
+    }
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let db = state.database.lock().unwrap();
+    let dp_id = match ensure_domain_permission_row(&db, state.current_user_id, &req.domain) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    };
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.grant_counterparty(dp_id, &req.counterparty, req.expires_at) {
+        Ok(id) => HttpResponse::Ok().json(serde_json::json!({
+            "granted": true,
+            "id": id,
+            "domainPermissionId": dp_id,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// DELETE /domain/permissions/counterparty?id=N
+pub async fn revoke_counterparty_permission(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let id: i64 = match query.get("id").and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "id parameter is required (numeric)"
+        })),
+    };
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    match repo.revoke_counterparty(id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"revoked": 1, "id": id})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
+/// GET /domain/permissions/counterparty?domain=X[&includeRevoked=true]
+pub async fn list_counterparty_permissions(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+    let domain = match query.get("domain") {
+        Some(d) => d,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "domain parameter is required"})),
+    };
+    let include_revoked = query.get("includeRevoked").map(|v| v == "true").unwrap_or(false);
+
+    let db = state.database.lock().unwrap();
+    let repo = crate::database::DomainPermissionRepository::new(db.connection());
+    let perm = match repo.get_by_domain(state.current_user_id, domain) {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(serde_json::json!({"permissions": []})),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    };
+    let dp_id = perm.id.unwrap();
+    let rows = if include_revoked {
+        repo.list_counterparties_all(dp_id)
+    } else {
+        repo.list_counterparties(dp_id)
+    };
+    match rows {
+        Ok(perms) => {
+            let items: Vec<_> = perms.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "counterparty": p.counterparty,
+                "expiresAt": p.expires_at,
+                "revokedAt": p.revoked_at,
+                "createdAt": p.created_at,
+            })).collect();
+            HttpResponse::Ok().json(serde_json::json!({"permissions": items, "count": items.len()}))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Database error: {}", e)
+        })),
+    }
+}
+
 // NOTE: Adblock per-site toggle handlers were removed — per-site adblock settings
 // now live in C++ AdblockCache (JSON file in profile dir).
 
