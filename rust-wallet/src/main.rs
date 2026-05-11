@@ -783,6 +783,9 @@ async fn main() -> std::io::Result<()> {
             .route("/decrypt", web::post().to(handlers::decrypt))
             .route("/verifySignature", web::post().to(handlers::verify_signature))
             .route("/createSignature", web::post().to(handlers::create_signature))
+            // BRC-72 key linkage revelation (Phase 1.5 Step 1)
+            .route("/revealCounterpartyKeyLinkage", web::post().to(handlers::reveal_counterparty_key_linkage))
+            .route("/revealSpecificKeyLinkage", web::post().to(handlers::reveal_specific_key_linkage))
             // createAction needs large payload support for inputBEEF (100MB limit)
             .service(
                 web::resource("/createAction")

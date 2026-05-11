@@ -310,17 +310,27 @@ Run BEFORE the architectural work below. Risk-free UI polish that:
 
 **Sizing: ~1 day.** Lower-risk than the architectural steps; should land cleanly before Step 1 starts.
 
-### Step 1 — Missing handlers + privacy-perimeter overlays
+### Step 1 — Missing handlers + privacy-perimeter overlays ✅ LANDED 2026-05-11
 
-- `crypto/key_linkage.rs` + 2 handlers + 2 routes.
-- New overlays: `IdentityKeyRevealOverlayRoot`, `KeyLinkageRevealOverlayRoot` (Win + Mac).
-- Hard-code "always prompt" — no engine integration yet.
+- `crypto/key_linkage.rs` + 2 handlers (`reveal_counterparty_key_linkage`, `reveal_specific_key_linkage`) + 2 routes registered in Identity group.
+- **No new overlays** — `identity_key_reveal` + `key_linkage_reveal` are new type cases on the existing shared `notification_browser_` overlay (multiplexed via `BRC100AuthOverlayRoot.tsx` type dispatch). Saved ~4 Win+Mac creation paths vs the original draft.
+- Privacy-perimeter prompt-trigger gate added to `Open()` AND `startAsyncHTTPRequest` (safety net for drain-forwarded siblings). `get_public_key` gate accepts either `X-Identity-Key-Approved` header or persistent `identity_key_disclosure_allowed` column.
+- **V17 migration pulled forward from Step 2** (single column: `domain_permissions.identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 0`) so the "Always allow for this site" UX is persistent from day one. Step 2's schema work renumbers to V18+.
+- **Bundled identity-key checkbox on `domain_approval` modal** (default ON, "Allow this site to identify you") wires through both simple and advanced approval flows. Unchecking surfaces the privacy-perimeter prompt as a clean second step via the safety-net gate.
+- **Drain bug fixed:** `add_domain_permission` + `add_domain_permission_advanced` were discarding queued sibling requests instead of forwarding them, leaving page promises hanging on multi-call connect flows (teragun.com pattern). Both now forward via `ForwardPendingWalletRequest`.
+- **macOS parity:** no platform-specific code; doc updated at `MACOS_PARITY_ANALYSIS.md`. Smoke pending sprint-end batch per `project_phase15_step0_completed.md`.
 
-**Test:** test page calls `/revealCounterpartyKeyLinkage`; prompt fires on Win and Mac; on approve, encrypted linkage returns; on deny, typed error returns. `getPublicKey({ identityKey: true })` now prompts where it was silent before.
+**Verified smoke (Win):** Bundle-approve flow ✅. Unchecked-bundle triggers second prompt ✅. Persistence across restart ✅. BRC-121 gold pill animation non-regression ✅.
+
+**Deferred to Step 5 per user direction:**
+- Info icon + "identify you across the Metanet" tooltip on all surfaces
+- Identity-key approval column in `ApprovedSitesTab` list
+- Binary identity-key toggle in `DomainPermissionForm` (simplified from the ratified tri-state since "Block" doesn't make sense if the site is otherwise approved)
+- Default identity-key toggle in "Default Limits for New Sites" section
 
 ### Step 2 — DB schema (after walkthrough + approval)
 
-- Migration V25 with the three new child tables + the `sensitivity` column.
+- **Migration V18** (not V25 — actual schema state was V16 pre-Step-1; Step 1 pulled V17 forward) adding three new child tables of `domain_permissions`: `domain_protocol_permissions`, `domain_basket_permissions`, `domain_counterparty_permissions`. **Sensitivity column dropped** per `feedback_simplify_sensitivity_classifier.md` — replaced by per-domain disclosure permissions.
 - New repos following existing pattern (`domain_protocol_permission_repo.rs`, etc.) or one combined permission repo file.
 - No handler changes yet — repos isolated.
 
@@ -513,9 +523,15 @@ These need user direction before Step 0/1 ships, but can be reviewed in parallel
 - [x] `PERMISSION_UX_DESIGN.md` written (then trimmed)
 - [x] User reviewed open questions
 - [x] Existing infrastructure mapped and acknowledged
-- [ ] DB schema table-by-table walkthrough + approval
-- [ ] `expires_at` default confirmed
-- [ ] Implementation begins (Step 1 first)
+- [x] **Step 0 landed (2026-05-10):** Cosmetic pre-flight + payment animation chain fix. Commit `2134234`.
+- [x] **Step 1 landed (2026-05-11):** Privacy-perimeter handlers + bundled identity-key approval + V17 migration. Smoke validated on Win; Mac smoke deferred to sprint-end batch.
+- [ ] Step 2 — DB schema (three child tables, V18). Kickoff in progress.
+- [ ] Step 3 — Permission engine (C++).
+- [ ] Step 4 — Manifest fetcher.
+- [ ] Step 5 — Extend existing UI (carries the deferred Step 1 UX work: info icon, list column, form toggle, default setting).
+- [ ] Step 6 — Rewire existing handlers through the engine.
+- [ ] Step 7 — Demo prep.
+- [ ] `expires_at` default confirmed for Step 2 child tables.
 
 ---
 

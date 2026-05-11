@@ -893,6 +893,13 @@ impl WalletDatabase {
             info!("   ✅ Schema V16 applied");
         }
 
+        if current_version < 17 {
+            info!("   Applying migration V17 (identity_key_disclosure_allowed)...");
+            migrations::migrate_v16_to_v17(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (17)", [])?;
+            info!("   ✅ Schema V17 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

@@ -237,8 +237,19 @@ pub async fn get_version(_body: web::Bytes) -> HttpResponse {
 // /getPublicKey - BRC-100 endpoint
 // Returns the master identity key when identityKey=true or no protocol params,
 // otherwise derives a child public key using BRC-42 key derivation.
+//
+// Phase 1.5 Step 1 privacy perimeter:
+// Requests from external sites (X-Requesting-Domain present) that ask for the
+// raw identity key (identityKey=true OR a getPublicKey call with no protocol
+// params, which the existing code already routes to the master key path) return
+// a structured `identity_key_prompt_required` error so the C++ layer can fire
+// the `identity_key_reveal` prompt. After user approval, C++ replays the
+// request with `X-Identity-Key-Approved: true` and Rust passes through.
+// Internal requests (no domain header — wallet UI, header-bar bootstrap) bypass
+// the gate entirely. Persistent "Always allow" storage lands in Step 2.
 pub async fn get_public_key(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /getPublicKey called");
@@ -276,8 +287,72 @@ pub async fn get_public_key(
     };
     drop(db);
 
+    // Phase 1.5 Step 1 privacy-perimeter gate: external sites cannot silently
+    // pull the master identity key.
+    //
+    // Triggers on the EXACT codepath that today returns the master pubkey:
+    // identityKey=true OR (no protocolID) OR (no keyID). For derived child keys
+    // (the BRC-42 path below) we let the existing domain-approval check fire
+    // when those endpoints are routed through createHmac/createSignature/etc.;
+    // raw getPublicKey for a derived (counterparty + protocol + keyID) tuple
+    // does not by itself expose the identity key, so it stays silent.
+    //
+    // The gate passes when ANY of the following is true:
+    //   1. No X-Requesting-Domain header (internal call from wallet UI).
+    //   2. X-Identity-Key-Approved: true header (C++ pre-approved this request
+    //      via the in-memory IdentityKeyApprovalCache that holds the user's
+    //      one-shot or session-scoped approval).
+    //   3. domain_permissions.identity_key_disclosure_allowed = 1 for this
+    //      domain (persistent grant from the domain_approval checkbox).
+    let wants_identity_key = identity_key || protocol_id.is_none() || key_id.is_none();
+    if wants_identity_key {
+        let requesting_domain = http_req
+            .headers()
+            .get("X-Requesting-Domain")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let pre_approved_header = http_req
+            .headers()
+            .get("X-Identity-Key-Approved")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if let Some(ref domain) = requesting_domain {
+            // Check the persistent grant column. We re-lock the DB briefly here
+            // because the earlier `db` lock was dropped above.
+            let persistent_grant = {
+                let db = state.database.lock().unwrap();
+                let repo = crate::database::DomainPermissionRepository::new(db.connection());
+                match repo.get_by_domain(state.current_user_id, domain) {
+                    Ok(Some(perm)) => perm.identity_key_disclosure_allowed,
+                    _ => false,
+                }
+            };
+
+            if !pre_approved_header && !persistent_grant {
+                log::warn!(
+                    "🛡️ /getPublicKey identityKey-style request from external domain '{}' — returning identity_key_prompt_required so C++ can fire the privacy-perimeter prompt",
+                    domain
+                );
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "identity_key_prompt_required",
+                    "code": "ERR_IDENTITY_KEY_PROMPT_REQUIRED",
+                    "domain": domain,
+                }));
+            }
+            log::info!(
+                "🛡️ /getPublicKey identityKey-style request from '{}' approved (header={}, db={}) — passing through",
+                domain, pre_approved_header, persistent_grant,
+            );
+        }
+        // No X-Requesting-Domain header = internal call (wallet UI etc.) — silent pass-through.
+    }
+
     // If identityKey=true or no protocol params, return master identity key
-    if identity_key || protocol_id.is_none() || key_id.is_none() {
+    if wants_identity_key {
         let master_pubkey_hex = hex::encode(&master_pubkey);
         log::info!("   Returning MASTER identity key: {}", master_pubkey_hex);
         return HttpResponse::Ok().json(serde_json::json!({
@@ -1872,6 +1947,381 @@ pub async fn decrypt(
     log::info!("   ✅ Decrypted {} bytes -> {} bytes", ciphertext_bytes.len(), plaintext.len());
 
     HttpResponse::Ok().json(DecryptResponse { plaintext })
+}
+
+// ============================================================================
+// BRC-72 style key linkage revelation handlers (Phase 1.5 Step 1)
+// ============================================================================
+
+// Request structure for /revealCounterpartyKeyLinkage
+#[derive(Debug, Deserialize)]
+pub struct RevealCounterpartyKeyLinkageRequest {
+    pub counterparty: serde_json::Value, // hex pubkey (NOT 'self'; 'anyone' allowed)
+    pub verifier: String,                // hex pubkey of the verifier
+    pub privileged: Option<bool>,
+    #[serde(rename = "privilegedReason")]
+    pub privileged_reason: Option<String>,
+}
+
+// Request structure for /revealSpecificKeyLinkage
+#[derive(Debug, Deserialize)]
+pub struct RevealSpecificKeyLinkageRequest {
+    pub counterparty: serde_json::Value, // hex pubkey, 'self', or 'anyone'
+    pub verifier: String,
+    #[serde(rename = "protocolID")]
+    pub protocol_id: serde_json::Value, // [level, name] OR string
+    #[serde(rename = "keyID")]
+    pub key_id: String,
+    pub privileged: Option<bool>,
+    #[serde(rename = "privilegedReason")]
+    pub privileged_reason: Option<String>,
+}
+
+/// /revealCounterpartyKeyLinkage - BRC-72 counterparty linkage revelation
+///
+/// Mirrors @bsv/sdk ProtoWallet.revealCounterpartyKeyLinkage. Returns the
+/// 33-byte compressed ECDH shared secret between our master key and the
+/// counterparty's public key, encrypted to the verifier via BRC-2 under
+/// protocolID `[2, "counterparty linkage revelation"]` and keyID = revelationTime.
+///
+/// **Phase 1.5 Step 1 deferral:** the canonical SDK packages a Schnorr DLEQ
+/// proof into `encryptedLinkageProof`. We emit the same `[0]` no-proof marker
+/// the SDK uses for `revealSpecificKeyLinkage`; full Schnorr proof generation
+/// is deferred to a later phase. Clients that require a verifiable proof must
+/// handle the `[0]` marker as "proof omitted" until then.
+pub async fn reveal_counterparty_key_linkage(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 /revealCounterpartyKeyLinkage called");
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let req: RevealCounterpartyKeyLinkageRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   JSON parse error: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid JSON: {}", e)
+            }));
+        }
+    };
+
+    // Forbid counterparty='self' per the @bsv/sdk KeyDeriver contract.
+    if let serde_json::Value::String(s) = &req.counterparty {
+        if s == "self" {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Counterparty secrets cannot be revealed for counterparty='self'"
+            }));
+        }
+    }
+
+    // Validate verifier as a hex pubkey we can encrypt to.
+    let verifier_pubkey = match hex::decode(&req.verifier) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        Ok(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "verifier must be 33-byte compressed public key (hex)"
+        })),
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid verifier hex: {}", e)
+        })),
+    };
+
+    // Fetch our master keys.
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to get master private key: {}", e)
+        })),
+    };
+    let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to get master public key: {}", e)
+        })),
+    };
+    drop(db);
+
+    // Resolve counterparty to a 33-byte pubkey.
+    let counterparty_opt = Some(req.counterparty.clone());
+    let counterparty_pubkey = match resolve_counterparty_pubkey(&counterparty_opt, &master_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid counterparty: {}", e)
+        })),
+    };
+
+    // Reject self-equivalent counterparty even when expressed as our own pubkey hex.
+    if counterparty_pubkey == master_pubkey {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Counterparty secrets cannot be revealed for counterparty='self'"
+        }));
+    }
+
+    // Compute the linkage value (33-byte compressed ECDH shared secret).
+    let linkage = match crate::crypto::key_linkage::compute_counterparty_linkage(
+        &master_privkey,
+        &counterparty_pubkey,
+    ) {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Linkage derivation failed: {}", e)
+        })),
+    };
+
+    // Schnorr DLEQ proof is deferred (see fn doc comment).
+    // Match the SDK's `[0]` no-proof marker convention from revealSpecificKeyLinkage.
+    let linkage_proof_placeholder: Vec<u8> = vec![0u8];
+
+    let revelation_time = chrono::Utc::now()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    // Encrypt linkage and proof to the verifier under BRC-2 with the canonical invoice.
+    let invoice_protocol = "counterparty linkage revelation";
+    let invoice = match InvoiceNumber::new(SecurityLevel::CounterpartyLevel, invoice_protocol, &revelation_time) {
+        Ok(inv) => inv,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Invoice number construction failed: {}", e)
+        })),
+    };
+    let invoice_number = invoice.to_string();
+
+    let symmetric_key = match derive_symmetric_key(&master_privkey, &verifier_pubkey, &invoice_number) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Symmetric key derivation failed: {}", e)
+        })),
+    };
+
+    let encrypted_linkage = match encrypt_brc2(&linkage, &symmetric_key) {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Linkage encryption failed: {}", e)
+        })),
+    };
+
+    let encrypted_linkage_proof = match encrypt_brc2(&linkage_proof_placeholder, &symmetric_key) {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Proof encryption failed: {}", e)
+        })),
+    };
+
+    let prover_hex = hex::encode(&master_pubkey);
+    let counterparty_hex = hex::encode(&counterparty_pubkey);
+
+    log::info!(
+        "   ✅ Counterparty linkage revealed: prover={} verifier={} counterparty={} linkage_bytes={} proof_bytes={}",
+        &prover_hex[..16],
+        &req.verifier[..req.verifier.len().min(16)],
+        &counterparty_hex[..16],
+        encrypted_linkage.len(),
+        encrypted_linkage_proof.len(),
+    );
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "prover": prover_hex,
+        "verifier": req.verifier,
+        "counterparty": counterparty_hex,
+        "revelationTime": revelation_time,
+        "encryptedLinkage": encrypted_linkage,
+        "encryptedLinkageProof": encrypted_linkage_proof,
+    }))
+}
+
+/// /revealSpecificKeyLinkage - BRC-72 per-invoice linkage revelation
+///
+/// Mirrors @bsv/sdk ProtoWallet.revealSpecificKeyLinkage. Returns the
+/// HMAC-SHA256(sharedSecret, invoiceNumber) value (32 bytes) encrypted to the
+/// verifier via BRC-2 under protocolID
+/// `[2, "specific linkage revelation {level} {name}"]` and keyID = the request's keyID.
+///
+/// `encryptedLinkageProof` is the encrypted `[0]` no-proof marker; `proofType: 0`.
+pub async fn reveal_specific_key_linkage(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Bytes,
+) -> HttpResponse {
+    log::info!("📋 /revealSpecificKeyLinkage called");
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let req: RevealSpecificKeyLinkageRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   JSON parse error: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid JSON: {}", e)
+            }));
+        }
+    };
+
+    // Validate verifier as a hex pubkey we can encrypt to.
+    let verifier_pubkey = match hex::decode(&req.verifier) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        Ok(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "verifier must be 33-byte compressed public key (hex)"
+        })),
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid verifier hex: {}", e)
+        })),
+    };
+
+    // Parse protocolID into (security_level, name).
+    let (security_level, protocol_name) = match &req.protocol_id {
+        serde_json::Value::Array(arr) if arr.len() >= 2 => {
+            let level = arr[0].as_u64().unwrap_or(2) as u8;
+            let name = arr[1].as_str().unwrap_or("unknown").to_string();
+            (level, name)
+        }
+        serde_json::Value::String(s) => {
+            if let Some(idx) = s.find('-') {
+                let level = s[..idx].parse::<u8>().unwrap_or(2);
+                (level, s[idx + 1..].to_string())
+            } else {
+                (2, s.clone())
+            }
+        }
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "protocolID must be array or string"
+        })),
+    };
+
+    let protocol_name_normalized = match normalize_protocol_id(&protocol_name) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid protocolID: {}", e)
+        })),
+    };
+
+    // Fetch our master keys.
+    let db = state.database.lock().unwrap();
+    let master_privkey = match crate::database::get_master_private_key_from_db(&db) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to get master private key: {}", e)
+        })),
+    };
+    let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to get master public key: {}", e)
+        })),
+    };
+    drop(db);
+
+    // Resolve counterparty to a 33-byte pubkey (allows 'self' / 'anyone' per SDK).
+    let counterparty_opt = Some(req.counterparty.clone());
+    let counterparty_pubkey = match resolve_counterparty_pubkey(&counterparty_opt, &master_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid counterparty: {}", e)
+        })),
+    };
+    let counterparty_hex = hex::encode(&counterparty_pubkey);
+
+    // Build BRC-43 invoice number "{level}-{protocol}-{keyID}" for the linkage HMAC.
+    let security = match security_level {
+        0 => SecurityLevel::NoPermissions,
+        1 => SecurityLevel::ProtocolLevel,
+        _ => SecurityLevel::CounterpartyLevel,
+    };
+    let linkage_invoice = match InvoiceNumber::new(security, &protocol_name_normalized, &req.key_id) {
+        Ok(inv) => inv,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid invoice number: {}", e)
+        })),
+    };
+
+    let linkage = match crate::crypto::key_linkage::compute_specific_linkage(
+        &master_privkey,
+        &counterparty_pubkey,
+        &linkage_invoice.to_string(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Linkage derivation failed: {}", e)
+        })),
+    };
+
+    // Encrypt linkage to the verifier with the canonical revelation invoice.
+    let revelation_protocol = format!("specific linkage revelation {} {}", security_level, protocol_name_normalized);
+    let revelation_invoice = match InvoiceNumber::new(
+        SecurityLevel::CounterpartyLevel,
+        &revelation_protocol,
+        &req.key_id,
+    ) {
+        Ok(inv) => inv,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Revelation invoice failed: {}", e)
+        })),
+    };
+    let revelation_invoice_str = revelation_invoice.to_string();
+
+    let symmetric_key = match derive_symmetric_key(&master_privkey, &verifier_pubkey, &revelation_invoice_str) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Symmetric key derivation failed: {}", e)
+        })),
+    };
+
+    let encrypted_linkage = match encrypt_brc2(&linkage, &symmetric_key) {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Linkage encryption failed: {}", e)
+        })),
+    };
+
+    // Proof type 0 = no proof, matching @bsv/sdk.
+    let proof_placeholder: Vec<u8> = vec![0u8];
+    let encrypted_linkage_proof = match encrypt_brc2(&proof_placeholder, &symmetric_key) {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Proof encryption failed: {}", e)
+        })),
+    };
+
+    let prover_hex = hex::encode(&master_pubkey);
+
+    log::info!(
+        "   ✅ Specific linkage revealed: prover={} verifier={} counterparty={} invoice={} linkage_bytes={}",
+        &prover_hex[..16],
+        &req.verifier[..req.verifier.len().min(16)],
+        &counterparty_hex[..16],
+        revelation_invoice_str,
+        encrypted_linkage.len(),
+    );
+
+    // Preserve original protocolID shape in response (array or string).
+    let protocol_id_response = match &req.protocol_id {
+        serde_json::Value::Array(_) => serde_json::json!([security_level, protocol_name_normalized]),
+        _ => serde_json::json!(format!("{}-{}", security_level, protocol_name_normalized)),
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "prover": prover_hex,
+        "verifier": req.verifier,
+        "counterparty": counterparty_hex,
+        "protocolID": protocol_id_response,
+        "keyID": req.key_id,
+        "encryptedLinkage": encrypted_linkage,
+        "encryptedLinkageProof": encrypted_linkage_proof,
+        "proofType": 0,
+    }))
 }
 
 // Wallet status endpoint
@@ -9204,6 +9654,10 @@ pub struct SetDomainPermissionRequest {
     pub per_session_limit_cents: Option<i64>,
     pub rate_limit_per_min: Option<i64>,
     pub max_tx_per_session: Option<i64>,
+    /// Phase 1.5 Step 1 — when ticked at domain approval time (default ON),
+    /// getPublicKey({identityKey:true}) from this domain bypasses the
+    /// privacy-perimeter prompt. None = leave existing value untouched.
+    pub identity_key_disclosure_allowed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9241,6 +9695,7 @@ pub async fn get_domain_permission(
             "perSessionLimitCents": perm.per_session_limit_cents,
             "rateLimitPerMin": perm.rate_limit_per_min,
             "maxTxPerSession": perm.max_tx_per_session,
+            "identityKeyDisclosureAllowed": perm.identity_key_disclosure_allowed,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
@@ -9308,6 +9763,15 @@ pub async fn set_domain_permission(
     if let Some(v) = req.max_tx_per_session {
         perm.max_tx_per_session = v;
     }
+    // Preserve existing identity_key_disclosure_allowed if the request omits it
+    // (None), so unrelated PUTs to the same row don't accidentally re-enable the
+    // privacy-perimeter prompt. If the row didn't exist yet, defaults() already
+    // set false.
+    if let Some(v) = req.identity_key_disclosure_allowed {
+        perm.identity_key_disclosure_allowed = v;
+    } else if let Ok(Some(existing)) = repo.get_by_domain(state.current_user_id, &req.domain) {
+        perm.identity_key_disclosure_allowed = existing.identity_key_disclosure_allowed;
+    }
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response
@@ -9320,6 +9784,7 @@ pub async fn set_domain_permission(
                     "perSessionLimitCents": saved.per_session_limit_cents,
                     "rateLimitPerMin": saved.rate_limit_per_min,
                     "maxTxPerSession": saved.max_tx_per_session,
+                    "identityKeyDisclosureAllowed": saved.identity_key_disclosure_allowed,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
                 })),
@@ -9426,6 +9891,7 @@ pub async fn list_domain_permissions(
                     "perSessionLimitCents": p.per_session_limit_cents,
                     "rateLimitPerMin": p.rate_limit_per_min,
                     "maxTxPerSession": p.max_tx_per_session,
+                    "identityKeyDisclosureAllowed": p.identity_key_disclosure_allowed,
                     "createdAt": p.created_at,
                     "updatedAt": p.updated_at,
                     "certFieldPermissions": cert_fields,

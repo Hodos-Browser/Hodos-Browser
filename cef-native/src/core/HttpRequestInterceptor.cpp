@@ -60,6 +60,10 @@ public:
         int64_t rateLimitPerMin = 30;
         int64_t maxTxPerSession = 100;       // max transactions per session
         bool adblockEnabled = true;     // Per-site ad blocking toggle (Sprint 8c)
+        // Phase 1.5 Step 1 — persistent grant from the domain_approval
+        // "Allow this site to identify you" checkbox. Default false; set
+        // alongside trust_level=approved when user ticks the box.
+        bool identityKeyDisclosureAllowed = false;
     };
 
     static DomainPermissionCache& GetInstance() {
@@ -177,6 +181,7 @@ private:
             result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)30);
             result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
+            result.identityKeyDisclosureAllowed = json.value("identityKeyDisclosureAllowed", false);
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("🔒 Failed to parse domain permission response: " + std::string(e.what()));
         }
@@ -200,6 +205,7 @@ private:
             result.rateLimitPerMin = json.value("rateLimitPerMin", (int64_t)30);
             result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
+            result.identityKeyDisclosureAllowed = json.value("identityKeyDisclosureAllowed", false);
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("Failed to parse domain permission response: " + std::string(e.what()));
         }
@@ -669,6 +675,73 @@ private:
     std::set<std::string> shownDomains_;
 };
 
+// Phase 1.5 Step 1 -- in-memory "Always allow for this site" caches for the two
+// new privacy-perimeter prompt types. Step 2 will replace these with SQLite
+// columns on the domain_permissions row (or a parallel child table). For Step
+// 1 the cache is process-lifetime only; on browser restart the user re-prompts.
+class IdentityKeyApprovalCache {
+public:
+    static IdentityKeyApprovalCache& GetInstance() {
+        static IdentityKeyApprovalCache instance;
+        return instance;
+    }
+    bool isApproved(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return approved_.count(domain) > 0;
+    }
+    void approve(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        approved_.insert(domain);
+    }
+    void revoke(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        approved_.erase(domain);
+    }
+private:
+    IdentityKeyApprovalCache() = default;
+    std::mutex mutex_;
+    std::set<std::string> approved_;
+};
+
+class KeyLinkageApprovalCache {
+public:
+    static KeyLinkageApprovalCache& GetInstance() {
+        static KeyLinkageApprovalCache instance;
+        return instance;
+    }
+    bool isApproved(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return approved_.count(domain) > 0;
+    }
+    void approve(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        approved_.insert(domain);
+    }
+    void revoke(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        approved_.erase(domain);
+    }
+private:
+    KeyLinkageApprovalCache() = default;
+    std::mutex mutex_;
+    std::set<std::string> approved_;
+};
+
+// Thin entry points for simple_handler.cpp's IPC dispatchers (declared in
+// include/core/HttpRequestInterceptor.h).
+void MarkIdentityKeyRevealApproved(const std::string& domain) {
+    IdentityKeyApprovalCache::GetInstance().approve(domain);
+}
+void MarkKeyLinkageRevealApproved(const std::string& domain) {
+    KeyLinkageApprovalCache::GetInstance().approve(domain);
+}
+
+// Forward declared in HttpRequestInterceptor.h; implementation here since
+// AsyncWalletResourceHandler and StartAsyncHTTPRequestTask are file-local
+// to this translation unit. See header docstring for usage and rationale.
+// Note: defined here forward-only because both classes are declared later
+// in the file; we use a separate translation-unit-internal trampoline.
+
 
 // Async Resource Handler for managing wallet HTTP requests
 class AsyncWalletResourceHandler : public CefResourceHandler {
@@ -859,6 +932,65 @@ public:
     }
 
 
+    // Phase 1.5 Step 1 — privacy-perimeter prompt triggers (identity key + key linkage).
+    // Mirror triggerCertificateDisclosureModal: store pending request keyed to this
+    // handler, then post CreateNotificationOverlayTask with a new type string. The
+    // shared notification_browser_ overlay multiplexes on `type` query param so no
+    // new HWND / NSPanel creation paths are needed Win-side or Mac-side.
+
+    void triggerIdentityKeyRevealModal(const std::string& domain) {
+        LOG_DEBUG_HTTP("🛡️ Triggering identity_key_reveal for " + domain);
+
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method_, endpoint_, body_, this, "identity_key_reveal");
+
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("identity_key_reveal", domain));
+        LOG_DEBUG_HTTP("🛡️ identity_key_reveal notification queued (requestId: " + requestId + ")");
+    }
+
+    void triggerKeyLinkageRevealModal(const std::string& domain, const std::string& endpoint, const std::string& body) {
+        LOG_DEBUG_HTTP("🛡️ Triggering key_linkage_reveal for " + domain + " endpoint=" + endpoint);
+
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method_, endpoint_, body_, this, "key_linkage_reveal");
+
+        // Verifier + linkage kind + (specific) protocol/keyID — best-effort body parse.
+        std::string verifier;
+        std::string linkageKind = (endpoint.find("/revealSpecificKeyLinkage") != std::string::npos)
+            ? "specific" : "counterparty";
+        std::string protocolName;
+        std::string keyId;
+        if (!body.empty()) {
+            try {
+                auto json = nlohmann::json::parse(body);
+                if (json.contains("verifier") && json["verifier"].is_string()) {
+                    verifier = json["verifier"].get<std::string>();
+                }
+                if (json.contains("keyID") && json["keyID"].is_string()) {
+                    keyId = json["keyID"].get<std::string>();
+                }
+                if (json.contains("protocolID")) {
+                    auto& pid = json["protocolID"];
+                    if (pid.is_array() && pid.size() >= 2 && pid[1].is_string()) {
+                        protocolName = pid[1].get<std::string>();
+                    } else if (pid.is_string()) {
+                        protocolName = pid.get<std::string>();
+                    }
+                }
+            } catch (...) {
+                // Body unparseable — that's fine; React copy degrades gracefully.
+            }
+        }
+
+        std::string extraParams = "&kind=" + linkageKind;
+        if (!verifier.empty())     extraParams += "&verifier=" + urlEncode(verifier);
+        if (!protocolName.empty()) extraParams += "&protocol=" + urlEncode(protocolName);
+        if (!keyId.empty())        extraParams += "&keyID=" + urlEncode(keyId);
+
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask("key_linkage_reveal", domain, extraParams));
+        LOG_DEBUG_HTTP("🛡️ key_linkage_reveal notification queued (requestId: " + requestId + ", kind=" + linkageKind + ")");
+    }
+
     // Trigger payment confirmation notification overlay with limit context
     void triggerPaymentConfirmationModal(const std::string& domain, int64_t satoshis, int64_t cents, double bsvPrice,
                                           const std::string& exceededLimit, int64_t perTxLimit, int64_t perSessionLimit, int64_t sessionSpent) {
@@ -892,6 +1024,39 @@ public:
     // Check if endpoint is proveCertificate (identity field disclosure)
     static bool isProveCertificateEndpoint(const std::string& endpoint) {
         return endpoint.find("/proveCertificate") != std::string::npos;
+    }
+
+    // Phase 1.5 Step 1 — privacy-perimeter endpoint checks.
+    static bool isGetPublicKeyEndpoint(const std::string& endpoint) {
+        return endpoint.find("/getPublicKey") != std::string::npos;
+    }
+
+    static bool isKeyLinkageEndpoint(const std::string& endpoint) {
+        return endpoint.find("/revealCounterpartyKeyLinkage") != std::string::npos
+            || endpoint.find("/revealSpecificKeyLinkage") != std::string::npos;
+    }
+
+    // True iff the /getPublicKey body would route through the master-identity-key
+    // codepath in handlers.rs (identityKey=true OR missing protocolID OR missing keyID).
+    static bool isIdentityKeyStyleGetPublicKey(const std::string& body) {
+        if (body.empty()) {
+            return true; // empty body → identity key
+        }
+        try {
+            auto json = nlohmann::json::parse(body);
+            bool identityKeyFlag = json.contains("identityKey") && json["identityKey"].is_boolean() && json["identityKey"].get<bool>();
+            bool hasProtocolId = json.contains("protocolID") && !json["protocolID"].is_null();
+            bool hasKeyId = json.contains("keyID")
+                          && json["keyID"].is_string()
+                          && !json["keyID"].get<std::string>().empty();
+            if (identityKeyFlag) return true;
+            if (!hasProtocolId || !hasKeyId) return true;
+            return false;
+        } catch (...) {
+            // If we can't parse, err on the safe side -- treat as identity-key request
+            // so the prompt fires (Rust would reject malformed JSON anyway).
+            return true;
+        }
     }
 
     // Parse request body JSON and sum outputs[].satoshis
@@ -1020,6 +1185,13 @@ private:
     int64_t preCalculatedCents_ = 0;
     bool wasAutoApprovedPayment_ = false;
 
+    // Phase 1.5 Step 1 — privacy-perimeter pre-approval flags. Set in Open() when
+    // the per-domain "Always allow" cache hit lets us skip the prompt; consumed in
+    // startAsyncHTTPRequest() to inject the corresponding pre-approval header so
+    // Rust's defense-in-depth gate passes through silently.
+    bool identityKeyApproved_ = false;
+    bool keyLinkageApproved_ = false;
+
     // Browser reference for modal triggering
     CefRefPtr<CefBrowser> browser_;
 
@@ -1111,6 +1283,50 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     // "approved" — auto-approve engine with spending limits and rate limiting
     if (perm.trustLevel == "approved") {
         LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is approved, checking spending limits");
+
+        // Phase 1.5 Step 1 -- privacy-perimeter check #1: identity-key reveal.
+        // Intercept /getPublicKey requests whose body would return the master
+        // identity key, regardless of domain approval, unless this site has the
+        // "Always allow" opt-in -- either via the persistent column populated
+        // from the domain_approval checkbox (perm.identityKeyDisclosureAllowed)
+        // or the in-memory session cache used as a transient fallback while
+        // the DB write is in flight.
+        if (isGetPublicKeyEndpoint(endpoint_) && isIdentityKeyStyleGetPublicKey(body_)) {
+            bool persistent_grant = perm.identityKeyDisclosureAllowed;
+            bool cache_grant = IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_);
+            if (persistent_grant || cache_grant) {
+                LOG_DEBUG_HTTP("🛡️ identity-key reveal silently approved for " + requestDomain_
+                               + " (db=" + (persistent_grant ? "1" : "0")
+                               + ", cache=" + (cache_grant ? "1" : "0") + ")");
+                identityKeyApproved_ = true;
+                handle_request = true;
+                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+                return true;
+            }
+            LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
+            triggerIdentityKeyRevealModal(requestDomain_);
+            postAuthTimeout(60000, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
+            handle_request = true;
+            return true;
+        }
+
+        // Phase 1.5 Step 1 -- privacy-perimeter check #2: key linkage reveal.
+        // /revealCounterpartyKeyLinkage and /revealSpecificKeyLinkage are always
+        // privacy-perimeter, never silent-pass without the cached opt-in.
+        if (isKeyLinkageEndpoint(endpoint_)) {
+            if (KeyLinkageApprovalCache::GetInstance().isApproved(requestDomain_)) {
+                LOG_DEBUG_HTTP("🛡️ key-linkage reveal silently approved for " + requestDomain_ + " (cached opt-in)");
+                keyLinkageApproved_ = true;
+                handle_request = true;
+                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+                return true;
+            }
+            LOG_DEBUG_HTTP("🛡️ key-linkage reveal prompt required for " + requestDomain_);
+            triggerKeyLinkageRevealModal(requestDomain_, endpoint_, body_);
+            postAuthTimeout(60000, "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
+            handle_request = true;
+            return true;
+        }
 
         // Certificate disclosure check — intercept proveCertificate BEFORE the payment check
         if (isProveCertificateEndpoint(endpoint_)) {
@@ -1377,8 +1593,8 @@ private:
 // Task class for creating domain permission request on UI thread
 class DomainPermissionTask : public CefTask {
 public:
-    explicit DomainPermissionTask(const std::string& domain)
-        : domain_(domain) {}
+    DomainPermissionTask(const std::string& domain, bool identityKeyDisclosureAllowed = false)
+        : domain_(domain), identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed) {}
 
     void Execute() override {
         LOG_DEBUG_HTTP("🔐 DomainPermissionTask executing on UI thread for domain: " + domain_);
@@ -1389,8 +1605,12 @@ public:
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
-        // Create JSON body
-        std::string jsonBody = "{\"domain\":\"" + domain_ + "\",\"trustLevel\":\"approved\"}";
+        // Create JSON body — Phase 1.5 Step 1 adds identityKeyDisclosureAllowed
+        nlohmann::json bodyJson;
+        bodyJson["domain"] = domain_;
+        bodyJson["trustLevel"] = "approved";
+        bodyJson["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed_;
+        std::string jsonBody = bodyJson.dump();
         LOG_DEBUG_HTTP("🔐 Domain permission JSON body: " + jsonBody);
 
         // Create post data
@@ -1417,6 +1637,7 @@ public:
 
 private:
     std::string domain_;
+    bool identityKeyDisclosureAllowed_;
     IMPLEMENT_REFCOUNTING(DomainPermissionTask);
     DISALLOW_COPY_AND_ASSIGN(DomainPermissionTask);
 };
@@ -1426,10 +1647,12 @@ class AdvancedDomainPermissionTask : public CefTask {
 public:
     AdvancedDomainPermissionTask(const std::string& domain, int64_t perTxLimitCents,
                                   int64_t perSessionLimitCents, int64_t rateLimitPerMin,
-                                  int64_t maxTxPerSession)
+                                  int64_t maxTxPerSession,
+                                  bool identityKeyDisclosureAllowed = false)
         : domain_(domain), perTxLimitCents_(perTxLimitCents),
           perSessionLimitCents_(perSessionLimitCents), rateLimitPerMin_(rateLimitPerMin),
-          maxTxPerSession_(maxTxPerSession) {}
+          maxTxPerSession_(maxTxPerSession),
+          identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed) {}
 
     void Execute() override {
         LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
@@ -1446,6 +1669,7 @@ public:
         body["perSessionLimitCents"] = perSessionLimitCents_;
         body["rateLimitPerMin"] = rateLimitPerMin_;
         body["maxTxPerSession"] = maxTxPerSession_;
+        body["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed_;
         std::string jsonBody = body.dump();
 
         CefRefPtr<CefPostData> postData = CefPostData::Create();
@@ -1468,43 +1692,79 @@ private:
     int64_t perSessionLimitCents_;
     int64_t rateLimitPerMin_;
     int64_t maxTxPerSession_;
+    bool identityKeyDisclosureAllowed_;
     IMPLEMENT_REFCOUNTING(AdvancedDomainPermissionTask);
     DISALLOW_COPY_AND_ASSIGN(AdvancedDomainPermissionTask);
 };
 
-// Function to add domain permission with advanced settings
+// Function to add domain permission with advanced settings.
+// Phase 1.5 Step 1: identityKeyDisclosureAllowed bundles the privacy-perimeter
+// grant into the same site approval, eliminating a second prompt on first connect.
 void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCents,
                                   int64_t perSessionLimitCents, int64_t rateLimitPerMin,
-                                  int64_t maxTxPerSession) {
+                                  int64_t maxTxPerSession,
+                                  bool identityKeyDisclosureAllowed) {
     LOG_DEBUG_HTTP("🔐 Adding advanced domain permission: " + domain +
         " (tx=" + std::to_string(perTxLimitCents) + ", session=" + std::to_string(perSessionLimitCents) +
-        ", rate=" + std::to_string(rateLimitPerMin) + ", maxTxPerSession=" + std::to_string(maxTxPerSession) + ")");
+        ", rate=" + std::to_string(rateLimitPerMin) + ", maxTxPerSession=" + std::to_string(maxTxPerSession) +
+        ", identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") + ")");
 
-    // Set cache immediately with full settings
+    // Set cache immediately with full settings — synchronous, so the next request
+    // from this domain sees both "approved" trust AND the identity-key grant
+    // before the async DB write lands.
     DomainPermissionCache::Permission perm;
     perm.trustLevel = "approved";
     perm.perTxLimitCents = perTxLimitCents;
     perm.perSessionLimitCents = perSessionLimitCents;
     perm.rateLimitPerMin = rateLimitPerMin;
     perm.maxTxPerSession = maxTxPerSession;
+    perm.identityKeyDisclosureAllowed = identityKeyDisclosureAllowed;
     DomainPermissionCache::GetInstance().set(domain, perm);
 
+    // Also mirror into the session-level in-memory cache so drain-forwarded
+    // sibling requests (which bypass Open()) get the X-Identity-Key-Approved
+    // header injected by startAsyncHTTPRequest while the Rust DB write is in flight.
+    if (identityKeyDisclosureAllowed) {
+        IdentityKeyApprovalCache::GetInstance().approve(domain);
+    }
+
     // Post async DB write
-    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession));
+    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(
+        domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin,
+        maxTxPerSession, identityKeyDisclosureAllowed));
 }
 
-// Function to add domain permission (sets "approved" trust level)
-void addDomainPermission(const std::string& domain) {
-    LOG_DEBUG_HTTP("🔐 Adding domain permission: " + domain);
+// Phase 1.5 Step 1 — defined here (after AsyncWalletResourceHandler +
+// StartAsyncHTTPRequestTask are visible) so simple_handler.cpp can forward
+// pending wallet requests without needing the file-local class definitions.
+bool ForwardPendingWalletRequest(CefRefPtr<CefResourceHandler> handler) {
+    if (!handler) return false;
+    AsyncWalletResourceHandler* walletHandler =
+        static_cast<AsyncWalletResourceHandler*>(handler.get());
+    CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(walletHandler));
+    return true;
+}
+
+// Function to add domain permission (sets "approved" trust level).
+// Phase 1.5 Step 1: bundles the identity-key privacy-perimeter grant via the
+// optional second arg so the simple-approval modal can ship both grants in one click.
+void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAllowed) {
+    LOG_DEBUG_HTTP("🔐 Adding domain permission: " + domain +
+        " (identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") + ")");
 
     // Set the cache immediately so the next request sees "approved" without waiting
     // for the async DB write to complete (prevents modal loop race condition)
     DomainPermissionCache::Permission perm;
     perm.trustLevel = "approved";
+    perm.identityKeyDisclosureAllowed = identityKeyDisclosureAllowed;
     DomainPermissionCache::GetInstance().set(domain, perm);
 
+    if (identityKeyDisclosureAllowed) {
+        IdentityKeyApprovalCache::GetInstance().approve(domain);
+    }
+
     // Post task to UI thread for the async DB write
-    CefPostTask(TID_UI, new DomainPermissionTask(domain));
+    CefPostTask(TID_UI, new DomainPermissionTask(domain, identityKeyDisclosureAllowed));
     LOG_DEBUG_HTTP("🔐 Domain permission task posted to UI thread");
 }
 
@@ -1753,6 +2013,33 @@ private:
 void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     LOG_DEBUG_HTTP("🌐 Starting async HTTP request to: " + endpoint_);
 
+    // Phase 1.5 Step 1 — privacy-perimeter safety net for drain-forwarded
+    // siblings (and any other code path that lands here without going through
+    // Open()'s gate). If this is an identity-key-style /getPublicKey for an
+    // external domain that has NEITHER the persistent grant nor the in-memory
+    // cache hit, we must trigger the privacy-perimeter prompt -- forwarding
+    // the bare request to Rust would just return identity_key_prompt_required
+    // and break the page. The "unchecked bundle checkbox" flow lands here.
+    if (!requestDomain_.empty()
+        && isGetPublicKeyEndpoint(endpoint_)
+        && isIdentityKeyStyleGetPublicKey(body_)
+        && !identityKeyApproved_) {
+        bool persistent_grant =
+            DomainPermissionCache::GetInstance()
+                .getPermission(requestDomain_)
+                .identityKeyDisclosureAllowed;
+        bool cache_grant =
+            IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_);
+        if (!persistent_grant && !cache_grant) {
+            LOG_DEBUG_HTTP("🛡️ identity-key-style /getPublicKey bypassed Open() for "
+                + requestDomain_ + " (drain-forward or sibling-forward) — firing "
+                + "identity_key_reveal prompt instead of sending a doomed request to Rust");
+            triggerIdentityKeyRevealModal(requestDomain_);
+            postAuthTimeout(60000, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
+            return;
+        }
+    }
+
     // Create CEF HTTP request
     CefRefPtr<CefRequest> httpRequest = CefRequest::Create();
     std::string fullUrl = "http://localhost:31301" + endpoint_;
@@ -1767,6 +2054,21 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     // Pass the requesting domain to Rust for defense-in-depth permission checks
     if (!requestDomain_.empty()) {
         headers.insert(std::make_pair("X-Requesting-Domain", requestDomain_));
+    }
+
+    // Phase 1.5 Step 1 — propagate privacy-perimeter pre-approval to Rust.
+    // X-Identity-Key-Approved: true lets get_public_key bypass its
+    // identity_key_prompt_required gate (defense-in-depth). The header is added
+    // when EITHER (a) Open() set identityKeyApproved_ after a cache hit, OR
+    // (b) we're being forwarded via the drain-after-domain-approval path (which
+    // skips Open()) and the in-memory IdentityKeyApprovalCache already says the
+    // domain is approved. Case (b) covers the race where Rust's DB write of
+    // identity_key_disclosure_allowed hasn't landed yet.
+    bool sendIdentityKeyApproved = identityKeyApproved_
+        || (!requestDomain_.empty()
+            && IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_));
+    if (sendIdentityKeyApproved) {
+        headers.insert(std::make_pair("X-Identity-Key-Approved", "true"));
     }
 
     // Forward original headers (including BRC-31 Authrite headers)
@@ -3166,6 +3468,8 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
             url.find("/verifyHmac") != std::string::npos ||
             url.find("/encrypt") != std::string::npos ||
             url.find("/decrypt") != std::string::npos ||
+            url.find("/revealCounterpartyKeyLinkage") != std::string::npos ||
+            url.find("/revealSpecificKeyLinkage") != std::string::npos ||
             url.find("/verifySignature") != std::string::npos ||
             url.find("/getNetwork") != std::string::npos ||
             url.find("/getHeight") != std::string::npos ||

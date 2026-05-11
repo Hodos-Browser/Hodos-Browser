@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import DomainPermissionForm from '../components/DomainPermissionForm';
 import type { DomainPermissionSettings } from '../components/DomainPermissionForm';
 import { HodosButton } from '../components/HodosButton';
+import { prompt as promptTheme } from '../styles/hodosTheme';
 
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
@@ -181,6 +182,22 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [certifier, setCertifier] = useState<string>('');
   const [rememberFields, setRememberFields] = useState<boolean>(true);
 
+  // Phase 1.5 Step 1 — privacy-perimeter prompt params (identity_key_reveal,
+  // key_linkage_reveal). Step 2 wires persistence into domain_permissions;
+  // for Step 1 the "Always allow" checkbox state ships into IPC and lands in
+  // the in-memory C++ cache.
+  const [linkageKind, setLinkageKind] = useState<string>(''); // 'counterparty' | 'specific'
+  const [linkageVerifier, setLinkageVerifier] = useState<string>('');
+  const [linkageProtocol, setLinkageProtocol] = useState<string>('');
+  const [linkageKeyId, setLinkageKeyId] = useState<string>('');
+  const [rememberPrivacy, setRememberPrivacy] = useState<boolean>(false);
+
+  // Phase 1.5 Step 1 — "Allow this site to identify you" checkbox in the
+  // domain_approval modal. Defaults ON so the common case (user trusts the
+  // site enough to approve it at all) avoids a second sequential popup for
+  // the identity-key reveal. Power users can untick to keep the prompt.
+  const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(true);
+
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
     const params = new URLSearchParams(queryString);
@@ -243,6 +260,17 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const certifierParam = params.get('certifier');
     setCertifier(certifierParam || '');
     setRememberFields(true);
+
+    // Phase 1.5 Step 1 — privacy-perimeter params
+    setLinkageKind(params.get('kind') || '');
+    setLinkageVerifier(params.get('verifier') || '');
+    setLinkageProtocol(params.get('protocol') || '');
+    setLinkageKeyId(params.get('keyID') || '');
+    setRememberPrivacy(false);
+
+    // Domain-approval bundle: default identity-key allow back to ON for each
+    // fresh prompt so the toggle isn't sticky across unrelated sites.
+    setAllowIdentityKey(true);
   };
 
   useEffect(() => {
@@ -309,9 +337,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const handleAllow = () => {
     try {
       if (window.cefMessage) {
-        // Set domain permission to "approved" (sets cache + DB write)
+        // Set domain permission to "approved" (sets cache + DB write).
+        // Phase 1.5 Step 1: bundle identityKeyDisclosureAllowed via the
+        // "Allow this site to identify you" checkbox state.
         window.cefMessage.send('add_domain_permission', [
-          JSON.stringify({ domain: notificationDomain }),
+          JSON.stringify({
+            domain: notificationDomain,
+            identityKeyDisclosureAllowed: allowIdentityKey,
+          }),
         ]);
         // Tell the interceptor to forward the pending request
         window.cefMessage.send('brc100_auth_response', [
@@ -335,6 +368,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             perSessionLimitCents: settings.perSessionLimitCents,
             rateLimitPerMin: settings.rateLimitPerMin,
             maxTxPerSession: settings.maxTxPerSession,
+            identityKeyDisclosureAllowed: allowIdentityKey,
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
@@ -475,6 +509,76 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const truncatePubkey = (key: string): string => {
     if (key.length <= 16) return key;
     return key.slice(0, 8) + '...' + key.slice(-8);
+  };
+
+  // ── Phase 1.5 Step 1 privacy-perimeter handlers ──
+  // Mirror handleCert{Approve,Deny}: fire the "remember" IPC if the user
+  // checked the box, then fire brc100_auth_response to unblock the
+  // AsyncWalletResourceHandler on the C++ side. Approve replays the original
+  // request through Rust; deny returns a typed error to the page.
+
+  const handleIdentityKeyApprove = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('approve_identity_key_reveal', [
+          JSON.stringify({
+            domain: notificationDomain,
+            remember: rememberPrivacy,
+          }),
+        ]);
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: true }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error approving identity-key reveal:', error);
+    }
+  };
+
+  const handleIdentityKeyDeny = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: false }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error denying identity-key reveal:', error);
+    }
+  };
+
+  const handleKeyLinkageApprove = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('approve_key_linkage_reveal', [
+          JSON.stringify({
+            domain: notificationDomain,
+            remember: rememberPrivacy,
+          }),
+        ]);
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: true }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error approving key-linkage reveal:', error);
+    }
+  };
+
+  const handleKeyLinkageDeny = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: false }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error denying key-linkage reveal:', error);
+    }
   };
 
   // ── No Wallet: Set Up ──
@@ -783,6 +887,173 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     );
   }
 
+  // ── Phase 1.5 Step 1 — shared privacy-perimeter card style ──
+  // Layered on top of the standard cardStyle. Gold border + soft halo via
+  // hodosTheme.prompt.privacyPerimeter (the existing tier that had no callers
+  // before Step 1 -- this is its first user).
+  const privacyPerimeterCardStyle: React.CSSProperties = {
+    ...cardStyle,
+    border: promptTheme.privacyPerimeter.framingBorder,
+    boxShadow: `${promptTheme.privacyPerimeter.framingShadow}, ${cardStyle.boxShadow}`,
+  };
+
+  const privacyPerimeterHeaderStyle: React.CSSProperties = {
+    fontSize: promptTheme.privacyPerimeter.headerFontSize,
+    fontWeight: promptTheme.privacyPerimeter.headerWeight,
+    color: promptTheme.privacyPerimeter.headerColor,
+    marginBottom: '12px',
+  };
+
+  const renderPrivacyPerimeterDomainRow = (subtitle: string) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '14px' }}>
+      {!faviconError ? (
+        <img
+          src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+          width={32}
+          height={32}
+          style={{ borderRadius: 4, flexShrink: 0 }}
+          onError={() => setFaviconError(true)}
+          alt=""
+        />
+      ) : (
+        <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+      )}
+      <div>
+        <div style={{ fontSize: '15px', fontWeight: 700, color: COLORS.textDark }}>
+          {cleanDomain}
+        </div>
+        <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
+          {subtitle}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderPrivacyPerimeterCheckbox = () => (
+    <label style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      fontSize: '13px',
+      color: COLORS.textMuted,
+      cursor: 'pointer',
+      marginBottom: '22px',
+      userSelect: 'none',
+    }}>
+      <input
+        type="checkbox"
+        checked={rememberPrivacy}
+        onChange={(e) => setRememberPrivacy(e.target.checked)}
+        style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+      />
+      Always allow for this site
+    </label>
+  );
+
+  // ── Identity key reveal (Phase 1.5 Step 1) ──
+  // Fires when an external site calls getPublicKey({ identityKey: true }) and
+  // the per-domain "Always allow" cache is empty. Locked copy: minimal +
+  // neutral; gold privacy-perimeter framing (NOT red).
+  if (notificationType === 'identity_key_reveal') {
+    return (
+      <div style={overlayBackdrop}>
+        <div style={privacyPerimeterCardStyle}>
+          <HodosWalletHeader />
+          {renderPrivacyPerimeterDomainRow('is requesting access to private wallet data')}
+
+          <h2 style={privacyPerimeterHeaderStyle}>Identity key request</h2>
+
+          <p style={{
+            margin: '0 0 18px',
+            fontSize: '14px',
+            color: COLORS.textDark,
+            lineHeight: 1.6,
+          }}>
+            <strong>{cleanDomain}</strong> is requesting your wallet identity
+            key. This key can be used to identify you across sites.
+          </p>
+
+          {renderPrivacyPerimeterCheckbox()}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+            <HodosButton variant="secondary" onClick={handleIdentityKeyDeny}>
+              Deny
+            </HodosButton>
+            <HodosButton variant="primary" onClick={handleIdentityKeyApprove}>
+              Approve
+            </HodosButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Key linkage reveal (Phase 1.5 Step 1) ──
+  // Fires for /revealCounterpartyKeyLinkage and /revealSpecificKeyLinkage.
+  // Verifier hex is truncated to first 4 + "..." + last 2 chars per locked copy.
+  if (notificationType === 'key_linkage_reveal') {
+    const truncateVerifier = (key: string): string => {
+      if (!key) return 'an unknown verifier';
+      if (key.length <= 8) return key;
+      return key.slice(0, 4) + '...' + key.slice(-2);
+    };
+    const verifierLabel = truncateVerifier(linkageVerifier);
+    const isSpecific = linkageKind === 'specific';
+
+    return (
+      <div style={overlayBackdrop}>
+        <div style={privacyPerimeterCardStyle}>
+          <HodosWalletHeader />
+          {renderPrivacyPerimeterDomainRow('is requesting a key-linkage proof')}
+
+          <h2 style={privacyPerimeterHeaderStyle}>Key linkage proof request</h2>
+
+          <p style={{
+            margin: '0 0 12px',
+            fontSize: '14px',
+            color: COLORS.textDark,
+            lineHeight: 1.6,
+          }}>
+            <strong>{cleanDomain}</strong> is requesting a linkage proof to{' '}
+            <span style={{
+              fontFamily: 'monospace',
+              fontSize: '12px',
+              background: '#0f1117',
+              padding: '2px 6px',
+              borderRadius: '4px',
+            }}>
+              {verifierLabel}
+            </span>
+            . This proves two of your keys are related.
+          </p>
+
+          {isSpecific && (linkageProtocol || linkageKeyId) && (
+            <p style={{
+              margin: '0 0 18px',
+              fontSize: '12px',
+              color: COLORS.textMuted,
+              lineHeight: 1.5,
+            }}>
+              {linkageProtocol && <>Protocol: <strong>{linkageProtocol}</strong>. </>}
+              {linkageKeyId && <>Key ID: <strong>{linkageKeyId}</strong>.</>}
+            </p>
+          )}
+
+          {renderPrivacyPerimeterCheckbox()}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+            <HodosButton variant="secondary" onClick={handleKeyLinkageDeny}>
+              Deny
+            </HodosButton>
+            <HodosButton variant="primary" onClick={handleKeyLinkageApprove}>
+              Approve
+            </HodosButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Certificate disclosure notification ──
   if (notificationType === 'certificate_disclosure') {
     return (
@@ -988,6 +1259,28 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             You can disconnect this site at any time from your browser settings.
             Payments above $0.10 will ask for your confirmation.
           </div>
+
+          {/* Phase 1.5 Step 1 \u2014 bundled identity-key grant. Default ON; users
+              who untick will be re-prompted via the privacy-perimeter modal
+              the first time the site requests the identity key. */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '14px',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={allowIdentityKey}
+              onChange={(e) => setAllowIdentityKey(e.target.checked)}
+              style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+            />
+            Allow this site to identify you
+          </label>
 
           {/* Advanced settings toggle */}
           <div

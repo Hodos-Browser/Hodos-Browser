@@ -81,7 +81,72 @@ No new platform-specific APIs introduced.
 ## Steps 1–7 — placeholders (populate when each step lands)
 
 ### Step 1 — Missing handlers + privacy perimeter
-_To be filled in when Step 1 lands. Likely items: new `identity_key_reveal` + `key_linkage_reveal` prompt types in `BRC100AuthOverlayRoot.tsx` (React, cross-platform). Rust handlers (`revealCounterpartyKeyLinkage`, `revealSpecificKeyLinkage`) in `rust-wallet/src/handlers.rs` (cross-platform Rust). Possible new key-linkage logic in `rust-wallet/src/crypto/key_linkage.rs` (cross-platform Rust)._
+
+**Landed:** 2026-05-11
+**Branch:** `feature/brc121-phase1` (uncommitted at time of writing)
+**TL;DR:** **No macOS-specific implementation work.** Step 1 lives entirely in cross-platform Rust, cross-platform CEF C++ (no Win/Mac branches added), React/TypeScript, and a single SQLite migration. Macros, headers, and APIs used are all platform-neutral. Verification is visual + behavioral; no Mac-only build changes.
+
+#### Files modified — platform impact matrix
+
+| File | Change summary | Platform impact |
+|---|---|---|
+| `rust-wallet/src/crypto/key_linkage.rs` (NEW) | BRC-72 linkage primitives: `compute_counterparty_linkage` (33-byte ECDH point), `compute_specific_linkage` (32-byte HMAC). Reuses `brc42` helpers. 6 unit tests. | None — pure Rust |
+| `rust-wallet/src/crypto/mod.rs` | Register `pub mod key_linkage;` | None — pure Rust |
+| `rust-wallet/src/handlers.rs` | Two new handlers (`reveal_counterparty_key_linkage`, `reveal_specific_key_linkage`); identity-key gate added to `get_public_key` (accepts X-Identity-Key-Approved header OR persistent DB column); `SetDomainPermissionRequest` accepts `identityKeyDisclosureAllowed`; all three `*domain_permission*` endpoints serialize new field | None — pure Rust |
+| `rust-wallet/src/main.rs` | Register `POST /revealCounterpartyKeyLinkage` + `POST /revealSpecificKeyLinkage` in Identity routes block | None — pure Rust |
+| `rust-wallet/src/database/migrations.rs` | New `migrate_v16_to_v17` adds `identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 0` to `domain_permissions`. Idempotent (PRAGMA table_info check) | None — SQLite |
+| `rust-wallet/src/database/connection.rs` | Wire V17 into migration runner | None — pure Rust |
+| `rust-wallet/src/database/models.rs` | `DomainPermission.identity_key_disclosure_allowed: bool` field + `defaults()` sets false | None — pure Rust |
+| `rust-wallet/src/database/domain_permission_repo.rs` | SELECT/INSERT/UPDATE/list_all all read/write the new column | None — pure Rust |
+| `cef-native/include/core/HttpRequestInterceptor.h` | Declared `MarkIdentityKeyRevealApproved`, `MarkKeyLinkageRevealApproved`, `ForwardPendingWalletRequest` free functions | Header — cross-platform |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | New file-local singletons `IdentityKeyApprovalCache` + `KeyLinkageApprovalCache` (both `std::set<std::string>` + `std::mutex`); `DomainPermissionCache::Permission` gains `identityKeyDisclosureAllowed` bool, parsed from JSON response; new isWalletEndpoint entries `/revealCounterpartyKeyLinkage` + `/revealSpecificKeyLinkage`; new privacy-perimeter gates in `Open()` for identity-key and key-linkage reveal; new `triggerIdentityKeyRevealModal` + `triggerKeyLinkageRevealModal` helpers (mirror `triggerCertificateDisclosureModal`); `startAsyncHTTPRequest` adds `X-Identity-Key-Approved` header on cache hit AND runs a safety-net privacy-perimeter gate for drain/sibling-forwarded requests that bypassed `Open()`; `addDomainPermission` + `addDomainPermissionAdvanced` accept `identityKeyDisclosureAllowed` and mirror it into both `DomainPermissionCache` and `IdentityKeyApprovalCache`; `DomainPermissionTask` + `AdvancedDomainPermissionTask` POST the new field to Rust; `ForwardPendingWalletRequest` helper exposed for `simple_handler.cpp` | **Pure C++ — uses only CefPostTask, std::mutex/set, nlohmann::json, and the existing `Win32 #ifdef _WIN32 / #else` WinHTTP/SyncHttpClient path that's already cross-platform.** No new `#ifdef` blocks added. |
+| `cef-native/src/handlers/simple_handler.cpp` | Two new IPC dispatchers (`approve_identity_key_reveal`, `approve_key_linkage_reveal`); `add_domain_permission` + `add_domain_permission_advanced` parse `identityKeyDisclosureAllowed` (default true) and pass through; drain paths replaced `popAllForDomain`-and-discard with `ForwardPendingWalletRequest`-forwarding-real-handlers (BRC-121 nullptr handlers still flow through `TriggerPendingBrc121Reloads`) | Cross-platform CEF APIs only |
+| `frontend/src/pages/BRC100AuthOverlayRoot.tsx` | Two new prompt branches (`identity_key_reveal`, `key_linkage_reveal`) using `hodosTheme.prompt.privacyPerimeter` framing; locked minimal-neutral copy; "Always allow for this site" checkbox; new approve/deny IPCs (`approve_identity_key_reveal`, `approve_key_linkage_reveal` + `brc100_auth_response`); new "Allow this site to identify you" checkbox on `domain_approval` modal (default ON) wires into `add_domain_permission` + `add_domain_permission_advanced` payloads; `allowIdentityKey` state resets to ON for each fresh prompt | None — React |
+
+#### CEF APIs used — all cross-platform
+
+Step 1's C++ additions use only:
+- `CefPostTask` / `CefResourceHandler` / `CefCallback` (cross-platform CEF)
+- `CefURLRequest` + `CefPostData` (cross-platform CEF)
+- `std::mutex`, `std::set`, `std::string` (C++ stdlib)
+- `nlohmann::json` (cross-platform)
+- Existing `SyncHttpClient` abstraction (already has Win/Mac branches)
+
+No new platform-specific APIs introduced. No new `#ifdef _WIN32` / `#elif defined(__APPLE__)` blocks added.
+
+#### macOS verification checklist (Step 1)
+
+**Visual:**
+
+- [ ] `identity_key_reveal` prompt renders with `prompt.privacyPerimeter` framing (gold border + soft halo, 18px/700 header) on macOS
+- [ ] `key_linkage_reveal` prompt same — verifier hex truncated to `first4...last2`, kind-aware copy (counterparty vs specific) renders
+- [ ] "Always allow for this site" checkbox on both prompts is visible, native styling, default unchecked
+- [ ] `domain_approval` modal shows the new "Allow this site to identify you" checkbox between reassurance text and Advanced settings toggle (default ON) on macOS
+
+**Behavioral:**
+
+- [ ] Visit a fresh site → bundle checkbox stays default ON → click Allow → site connects without a second popup. Verify in macOS log: `🔐 Setting domain permission ... identityKeyDisclosure=1` AND `🛡️ identity-key reveal silently approved`.
+- [ ] Visit a fresh site → UNCHECK the bundle checkbox → click Allow → the privacy-perimeter prompt fires as a second step (safety-net gate in `startAsyncHTTPRequest` catches drain-forwarded siblings). Verify in macOS log: `🛡️ identity-key-style /getPublicKey bypassed Open() for <site> ... — firing identity_key_reveal prompt`.
+- [ ] Approve a site → close app → relaunch → revisit. Expected: silent connect, no identity-key prompt. Verify with `sqlite3 ~/Library/Application\ Support/HodosBrowserDev/wallet/wallet.db "SELECT identity_key_disclosure_allowed FROM domain_permissions WHERE domain='<site>';"` returns 1.
+- [ ] Right-click "Manage Site Permissions" still opens the `edit_permissions` overlay correctly (existing behavior, not changed in Step 1).
+- [ ] **BRC-121 payment animation non-regression** — gold pill animation still fires on auto-approved payments at `now.bsvblockchain.tech/articles/<slug>`.
+- [ ] Drain-forward fix: visit a site that makes parallel BRC-100 calls during connect → after Allow, all queued requests resolve. Verify in macOS log: `🔐 Drained N pending request(s) for <site> after approval (N forwarded, 0 BRC-121)`.
+
+**Build verification:**
+
+- [ ] `rust-wallet` builds clean on macOS (`cargo build --release`)
+- [ ] `cef-native` builds clean on macOS (the `#elif defined(__APPLE__)` path in `DomainPermissionCache::fetchFromBackend` parses the new `identityKeyDisclosureAllowed` field via the same nlohmann::json path — verify the new field shows up in the macOS fetch result)
+- [ ] `frontend` builds clean (`npm run build`) — Step 1 is pure cross-platform React
+
+**Migration verification:**
+
+- [ ] First launch with a pre-existing dev DB (at V16) shows in log: `Applying migration V17 (identity_key_disclosure_allowed)... ✅ Schema V17 applied`
+- [ ] `PRAGMA table_info(domain_permissions);` on macOS dev DB lists `identity_key_disclosure_allowed` as the last column
+
+#### Known follow-ups to also check on Mac
+
+- The Step 1 follow-up bug we fixed (drain-forwarded siblings hitting Rust 403 instead of firing the second prompt) was a logic bug, not a Win-only one. The safety-net check in `startAsyncHTTPRequest` runs on both platforms identically. Verify on Mac by repeating the unchecked-bundle smoke step.
+- `KeyLinkageApprovalCache` is in-memory only (no DB persistence in Step 1 per user direction). On Mac this means restarting the browser re-prompts for key-linkage revelation — same as Windows. If a Mac user reports this surprises them, surface as a Step 5+ ask.
 
 ### Step 2 — DB schema
 _To be filled in. Three new child tables of `domain_permissions` + optional `sensitivity` column on `cert_field_permissions`. Pure SQLite/Rust — no platform impact._

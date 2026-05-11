@@ -121,3 +121,18 @@ private:
 void sendAuthRequestDataToOverlay();
 void handleAuthResponse(const std::string& requestId, const std::string& responseData);
 void handleAuthResponse(const std::string& responseData);  // legacy overload
+
+// Phase 1.5 Step 1 — privacy-perimeter "Always allow for this site" opt-ins.
+// In-memory cache only for key-linkage; identity-key now persists via the new
+// domain_permissions.identity_key_disclosure_allowed column (V17). These are
+// safe no-ops if storage drifts -- the gate falls back to prompting.
+void MarkIdentityKeyRevealApproved(const std::string& domain);
+void MarkKeyLinkageRevealApproved(const std::string& domain);
+
+// Phase 1.5 Step 1 — forward a queued AsyncWalletResourceHandler entry to Rust.
+// Used by simple_handler.cpp's add_domain_permission{,_advanced} drain path to
+// resume sibling requests after the user approves a domain. Returns false if
+// the handler is null (BRC-121 nullptr-handler entry — caller handles via
+// TriggerPendingBrc121Reloads instead). Implementation casts to the file-local
+// AsyncWalletResourceHandler class inside HttpRequestInterceptor.cpp.
+bool ForwardPendingWalletRequest(CefRefPtr<CefResourceHandler> handler);

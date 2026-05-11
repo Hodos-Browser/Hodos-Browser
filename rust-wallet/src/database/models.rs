@@ -249,6 +249,12 @@ pub struct DomainPermission {
     pub per_session_limit_cents: i64,   // USD cents per browser session
     pub rate_limit_per_min: i64,
     pub max_tx_per_session: i64,        // Maximum number of transactions per session
+    /// Phase 1.5 Step 1 — when true, getPublicKey({identityKey:true}) requests
+    /// from this domain bypass the privacy-perimeter prompt. Set when the user
+    /// approves a site with the "Allow this site to identify you" checkbox
+    /// ticked (default ON). Default false ensures pre-existing rows still
+    /// prompt the first time.
+    pub identity_key_disclosure_allowed: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -269,6 +275,7 @@ impl DomainPermission {
             per_session_limit_cents: 1000,
             rate_limit_per_min: 30,
             max_tx_per_session: 100,
+            identity_key_disclosure_allowed: false,
             created_at: now,
             updated_at: now,
         }

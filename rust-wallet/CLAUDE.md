@@ -75,9 +75,11 @@ cargo check              # Fast type-check without building
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |
 | `src/balance_cache.rs` | `BalanceCache` — in-memory balance with instant invalidation |
 
-## Database Schema (V24)
+## Database Schema (V17)
 
-Current migration version: **V24**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+Current migration version: **V17**. Migrations in `src/database/migrations.rs`, runner in `src/database/connection.rs`.
+
+> **Doc drift note (2026-05-11):** Earlier revisions of this CLAUDE.md headlined "V24" with a V20–V24 migration table; the actual code never had those — the consolidated V1 schema + V2–V16 incremental migrations were the real pre-Step-1 state. Step 1 adds V17 (`identity_key_disclosure_allowed` column on `domain_permissions`). The V20–V24 section below describes migrations that **do not exist** and should be treated as planning notes from a parallel branch. Authoritative list is in `migrations.rs`.
 
 | Table | Purpose | Phase |
 |-------|---------|-------|
@@ -112,6 +114,18 @@ Current migration version: **V24**. Migrations in `src/database/migrations.rs`, 
 | V22 | Fix array-format BLOBs in `proven_txs` — normalize `[{...}]` to `{...}` and inject height |
 | V23 | Re-tag legacy BIP32 outputs: `derivation_prefix = "bip32"` so signing path can distinguish from BRC-42 |
 | V24 | Drop deprecated tables (`merkle_proofs`, `domain_whitelist`, `transaction_labels`); rebuild `output_tag_map` with correct FK to `outputs(outputId)`; clean up nosend txs >48h |
+
+### Migrations actually shipped (V11–V17)
+
+| Migration | Purpose |
+|-----------|---------|
+| V11 | Add `price_usd_cents` to `transactions` and `peerpay_received` |
+| V12 | Add `max_tx_per_session` to `domain_permissions` and `settings`; update default limits |
+| V13 | Add `recipient` and `recipient_name` to `transactions` for autocomplete |
+| V14 | Confirmed outputs + notification types |
+| V15 | `peerpay_pending_verification` table |
+| V16 | `peerpay_outbox` table for MessageBox delivery retry |
+| V17 | **Phase 1.5 Step 1.** Add `identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 0` column to `domain_permissions`. Set to 1 when user approves a site with the bundled "Allow this site to identify you" checkbox; gates `get_public_key({identityKey:true})` for external domains alongside the `X-Identity-Key-Approved` header path. |
 
 ### Output Model (V18 - Phase 4 Complete)
 

@@ -940,3 +940,35 @@ pub fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
     info!("   ✅ V16 migration applied (peerpay_outbox)");
     Ok(())
 }
+
+/// Migrate V16 → V17: Add identity_key_disclosure_allowed to domain_permissions.
+///
+/// Phase 1.5 Step 1 — privacy-perimeter persistence. When the user approves a
+/// site (domain_approval modal) with the "Allow this site to identify you"
+/// checkbox ticked (default ON), this column is set to 1 so subsequent
+/// getPublicKey({identityKey:true}) requests bypass the privacy-perimeter
+/// prompt for that site. 0 means always prompt (the safe default for any
+/// pre-existing row).
+///
+/// Idempotent: checks PRAGMA table_info before ALTER.
+pub fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    info!("   Adding identity_key_disclosure_allowed column to domain_permissions...");
+
+    let dp_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(domain_permissions)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !dp_cols.iter().any(|c| c == "identity_key_disclosure_allowed") {
+        conn.execute(
+            "ALTER TABLE domain_permissions ADD COLUMN identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V17 migration applied (identity_key_disclosure_allowed)");
+    Ok(())
+}

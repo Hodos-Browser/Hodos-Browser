@@ -4176,22 +4176,44 @@ bool SimpleHandler::OnProcessMessageReceived(
                 nlohmann::json permData = nlohmann::json::parse(permJson);
                 std::string domain = permData["domain"];
 
-                LOG_DEBUG_BROWSER("🔐 Setting domain permission - Domain: " + domain);
+                // Phase 1.5 Step 1 — identityKeyDisclosureAllowed bundles the
+                // identity-key privacy-perimeter grant into the same approval.
+                // Default true so existing React clients that don't send the field
+                // still get the bundled UX (matches the new checkbox's default).
+                bool identityKeyDisclosureAllowed =
+                    permData.value("identityKeyDisclosureAllowed", true);
+
+                LOG_DEBUG_BROWSER("🔐 Setting domain permission - Domain: " + domain +
+                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed));
 
                 // Call the domain permission API
-                extern void addDomainPermission(const std::string& domain);
-                addDomainPermission(domain);
+                extern void addDomainPermission(const std::string& domain,
+                                                bool identityKeyDisclosureAllowed);
+                addDomainPermission(domain, identityKeyDisclosureAllowed);
 
-                // Drain any pending requests for this domain that we added
-                // with nullptr handler (BRC-121 paths). The createAction-style
-                // path uses popAllForDomain elsewhere via handleAuthResponse,
-                // but BRC-121's nullptr-handler entries stay in the queue
-                // forever otherwise — blocking subsequent modal fires because
-                // hasPendingForDomain would return true on the next attempt.
+                // Drain pending requests for this domain. Two kinds queue up here:
+                //   1. Wallet-style entries with a real AsyncWalletResourceHandler --
+                //      forward each to Rust so the page's pending promise resolves.
+                //      Previously these were dropped on the floor and the page hung
+                //      (the brc100_auth_response IPC arrives AFTER this drain, so
+                //      its replay path never finds the primary).
+                //   2. BRC-121 entries with a nullptr handler -- handled elsewhere via
+                //      TriggerPendingBrc121Reloads; we don't try to forward them here.
                 auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                int forwarded = 0;
+                int brc121_entries = 0;
+                for (auto& entry : drained) {
+                    if (ForwardPendingWalletRequest(entry.handler)) {
+                        forwarded++;
+                    } else {
+                        brc121_entries++;
+                    }
+                }
                 if (!drained.empty()) {
                     LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
-                                      + " pending request(s) for " + domain + " after approval");
+                                      + " pending request(s) for " + domain + " after approval ("
+                                      + std::to_string(forwarded) + " forwarded, "
+                                      + std::to_string(brc121_entries) + " BRC-121)");
                 }
 
                 // Reload any browser stuck on the CEF error page after a
@@ -4221,23 +4243,42 @@ bool SimpleHandler::OnProcessMessageReceived(
                 int64_t perSessionLimitCents = permData.value("perSessionLimitCents", (int64_t)300);
                 int64_t rateLimitPerMin = permData.value("rateLimitPerMin", (int64_t)10);
                 int64_t maxTxPerSession = permData.value("maxTxPerSession", (int64_t)100);
+                // Phase 1.5 Step 1 — default true (matches the new checkbox's default).
+                bool identityKeyDisclosureAllowed =
+                    permData.value("identityKeyDisclosureAllowed", true);
 
                 LOG_DEBUG_BROWSER("🔐 Setting advanced domain permission - Domain: " + domain +
                     " tx=" + std::to_string(perTxLimitCents) +
                     " session=" + std::to_string(perSessionLimitCents) +
                     " rate=" + std::to_string(rateLimitPerMin) +
-                    " maxTxPerSession=" + std::to_string(maxTxPerSession));
+                    " maxTxPerSession=" + std::to_string(maxTxPerSession) +
+                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed));
 
                 extern void addDomainPermissionAdvanced(const std::string& domain,
                     int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin,
-                    int64_t maxTxPerSession);
-                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin, maxTxPerSession);
+                    int64_t maxTxPerSession, bool identityKeyDisclosureAllowed);
+                addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents,
+                    rateLimitPerMin, maxTxPerSession, identityKeyDisclosureAllowed);
 
-                // Drain stale pending entries (see add_domain_permission for rationale).
+                // Drain pending entries (see add_domain_permission for full rationale).
+                // Real-handler entries forward via startAsyncHTTPRequest so the page's
+                // pending promise resolves; nullptr-handler (BRC-121) entries are
+                // handled by TriggerPendingBrc121Reloads below.
                 auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                int forwarded = 0;
+                int brc121_entries = 0;
+                for (auto& entry : drained) {
+                    if (ForwardPendingWalletRequest(entry.handler)) {
+                        forwarded++;
+                    } else {
+                        brc121_entries++;
+                    }
+                }
                 if (!drained.empty()) {
                     LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
-                                      + " pending request(s) for " + domain + " after advanced-approval");
+                                      + " pending request(s) for " + domain + " after advanced-approval ("
+                                      + std::to_string(forwarded) + " forwarded, "
+                                      + std::to_string(brc121_entries) + " BRC-121)");
                 }
 
                 // Reload any browser stuck on the CEF error page after a
@@ -4357,6 +4398,56 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
         } else {
             LOG_DEBUG_BROWSER("📋 Invalid arguments for approve_cert_fields");
+        }
+        return true;
+    }
+
+    // Phase 1.5 Step 1 — privacy-perimeter "Always allow for this site" opt-ins.
+    // React fires these alongside `brc100_auth_response` on user approval. Step 1
+    // persists into in-memory caches inside HttpRequestInterceptor.cpp; Step 2 will
+    // replace these with SQLite columns on domain_permissions (or a parallel child
+    // table). The actual gate-unblock happens through `brc100_auth_response` →
+    // handleAuthResponse → onAuthResponseReceived path, same as certificate_disclosure.
+    if (message_name == "approve_identity_key_reveal") {
+        LOG_DEBUG_BROWSER("🛡️ approve_identity_key_reveal message received from role: " + role_);
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string payload = args->GetString(0).ToString();
+            try {
+                auto data = nlohmann::json::parse(payload);
+                std::string domain = data.value("domain", "");
+                bool remember = data.value("remember", false);
+                if (remember && !domain.empty()) {
+                    LOG_DEBUG_BROWSER("🛡️ Persisting identity-key reveal opt-in (in-memory) for " + domain);
+                    MarkIdentityKeyRevealApproved(domain);
+                } else {
+                    LOG_DEBUG_BROWSER("🛡️ identity-key reveal NOT remembered for " + domain + " (one-shot)");
+                }
+            } catch (const std::exception& e) {
+                LOG_DEBUG_BROWSER("🛡️ Error parsing approve_identity_key_reveal JSON: " + std::string(e.what()));
+            }
+        }
+        return true;
+    }
+
+    if (message_name == "approve_key_linkage_reveal") {
+        LOG_DEBUG_BROWSER("🛡️ approve_key_linkage_reveal message received from role: " + role_);
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string payload = args->GetString(0).ToString();
+            try {
+                auto data = nlohmann::json::parse(payload);
+                std::string domain = data.value("domain", "");
+                bool remember = data.value("remember", false);
+                if (remember && !domain.empty()) {
+                    LOG_DEBUG_BROWSER("🛡️ Persisting key-linkage reveal opt-in (in-memory) for " + domain);
+                    MarkKeyLinkageRevealApproved(domain);
+                } else {
+                    LOG_DEBUG_BROWSER("🛡️ key-linkage reveal NOT remembered for " + domain + " (one-shot)");
+                }
+            } catch (const std::exception& e) {
+                LOG_DEBUG_BROWSER("🛡️ Error parsing approve_key_linkage_reveal JSON: " + std::string(e.what()));
+            }
         }
         return true;
     }
