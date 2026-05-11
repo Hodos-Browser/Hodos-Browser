@@ -211,6 +211,7 @@ if(APPLE)
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
         src/core/PermissionEngine.cpp
+        src/core/ManifestFetcher.cpp
         src/core/AutoUpdater_mac.mm
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
@@ -253,6 +254,8 @@ elseif(WIN32)
         src/core/HttpRequestInterceptor.cpp
         include/core/PermissionEngine.h
         src/core/PermissionEngine.cpp
+        include/core/ManifestFetcher.h
+        src/core/ManifestFetcher.cpp
         include/core/SessionManager.h
         src/core/SessionManager.cpp
         include/core/Tab.h

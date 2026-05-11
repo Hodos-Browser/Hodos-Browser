@@ -222,10 +222,47 @@ No new platform-specific APIs introduced. No new `#ifdef _WIN32` / `#elif define
 **No frontend changes in this step.** No new UX surface; the new prompt types (`protocol_permission_prompt`, `basket_permission_prompt`, `counterparty_permission_prompt`) will be wired into `BRC100AuthOverlayRoot.tsx` in Step 5 when the new UI flows ship.
 
 ### Step 4 — Manifest fetcher
-_To be filled in. Likely uses `SyncHttpClient` which is already cross-platform (WinHTTP / libcurl)._
+
+**Landed:** 2026-05-11
+**Branch:** `feature/brc121-phase1`
+**TL;DR:** **No macOS-specific implementation work.** `ManifestFetcher` uses `SyncHttpClient` (already cross-platform — WinHTTP on Windows, libcurl on macOS) and `nlohmann::json` (cross-platform). Parse logic is pure C++ with no platform conditionals. Stand-alone build — fetcher exists but no consumer yet; Step 5 wires it into `Open()` via the locked three-mode dispatch (see Step 5 section above).
+
+#### Files modified — platform impact matrix
+
+| File | Change summary | Platform impact |
+|---|---|---|
+| `cef-native/include/core/ManifestFetcher.h` (NEW) | `Manifest` struct (plain data) + `ManifestProtocol`/`ManifestBasket`/`ManifestCertificate`/`ManifestSpending`/`ManifestCounterparty` sub-structs + `ManifestFetcher::Fetch(origin)` + `::ParseFromJson(json)` static methods | None — pure C++ |
+| `cef-native/src/core/ManifestFetcher.cpp` (NEW) | URL builder (defaults bare hosts to `https://`), `SyncHttpClient::Get` with 3s timeout, 64 KB body cap, lenient nlohmann parse, never throws | None — uses already-cross-platform `SyncHttpClient` |
+| `cef-native/CMakeLists.txt` | Added `ManifestFetcher.cpp` to Win + Mac source lists | None — CMake works on both |
+| `cef-native/tests/CMakeLists.txt` | Added `manifest_fetcher_test.cpp` + `ManifestFetcher.cpp` + `SyncHttpClient.cpp` + `Logger.cpp` to `hodos_tests` target. Linked `winhttp` (Win) / `CURL::libcurl` (Mac) for SyncHttpClient. Linked `nlohmann_json::nlohmann_json` for the parser. | Platform-specific link libs but each handled via conditional |
+| `cef-native/tests/manifest_fetcher_test.cpp` (NEW) | 13 parse-only tests: happy path, forward compat (unknown fields ignored), defaults applied, malformed entries dropped not errored, malformed/empty/non-object JSON → invalid, security-level out-of-range falls back | None — pure C++ |
+
+#### macOS verification checklist (Step 4)
+
+**Build verification:**
+
+- [ ] `cmake -S cef-native -B cef-native/build -G "Unix Makefiles" && cmake --build cef-native/build --config Release` builds the shell with `ManifestFetcher.cpp` included — no warnings about missing platform conditionals
+- [ ] `cmake -S cef-native -B cef-native/build -DHODOS_BUILD_TESTS=ON` configures successfully; `cmake --build cef-native/build --target hodos_tests` builds the test binary. `find_package(CURL REQUIRED)` resolves on macOS via Homebrew or system libcurl
+- [ ] `./cef-native/build/bin/Release/hodos_tests` reports **38 PASSED** (25 PermissionEngine + 13 ManifestFetcher)
+
+**Functional verification (no UX change in Step 4 — fetcher is dormant):**
+
+- [ ] Existing wallet flows still work — Step 1 bundle approval, Step 2 schema, Step 3 endpoints. No `Open()` change yet.
+
+**Step 5 integration smoke (when Step 5 lands):**
+
+- [ ] On macOS, visiting a manifest-less site (any current site) → fast 404 from the wallet's `.well-known/` fetch → existing `domain_approval` modal fires (mode 1)
+- [ ] On macOS, visiting a manifest-shipping demo site → new bundled connect prompt with the plain-language permissions list (mode 2)
+- [ ] Slow / unreachable server → 3s timeout → fallback `domain_approval` modal (mode 3)
+
+**No frontend changes in this step.** New prompt UIs (`manifest_connect_bundle`, etc.) land in Step 5.
 
 ### Step 5 — Extend existing UI
-_To be filled in. Manifest connect bundle prompt + two new prompt types (`protocol_permission_prompt`, `counterparty_permission_prompt`) in shared overlay. Likely React-only, cross-platform._
+_To be filled in._
+
+**Design lock (2026-05-11 during Step 4 kickoff):** the manifest-aware connect flow integrates into `HttpRequestInterceptor::Open()` at the `trust == "unknown"` branch — see Phase 1.5 README "Manifest integration design" subsection under Step 5. Three modes with a fixed 3s `ManifestFetcher` timeout: (1) 404 → existing `domain_approval` modal, zero regression; (2) valid manifest → new `manifest_connect_bundle` prompt; (3) timeout → existing `domain_approval` fallback. PendingRequestManager queue interaction unchanged. On accept, grants are written via the Step 3 sub-permission endpoints (`POST /domain/permissions/{protocol,basket,counterparty}`) before the queue drains.
+
+Likely cross-platform additions: React `manifest_connect_bundle` branch in `BRC100AuthOverlayRoot.tsx`, plus protocol/counterparty per-call prompt branches for the JIT fallback path. C++ side adds the dispatch in `Open()` consuming Step 4's `ManifestFetcher`.
 
 ### Step 6 — Rewire existing handlers
 _To be filled in. One-line gate at top of 26+2 BRC-100 handlers. Pure C++ in `HttpRequestInterceptor.cpp` — cross-platform._

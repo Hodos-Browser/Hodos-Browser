@@ -358,8 +358,76 @@ Run BEFORE the architectural work below. Risk-free UI polish that:
 - `DomainPermissionForm` — "Allow without limits" button, "Specific permissions" section, "Certificate fields" section.
 - `ApprovedSitesTab` — "Allow without limits" globally, sensitivity classifier editor.
 - New overlays: `ProtocolPermissionPromptOverlayRoot`, `CounterpartyPermissionPromptOverlayRoot`.
+- Adds the **manifest-aware connect flow** that consumes Step 4's `ManifestFetcher`.
 
 **Test:** smoke against auth-category sites (x.com, google.com, github.com) on both Win + Mac. Verify right-click "Manage Site Permissions" still works.
+
+#### Manifest integration design (locked 2026-05-11 during Step 4 kickoff)
+
+Step 4 ships `ManifestFetcher` stand-alone (no consumer). Step 5 wires it into `HttpRequestInterceptor::Open()` at the unknown-trust branch. The integration handles three modes with a **fixed 3s timeout** to never block the user:
+
+**Trigger point in `Open()`:** today, when `trust == "unknown"`, the code immediately calls `triggerDomainApprovalModal`. Step 5 replaces that single call with a manifest-aware dispatch:
+
+```
+T+0     User navigates to app.com
+T+50    HTML + JS load
+T+100   First BRC-100 call hits C++ Open()
+         │
+         │   DomainPermissionCache.getPermission(app.com) → trust = "unknown"
+         │
+         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  STEP 5 ADDITION: before firing any prompt, attempt manifest fetch.    │
+│                                                                        │
+│  1. Queue this BRC-100 call in PendingRequestManager (UNCHANGED —      │
+│     existing PendingRequestManager.addRequest + hasPendingForDomain    │
+│     pattern keeps working; subsequent BRC-100 calls from same origin   │
+│     stack under the same modal exactly as today)                       │
+│                                                                        │
+│  2. ManifestFetcher::Fetch(origin)  ← synchronous, 3s hard cap         │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │
+              ┌──────────────────┼──────────────────────┐
+              ▼                  ▼                      ▼
+  ┌───────────────────┐  ┌─────────────────┐  ┌─────────────────────┐
+  │ MODE 1            │  │ MODE 2          │  │ MODE 3              │
+  │ Manifest is 404   │  │ Manifest valid  │  │ Manifest >3s        │
+  │ (today's reality, │  │ (future state,  │  │ (slow / hostile)    │
+  │ ~10-50ms response)│  │ ~50ms typical)  │  │                     │
+  │                   │  │                 │  │                     │
+  │ → fire existing   │  │ → fire NEW      │  │ → fire existing     │
+  │   domain_approval │  │   manifest_     │  │   domain_approval   │
+  │   modal           │  │   connect_      │  │   modal             │
+  │                   │  │   bundle modal  │  │                     │
+  │ ZERO REGRESSION   │  │ Bundled UX win  │  │ Defensive fallback  │
+  │ FROM TODAY        │  │                 │  │                     │
+  └───────────────────┘  └─────────────────┘  └─────────────────────┘
+                                 │
+                                 ▼ (in all three modes)
+              User decides (approve / customize / deny)
+                                 ▼
+              PendingRequestManager.popAllForDomain drains
+              the queued BRC-100 calls (UNCHANGED — existing pattern)
+```
+
+**Three guarantees baked into the design:**
+
+1. **No regression for any current site.** Today's flow is mode 1. The wallet's `.well-known/wallet-manifest.json` request to a manifest-less server is a fast 404 (typically <50ms — well inside the user-perception window for "Allow" click latency, which is multiple seconds anyway). User sees the same `domain_approval` modal they see today.
+2. **Better UX as adoption grows.** Manifest-shipping sites get the bundled "Connect to <site>? Here's everything: ..." prompt with one-click grant of all bundle permissions. No multi-popup chain.
+3. **Defensive against slow/hostile servers.** Hard 3s timeout in `ManifestFetcher`. If the server hangs or stalls, we degrade to mode 1. Worst case === today.
+
+**PendingRequestManager interaction (UNCHANGED).** The manifest fetch is a precondition for *which prompt type* fires, not a gate on the request queue. Multiple concurrent BRC-100 calls from the same fresh origin queue under the same modal exactly as they do today via `hasPendingForDomain` / `addRequest` / `popAllForDomain`. On user approval, all queued calls drain in order.
+
+**On manifest approval, Step 5 writes the grants via the Step 3 endpoints:**
+- `POST /domain/permissions/protocol` for each protocol in the manifest
+- `POST /domain/permissions/basket` for each basket
+- `POST /domain/permissions/counterparty` for each counterparty
+- `POST /domain/permissions` to set the parent domain row's trust + limits (existing endpoint, extended in Step 1 with `identityKeyDisclosureAllowed`)
+- Existing `POST /domain/permissions/certificate` (pre-Step-1) for cert fields
+
+Once written, the manifest data is thrown away — it was a one-shot input to the connect prompt. Future BRC-100 calls consult the V18 grant tables, not the manifest.
+
+**Console-warn on every BRC-100 call from a manifest-less site:** `[Hodos] No wallet-manifest.json at https://<origin>/.well-known/. Permission UX is degraded; please ship a manifest.` (per PERMISSION_UX_DESIGN.md:330). Dev-tooling-targeted, not user-visible.
 
 ### Step 6 — Rewire existing handlers through the engine
 
@@ -527,6 +595,7 @@ These need user direction before Step 0/1 ships, but can be reviewed in parallel
 - [x] **Step 1 landed (2026-05-11):** Privacy-perimeter handlers + bundled identity-key approval + V17 migration. Smoke validated on Win; Mac smoke deferred to sprint-end batch.
 - [x] **Step 2 landed (2026-05-11):** V18 schema (three child tables of `domain_permissions`) + repo CRUD + 10 inline tests. `revoked_at INTEGER` soft-delete chosen over `is_deleted INTEGER` for audit-friendly timestamps. Sensitivity column dropped. No handlers consume the tables yet — Step 6 wires them through the permission engine.
 - [x] **Step 3 landed (2026-05-11):** `PermissionEngine` C++ class + 9 new `/domain/permissions/{protocol,basket,counterparty}` Rust endpoints + first C++ test infrastructure in the project (GoogleTest via CMake FetchContent, 25 tests covering Matrix C). Stand-alone — engine exists and is unit-tested but no production traffic flows through it yet (Step 6 wires it in).
+- [x] **Step 4 landed (2026-05-11):** `ManifestFetcher` C++ class with `SyncHttpClient` + `nlohmann::json` parsing of `.well-known/wallet-manifest.json`. 3s timeout, 64 KB cap, lenient forward-compatible parse, never throws. 13 parse-only unit tests. Stand-alone — fetcher exists but no consumer yet; Step 5 wires the three-mode dispatch (manifest valid / 404 / timeout) into `HttpRequestInterceptor::Open()`. Integration design locked above in Step 5 section.
 - [ ] Step 3 — Permission engine (C++).
 - [ ] Step 4 — Manifest fetcher.
 - [ ] Step 5 — Extend existing UI (carries the deferred Step 1 UX work: info icon, list column, form toggle, default setting).

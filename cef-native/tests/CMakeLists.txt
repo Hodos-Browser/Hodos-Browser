@@ -32,11 +32,32 @@ FetchContent_MakeAvailable(googletest)
 # and forces an explicit choice when a new test file is added.
 add_executable(hodos_tests
     permission_engine_test.cpp
+    manifest_fetcher_test.cpp
 
     # Production sources under test (built into the test exe directly).
     # PermissionEngine is pure logic with no CEF deps, so it links cleanly.
+    # ManifestFetcher's parse path is pure, but it lives in the same TU as
+    # Fetch (which references SyncHttpClient::Get + Logger::Log). To keep
+    # the linker happy without inflating the test binary, we pull in the
+    # SyncHttpClient + Logger implementations too — both are small and
+    # have no external deps beyond stdlib + platform HTTP libs.
     ../src/core/PermissionEngine.cpp
+    ../src/core/ManifestFetcher.cpp
+    ../src/core/SyncHttpClient.cpp
+    ../src/core/Logger.cpp
 )
+
+# SyncHttpClient pulls platform HTTP libs:
+if(WIN32)
+    target_link_libraries(hodos_tests PRIVATE winhttp)
+elseif(APPLE)
+    find_package(CURL REQUIRED)
+    target_link_libraries(hodos_tests PRIVATE CURL::libcurl)
+endif()
+
+# nlohmann::json header is needed by ManifestFetcher.
+find_package(nlohmann_json CONFIG REQUIRED)
+target_link_libraries(hodos_tests PRIVATE nlohmann_json::nlohmann_json)
 
 target_include_directories(hodos_tests PRIVATE
     ../include
