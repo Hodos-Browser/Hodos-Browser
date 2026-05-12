@@ -1,6 +1,8 @@
 #include "../../include/core/HttpRequestInterceptor.h"
 #include "../../include/core/CookieBlockManager.h"
 #include "../../include/core/ManifestFetcher.h"
+#include "../../include/core/PermissionEngine.h"
+#include "../../include/core/SyncHttpClient.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
 #include "include/cef_request.h"
@@ -728,6 +730,385 @@ private:
     std::set<std::string> approved_;
 };
 
+// ============================================================================
+// Phase 1.5 Step 6 (Commit A) — SubPermissionCache
+// ============================================================================
+// Caches the {protocol, basket, counterparty} sub-permission lookups from the
+// V18 child tables (queried via the Step 3 /domain/permissions/{kind} GET
+// endpoints). Without this, the engine would HTTP round-trip on every BRC-100
+// call to decide if a scope is granted.
+//
+// Mirrors DomainPermissionCache's pattern:
+//   - One read miss → blocking sync HTTP to Rust → populate cache → return
+//   - Subsequent reads hit the cache
+//   - Explicit invalidation on domain_permission_invalidate IPC
+//
+// Cache shape: per-domain map of (scope-tuple → bool). Cleared on any change
+// to a domain's perms so re-grant / re-revoke take effect immediately.
+class SubPermissionCache {
+public:
+    static SubPermissionCache& GetInstance() {
+        static SubPermissionCache instance;
+        return instance;
+    }
+
+    // Protocol grant: (level, name, keyId, counterparty) → granted-or-not.
+    // Honors '*' wildcard keyId on the Rust side; we just relay the result.
+    bool isProtocolGranted(const std::string& domain, int level, const std::string& name,
+                            const std::string& keyId, const std::string& counterparty) {
+        const std::string key = "p:" + std::to_string(level) + ":" + name + ":" + keyId + ":" + counterparty;
+        return queryAndCache(domain, key, [&]() {
+            return fetchBool("/domain/permissions/protocol", domain, [&](const nlohmann::json& perms) {
+                for (const auto& p : perms) {
+                    int plvl = p.value("securityLevel", -1);
+                    std::string pname = p.value("protocolName", "");
+                    std::string pkey = p.value("keyId", "");
+                    std::string pcp = p.value("counterparty", "");
+                    if (plvl == level && pname == name
+                        && (pkey == keyId || pkey == "*")
+                        && (counterparty.empty() || pcp.empty() || pcp == counterparty)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        });
+    }
+
+    // Basket grant: read_write satisfies a read check; read alone does not satisfy read_write.
+    bool isBasketGranted(const std::string& domain, const std::string& basket, const std::string& requiredAccess) {
+        const std::string key = "b:" + basket + ":" + requiredAccess;
+        return queryAndCache(domain, key, [&]() {
+            return fetchBool("/domain/permissions/basket", domain, [&](const nlohmann::json& perms) {
+                for (const auto& p : perms) {
+                    if (p.value("basket", "") != basket) continue;
+                    const std::string access = p.value("access", "");
+                    if (access == "read_write") return true;
+                    if (access == "read" && requiredAccess == "read") return true;
+                }
+                return false;
+            });
+        });
+    }
+
+    bool isCounterpartyGranted(const std::string& domain, const std::string& counterparty) {
+        const std::string key = "c:" + counterparty;
+        return queryAndCache(domain, key, [&]() {
+            return fetchBool("/domain/permissions/counterparty", domain, [&](const nlohmann::json& perms) {
+                for (const auto& p : perms) {
+                    if (p.value("counterparty", "") == counterparty) return true;
+                }
+                return false;
+            });
+        });
+    }
+
+    void invalidate(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_.erase(domain);
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_.clear();
+    }
+
+private:
+    SubPermissionCache() = default;
+    std::mutex mutex_;
+    // Per-domain map of (scope-tuple-key → bool). Memoizes the lookup so
+    // a single BRC-100 call sequence doesn't HTTP-fetch repeatedly.
+    std::unordered_map<std::string, std::unordered_map<std::string, bool>> cache_;
+
+    template <typename Compute>
+    bool queryAndCache(const std::string& domain, const std::string& key, Compute compute) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto domIt = cache_.find(domain);
+            if (domIt != cache_.end()) {
+                auto entryIt = domIt->second.find(key);
+                if (entryIt != domIt->second.end()) {
+                    return entryIt->second;
+                }
+            }
+        }
+        bool result = compute();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cache_[domain][key] = result;
+        }
+        return result;
+    }
+
+    // Helper: fetch the /domain/permissions/{kind} list and let the caller
+    // scan it for the specific tuple. Returns false on any HTTP / parse error
+    // (treat absence-of-grant as default-denied, callers will prompt).
+    template <typename Scan>
+    bool fetchBool(const std::string& endpoint, const std::string& domain, Scan scan) {
+        const std::string url = "http://localhost:31301" + endpoint
+            + "?domain=" + domain;
+        HttpResponse resp = SyncHttpClient::Get(url, 1500);
+        if (!resp.success || resp.statusCode != 200) return false;
+        try {
+            auto j = nlohmann::json::parse(resp.body);
+            if (!j.contains("permissions") || !j["permissions"].is_array()) return false;
+            return scan(j["permissions"]);
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+// ============================================================================
+// Phase 1.5 Step 6 (Commit A) — Body-peeking helpers
+// ============================================================================
+// Extract scope-specific data from BRC-100 request bodies so the
+// PermissionContext builder can fill in the right fields. Each helper returns
+// a `valid` flag — false means "this endpoint doesn't have this scope" and
+// the caller should not check the matching scope.
+
+namespace {
+
+struct ProtocolScope {
+    bool valid = false;
+    int level = 2;
+    std::string name;
+    std::string keyId = "*";
+    std::string counterparty; // empty = none / self
+};
+
+struct BasketScope {
+    bool valid = false;
+    std::string basket;
+    std::string requiredAccess = "read";
+};
+
+// Parse protocolID JSON value into (level, name). Accepts [level, name] array
+// or "level-name" string per @bsv/sdk shape. Returns false if unparseable.
+static bool parseProtocolId(const nlohmann::json& v, int& outLevel, std::string& outName) {
+    if (v.is_array() && v.size() >= 2) {
+        if (v[0].is_number()) outLevel = v[0].get<int>();
+        if (v[1].is_string()) outName = v[1].get<std::string>();
+        return !outName.empty();
+    }
+    if (v.is_string()) {
+        const std::string s = v.get<std::string>();
+        auto dash = s.find('-');
+        if (dash != std::string::npos) {
+            try { outLevel = std::stoi(s.substr(0, dash)); } catch (...) {}
+            outName = s.substr(dash + 1);
+        } else {
+            outName = s;
+        }
+        return !outName.empty();
+    }
+    return false;
+}
+
+// Extract protocol scope from a BRC-100 call body. Returns valid=true only
+// for endpoints that genuinely use a protocolID/keyID tuple.
+static ProtocolScope extractProtocolScope(const std::string& endpoint, const std::string& body) {
+    ProtocolScope s;
+    const bool isProtocolEndpoint =
+        endpoint.find("/createSignature") != std::string::npos ||
+        endpoint.find("/verifySignature") != std::string::npos ||
+        endpoint.find("/createHmac") != std::string::npos ||
+        endpoint.find("/verifyHmac") != std::string::npos ||
+        endpoint.find("/encrypt") != std::string::npos ||
+        endpoint.find("/decrypt") != std::string::npos;
+    if (!isProtocolEndpoint || body.empty()) return s;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (!j.contains("protocolID")) return s;
+        if (!parseProtocolId(j["protocolID"], s.level, s.name)) return s;
+        // keyID — defaults to wildcard if absent
+        if (j.contains("keyID") && j["keyID"].is_string()) {
+            s.keyId = j["keyID"].get<std::string>();
+        }
+        // counterparty — empty means 'self' or no specific party
+        if (j.contains("counterparty") && j["counterparty"].is_string()) {
+            const std::string cp = j["counterparty"].get<std::string>();
+            if (cp != "self" && cp != "anyone") {
+                s.counterparty = cp;
+            }
+        }
+        s.valid = true;
+    } catch (...) {
+        // Malformed body — keep s.valid = false
+    }
+    return s;
+}
+
+// Extract basket scope from a BRC-100 call body.
+static BasketScope extractBasketScope(const std::string& endpoint, const std::string& body) {
+    BasketScope s;
+    const bool isBasketEndpoint =
+        endpoint.find("/listOutputs") != std::string::npos ||
+        endpoint.find("/relinquishOutput") != std::string::npos;
+    if (!isBasketEndpoint || body.empty()) return s;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (j.contains("basket") && j["basket"].is_string()) {
+            s.basket = j["basket"].get<std::string>();
+            // relinquishOutput is destructive → read_write; listOutputs → read
+            s.requiredAccess = (endpoint.find("/relinquishOutput") != std::string::npos)
+                ? "read_write" : "read";
+            s.valid = !s.basket.empty();
+        }
+    } catch (...) {}
+    return s;
+}
+
+// Classify a request into a PermissionCallKind for the engine.
+//
+// Order matters — privacy-perimeter and scope kinds take precedence over
+// payment/generic. The engine's branch ordering handles trust separately,
+// so we don't classify DomainTrust here; the caller short-circuits on
+// trust before calling buildPermissionContext.
+static hodos::PermissionCallKind classifyCallKind(
+    const std::string& endpoint,
+    const std::string& body,
+    const ProtocolScope& proto,
+    const BasketScope& basket
+) {
+    using K = hodos::PermissionCallKind;
+
+    // Privacy perimeter — endpoint-driven.
+    if (endpoint.find("/revealCounterpartyKeyLinkage") != std::string::npos) return K::CounterpartyKeyLinkage;
+    if (endpoint.find("/revealSpecificKeyLinkage") != std::string::npos) return K::SpecificKeyLinkage;
+
+    // getPublicKey is identity-key only when body matches the identity-key style
+    // (matches the existing inline isIdentityKeyStyleGetPublicKey logic).
+    if (endpoint.find("/getPublicKey") != std::string::npos) {
+        bool identityKeyStyle = body.empty();
+        if (!identityKeyStyle) {
+            try {
+                auto j = nlohmann::json::parse(body);
+                bool flag = j.contains("identityKey") && j["identityKey"].is_boolean() && j["identityKey"].get<bool>();
+                bool hasProto = j.contains("protocolID") && !j["protocolID"].is_null();
+                bool hasKey = j.contains("keyID") && j["keyID"].is_string() && !j["keyID"].get<std::string>().empty();
+                identityKeyStyle = flag || !hasProto || !hasKey;
+            } catch (...) { identityKeyStyle = true; }
+        }
+        return identityKeyStyle ? K::IdentityKeyReveal : K::GenericApproved;
+    }
+
+    // Cert disclosure
+    if (endpoint.find("/proveCertificate") != std::string::npos) return K::CertificateDisclosure;
+
+    // Payment endpoints (createAction / acquireCertificate / sendMessage).
+    // Existing isPaymentEndpoint logic.
+    if (endpoint.find("/createAction") != std::string::npos
+        || endpoint.find("/acquireCertificate") != std::string::npos
+        || endpoint.find("/sendMessage") != std::string::npos) {
+        return K::Payment;
+    }
+
+    // Scoped grants — order: counterparty (more specific) before protocol.
+    if (proto.valid && !proto.counterparty.empty()) return K::CounterpartyUse;
+    if (proto.valid) return K::ProtocolUse;
+    if (basket.valid) return K::BasketAccess;
+
+    return K::GenericApproved;
+}
+
+// Build a fully-populated PermissionContext for engine.Decide().
+// Caller must have already short-circuited on trustLevel == "unknown" / "blocked"
+// (engine handles those branches, but we don't want to fetch sub-permissions
+// for a domain we won't approve anyway).
+static hodos::PermissionContext buildPermissionContext(
+    const std::string& domain,
+    const std::string& endpoint,
+    const std::string& body,
+    const DomainPermissionCache::Permission& perm,
+    int64_t requestedCents,
+    int64_t sessionSpentCents,
+    int paymentRequestsThisMinute,
+    int paymentCountThisSession
+) {
+    using K = hodos::PermissionCallKind;
+    hodos::PermissionContext ctx;
+
+    ProtocolScope proto = extractProtocolScope(endpoint, body);
+    BasketScope basket = extractBasketScope(endpoint, body);
+
+    ctx.callKind = classifyCallKind(endpoint, body, proto, basket);
+
+    // Domain-level state
+    ctx.trustLevel = perm.trustLevel;
+    ctx.perTxLimitCents = perm.perTxLimitCents;
+    ctx.perSessionLimitCents = perm.perSessionLimitCents;
+    ctx.rateLimitPerMin = perm.rateLimitPerMin;
+    ctx.maxTxPerSession = perm.maxTxPerSession;
+    ctx.identityKeyDisclosureAllowed = perm.identityKeyDisclosureAllowed;
+
+    // Session counters
+    ctx.sessionSpentCents = sessionSpentCents;
+    ctx.paymentRequestsThisMinute = paymentRequestsThisMinute;
+    ctx.paymentCountThisSession = paymentCountThisSession;
+
+    // Session-scoped privacy-perimeter opt-ins (in-memory caches)
+    ctx.identityKeySessionOptIn = IdentityKeyApprovalCache::GetInstance().isApproved(domain);
+    ctx.keyLinkageSessionOptIn = KeyLinkageApprovalCache::GetInstance().isApproved(domain);
+
+    // Payment-specific
+    ctx.requestedCents = requestedCents;
+
+    // Scoped grant lookups — only fetch the cache for the relevant kind, so
+    // a Payment call doesn't HTTP-fetch the protocol cache pointlessly.
+    switch (ctx.callKind) {
+        case K::ProtocolUse:
+        case K::CounterpartyUse:
+            if (proto.valid) {
+                ctx.scopedGrantExists = SubPermissionCache::GetInstance().isProtocolGranted(
+                    domain, proto.level, proto.name, proto.keyId, proto.counterparty);
+            }
+            break;
+        case K::BasketAccess:
+            if (basket.valid) {
+                ctx.scopedGrantExists = SubPermissionCache::GetInstance().isBasketGranted(
+                    domain, basket.basket, basket.requiredAccess);
+            }
+            break;
+        default:
+            // Other kinds don't use scopedGrantExists; leave default false.
+            break;
+    }
+
+    return ctx;
+}
+
+// Human-readable string for a callKind. Used only for shadow-mode logging in
+// Commit A — replaced by the engine driving production behavior in later commits.
+static const char* callKindToString(hodos::PermissionCallKind k) {
+    using K = hodos::PermissionCallKind;
+    switch (k) {
+        case K::IdentityKeyReveal: return "IdentityKeyReveal";
+        case K::CounterpartyKeyLinkage: return "CounterpartyKeyLinkage";
+        case K::SpecificKeyLinkage: return "SpecificKeyLinkage";
+        case K::SensitiveCertField: return "SensitiveCertField";
+        case K::ProtocolUse: return "ProtocolUse";
+        case K::BasketAccess: return "BasketAccess";
+        case K::CounterpartyUse: return "CounterpartyUse";
+        case K::Payment: return "Payment";
+        case K::DomainTrust: return "DomainTrust";
+        case K::CertificateDisclosure: return "CertificateDisclosure";
+        case K::GenericApproved: return "GenericApproved";
+    }
+    return "Unknown";
+}
+
+static const char* decisionKindToString(hodos::PermissionDecision::Kind k) {
+    using DK = hodos::PermissionDecision::Kind;
+    switch (k) {
+        case DK::Silent: return "Silent";
+        case DK::Prompt: return "Prompt";
+        case DK::Deny: return "Deny";
+    }
+    return "Unknown";
+}
+
+} // anonymous namespace
+
 // Thin entry points for simple_handler.cpp's IPC dispatchers (declared in
 // include/core/HttpRequestInterceptor.h).
 void MarkIdentityKeyRevealApproved(const std::string& domain) {
@@ -1409,6 +1790,49 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     // "approved" — auto-approve engine with spending limits and rate limiting
     if (perm.trustLevel == "approved") {
         LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is approved, checking spending limits");
+
+        // ====================================================================
+        // Phase 1.5 Step 6 — Commit A: shadow-mode PermissionEngine logging.
+        // ====================================================================
+        // The engine runs alongside the inline gates and logs its decision so
+        // we can verify agreement before any branch is migrated. Behavior is
+        // unchanged — only logging. Inline gates below stay in full control.
+        //
+        // For Payment kind we precompute satoshis/cents so the engine sees the
+        // same input the inline gates will. For non-Payment kinds requestedCents
+        // stays 0; the engine ignores it for those branches.
+        {
+            const int browserIdShadow = browser_ ? browser_->GetIdentifier() : 0;
+            int64_t shadowRequestedCents = 0;
+            if (isPaymentEndpoint(endpoint_)) {
+                const int64_t shadowSats = extractOutputSatoshis(body_);
+                const double shadowPrice = BSVPriceCache::GetInstance().getPrice();
+                if (shadowPrice > 0 && shadowSats > 0) {
+                    shadowRequestedCents = static_cast<int64_t>(
+                        (static_cast<double>(shadowSats) / 100000000.0) * shadowPrice * 100.0);
+                }
+            }
+            const int64_t shadowSessionSpent =
+                SessionManager::GetInstance().getSpentCents(browserIdShadow, requestDomain_);
+            const int shadowRateCount =
+                SessionManager::GetInstance().getRateCounter(browserIdShadow, requestDomain_);
+            const int shadowPayCount =
+                SessionManager::GetInstance().getPaymentCount(browserIdShadow, requestDomain_);
+
+            hodos::PermissionContext shadowCtx = buildPermissionContext(
+                requestDomain_, endpoint_, body_, perm,
+                shadowRequestedCents, shadowSessionSpent,
+                shadowRateCount, shadowPayCount);
+            hodos::PermissionDecision shadowDecision =
+                hodos::PermissionEngine::Decide(shadowCtx);
+
+            LOG_INFO_HTTP(std::string("🧪 [engine-shadow] domain=") + requestDomain_
+                + " endpoint=" + endpoint_
+                + " callKind=" + callKindToString(shadowCtx.callKind)
+                + " engineDecision=" + decisionKindToString(shadowDecision.kind)
+                + " promptType=" + shadowDecision.promptType
+                + " reason=" + shadowDecision.reason);
+        }
 
         // Phase 1.5 Step 1 -- privacy-perimeter check #1: identity-key reveal.
         // Intercept /getPublicKey requests whose body would return the master

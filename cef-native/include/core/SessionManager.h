@@ -52,6 +52,19 @@ public:
         return 0;
     }
 
+    // Phase 1.5 Step 6 — peek the current minute's payment-request count.
+    // Non-mutating read used by the PermissionEngine context builder so
+    // shadow-mode logging matches the inline-gate rate-limit math without
+    // creating a session as a side effect.
+    int getRateCounter(int browserId, const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sessions_.find(browserId);
+        if (it != sessions_.end() && it->second.domain == domain) {
+            return it->second.paymentRequestsThisMinute;
+        }
+        return 0;
+    }
+
     // Increment total payment transaction count (call alongside incrementRateCounter)
     void incrementPaymentCount(int browserId) {
         std::lock_guard<std::mutex> lock(mutex_);
