@@ -2328,6 +2328,39 @@ void clearDomainPermissionCache() {
     DomainPermissionCache::GetInstance().clear();
 }
 
+// ============================================================================
+// Phase 1.5 — session-scoped trust caches: domain-revoke helpers
+// ============================================================================
+// IdentityKeyApprovalCache and KeyLinkageApprovalCache are in-memory caches
+// populated when the user clicks "Approve with Always allow" on the privacy-
+// perimeter prompts. They were designed as a fast-path while the V17 column /
+// future linkage column DB write is in flight. SubPermissionCache (Commit A)
+// memoizes V18 child-table lookups.
+//
+// Without these helpers, when the user toggles identity-key disclosure off in
+// DomainPermissionsTab or DomainPermissionForm, only the V17 column flips —
+// the session cache still says approved, so the inline gate's
+// `persistent_grant || cache_grant` test silently leaks identity keys until
+// the browser is restarted.
+//
+// Called from simple_handler.cpp's `domain_permission_invalidate` IPC, which
+// fires every time a domain's permissions change (revoke, edit, advanced
+// save, etc.). Dropping all session-scoped trust on the invalidate edge is
+// the right default — the user just touched this domain's permissions, so
+// any prior session-only opt-in should be re-confirmed.
+void revokeIdentityKeyApprovalForDomain(const std::string& domain) {
+    IdentityKeyApprovalCache::GetInstance().revoke(domain);
+}
+void revokeKeyLinkageApprovalForDomain(const std::string& domain) {
+    KeyLinkageApprovalCache::GetInstance().revoke(domain);
+}
+void invalidateSubPermissionCacheForDomain(const std::string& domain) {
+    SubPermissionCache::GetInstance().invalidate(domain);
+}
+void clearSubPermissionCache() {
+    SubPermissionCache::GetInstance().clear();
+}
+
 // Cache-warming helpers (called from simple_handler.cpp startup / navigation)
 void warmWalletStatusCache() {
     WalletStatusCache::GetInstance().walletExists();

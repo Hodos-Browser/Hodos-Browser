@@ -9740,14 +9740,29 @@ pub async fn set_domain_permission(
     let db = state.database.lock().unwrap();
     let repo = crate::database::DomainPermissionRepository::new(db.connection());
 
-    // Use user's configured default limits instead of hardcoded values
-    let mut perm = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
-    let settings_repo = crate::database::SettingsRepository::new(db.connection());
-    if let Ok((per_tx, per_session, rate)) = settings_repo.get_default_limits() {
-        perm.per_tx_limit_cents = per_tx;
-        perm.per_session_limit_cents = per_session;
-        perm.rate_limit_per_min = rate;
-    }
+    // Build the working row by starting from the existing row (if any) and
+    // layering in only the fields the request explicitly supplied. This makes
+    // partial POSTs safe — e.g. a "set identity-key disclosure" call doesn't
+    // reset the user's per-tx / per-session / rate caps to defaults.
+    let existing_opt = repo
+        .get_by_domain(state.current_user_id, &req.domain)
+        .ok()
+        .flatten();
+    let mut perm = match existing_opt {
+        Some(p) => p,
+        None => {
+            // Fresh row: start from struct defaults, then layer in the user's
+            // configured default limits from settings.
+            let mut p = crate::database::DomainPermission::defaults(state.current_user_id, &req.domain);
+            let settings_repo = crate::database::SettingsRepository::new(db.connection());
+            if let Ok((per_tx, per_session, rate)) = settings_repo.get_default_limits() {
+                p.per_tx_limit_cents = per_tx;
+                p.per_session_limit_cents = per_session;
+                p.rate_limit_per_min = rate;
+            }
+            p
+        }
+    };
     if let Some(ref tl) = req.trust_level {
         perm.trust_level = tl.clone();
     }
@@ -9763,15 +9778,11 @@ pub async fn set_domain_permission(
     if let Some(v) = req.max_tx_per_session {
         perm.max_tx_per_session = v;
     }
-    // Preserve existing identity_key_disclosure_allowed if the request omits it
-    // (None), so unrelated PUTs to the same row don't accidentally re-enable the
-    // privacy-perimeter prompt. If the row didn't exist yet, defaults() already
-    // set false.
     if let Some(v) = req.identity_key_disclosure_allowed {
         perm.identity_key_disclosure_allowed = v;
-    } else if let Ok(Some(existing)) = repo.get_by_domain(state.current_user_id, &req.domain) {
-        perm.identity_key_disclosure_allowed = existing.identity_key_disclosure_allowed;
     }
+    // Note: identity_key_disclosure_allowed is preserved via the existing-row
+    // fallback above when the request omits the field.
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response

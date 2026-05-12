@@ -40,6 +40,7 @@
 #include "../../include/core/TaskbarProfile.h"
 #include "../../include/core/ProfileImporter.h"
 #include "../../include/core/QRScannerScript.h"
+#include "../../include/core/SyncHttpClient.h"
 #ifdef _WIN32
 #include "../../include/core/QRScreenCapture.h"
 #endif
@@ -4299,7 +4300,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (args && args->GetSize() > 0) {
             std::string domain = args->GetString(0).ToString();
             extern void invalidateDomainPermissionCache(const std::string& domain);
+            extern void revokeIdentityKeyApprovalForDomain(const std::string& domain);
+            extern void revokeKeyLinkageApprovalForDomain(const std::string& domain);
+            extern void invalidateSubPermissionCacheForDomain(const std::string& domain);
             invalidateDomainPermissionCache(domain);
+            // Session-scoped trust caches must follow the V17/V18 row state.
+            // Without this, toggling identity-key disclosure off in the UI
+            // leaves the in-memory IdentityKeyApprovalCache approved and the
+            // inline gate silently passes (`persistent_grant || cache_grant`).
+            // Same shape for key-linkage and the V18 sub-permission cache.
+            revokeIdentityKeyApprovalForDomain(domain);
+            revokeKeyLinkageApprovalForDomain(domain);
+            invalidateSubPermissionCacheForDomain(domain);
             // Also drain any stale pending requests for this domain. Trust
             // state changed (revoked, edited, etc.); leftover entries from
             // previous modal cycles would falsely return true from
@@ -4309,7 +4321,12 @@ bool SimpleHandler::OnProcessMessageReceived(
                               + " (drained " + std::to_string(drained.size()) + " stale pending request(s))");
         } else {
             extern void clearDomainPermissionCache();
+            extern void clearSubPermissionCache();
             clearDomainPermissionCache();
+            clearSubPermissionCache();
+            // Note: IdentityKeyApprovalCache / KeyLinkageApprovalCache have no
+            // bulk-clear helper because the all-domains invalidate path is
+            // only used at startup / shutdown when those caches are empty.
             LOG_DEBUG_BROWSER("🔐 Cleared entire domain permission cache");
         }
         return true;
@@ -4418,7 +4435,33 @@ bool SimpleHandler::OnProcessMessageReceived(
                 std::string domain = data.value("domain", "");
                 bool remember = data.value("remember", false);
                 if (remember && !domain.empty()) {
-                    LOG_DEBUG_BROWSER("🛡️ Persisting identity-key reveal opt-in (in-memory) for " + domain);
+                    // Phase 1.5 polish — persist to V17 column so "Always allow"
+                    // matches what the Manage Site Permissions form will show on
+                    // next open. Without this, the in-memory cache is the only
+                    // grant and the form correctly renders unchecked, which
+                    // confuses users.
+                    LOG_DEBUG_BROWSER("🛡️ Persisting identity-key reveal opt-in (V17 + cache) for " + domain);
+                    std::string body = std::string("{\"domain\":\"") + domain
+                        + "\",\"trustLevel\":\"approved\",\"identityKeyDisclosureAllowed\":true}";
+                    HttpResponse resp = SyncHttpClient::Post(
+                        "http://localhost:31301/domain/permissions",
+                        body, "application/json", 3000);
+                    if (resp.success && resp.statusCode == 200) {
+                        LOG_DEBUG_BROWSER("🛡️ V17 set for " + domain + " (HTTP 200)");
+                    } else {
+                        LOG_DEBUG_BROWSER("🛡️ V17 write FAILED for " + domain
+                                          + " (status=" + std::to_string(resp.statusCode)
+                                          + ", success=" + (resp.success ? "true" : "false")
+                                          + ") — falling back to session cache only");
+                    }
+                    // Drop the row-level DomainPermissionCache directly so the
+                    // next Open() picks up the fresh V17 value. We deliberately
+                    // do NOT call the full `domain_permission_invalidate` IPC,
+                    // which would also revoke IdentityKeyApprovalCache — that
+                    // cache is the fast-path we want to keep set for the
+                    // queued requests that haven't drained yet.
+                    extern void invalidateDomainPermissionCache(const std::string& domain);
+                    invalidateDomainPermissionCache(domain);
                     MarkIdentityKeyRevealApproved(domain);
                 } else {
                     LOG_DEBUG_BROWSER("🛡️ identity-key reveal NOT remembered for " + domain + " (one-shot)");
