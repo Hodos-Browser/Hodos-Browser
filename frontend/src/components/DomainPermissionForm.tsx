@@ -42,6 +42,16 @@ interface DomainPermissionFormProps {
   currentSettings?: DomainPermissionSettings;
   onSave: (settings: DomainPermissionSettings) => void;
   onCancel: () => void;
+  /**
+   * Phase 1.5 Step 5 — when true, hide the "Personal Info Disclosure" section.
+   * Set this when the form is embedded inside `domain_approval`'s Advanced
+   * expander, where the parent modal already shows a bundle checkbox for
+   * identity-key — rendering the form's own toggle would create two
+   * unsynced checkboxes for the same setting. Default false keeps the
+   * section visible for edit contexts (Approved Sites tab, right-click
+   * Manage Site Permissions).
+   */
+  hideDisclosureSection?: boolean;
 }
 
 const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
@@ -49,6 +59,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   currentSettings,
   onSave,
   onCancel,
+  hideDisclosureSection = false,
 }) => {
   const [perTxUsd, setPerTxUsd] = useState(
     currentSettings ? (currentSettings.perTxLimitCents / 100).toFixed(2) : '1.00'
@@ -128,8 +139,13 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   }, [domain]);
 
   useEffect(() => {
-    refreshSubPermissions();
-  }, [refreshSubPermissions]);
+    // Skip the sub-permission fetch when the disclosure section is hidden —
+    // the list isn't rendered, no point hitting the wallet endpoints just to
+    // throw the result away. Saves ~3 HTTP requests per domain_approval open.
+    if (!hideDisclosureSection) {
+      refreshSubPermissions();
+    }
+  }, [refreshSubPermissions, hideDisclosureSection]);
 
   const handleRevokeSubPerm = async (row: SubPermissionRow) => {
     const wallet = 'http://127.0.0.1:31301';
@@ -371,7 +387,13 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
         </div>
       )}
 
-      {/* ─── Phase 1.5 Step 5: Personal Info Disclosure section ────────── */}
+      {/* ─── Phase 1.5 Step 5: Personal Info Disclosure section ──────────
+          Hidden when the form is embedded inside the domain_approval modal's
+          Advanced expander — that modal already has a bundle checkbox for
+          identity-key, and having two unsynced toggles for the same setting
+          confuses users (and lets them disagree). Visible in edit contexts
+          (Approved Sites tab, right-click Manage Site Permissions). */}
+      {!hideDisclosureSection && (
       <div style={{
         marginTop: '8px',
         marginBottom: '14px',
@@ -498,6 +520,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Action buttons */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>

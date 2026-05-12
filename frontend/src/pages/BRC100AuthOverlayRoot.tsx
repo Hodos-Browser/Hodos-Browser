@@ -138,35 +138,79 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
 };
 
 // Phase 1.5 Step 5 — small info icon for tooltips on identity-key surfaces.
-// Native title attribute keeps it CEF-friendly (no popover library / refs needed).
+// Uses onMouseEnter/onMouseLeave + a positioned div rather than the native
+// `title` attribute, because CEF doesn't reliably render Chromium's native
+// tooltip UI inside overlays. Mirrors the working pattern in
+// frontend/src/components/wallet/DashboardTab.tsx's `InfoTooltip`.
 // Default copy is the "identify you across the Metanet" framing surfaced
 // during Step 5 design — overridable per-callsite if different copy fits.
 const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
   tooltip,
   style,
-}) => (
-  <span
-    title={tooltip || 'Identify you across the Metanet with your wallet identity key. This key is the same across every BRC-100 site you visit, so granting it lets sites recognize you between visits.'}
-    style={{
-      marginLeft: '4px',
-      cursor: 'help',
-      color: COLORS.textMuted,
-      fontSize: '11px',
-      border: `1px solid ${COLORS.textMuted}`,
-      borderRadius: '50%',
-      width: '14px',
-      height: '14px',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontWeight: 600,
-      lineHeight: 1,
-      ...style,
-    }}
-  >
-    i
-  </span>
-);
+}) => {
+  const [open, setOpen] = React.useState(false);
+  const text = tooltip || 'Identify you across the Metanet with your wallet identity key. This key is the same across every BRC-100 site you visit, so granting it lets sites recognize you between visits.';
+  return (
+    <span
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      style={{
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        marginLeft: '4px',
+        verticalAlign: 'middle',
+      }}
+    >
+      <span
+        style={{
+          cursor: 'help',
+          color: COLORS.textMuted,
+          fontSize: '11px',
+          border: `1px solid ${COLORS.textMuted}`,
+          borderRadius: '50%',
+          width: '14px',
+          height: '14px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontWeight: 600,
+          lineHeight: 1,
+          fontStyle: 'italic',
+          ...style,
+        }}
+      >
+        i
+      </span>
+      {open && (
+        <span
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 6px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 9999,
+            background: '#0f1117',
+            color: COLORS.textDark,
+            border: `1px solid ${COLORS.gold}`,
+            borderRadius: '6px',
+            padding: '8px 10px',
+            fontSize: '11px',
+            fontWeight: 400,
+            lineHeight: 1.45,
+            width: '240px',
+            textAlign: 'left',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.4)',
+            fontStyle: 'normal',
+            pointerEvents: 'none',
+          }}
+        >
+          {text}
+        </span>
+      )}
+    </span>
+  );
+};
 
 // Phase 1.5 Step 0 — Hodos wallet attribution header. Renders the
 // Hodos_Gold_Wallet_Icon.svg at the top of every auth/payment/cert/
@@ -1921,6 +1965,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 domain={notificationDomain}
                 onSave={(settings) => handleAllowAdvanced(settings)}
                 onCancel={() => setShowAdvanced(false)}
+                // Phase 1.5 Step 5 bugfix — the parent domain_approval modal
+                // already shows the "Allow this site to identify you" bundle
+                // checkbox; rendering the form's own toggle here would create
+                // two unsynced controls for the same setting.
+                hideDisclosureSection={true}
               />
             </div>
           )}
