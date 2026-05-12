@@ -1,5 +1,6 @@
 #include "../../include/core/HttpRequestInterceptor.h"
 #include "../../include/core/CookieBlockManager.h"
+#include "../../include/core/ManifestFetcher.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
 #include "include/cef_request.h"
@@ -931,6 +932,96 @@ public:
         LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + domain + " requesting " + method + " " + endpoint);
     }
 
+    // Phase 1.5 Step 5 — manifest-aware bundled connect prompt.
+    // Fires when ManifestFetcher::Fetch returned a valid manifest with at
+    // least one declared permission. Passes the entire manifest as a
+    // URL-encoded JSON payload in extraParams so the React side can render
+    // the bundled connect UX without re-fetching.
+    //
+    // Subsequent BRC-100 calls from the same fresh origin queue under the
+    // same modal via PendingRequestManager — UNCHANGED from existing pattern.
+    void triggerManifestConnectBundleModal(const std::string& domain,
+                                            const hodos::Manifest& m) {
+        LOG_DEBUG_HTTP("📦 Triggering manifest_connect_bundle for " + domain
+                        + " (app=" + m.name + ", " + std::to_string(m.protocols.size())
+                        + " protocols, " + std::to_string(m.baskets.size())
+                        + " baskets, " + std::to_string(m.certificates.size())
+                        + " certs, " + std::to_string(m.counterparties.size())
+                        + " counterparties)");
+
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        std::string requestId = PendingRequestManager::GetInstance().addRequest(
+            domain, method_, endpoint_, body_, this, "manifest_connect_bundle");
+
+        if (modalAlreadyShowing) {
+            LOG_DEBUG_HTTP("📦 Modal already pending for domain " + domain
+                            + ", request queued (requestId: " + requestId + ")");
+            return;
+        }
+
+        // Serialize manifest to JSON, URL-encode, pass as extraParams.
+        // 64 KB cap from fetcher + ~33% base64-style inflation → ~85 KB URL-safe
+        // string, well under CEF/Chromium's multi-MB URL handling capacity.
+        nlohmann::json j;
+        j["name"] = m.name;
+        j["description"] = m.description;
+        j["iconUrl"] = m.iconUrl;
+        j["expiresAt"] = m.expiresAt;
+        j["version"] = m.version;
+
+        nlohmann::json protocols = nlohmann::json::array();
+        for (const auto& p : m.protocols) {
+            protocols.push_back({
+                {"securityLevel", p.securityLevel},
+                {"name", p.name},
+                {"keyId", p.keyId},
+                {"purpose", p.purpose},
+            });
+        }
+        j["protocols"] = protocols;
+
+        nlohmann::json baskets = nlohmann::json::array();
+        for (const auto& b : m.baskets) {
+            baskets.push_back({
+                {"name", b.name},
+                {"access", b.access},
+                {"purpose", b.purpose},
+            });
+        }
+        j["baskets"] = baskets;
+
+        nlohmann::json certs = nlohmann::json::array();
+        for (const auto& c : m.certificates) {
+            certs.push_back({
+                {"type", c.type},
+                {"fields", c.fields},
+                {"purpose", c.purpose},
+            });
+        }
+        j["certificates"] = certs;
+
+        j["spending"] = {
+            {"perTransactionUsd", m.spending.perTransactionUsd},
+            {"perSessionUsd", m.spending.perSessionUsd},
+            {"purpose", m.spending.purpose},
+        };
+
+        nlohmann::json counterparties = nlohmann::json::array();
+        for (const auto& cp : m.counterparties) {
+            counterparties.push_back({
+                {"type", cp.type},
+                {"counterparty", cp.counterparty},
+                {"purpose", cp.purpose},
+            });
+        }
+        j["counterparties"] = counterparties;
+
+        std::string extraParams = "&manifest=" + urlEncode(j.dump());
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+            "manifest_connect_bundle", domain, extraParams));
+        LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
+    }
+
 
     // Phase 1.5 Step 1 — privacy-perimeter prompt triggers (identity key + key linkage).
     // Mirror triggerCertificateDisclosureModal: store pending request keyed to this
@@ -1266,13 +1357,48 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     }
 
     if (perm.trustLevel == "unknown") {
-        // Domain has no permission record — needs approval
+        // Domain has no permission record — needs approval.
+        //
+        // Phase 1.5 Step 5: three-mode dispatch documented in Phase 1.5 README's
+        // Step 5 section. Before firing the existing domain_approval modal, try
+        // to fetch the dApp's /.well-known/wallet-manifest.json. If it succeeds
+        // with declared permissions, fire the new manifest_connect_bundle modal
+        // instead. If the fetch 404s, times out, or returns nothing actionable,
+        // fall back to the existing flow with ZERO regression.
+        //
+        // PendingRequestManager queue interaction is UNCHANGED — concurrent calls
+        // from the same fresh origin still stack under whichever modal fires.
+
         if (endpoint_.find("/brc100/auth/") != std::string::npos) {
+            // BRC-100 auth handshake — manifest UX doesn't apply here.
             LOG_DEBUG_HTTP("🔐 BRC-100 auth request from unknown domain: " + requestDomain_);
             triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
         } else {
-            LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " unknown, triggering approval modal");
-            triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
+            LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " unknown — attempting manifest fetch first");
+            hodos::Manifest manifest = hodos::ManifestFetcher::Fetch(requestDomain_);
+            const bool hasDeclaredPerms = manifest.valid
+                && (!manifest.protocols.empty()
+                    || !manifest.baskets.empty()
+                    || !manifest.certificates.empty()
+                    || !manifest.counterparties.empty()
+                    || manifest.spending.perTransactionUsd > 0);
+
+            if (hasDeclaredPerms) {
+                LOG_DEBUG_HTTP("📦 Manifest found for " + requestDomain_
+                                + " — firing manifest_connect_bundle prompt");
+                triggerManifestConnectBundleModal(requestDomain_, manifest);
+            } else {
+                // Mode 1 (404 / no permissions declared) or Mode 3 (timeout).
+                // Both fall through to the existing pre-Step-5 flow.
+                if (!manifest.valid) {
+                    LOG_DEBUG_HTTP("✗ No manifest at " + requestDomain_
+                                    + "/.well-known/wallet-manifest.json — using domain_approval");
+                } else {
+                    LOG_DEBUG_HTTP("✗ Manifest at " + requestDomain_
+                                    + " declared no permissions — using domain_approval");
+                }
+                triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
+            }
         }
 
         postAuthTimeout(60000, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");

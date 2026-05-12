@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { HodosButton } from './HodosButton';
 
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
@@ -21,6 +21,20 @@ export interface DomainPermissionSettings {
   perSessionLimitCents: number;
   rateLimitPerMin: number;
   maxTxPerSession: number;
+  // Phase 1.5 Step 5 — Personal Info Disclosure binary toggle. Maps directly
+  // to the V17 domain_permissions.identity_key_disclosure_allowed column.
+  // Optional in the interface for backward compat; callers should always pass
+  // the user's current selection so the column doesn't silently flip.
+  identityKeyDisclosureAllowed?: boolean;
+}
+
+// Sub-permission row types fetched from Step 3 GET endpoints. Display-only
+// inside the form; per-row revoke buttons call the matching DELETE endpoint.
+interface SubPermissionRow {
+  id: number;
+  kind: 'protocol' | 'basket' | 'counterparty';
+  label: string;
+  sublabel?: string;
 }
 
 interface DomainPermissionFormProps {
@@ -48,6 +62,89 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   const [maxTxPerSession, setMaxTxPerSession] = useState(
     String(currentSettings?.maxTxPerSession ?? 100)
   );
+
+  // Phase 1.5 Step 5 — Personal Info Disclosure section state.
+  const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(
+    currentSettings?.identityKeyDisclosureAllowed ?? true
+  );
+  const [subPermissions, setSubPermissions] = useState<SubPermissionRow[]>([]);
+  const [subPermsLoading, setSubPermsLoading] = useState<boolean>(false);
+
+  // Fetch granted sub-permissions for this domain. Display-only — revoking
+  // hits the Step 3 DELETE endpoint directly. We fetch on mount + after each
+  // successful revoke so the list stays accurate.
+  const refreshSubPermissions = useCallback(async () => {
+    setSubPermsLoading(true);
+    const wallet = 'http://127.0.0.1:31301';
+    const enc = encodeURIComponent(domain);
+    try {
+      const [protoRes, basketRes, cpRes] = await Promise.all([
+        fetch(`${wallet}/domain/permissions/protocol?domain=${enc}`),
+        fetch(`${wallet}/domain/permissions/basket?domain=${enc}`),
+        fetch(`${wallet}/domain/permissions/counterparty?domain=${enc}`),
+      ]);
+      const rows: SubPermissionRow[] = [];
+      if (protoRes.ok) {
+        const data = await protoRes.json();
+        for (const p of data.permissions ?? []) {
+          rows.push({
+            id: p.id,
+            kind: 'protocol',
+            label: `Protocol: ${p.protocolName}`,
+            sublabel: `level ${p.securityLevel} · key ${p.keyId === '*' ? 'any' : p.keyId}${p.counterparty ? ` · counterparty ${p.counterparty.slice(0, 10)}…` : ''}`,
+          });
+        }
+      }
+      if (basketRes.ok) {
+        const data = await basketRes.json();
+        for (const b of data.permissions ?? []) {
+          rows.push({
+            id: b.id,
+            kind: 'basket',
+            label: `Basket: ${b.basket}`,
+            sublabel: `${b.access} access`,
+          });
+        }
+      }
+      if (cpRes.ok) {
+        const data = await cpRes.json();
+        for (const cp of data.permissions ?? []) {
+          rows.push({
+            id: cp.id,
+            kind: 'counterparty',
+            label: 'Counterparty',
+            sublabel: cp.counterparty.slice(0, 24) + (cp.counterparty.length > 24 ? '…' : ''),
+          });
+        }
+      }
+      setSubPermissions(rows);
+    } catch (err) {
+      // Endpoints might 404 on very fresh dev DBs; treat as empty list.
+      console.warn('[Hodos] Could not load sub-permissions for', domain, err);
+      setSubPermissions([]);
+    } finally {
+      setSubPermsLoading(false);
+    }
+  }, [domain]);
+
+  useEffect(() => {
+    refreshSubPermissions();
+  }, [refreshSubPermissions]);
+
+  const handleRevokeSubPerm = async (row: SubPermissionRow) => {
+    const wallet = 'http://127.0.0.1:31301';
+    try {
+      const res = await fetch(`${wallet}/domain/permissions/${row.kind}?id=${row.id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        // Refresh list — soft-deleted rows drop from the active view.
+        refreshSubPermissions();
+      }
+    } catch (err) {
+      console.error('[Hodos] Failed to revoke sub-permission:', err);
+    }
+  };
 
   const isAlwaysNotify = perTxUsd === '0' && perSessionUsd === '0';
 
@@ -77,6 +174,7 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
       perSessionLimitCents: perSessionCents,
       rateLimitPerMin: rateLimitNum,
       maxTxPerSession: parseInt(maxTxPerSession) || 0,
+      identityKeyDisclosureAllowed: allowIdentityKey,
     });
   };
 
@@ -272,6 +370,134 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           High limits set. Payments up to these amounts will be approved automatically without confirmation.
         </div>
       )}
+
+      {/* ─── Phase 1.5 Step 5: Personal Info Disclosure section ────────── */}
+      <div style={{
+        marginTop: '8px',
+        marginBottom: '14px',
+        paddingTop: '14px',
+        borderTop: `1px solid ${COLORS.borderLight}`,
+      }}>
+        <div style={{
+          fontSize: '13px',
+          fontWeight: 600,
+          color: COLORS.textDark,
+          marginBottom: '4px',
+        }}>
+          Personal Info Disclosure
+        </div>
+        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: '12px' }}>
+          What this site can learn about you across the Metanet.
+        </div>
+
+        {/* Identity-key binary toggle (V17 column) */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            marginBottom: '12px',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+          onClick={() => setAllowIdentityKey(!allowIdentityKey)}
+        >
+          <div style={{
+            width: '18px',
+            height: '18px',
+            borderRadius: '4px',
+            border: `2px solid ${allowIdentityKey ? COLORS.gold : COLORS.borderInput}`,
+            background: allowIdentityKey ? COLORS.gold : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+            transition: 'all 0.15s',
+          }}>
+            {allowIdentityKey && (
+              <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+            )}
+          </div>
+          <div>
+            <div style={{ fontSize: '13px', color: COLORS.textDark, fontWeight: 600 }}>
+              Allow site to identify you
+              <span
+                title="Lets this site read your wallet identity key — the same key uniquely identifies you across every BRC-100 site you visit."
+                style={{
+                  marginLeft: '6px',
+                  cursor: 'help',
+                  color: COLORS.textMuted,
+                  fontSize: '11px',
+                  border: `1px solid ${COLORS.textMuted}`,
+                  borderRadius: '50%',
+                  width: '14px',
+                  height: '14px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 600,
+                  lineHeight: 1,
+                  verticalAlign: 'middle',
+                }}
+              >i</span>
+            </div>
+            <div style={{ fontSize: '11px', color: COLORS.textMuted }}>
+              When off, the wallet will prompt before sharing your identity key with this site.
+            </div>
+          </div>
+        </div>
+
+        {/* Granted sub-permissions list (read-only with revoke buttons) */}
+        <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '6px' }}>
+          Granted permissions
+        </div>
+        {subPermsLoading ? (
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, fontStyle: 'italic', marginBottom: '4px' }}>
+            Loading…
+          </div>
+        ) : subPermissions.length === 0 ? (
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, fontStyle: 'italic', marginBottom: '4px' }}>
+            No specific protocol, basket, or counterparty grants for this site.
+          </div>
+        ) : (
+          <div style={{
+            background: '#0f1117',
+            border: `1px solid ${COLORS.borderLight}`,
+            borderRadius: '6px',
+            padding: '8px 10px',
+          }}>
+            {subPermissions.map((row) => (
+              <div
+                key={`${row.kind}-${row.id}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  padding: '6px 0',
+                  borderBottom: `1px solid ${COLORS.borderLight}`,
+                  fontSize: '12px',
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: COLORS.textDark, fontWeight: 500 }}>{row.label}</div>
+                  {row.sublabel && (
+                    <div style={{ color: COLORS.textMuted, fontSize: '11px', marginTop: '2px' }}>{row.sublabel}</div>
+                  )}
+                </div>
+                <HodosButton
+                  variant="secondary"
+                  size="small"
+                  onClick={() => handleRevokeSubPerm(row)}
+                  style={{ flexShrink: 0, color: '#ef4444', borderColor: '#ef4444' }}
+                >
+                  Revoke
+                </HodosButton>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Action buttons */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>

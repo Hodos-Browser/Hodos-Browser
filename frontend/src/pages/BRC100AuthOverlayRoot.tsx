@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import DomainPermissionForm from '../components/DomainPermissionForm';
 import type { DomainPermissionSettings } from '../components/DomainPermissionForm';
 import { HodosButton } from '../components/HodosButton';
@@ -41,6 +41,9 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
               perSessionLimitCents: data.perSessionLimitCents ?? 1000,
               rateLimitPerMin: data.rateLimitPerMin ?? 30,
               maxTxPerSession: data.maxTxPerSession ?? 100,
+              // Phase 1.5 Step 5 — pass through current V17 column value so
+              // the form shows the actual setting, not the default.
+              identityKeyDisclosureAllowed: data.identityKeyDisclosureAllowed ?? true,
             });
           }
         }
@@ -63,6 +66,8 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
           perSessionLimitCents: settings.perSessionLimitCents,
           rateLimitPerMin: settings.rateLimitPerMin,
           maxTxPerSession: settings.maxTxPerSession,
+          // Phase 1.5 Step 5 — Personal Info Disclosure toggle persistence.
+          identityKeyDisclosureAllowed: settings.identityKeyDisclosureAllowed,
         }),
       });
     } catch (err) {
@@ -132,6 +137,37 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
   );
 };
 
+// Phase 1.5 Step 5 — small info icon for tooltips on identity-key surfaces.
+// Native title attribute keeps it CEF-friendly (no popover library / refs needed).
+// Default copy is the "identify you across the Metanet" framing surfaced
+// during Step 5 design — overridable per-callsite if different copy fits.
+const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
+  tooltip,
+  style,
+}) => (
+  <span
+    title={tooltip || 'Identify you across the Metanet with your wallet identity key. This key is the same across every BRC-100 site you visit, so granting it lets sites recognize you between visits.'}
+    style={{
+      marginLeft: '4px',
+      cursor: 'help',
+      color: COLORS.textMuted,
+      fontSize: '11px',
+      border: `1px solid ${COLORS.textMuted}`,
+      borderRadius: '50%',
+      width: '14px',
+      height: '14px',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontWeight: 600,
+      lineHeight: 1,
+      ...style,
+    }}
+  >
+    i
+  </span>
+);
+
 // Phase 1.5 Step 0 — Hodos wallet attribution header. Renders the
 // Hodos_Gold_Wallet_Icon.svg at the top of every auth/payment/cert/
 // permission prompt so the user can immediately tell the wallet (not the
@@ -197,6 +233,48 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // site enough to approve it at all) avoids a second sequential popup for
   // the identity-key reveal. Power users can untick to keep the prompt.
   const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(true);
+
+  // Phase 1.5 Step 5 — user's saved default for the bundle checkbox (V19
+  // settings column). applyParams reads this ref so each fresh notification
+  // initializes to the user's preference rather than hardcoded true. Ref
+  // (not state) because applyParams is invoked from a JS-injection callback
+  // whose closure would otherwise capture stale state.
+  const savedDefaultIdentityKeyRef = useRef<boolean>(true);
+
+  // Phase 1.5 Step 5 — manifest_connect_bundle state. Parsed once from the
+  // C++-supplied `manifest` query param; sub-permissions start all-selected
+  // (matching the "Connect grants everything in the manifest" default per
+  // PERMISSION_UX_DESIGN.md §5). Customize subview lets the user untick
+  // individual permissions before connecting.
+  interface ManifestProtocol { securityLevel: number; name: string; keyId: string; purpose: string; }
+  interface ManifestBasket { name: string; access: string; purpose: string; }
+  interface ManifestCertificate { type: string; fields: string[]; purpose: string; }
+  interface ManifestSpending { perTransactionUsd: number; perSessionUsd: number; purpose: string; }
+  interface ManifestCounterparty { type: string; counterparty: string; purpose: string; }
+  interface ManifestData {
+    name: string;
+    description: string;
+    iconUrl: string;
+    expiresAt: number;
+    version: string;
+    protocols: ManifestProtocol[];
+    baskets: ManifestBasket[];
+    certificates: ManifestCertificate[];
+    spending: ManifestSpending;
+    counterparties: ManifestCounterparty[];
+  }
+  const [manifestData, setManifestData] = useState<ManifestData | null>(null);
+  const [manifestShowCustomize, setManifestShowCustomize] = useState<boolean>(false);
+  const [manifestSelectedProtocols, setManifestSelectedProtocols] = useState<Set<number>>(new Set());
+  const [manifestSelectedBaskets, setManifestSelectedBaskets] = useState<Set<number>>(new Set());
+  const [manifestSelectedCertificates, setManifestSelectedCertificates] = useState<Set<number>>(new Set());
+  const [manifestSelectedCounterparties, setManifestSelectedCounterparties] = useState<Set<number>>(new Set());
+  const [manifestAllowIdentityKey, setManifestAllowIdentityKey] = useState<boolean>(true);
+  // Customize subview payment caps (start from manifest's recommendation, fall back to wallet defaults).
+  const [manifestPerTxCents, setManifestPerTxCents] = useState<number>(100);
+  const [manifestPerSessionCents, setManifestPerSessionCents] = useState<number>(1000);
+  const [manifestRateLimit, setManifestRateLimit] = useState<number>(30);
+  const [manifestMaxTxPerSession, setManifestMaxTxPerSession] = useState<number>(100);
 
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
@@ -268,9 +346,43 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     setLinkageKeyId(params.get('keyID') || '');
     setRememberPrivacy(false);
 
-    // Domain-approval bundle: default identity-key allow back to ON for each
-    // fresh prompt so the toggle isn't sticky across unrelated sites.
-    setAllowIdentityKey(true);
+    // Domain-approval bundle: initialize from the user's saved default (V19),
+    // not hardcoded true. Ref keeps applyParams non-stale across re-renders.
+    setAllowIdentityKey(savedDefaultIdentityKeyRef.current);
+
+    // Phase 1.5 Step 5 — manifest_connect_bundle params.
+    // Reset every time so a previous site's manifest doesn't leak in.
+    setManifestData(null);
+    setManifestShowCustomize(false);
+    setManifestAllowIdentityKey(savedDefaultIdentityKeyRef.current);
+    const manifestParam = params.get('manifest');
+    if (manifestParam) {
+      try {
+        const m: ManifestData = JSON.parse(manifestParam);
+        setManifestData(m);
+        // All permissions ticked by default — matches "Connect grants everything"
+        setManifestSelectedProtocols(new Set(m.protocols.map((_, i) => i)));
+        setManifestSelectedBaskets(new Set(m.baskets.map((_, i) => i)));
+        setManifestSelectedCertificates(new Set(m.certificates.map((_, i) => i)));
+        setManifestSelectedCounterparties(new Set(m.counterparties.map((_, i) => i)));
+        // Use manifest's recommended caps if present, otherwise wallet defaults.
+        if (m.spending && m.spending.perTransactionUsd > 0) {
+          setManifestPerTxCents(m.spending.perTransactionUsd * 100);
+        } else {
+          setManifestPerTxCents(100); // $1
+        }
+        if (m.spending && m.spending.perSessionUsd > 0) {
+          setManifestPerSessionCents(m.spending.perSessionUsd * 100);
+        } else {
+          setManifestPerSessionCents(1000); // $10
+        }
+        setManifestRateLimit(30);
+        setManifestMaxTxPerSession(100);
+      } catch (e) {
+        console.error('[Hodos] Failed to parse manifest from extraParams:', e);
+        setManifestData(null);
+      }
+    }
   };
 
   useEffect(() => {
@@ -282,6 +394,22 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       setNotificationType('');
       setNotificationDomain('');
     };
+
+    // Phase 1.5 Step 5 — fetch the user's default for the identity-key bundle
+    // checkbox. If they set it to OFF in Approved Sites, fresh-site prompts
+    // should start the checkbox unticked. Default to true on any fetch failure
+    // so we don't accidentally degrade UX on a wallet that doesn't have V19 yet.
+    fetch('http://127.0.0.1:31301/wallet/settings')
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        if (data && typeof data.default_identity_key_disclosure_allowed === 'boolean') {
+          const def = data.default_identity_key_disclosure_allowed;
+          savedDefaultIdentityKeyRef.current = def;
+          setAllowIdentityKey(def);
+          setManifestAllowIdentityKey(def);
+        }
+      })
+      .catch(() => { /* silent — keep defaults */ });
 
     // Initial load: parse URL params (backward compat + first page load)
     const search = window.location.search;
@@ -578,6 +706,146 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       window.cefMessage?.send('overlay_close', []);
     } catch (error) {
       console.error('Error denying key-linkage reveal:', error);
+    }
+  };
+
+  // ── Phase 1.5 Step 5 — manifest_connect_bundle handlers ──
+
+  // Toggle a permission in/out of a Set<number> (immutably).
+  const toggleManifestPerm = (
+    set: Set<number>,
+    setter: React.Dispatch<React.SetStateAction<Set<number>>>,
+    idx: number,
+  ) => {
+    const next = new Set(set);
+    if (next.has(idx)) next.delete(idx);
+    else next.add(idx);
+    setter(next);
+  };
+
+  // Guardrail: never auto-grant sensitive baskets even if a dApp lists them
+  // in its manifest. The user can still grant these explicitly through the
+  // form later, but a Connect-button click won't silently hand them over.
+  // Aligns with @bsv/wallet-toolbox's "admin "-prefix convention.
+  const isProtectedBasket = (name: string): boolean => {
+    if (!name) return false;
+    if (name === 'default') return true;                // change outputs
+    if (name.startsWith('backup-')) return true;        // backup tokens etc.
+    if (name.startsWith('admin ')) return true;         // toolbox admin baskets
+    return false;
+  };
+
+  const handleManifestConnect = async (allowWithoutLimits: boolean = false) => {
+    if (!manifestData) return;
+    const domain = notificationDomain;
+    try {
+      // 1. Parent domain_permissions row — trust + payment caps + identity-key.
+      // "Allow without limits" only raises PAYMENT caps; scoped grants stay
+      // exactly as the user ticked them (and protected baskets stay blocked).
+      const perTx = allowWithoutLimits ? 100000 : manifestPerTxCents;
+      const perSession = allowWithoutLimits ? 1000000 : manifestPerSessionCents;
+      const rate = allowWithoutLimits ? 1000 : manifestRateLimit;
+      const maxTx = allowWithoutLimits ? 10000 : manifestMaxTxPerSession;
+
+      if (window.cefMessage) {
+        window.cefMessage.send('add_domain_permission_advanced', [JSON.stringify({
+          domain,
+          perTxLimitCents: perTx,
+          perSessionLimitCents: perSession,
+          rateLimitPerMin: rate,
+          maxTxPerSession: maxTx,
+          identityKeyDisclosureAllowed: manifestAllowIdentityKey,
+        })]);
+      }
+
+      // 2. Scoped sub-permissions via Step 3 endpoints. Fail-tolerant —
+      // each row is independent, partial-write doesn't corrupt anything.
+      const walletBase = 'http://127.0.0.1:31301';
+      const post = (path: string, body: object) => fetch(walletBase + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const writes: Promise<unknown>[] = [];
+
+      manifestData.protocols.forEach((p, i) => {
+        if (!manifestSelectedProtocols.has(i)) return;
+        writes.push(post('/domain/permissions/protocol', {
+          domain,
+          securityLevel: p.securityLevel,
+          protocolName: p.name,
+          keyId: p.keyId || '*',
+        }));
+      });
+
+      manifestData.baskets.forEach((b, i) => {
+        if (!manifestSelectedBaskets.has(i)) return;
+        if (isProtectedBasket(b.name)) {
+          console.warn(`[Hodos] Refused to auto-grant protected basket: ${b.name} (manifest from ${domain})`);
+          return;
+        }
+        writes.push(post('/domain/permissions/basket', {
+          domain,
+          basket: b.name,
+          access: b.access,
+        }));
+      });
+
+      manifestData.counterparties.forEach((cp, i) => {
+        if (!manifestSelectedCounterparties.has(i)) return;
+        // Type-only category entries (no specific pubkey) are out-of-scope
+        // for Step 5 grants — Step 6 engine will handle them lazily.
+        if (!cp.counterparty) return;
+        writes.push(post('/domain/permissions/counterparty', {
+          domain,
+          counterparty: cp.counterparty,
+        }));
+      });
+
+      // Cert fields go through the existing IPC (which writes via the
+      // wallet's /domain/permissions/certificate endpoint).
+      manifestData.certificates.forEach((c, i) => {
+        if (!manifestSelectedCertificates.has(i)) return;
+        if (!c.type || c.fields.length === 0) return;
+        if (window.cefMessage) {
+          window.cefMessage.send('approve_cert_fields', [JSON.stringify({
+            domain,
+            certType: c.type,
+            fields: c.fields,
+            remember: true,
+          })]);
+        }
+      });
+
+      await Promise.allSettled(writes);
+
+      // 3. Unblock the AsyncWalletResourceHandler queue. Same IPC the
+      // existing domain_approval flow uses; PendingRequestManager drains
+      // all queued requests on approval.
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [JSON.stringify({
+          approved: true,
+          whitelist: true,
+        })]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (e) {
+      console.error('[Hodos] Error in manifest connect flow:', e);
+    }
+  };
+
+  const handleManifestDecline = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [JSON.stringify({
+          approved: false,
+          whitelist: false,
+        })]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (e) {
+      console.error('[Hodos] Error declining manifest:', e);
     }
   };
 
@@ -961,7 +1229,10 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {renderPrivacyPerimeterDomainRow('is requesting access to private wallet data')}
 
-          <h2 style={privacyPerimeterHeaderStyle}>Identity key request</h2>
+          <h2 style={privacyPerimeterHeaderStyle}>
+            Identity key request
+            <InfoIcon style={{ fontSize: '13px', width: '16px', height: '16px' }} />
+          </h2>
 
           <p style={{
             margin: '0 0 18px',
@@ -1189,6 +1460,347 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     );
   }
 
+  // ── Phase 1.5 Step 5 — manifest_connect_bundle ──
+  // Bundled connect prompt that consumes the dApp's wallet-manifest.json
+  // permissions list. Three buttons: Connect (primary, grants everything
+  // ticked with the user's default limits), Customize (toggle individual
+  // permissions + adjust caps), Decline (block this domain in-session).
+  if (notificationType === 'manifest_connect_bundle' && manifestData) {
+    const formatUsd = (cents: number) => '$' + (cents / 100).toFixed(2);
+
+    // Primary view — bundled summary
+    if (!manifestShowCustomize) {
+      return (
+        <div style={overlayBackdrop}>
+          <div style={{ ...cardStyle, maxWidth: '480px' }}>
+            <HodosWalletHeader />
+
+            {/* App branding row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '16px' }}>
+              {manifestData.iconUrl && !faviconError ? (
+                <img
+                  src={manifestData.iconUrl}
+                  width={48}
+                  height={48}
+                  style={{ borderRadius: 8, flexShrink: 0 }}
+                  onError={() => setFaviconError(true)}
+                  alt=""
+                />
+              ) : !faviconError ? (
+                <img
+                  src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=48`}
+                  width={48}
+                  height={48}
+                  style={{ borderRadius: 8, flexShrink: 0 }}
+                  onError={() => setFaviconError(true)}
+                  alt=""
+                />
+              ) : (
+                <div style={{ ...avatarStyle, width: 48, height: 48 }}>
+                  {getDomainInitial(notificationDomain)}
+                </div>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '17px', fontWeight: 700, color: COLORS.textDark }}>
+                  {manifestData.name || cleanDomain}
+                </div>
+                <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
+                  {cleanDomain}
+                </div>
+                {manifestData.description && (
+                  <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '4px', lineHeight: 1.4 }}>
+                    {manifestData.description}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ fontSize: '14px', color: COLORS.textDark, marginBottom: '12px' }}>
+              This site is asking permission to:
+            </div>
+
+            {/* Permissions list with plain-language `purpose` strings */}
+            <div style={{
+              background: COLORS.subduedGold,
+              borderRadius: '10px',
+              padding: '14px 16px',
+              marginBottom: '16px',
+              maxHeight: '240px',
+              overflowY: 'auto',
+            }}>
+              {manifestData.protocols.map((p, i) => (
+                <div key={`proto-${i}`} style={permissionItem}>
+                  <span style={checkmark}>&#10003;</span>
+                  <span>{p.purpose || `Use protocol "${p.name}"`}</span>
+                </div>
+              ))}
+              {manifestData.baskets.map((b, i) => (
+                <div key={`basket-${i}`} style={permissionItem}>
+                  <span style={checkmark}>&#10003;</span>
+                  <span>
+                    {b.purpose || `${b.access === 'read_write' ? 'Manage' : 'View'} "${b.name}"`}
+                    {isProtectedBasket(b.name) && (
+                      <span style={{ color: COLORS.error, fontWeight: 600, fontSize: '11px', marginLeft: '6px' }}>
+                        (protected — won't auto-grant)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+              {manifestData.certificates.map((c, i) => (
+                <div key={`cert-${i}`} style={permissionItem}>
+                  <span style={checkmark}>&#10003;</span>
+                  <span>{c.purpose || `Read ${c.fields.length} certificate field(s)`}</span>
+                </div>
+              ))}
+              {manifestData.spending.perTransactionUsd > 0 && (
+                <div style={permissionItem}>
+                  <span style={checkmark}>&#10003;</span>
+                  <span>
+                    {manifestData.spending.purpose || 'Send payments'}
+                    {' '}
+                    <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
+                      (up to ${manifestData.spending.perTransactionUsd}/tx, ${manifestData.spending.perSessionUsd}/session)
+                    </span>
+                  </span>
+                </div>
+              )}
+              {manifestData.counterparties.map((cp, i) => (
+                <div key={`cp-${i}`} style={permissionItem}>
+                  <span style={checkmark}>&#10003;</span>
+                  <span>{cp.purpose || 'Communicate with specific peers'}</span>
+                </div>
+              ))}
+              {manifestData.protocols.length === 0 &&
+                manifestData.baskets.length === 0 &&
+                manifestData.certificates.length === 0 &&
+                manifestData.counterparties.length === 0 &&
+                manifestData.spending.perTransactionUsd === 0 && (
+                <div style={{ color: COLORS.textMuted, fontSize: '13px', fontStyle: 'italic' }}>
+                  No specific permissions declared.
+                </div>
+              )}
+            </div>
+
+            {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '13px',
+              color: COLORS.textDark,
+              cursor: 'pointer',
+              marginBottom: '16px',
+              userSelect: 'none',
+            }}>
+              <input
+                type="checkbox"
+                checked={manifestAllowIdentityKey}
+                onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
+                style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+              />
+              Allow this site to identify you
+              <InfoIcon />
+            </label>
+
+            {/* Default limits hint */}
+            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '18px', lineHeight: 1.5 }}>
+              Default payment limits: {formatUsd(manifestPerTxCents)}/tx, {formatUsd(manifestPerSessionCents)}/session.
+              {' '}You can adjust these in Customize.
+            </div>
+
+            {/* Buttons: Decline / Customize / Connect */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+              <HodosButton variant="secondary" onClick={handleManifestDecline}>
+                Decline
+              </HodosButton>
+              <HodosButton variant="secondary" onClick={() => setManifestShowCustomize(true)}>
+                Customize
+              </HodosButton>
+              <HodosButton variant="primary" onClick={() => handleManifestConnect(false)}>
+                Connect
+              </HodosButton>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Customize subview — per-permission checkboxes + payment-cap inputs
+    return (
+      <div style={overlayBackdrop}>
+        <div style={{ ...cardStyle, maxWidth: '520px' }}>
+          <HodosWalletHeader />
+
+          <div style={{ fontSize: '15px', fontWeight: 700, color: COLORS.textDark, marginBottom: '4px' }}>
+            Customize permissions for {manifestData.name || cleanDomain}
+          </div>
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '14px' }}>
+            Untick anything you don't want to grant.
+          </div>
+
+          {/* Per-permission checkboxes */}
+          <div style={{
+            background: COLORS.subduedGold,
+            borderRadius: '10px',
+            padding: '12px 14px',
+            marginBottom: '14px',
+            maxHeight: '260px',
+            overflowY: 'auto',
+          }}>
+            {manifestData.protocols.map((p, i) => (
+              <label key={`cust-proto-${i}`} style={customizeRowLabel}>
+                <input
+                  type="checkbox"
+                  checked={manifestSelectedProtocols.has(i)}
+                  onChange={() => toggleManifestPerm(manifestSelectedProtocols, setManifestSelectedProtocols, i)}
+                  style={customizeCheckbox}
+                />
+                <span><strong>Protocol:</strong> {p.purpose || p.name}</span>
+              </label>
+            ))}
+            {manifestData.baskets.map((b, i) => (
+              <label key={`cust-basket-${i}`} style={customizeRowLabel}>
+                <input
+                  type="checkbox"
+                  checked={manifestSelectedBaskets.has(i) && !isProtectedBasket(b.name)}
+                  disabled={isProtectedBasket(b.name)}
+                  onChange={() => toggleManifestPerm(manifestSelectedBaskets, setManifestSelectedBaskets, i)}
+                  style={customizeCheckbox}
+                />
+                <span>
+                  <strong>Basket {b.access}:</strong> {b.purpose || b.name}
+                  {isProtectedBasket(b.name) && (
+                    <span style={{ color: COLORS.error, fontSize: '11px', marginLeft: '6px' }}>
+                      (protected, never auto-granted)
+                    </span>
+                  )}
+                </span>
+              </label>
+            ))}
+            {manifestData.certificates.map((c, i) => (
+              <label key={`cust-cert-${i}`} style={customizeRowLabel}>
+                <input
+                  type="checkbox"
+                  checked={manifestSelectedCertificates.has(i)}
+                  onChange={() => toggleManifestPerm(manifestSelectedCertificates, setManifestSelectedCertificates, i)}
+                  style={customizeCheckbox}
+                />
+                <span><strong>Certificate fields:</strong> {c.purpose || c.fields.join(', ')}</span>
+              </label>
+            ))}
+            {manifestData.counterparties.map((cp, i) => (
+              <label key={`cust-cp-${i}`} style={customizeRowLabel}>
+                <input
+                  type="checkbox"
+                  checked={manifestSelectedCounterparties.has(i)}
+                  onChange={() => toggleManifestPerm(manifestSelectedCounterparties, setManifestSelectedCounterparties, i)}
+                  style={customizeCheckbox}
+                />
+                <span><strong>Counterparty:</strong> {cp.purpose || cp.type || cp.counterparty.slice(0, 12) + '…'}</span>
+              </label>
+            ))}
+          </div>
+
+          {/* Identity-key toggle */}
+          <label style={{ ...customizeRowLabel, marginBottom: '14px' }}>
+            <input
+              type="checkbox"
+              checked={manifestAllowIdentityKey}
+              onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
+              style={customizeCheckbox}
+            />
+            <span>
+              <strong>Identity:</strong> Allow this site to identify you across the Metanet
+            </span>
+          </label>
+
+          {/* Payment limit inputs */}
+          <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textDark, marginBottom: '8px' }}>
+            Payment limits
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '14px' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px', color: COLORS.textMuted }}>
+              Per transaction ($)
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                value={(manifestPerTxCents / 100).toFixed(2)}
+                onChange={(e) => setManifestPerTxCents(Math.round(parseFloat(e.target.value || '0') * 100))}
+                style={customizeNumberInput}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px', color: COLORS.textMuted }}>
+              Per session ($)
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                value={(manifestPerSessionCents / 100).toFixed(2)}
+                onChange={(e) => setManifestPerSessionCents(Math.round(parseFloat(e.target.value || '0') * 100))}
+                style={customizeNumberInput}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px', color: COLORS.textMuted }}>
+              Rate (requests/min)
+              <input
+                type="number"
+                min={0}
+                value={manifestRateLimit}
+                onChange={(e) => setManifestRateLimit(parseInt(e.target.value || '0'))}
+                style={customizeNumberInput}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px', color: COLORS.textMuted }}>
+              Max tx / session
+              <input
+                type="number"
+                min={0}
+                value={manifestMaxTxPerSession}
+                onChange={(e) => setManifestMaxTxPerSession(parseInt(e.target.value || '0'))}
+                style={customizeNumberInput}
+              />
+            </label>
+          </div>
+
+          {/* Allow without limits — payment caps only, scoped grants unaffected */}
+          <div style={{
+            background: 'rgba(166, 124, 0, 0.08)',
+            border: `1px solid ${COLORS.gold}`,
+            borderRadius: '8px',
+            padding: '10px 12px',
+            marginBottom: '16px',
+            fontSize: '12px',
+            color: COLORS.textMuted,
+            lineHeight: 1.5,
+          }}>
+            <strong style={{ color: COLORS.textDark }}>Trust this site fully?</strong>
+            <br />
+            "Allow without limits" raises payment caps to $1000/tx and $10000/session.
+            Sensitive baskets (default change outputs, backup tokens) stay protected
+            either way.
+            <div style={{ marginTop: '8px' }}>
+              <HodosButton variant="secondary" size="small" onClick={() => handleManifestConnect(true)}>
+                Allow without limits
+              </HodosButton>
+            </div>
+          </div>
+
+          {/* Buttons: Back / Connect with current selections */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+            <HodosButton variant="secondary" onClick={() => setManifestShowCustomize(false)}>
+              Back
+            </HodosButton>
+            <HodosButton variant="primary" onClick={() => handleManifestConnect(false)}>
+              Connect with these
+            </HodosButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Domain approval notification ──
   if (notificationType === 'domain_approval') {
     return (
@@ -1280,6 +1892,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
             />
             Allow this site to identify you
+            <InfoIcon />
           </label>
 
           {/* Advanced settings toggle */}
@@ -1414,6 +2027,38 @@ const checkmark: React.CSSProperties = {
   fontSize: '14px',
   marginTop: '1px',
   flexShrink: 0,
+};
+
+// Phase 1.5 Step 5 — Customize subview shared styles for manifest_connect_bundle.
+const customizeRowLabel: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: '10px',
+  fontSize: '13px',
+  color: '#f0f0f0',
+  lineHeight: 1.45,
+  marginBottom: '8px',
+  cursor: 'pointer',
+  userSelect: 'none',
+};
+
+const customizeCheckbox: React.CSSProperties = {
+  accentColor: '#a67c00',
+  width: '16px',
+  height: '16px',
+  cursor: 'pointer',
+  flexShrink: 0,
+  marginTop: '2px',
+};
+
+const customizeNumberInput: React.CSSProperties = {
+  background: '#0f1117',
+  border: '1px solid #2a2d35',
+  borderRadius: '6px',
+  padding: '6px 8px',
+  color: '#f0f0f0',
+  fontSize: '13px',
+  fontFamily: 'inherit',
 };
 
 export default BRC100AuthOverlayRoot;

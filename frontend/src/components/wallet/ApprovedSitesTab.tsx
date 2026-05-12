@@ -7,6 +7,10 @@ interface DefaultLimits {
   defaultPerSessionLimitCents: number;
   defaultRateLimitPerMin: number;
   defaultMaxTxPerSession: number;
+  // Phase 1.5 Step 5 — V19 column. Controls whether the bundle checkbox on
+  // domain_approval / manifest_connect_bundle modals starts ticked for new
+  // sites. Default true preserves the Step 1 behavior.
+  defaultIdentityKeyDisclosureAllowed: boolean;
 }
 
 const ApprovedSitesTab: React.FC = () => {
@@ -15,6 +19,7 @@ const ApprovedSitesTab: React.FC = () => {
     defaultPerSessionLimitCents: 1000, // $10
     defaultRateLimitPerMin: 30,
     defaultMaxTxPerSession: 100,
+    defaultIdentityKeyDisclosureAllowed: true,
   });
   const [savedDefaults, setSavedDefaults] = useState<DefaultLimits>(defaults);
   const [perTxUsd, setPerTxUsd] = useState('1.00');
@@ -37,6 +42,7 @@ const ApprovedSitesTab: React.FC = () => {
         defaultPerSessionLimitCents: data.default_per_session_limit_cents ?? 1000,
         defaultRateLimitPerMin: data.default_rate_limit_per_min ?? 30,
         defaultMaxTxPerSession: data.default_max_tx_per_session ?? 100,
+        defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? true,
       };
       setDefaults(loaded);
       setSavedDefaults(loaded);
@@ -68,6 +74,7 @@ const ApprovedSitesTab: React.FC = () => {
           default_per_session_limit_cents: defaults.defaultPerSessionLimitCents,
           default_rate_limit_per_min: defaults.defaultRateLimitPerMin,
           default_max_tx_per_session: defaults.defaultMaxTxPerSession,
+          default_identity_key_disclosure_allowed: defaults.defaultIdentityKeyDisclosureAllowed,
         }),
       });
       if (!postRes.ok) throw new Error('Failed to save defaults');
@@ -81,6 +88,7 @@ const ApprovedSitesTab: React.FC = () => {
           defaultPerSessionLimitCents: data.default_per_session_limit_cents ?? defaults.defaultPerSessionLimitCents,
           defaultRateLimitPerMin: data.default_rate_limit_per_min ?? defaults.defaultRateLimitPerMin,
           defaultMaxTxPerSession: data.default_max_tx_per_session ?? defaults.defaultMaxTxPerSession,
+          defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? defaults.defaultIdentityKeyDisclosureAllowed,
         };
         setDefaults(confirmed);
         setSavedDefaults(confirmed);
@@ -211,6 +219,62 @@ const ApprovedSitesTab: React.FC = () => {
                 />
                 <div style={{ color: '#9ca3af', fontSize: '10px', marginTop: '2px' }}>
                   Payments per session before prompting
+                </div>
+              </div>
+            </div>
+
+            {/* Phase 1.5 Step 5 — default identity-key bundle toggle (V19 column) */}
+            <div style={{
+              marginTop: '14px',
+              paddingTop: '14px',
+              borderTop: '1px solid #2a2d35',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }} onClick={() => setDefaults((d) => ({ ...d, defaultIdentityKeyDisclosureAllowed: !d.defaultIdentityKeyDisclosureAllowed }))}>
+              <div style={{
+                width: '18px',
+                height: '18px',
+                borderRadius: '4px',
+                border: `2px solid ${defaults.defaultIdentityKeyDisclosureAllowed ? '#a67c00' : '#555'}`,
+                background: defaults.defaultIdentityKeyDisclosureAllowed ? '#a67c00' : 'transparent',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                transition: 'all 0.15s',
+              }}>
+                {defaults.defaultIdentityKeyDisclosureAllowed && (
+                  <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+                )}
+              </div>
+              <div>
+                <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
+                  Allow identity-key disclosure by default for new sites
+                  <span
+                    title="When a fresh site asks to connect, the 'Allow this site to identify you' checkbox starts ticked. Untick to make new sites prompt separately before sharing your identity key."
+                    style={{
+                      marginLeft: '6px',
+                      cursor: 'help',
+                      color: '#9ca3af',
+                      fontSize: '11px',
+                      border: '1px solid #9ca3af',
+                      borderRadius: '50%',
+                      width: '14px',
+                      height: '14px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontWeight: 600,
+                      lineHeight: 1,
+                      verticalAlign: 'middle',
+                    }}
+                  >i</span>
+                </div>
+                <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '2px' }}>
+                  Controls the default state of the bundle checkbox on the first-visit connect prompt.
                 </div>
               </div>
             </div>

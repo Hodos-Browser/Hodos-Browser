@@ -1049,3 +1049,32 @@ pub fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
     info!("   ✅ V18 migration applied (three child tables: protocol / basket / counterparty)");
     Ok(())
 }
+
+/// Migrate V18 → V19: Add `default_identity_key_disclosure_allowed` to settings.
+///
+/// Phase 1.5 Step 5 — global default for the bundle checkbox that appears on
+/// domain_approval and manifest_connect_bundle modals. When the user changes
+/// this in the "Default Limits for New Sites" form, future fresh-site prompts
+/// initialize the bundle checkbox to this value. Default 1 (ON) preserves the
+/// Step 1 behavior — most users will never change it.
+pub fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    info!("   Adding default_identity_key_disclosure_allowed column to settings...");
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let result: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    if !cols.iter().any(|c| c == "default_identity_key_disclosure_allowed") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+
+    info!("   ✅ V19 migration applied (default_identity_key_disclosure_allowed)");
+    Ok(())
+}

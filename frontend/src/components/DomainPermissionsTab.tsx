@@ -69,6 +69,8 @@ interface DomainPermissionRecord {
   perSessionLimitCents: number;
   rateLimitPerMin: number;
   maxTxPerSession: number;
+  // Phase 1.5 Step 1 — V17 column
+  identityKeyDisclosureAllowed?: boolean;
   createdAt: number;
   updatedAt: number;
   certFieldPermissions?: CertFieldPermission[];
@@ -168,9 +170,16 @@ const DomainPermissionsTab: React.FC = () => {
           perSessionLimitCents: settings.perSessionLimitCents,
           rateLimitPerMin: settings.rateLimitPerMin,
           max_tx_per_session: settings.maxTxPerSession,
+          // Phase 1.5 Step 5 — persist the Personal Info Disclosure toggle.
+          identityKeyDisclosureAllowed: settings.identityKeyDisclosureAllowed,
         }),
       });
       if (!res.ok) throw new Error(`Failed to update: ${res.statusText}`);
+      // Invalidate the C++ DomainPermissionCache so the V17 column change
+      // takes effect on the next BRC-100 call. Without this, the cache would
+      // still report the old identityKeyDisclosureAllowed value.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).cefMessage?.send('domain_permission_invalidate', [editingDomain.domain]);
       setEditingDomain(null);
       fetchPermissions();
     } catch (err) {
@@ -247,6 +256,11 @@ const DomainPermissionsTab: React.FC = () => {
     { key: 'createdAt', label: 'Approved' },
   ];
 
+  // Phase 1.5 Step 5 — identity-key column rendered separately (non-sortable,
+  // and we don't want to add a sort key for it for now since the user is more
+  // likely to scan than sort by this binary field).
+  const identityKeyHeaderLabel = 'Identity Key';
+
   return (
     <>
       {error && (
@@ -289,6 +303,14 @@ const DomainPermissionsTab: React.FC = () => {
                       </TableSortLabel>
                     </TableCell>
                   ))}
+                  <TableCell>
+                    <span
+                      title="Whether this site can read your wallet identity key. The identity key uniquely identifies you across every BRC-100 site you visit."
+                      style={{ cursor: 'help' }}
+                    >
+                      {identityKeyHeaderLabel}
+                    </span>
+                  </TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -323,6 +345,19 @@ const DomainPermissionsTab: React.FC = () => {
                       <TableCell>{perm.rateLimitPerMin}/min</TableCell>
                       <TableCell>{perm.maxTxPerSession}</TableCell>
                       <TableCell>{formatDate(perm.createdAt)}</TableCell>
+                      <TableCell>
+                        {perm.identityKeyDisclosureAllowed ? (
+                          <Chip
+                            label="Allowed"
+                            size="small"
+                            sx={{ height: 20, fontSize: '0.7rem', bgcolor: 'rgba(166, 124, 0, 0.15)', color: '#a67c00', fontWeight: 600 }}
+                          />
+                        ) : (
+                          <Typography variant="body2" sx={{ color: '#9ca3af', fontSize: '0.75rem' }}>
+                            Prompt
+                          </Typography>
+                        )}
+                      </TableCell>
                       <TableCell align="right">
                         <HodosButton
                           variant="icon"
@@ -346,7 +381,7 @@ const DomainPermissionsTab: React.FC = () => {
                     </TableRow>
                     {hasCertFields(perm) && (
                       <TableRow>
-                        <TableCell colSpan={7} sx={{ py: 0, borderBottom: expandedDomain === perm.id ? undefined : 'none' }}>
+                        <TableCell colSpan={8} sx={{ py: 0, borderBottom: expandedDomain === perm.id ? undefined : 'none' }}>
                           <Collapse in={expandedDomain === perm.id} timeout="auto" unmountOnExit>
                             <Box sx={{ py: 1.5, pl: 4 }}>
                               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, mb: 1, display: 'block' }}>
@@ -441,6 +476,10 @@ const DomainPermissionsTab: React.FC = () => {
                   perSessionLimitCents: editingDomain.perSessionLimitCents,
                   rateLimitPerMin: editingDomain.rateLimitPerMin,
                   maxTxPerSession: editingDomain.maxTxPerSession,
+                  // Phase 1.5 Step 5 — preserve the user's identity-key choice
+                  // when the form re-opens so it shows the actual current value
+                  // rather than defaulting to ON every time.
+                  identityKeyDisclosureAllowed: editingDomain.identityKeyDisclosureAllowed,
                 }}
                 onSave={handleEditSave}
                 onCancel={() => setEditingDomain(null)}

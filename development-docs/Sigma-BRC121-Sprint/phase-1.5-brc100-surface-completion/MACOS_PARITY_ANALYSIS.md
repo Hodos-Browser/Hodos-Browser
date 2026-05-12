@@ -258,11 +258,64 @@ No new platform-specific APIs introduced. No new `#ifdef _WIN32` / `#elif define
 **No frontend changes in this step.** New prompt UIs (`manifest_connect_bundle`, etc.) land in Step 5.
 
 ### Step 5 — Extend existing UI
-_To be filled in._
 
-**Design lock (2026-05-11 during Step 4 kickoff):** the manifest-aware connect flow integrates into `HttpRequestInterceptor::Open()` at the `trust == "unknown"` branch — see Phase 1.5 README "Manifest integration design" subsection under Step 5. Three modes with a fixed 3s `ManifestFetcher` timeout: (1) 404 → existing `domain_approval` modal, zero regression; (2) valid manifest → new `manifest_connect_bundle` prompt; (3) timeout → existing `domain_approval` fallback. PendingRequestManager queue interaction unchanged. On accept, grants are written via the Step 3 sub-permission endpoints (`POST /domain/permissions/{protocol,basket,counterparty}`) before the queue drains.
+**Landed:** 2026-05-12
+**Branch:** `feature/brc121-phase1`
+**TL;DR:** **No macOS-specific implementation work.** All Step 5 changes are cross-platform: React UI for the bundled connect prompt, ApprovedSitesTab + DomainPermissionForm extensions, info-icon tooltips. C++ side wires `ManifestFetcher` into `Open()` using the existing `triggerXxxModal` pattern (no new HWND/NSPanel creation paths). One new Rust handler change (`/wallet/settings`) + V19 migration.
 
-Likely cross-platform additions: React `manifest_connect_bundle` branch in `BRC100AuthOverlayRoot.tsx`, plus protocol/counterparty per-call prompt branches for the JIT fallback path. C++ side adds the dispatch in `Open()` consuming Step 4's `ManifestFetcher`.
+#### Files modified — platform impact matrix
+
+| File | Change summary | Platform impact |
+|---|---|---|
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | Includes `ManifestFetcher.h`; new `triggerManifestConnectBundleModal` helper; unknown-trust branch in `Open()` now attempts manifest fetch first (3-mode dispatch documented in Step 5 section above) | None — uses existing `CreateNotificationOverlayTask` + extraParams transport |
+| `rust-wallet/src/database/migrations.rs` | `migrate_v18_to_v19` adds `default_identity_key_disclosure_allowed INTEGER NOT NULL DEFAULT 1` to `settings` | None — SQLite |
+| `rust-wallet/src/database/connection.rs` | Wire V19 into migrate() runner | None — pure Rust |
+| `rust-wallet/src/handlers.rs` | `/wallet/settings` GET returns new field; POST accepts it (raw `db.connection().execute` to avoid extending SettingsRepository for one toggle) | None — pure Rust |
+| `frontend/src/pages/BRC100AuthOverlayRoot.tsx` | `manifest_connect_bundle` branch with primary + Customize subviews; grant-writing handler `handleManifestConnect` fans out to Step 3 endpoints + Step 1 cert IPC + parent `add_domain_permission_advanced`; protected-basket guardrail; new `InfoIcon` component used on bundle checkboxes; `EditPermissionsForm` passes `identityKeyDisclosureAllowed` through to/from form; mount-time fetch of saved default + ref pattern so `applyParams` uses user's preference, not hardcoded true | None — React |
+| `frontend/src/components/DomainPermissionForm.tsx` | New "Personal Info Disclosure" section: identity-key binary toggle + read-only granted-sub-permissions list (fetched from Step 3 GET endpoints) with per-row Revoke button (Step 3 DELETE). `DomainPermissionSettings` interface gains optional `identityKeyDisclosureAllowed` | None — React |
+| `frontend/src/components/DomainPermissionsTab.tsx` | Identity-key column added between Approved and Actions; passes `identityKeyDisclosureAllowed` to/from `DomainPermissionForm`; `domain_permission_invalidate` IPC fires on edit save | None — React/MUI |
+| `frontend/src/components/wallet/ApprovedSitesTab.tsx` | New "Allow identity-key by default for new sites" toggle in defaults section, persisted via `/wallet/settings` | None — React |
+
+#### macOS verification checklist (Step 5)
+
+**Migration verification:**
+
+- [ ] First launch with a V18 dev DB on macOS shows: `Applying migration V19 (default_identity_key_disclosure_allowed)... ✅ Schema V19 applied`
+- [ ] `PRAGMA table_info(settings);` lists `default_identity_key_disclosure_allowed` as the last column with default 1
+
+**Behavioral (manifest-less sites — mode 1, zero regression):**
+
+- [ ] Visit teragun.com (or any existing manifest-less site) → fast 404 from manifest fetch → existing `domain_approval` modal fires with Step 1 bundle checkbox intact → click Allow → site connects normally
+- [ ] BRC-121 gold pill payment animation on `now.bsvblockchain.tech/articles/<slug>` unchanged
+
+**Behavioral (manifest-shipping sites — mode 2):**
+
+- [ ] Local test server serving a valid `wallet-manifest.json` (Step 7 demo will provide one; for now, smoke via a sandboxed test page) → new bundled prompt fires with app name, description, plain-language permissions list
+- [ ] Click **Connect** with all permissions ticked → grants written via `POST /domain/permissions/{protocol,basket,counterparty}` (verifiable via curl `GET /domain/permissions/{kind}?domain=X`)
+- [ ] Click **Customize** → checkbox subview with per-permission tick state + payment-cap text inputs + "Allow without limits" button
+- [ ] Customize → uncheck a basket → Connect → only ticked permissions are written
+- [ ] **Protected baskets:** A manifest declaring `default`, `backup-*`, or `admin *` baskets is parsed but the corresponding rows are NOT written even with "Allow without limits" — verifiable via console-warn `[Hodos] Refused to auto-grant protected basket: ...`
+- [ ] **Allow without limits:** payment caps raise to $1000/tx / $10000/session / 1000 rate / 10000 max-tx; scoped grants follow only the user's ticked selections (NOT auto-granted)
+
+**Behavioral (timeout — mode 3):**
+
+- [ ] Visiting a site whose `.well-known/wallet-manifest.json` is intentionally slow (>3s) → falls back to existing `domain_approval` modal — no UX freeze
+
+**Form & list extensions:**
+
+- [ ] DomainPermissionsTab shows new "Identity Key" column with gold "Allowed" chip for sites with V17 column = 1, "Prompt" otherwise
+- [ ] Edit row → `DomainPermissionForm` opens with toggle preset to current value; sub-permission list reflects Step 3 GET endpoints; Revoke buttons hit Step 3 DELETE
+- [ ] Save with toggle flipped → V17 column updates → `domain_permission_invalidate` IPC fires → next BRC-100 call from that site honors new value
+- [ ] ApprovedSitesTab Default Limits section: "Allow identity-key by default for new sites" toggle persists across reload; affects bundle checkbox initial state on next fresh prompt
+
+**Build verification:**
+
+- [ ] `cargo build --release` clean on macOS
+- [ ] `cmake --build cef-native/build --config Release` shell builds with the new `Open()` dispatch
+- [ ] `cmake --build cef-native/build --target hodos_tests && ./hodos_tests` — 38/38 tests still pass (Step 5 didn't touch PermissionEngine or ManifestFetcher parse logic)
+- [ ] `npm run build` clean in `frontend/`
+
+**No platform-specific code added in Step 5.** The new prompt type uses the existing shared `notification_browser_` overlay with type-multiplexing (Win: `simple_app.cpp::CreateNotificationOverlay`, Mac: `cef_browser_shell_mac.mm` notification overlay creation path). No new creation functions on either platform.
 
 ### Step 6 — Rewire existing handlers
 _To be filled in. One-line gate at top of 26+2 BRC-100 handlers. Pure C++ in `HttpRequestInterceptor.cpp` — cross-platform._

@@ -17688,6 +17688,16 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
     let settings_repo = crate::database::SettingsRepository::new(db.connection());
     let display_name = settings_repo.get_sender_display_name().unwrap_or_else(|_| "Anonymous".to_string());
     let (per_tx, per_session, rate) = settings_repo.get_default_limits().unwrap_or((1000, 5000, 10));
+
+    // Phase 1.5 Step 5 — V19 default identity-key disclosure. Read directly via
+    // raw SQL to avoid extending SettingsRepository for one toggle. Default 1
+    // (ON) if the row is missing for any reason.
+    let default_identity_key_disclosure_allowed: i64 = db.connection().query_row(
+        "SELECT default_identity_key_disclosure_allowed FROM settings LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+
     drop(db);
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -17695,6 +17705,7 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
         "default_per_tx_limit_cents": per_tx,
         "default_per_session_limit_cents": per_session,
         "default_rate_limit_per_min": rate,
+        "default_identity_key_disclosure_allowed": default_identity_key_disclosure_allowed != 0,
     }))
 }
 
@@ -17728,6 +17739,17 @@ pub async fn wallet_settings_set(
         let rate = body.get("default_rate_limit_per_min").and_then(|v| v.as_i64()).unwrap_or(cur_rate);
 
         if let Err(e) = settings_repo.set_default_limits(per_tx, per_session, rate) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    // Phase 1.5 Step 5 — V19 default identity-key disclosure setter.
+    if let Some(v) = body.get("default_identity_key_disclosure_allowed").and_then(|v| v.as_bool()) {
+        if let Err(e) = db.connection().execute(
+            "UPDATE settings SET default_identity_key_disclosure_allowed = ?1",
+            rusqlite::params![if v { 1_i64 } else { 0_i64 }],
+        ) {
             drop(db);
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
         }
