@@ -16780,6 +16780,26 @@ pub async fn pay_402(
         &server_key[..16]
     );
 
+    // Extract host from the originating URL so the Activity tab can show
+    // which site the spend was for. Falls back to "unknown site" when the
+    // C++ caller didn't pass original_url (shouldn't happen in normal flow,
+    // but keep the description user-readable either way). The Wallet
+    // Activity tab uses this string as the row label.
+    let originating_host: String = req
+        .original_url
+        .as_deref()
+        .and_then(|u| {
+            // Strip scheme then take everything up to the first '/'.
+            let after_scheme = u.split_once("://").map(|(_, rest)| rest).unwrap_or(u);
+            after_scheme
+                .split('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.split('@').last().unwrap_or(s)) // strip userinfo
+                .map(|s| s.split(':').next().unwrap_or(s).to_string()) // strip port
+        })
+        .unwrap_or_else(|| "unknown site".to_string());
+
     // Build createAction request: no_send=true. The CEF Async402ResourceHandler
     // calls /wallet/broadcast-nosend AFTER the server returns 200 to the retry,
     // which eliminates both the isMerge race and the nosend auto-fail race.
@@ -16796,7 +16816,10 @@ pub async fn pay_402(
             basket: None,
             tags: None,
         }],
-        description: Some(format!("BRC-121 {} sats", req.satoshis)),
+        // Activity-tab row label — must always identify the spend per user
+        // requirement ([[feedback_activity_log_every_spend]]). Site host
+        // first so users can scan the list and locate a specific payment.
+        description: Some(format!("Paid content — {}", originating_host)),
         labels: Some(vec!["brc121".to_string(), "pay402".to_string()]),
         options: Some(CreateActionOptions {
             sign_and_process: Some(true),
