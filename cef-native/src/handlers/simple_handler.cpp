@@ -4417,7 +4417,10 @@ bool SimpleHandler::OnProcessMessageReceived(
                     ScopedGrantTask(std::string url, std::string body, std::string domain)
                         : url_(std::move(url)), body_(std::move(body)), domain_(std::move(domain)) {}
                     void Execute() override {
-                        HttpResponse resp = SyncHttpClient::Post(url_, "application/json", body_, 3000);
+                        // SyncHttpClient::Post signature is (url, body, contentType, timeout).
+                        // Earlier version had body and contentType swapped — Rust got
+                        // "application/json" as the body and rejected with 400.
+                        HttpResponse resp = SyncHttpClient::Post(url_, body_, "application/json", 3000);
                         if (resp.success && resp.statusCode >= 200 && resp.statusCode < 300) {
                             LOG_INFO_BROWSER("🛡️ Scoped grant written for " + domain_);
                             extern void invalidateSubPermissionCacheForDomain(const std::string& domain);
