@@ -75,7 +75,14 @@ public:
         return instance;
     }
 
-    // Lookup: cached first, then fetches from Rust backend synchronously
+    // Lookup: cached first, then fetches from Rust backend synchronously.
+    // Failure cases (HTTP timeout, parse error) are NOT cached — they return
+    // a "unknown" Permission to the caller but the next call retries the
+    // fetch. Without this, a single transient failure (e.g., Rust busy at
+    // startup serving many parallel requests) poisons the cache with
+    // "unknown" for an already-approved domain, triggering a spurious
+    // domain_approval modal. See the recurring user-visible race condition
+    // reported during SocialCert testing (2026-05-13).
     Permission getPermission(const std::string& domain) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -84,10 +91,14 @@ public:
                 return it->second;
             }
         }
-        Permission perm = fetchFromBackend(domain);
-        {
+        bool fetchSucceeded = false;
+        Permission perm = fetchFromBackend(domain, fetchSucceeded);
+        if (fetchSucceeded) {
             std::lock_guard<std::mutex> lock(mutex_);
             cache_[domain] = perm;
+        } else {
+            LOG_DEBUG_HTTP("🔒 DomainPermissionCache fetch failed for "
+                           + domain + " — NOT caching, will retry next call");
         }
         return perm;
     }
@@ -129,9 +140,13 @@ private:
         return hSession_;
     }
 
-    Permission fetchFromBackend(const std::string& domain) {
+    // fetchSucceeded out-param distinguishes "Rust returned an explicit
+    // result" (worth caching) from "request failed or didn't reach Rust"
+    // (NOT worth caching — we'd cache a phantom unknown state).
+    Permission fetchFromBackend(const std::string& domain, bool& fetchSucceeded) {
         Permission result;
         result.trustLevel = "unknown";
+        fetchSucceeded = false;
 
         HINTERNET hSession = getSession();
         if (!hSession) return result;
@@ -152,8 +167,14 @@ private:
             return result;
         }
 
-        // 1s timeout for localhost (P2 perf fix — reduced from 5s)
-        DWORD timeout = 1000;
+        // 3s timeout for localhost — was 1s but caused cache poisoning on
+        // busy startup when Rust is serving many parallel requests. Long
+        // enough to ride out load spikes, short enough that a truly down
+        // Rust still surfaces quickly. Combined with the no-cache-on-failure
+        // policy in getPermission(), this fully resolves the recurring
+        // "site already approved but domain_approval modal fires anyway"
+        // race condition.
+        DWORD timeout = 3000;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
@@ -186,6 +207,7 @@ private:
             result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
             result.identityKeyDisclosureAllowed = json.value("identityKeyDisclosureAllowed", false);
+            fetchSucceeded = true;  // Parsed OK — cache this result.
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("🔒 Failed to parse domain permission response: " + std::string(e.what()));
         }
@@ -193,9 +215,10 @@ private:
         return result;
     }
 #else
-    Permission fetchFromBackend(const std::string& domain) {
+    Permission fetchFromBackend(const std::string& domain, bool& fetchSucceeded) {
         Permission result;
         result.trustLevel = "unknown";
+        fetchSucceeded = false;
 
         std::string url = "http://localhost:31301/domain/permissions?domain=" + domain;
         HttpResponse resp = SyncHttpClient::Get(url, 5000);
@@ -210,6 +233,7 @@ private:
             result.maxTxPerSession = json.value("maxTxPerSession", (int64_t)100);
             result.adblockEnabled = json.value("adblockEnabled", true);
             result.identityKeyDisclosureAllowed = json.value("identityKeyDisclosureAllowed", false);
+            fetchSucceeded = true;
         } catch (const std::exception& e) {
             LOG_DEBUG_HTTP("Failed to parse domain permission response: " + std::string(e.what()));
         }
@@ -843,11 +867,15 @@ private:
     // Helper: fetch the /domain/permissions/{kind} list and let the caller
     // scan it for the specific tuple. Returns false on any HTTP / parse error
     // (treat absence-of-grant as default-denied, callers will prompt).
+    // Timeout bumped from 1.5s → 3s — same rationale as DomainPermissionCache:
+    // Rust localhost can be busy during dApp page-load bursts (SocialCert hits
+    // 30+ wallet endpoints in 6 seconds), and an aggressive timeout silently
+    // turns "actually granted" into "default-denied" → spurious re-prompts.
     template <typename Scan>
     bool fetchBool(const std::string& endpoint, const std::string& domain, Scan scan) {
         const std::string url = "http://localhost:31301" + endpoint
             + "?domain=" + domain;
-        HttpResponse resp = SyncHttpClient::Get(url, 1500);
+        HttpResponse resp = SyncHttpClient::Get(url, 3000);
         if (!resp.success || resp.statusCode != 200) return false;
         try {
             auto j = nlohmann::json::parse(resp.body);
