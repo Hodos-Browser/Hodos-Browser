@@ -80,6 +80,14 @@ struct PermissionContext {
 
     // Request-specific cost (computed by caller for Payment kind).
     int64_t requestedCents = 0;
+    // True when the BSV/USD price cache returned a usable price for the
+    // current request, false when the caller could not convert satoshis to
+    // cents (network failure, cache cold). Payment kind: when false the engine
+    // prompts payment_confirmation with reason="price_unavailable" so the
+    // user can review the satoshi amount manually instead of silently
+    // forwarding a tx whose USD cost we couldn't verify. Defaults to true so
+    // non-payment contexts (which never set this) preserve existing semantics.
+    bool bsvPriceAvailable = true;
 
     // Scoped-grant evaluation (filled in by caller for ProtocolUse/BasketAccess/CounterpartyUse).
     // The caller queries the V18 sub-permission tables before calling Decide,

@@ -121,6 +121,18 @@ PermissionDecision PermissionEngine::DecidePayment(const PermissionContext& ctx)
         return d;
     }
 
+    // BSV/USD price unavailable — we cannot evaluate the per-tx or per-session
+    // caps in cents, so the cap checks below would be misleading. Prompt
+    // payment_confirmation so the user sees the satoshi amount and decides
+    // manually. The C++ caller derives `exceededLimit=price_unavailable` from
+    // the same context, so the React modal renders the correct banner.
+    if (!ctx.bsvPriceAvailable && ctx.requestedCents == 0) {
+        d.kind = PermissionDecision::Kind::Prompt;
+        d.promptType = "payment_confirmation";
+        d.reason = "BSV price unavailable — cannot evaluate spending caps";
+        return d;
+    }
+
     // Rate limit first — if exceeded, fire the rate-limit prompt regardless of cap.
     if (ctx.paymentRequestsThisMinute >= ctx.rateLimitPerMin && ctx.rateLimitPerMin > 0) {
         d.kind = PermissionDecision::Kind::Prompt;

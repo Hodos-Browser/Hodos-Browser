@@ -270,6 +270,36 @@ TEST(PermissionEngine, PaymentExactlyAtPerTxCapIsSilent) {
     EXPECT_EQ(d.kind, Kind::Silent);
 }
 
+TEST(PermissionEngine, PaymentPriceUnavailablePromptsConfirmation) {
+    // BSV price cache cold / network down — engine cannot trust cap math
+    // (requestedCents would be 0 even for a real spend). Prompt so the user
+    // sees the satoshi amount.
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = false;
+    ctx.requestedCents = 0; // caller couldn't convert satoshis → cents
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "payment_confirmation");
+    // Reason is human-readable; checking presence rather than exact match.
+    EXPECT_NE(d.reason.find("price unavailable"), std::string::npos);
+}
+
+TEST(PermissionEngine, PaymentPriceAvailableWithZeroCentsStillSilent) {
+    // Defensive: a free output (satoshis=0 → cents=0) should NOT be blocked
+    // by the price-unavailable check. The new branch only fires when price
+    // is unavailable AND requestedCents would otherwise be 0 as a proxy for
+    // "we couldn't convert."
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true; // price IS available
+    ctx.requestedCents = 0;       // genuine zero-cost payment
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Silent);
+}
+
 // ============================================================================
 // Branch 5: Cert disclosure (non-sensitive fields)
 // ============================================================================

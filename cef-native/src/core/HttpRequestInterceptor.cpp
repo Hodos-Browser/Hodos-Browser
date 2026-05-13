@@ -1023,7 +1023,8 @@ static hodos::PermissionContext buildPermissionContext(
     int64_t requestedCents,
     int64_t sessionSpentCents,
     int paymentRequestsThisMinute,
-    int paymentCountThisSession
+    int paymentCountThisSession,
+    bool bsvPriceAvailable = true
 ) {
     using K = hodos::PermissionCallKind;
     hodos::PermissionContext ctx;
@@ -1052,6 +1053,7 @@ static hodos::PermissionContext buildPermissionContext(
 
     // Payment-specific
     ctx.requestedCents = requestedCents;
+    ctx.bsvPriceAvailable = bsvPriceAvailable;
 
     // Scoped grant lookups — only fetch the cache for the relevant kind, so
     // a Payment call doesn't HTTP-fetch the protocol cache pointlessly.
@@ -1914,104 +1916,46 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         }
 
         if (isPaymentEndpoint(endpoint_)) {
+            // Phase 1.5 Step 6 (Commit B) — payment gate is now driven by
+            // PermissionEngine::Decide(). The C++ side still owns:
+            //   1. The state collection (satoshis/cents/sessionSpent/etc.)
+            //   2. The extraParams string the React modal expects
+            //   3. The PendingRequestManager queue + CreateNotificationOverlayTask
+            //   4. Session-counter increments on auto-approve
+            // The engine owns the decision (Silent/Prompt/Deny) and the
+            // promptType. Inline gate cascade is gone.
             int browserId = browser_ ? browser_->GetIdentifier() : 0;
-
-            // Ensure session exists for rate limiting and spending tracking
             SessionManager::GetInstance().getSession(browserId, requestDomain_);
 
-            // Parse outputs and calculate USD cents (needed for all paths)
             int64_t satoshis = extractOutputSatoshis(body_);
             double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+            const bool priceAvailable = (bsvPrice > 0);
             int64_t cents = 0;
-            if (bsvPrice > 0 && satoshis > 0) {
-                // satoshis → USD: (satoshis / 100_000_000) * bsvPrice * 100 (for cents)
+            if (priceAvailable && satoshis > 0) {
                 cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
             }
+            const int64_t sessionSpent = SessionManager::GetInstance().getSpentCents(browserId, requestDomain_);
+            const int rateCount = SessionManager::GetInstance().getRateCounter(browserId, requestDomain_);
+            const int txCount = SessionManager::GetInstance().getPaymentCount(browserId, requestDomain_);
 
-            // Safety: if price is unknown (never fetched or all fetches failed), require user confirmation
-            if (bsvPrice <= 0 && satoshis > 0) {
-                LOG_DEBUG_HTTP("⚠️ BSV price unavailable — requiring user confirmation for " + requestDomain_);
-                preCalculatedCents_ = 0;
+            hodos::PermissionContext ctx = buildPermissionContext(
+                requestDomain_, endpoint_, body_, perm,
+                cents, sessionSpent, rateCount, txCount,
+                priceAvailable);
+            hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
 
-                std::string requestId = PendingRequestManager::GetInstance().addRequest(
-                    requestDomain_, method_, endpoint_, body_, this, "payment_confirmation");
-
-                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                        + "&cents=0"
-                                        + "&bsvPrice=0"
-                                        + "&exceededLimit=price_unavailable"
-                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                        + "&sessionSpent=0";
-
-                CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", requestDomain_, extraParams));
-                postAuthTimeout(60000, "{\"error\":\"Payment approval timeout\",\"status\":\"error\"}");
-                handle_request = true;
-                return true;
-            }
-
-            // Rate limit check — show notification instead of auto-rejecting
-            if (!SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
-                LOG_DEBUG_HTTP("🔒 Rate limit exceeded for " + requestDomain_ + ", showing notification");
-                preCalculatedCents_ = cents;
-
-                std::string requestId = PendingRequestManager::GetInstance().addRequest(
-                    requestDomain_, method_, endpoint_, body_, this, "rate_limit_exceeded");
-
-                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                        + "&cents=" + std::to_string(cents)
-                                        + "&bsvPrice=" + std::to_string(bsvPrice)
-                                        + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents);
-
-                CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", requestDomain_, extraParams));
-                postAuthTimeout(60000, "{\"error\":\"Rate limit approval timeout\",\"status\":\"error\"}");
-                handle_request = true;
-                return true;
-            }
-
-            // Session transaction count check — require confirmation if max tx count reached
-            int txCount = SessionManager::GetInstance().getPaymentCount(browserId, requestDomain_);
-            if (txCount >= perm.maxTxPerSession) {
-                LOG_DEBUG_HTTP("🔒 Session transaction count exceeded for " + requestDomain_ + " (" + std::to_string(txCount) + " >= " + std::to_string(perm.maxTxPerSession) + "), showing notification");
-                preCalculatedCents_ = cents;
-
-                std::string requestId = PendingRequestManager::GetInstance().addRequest(
-                    requestDomain_, method_, endpoint_, body_, this, "rate_limit_exceeded");
-
-                std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                        + "&cents=" + std::to_string(cents)
-                                        + "&bsvPrice=" + std::to_string(bsvPrice)
-                                        + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                                        + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                        + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                        + "&exceededLimit=session_tx_count"
-                                        + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
-                                        + "&txCount=" + std::to_string(txCount);
-
-                CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", requestDomain_, extraParams));
-                postAuthTimeout(60000, "{\"error\":\"Session transaction count approval timeout\",\"status\":\"error\"}");
-                handle_request = true;
-                return true;
-            }
-
-            // Check per-tx limit
-            bool withinTxLimit = (cents <= perm.perTxLimitCents);
-
-            // Check per-session cumulative limit
-            int64_t sessionSpent = SessionManager::GetInstance().getSpentCents(browserId, requestDomain_);
-            bool withinSessionLimit = ((sessionSpent + cents) <= perm.perSessionLimitCents);
-
-            LOG_DEBUG_HTTP("💰 Payment: " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
-                + " | tx_limit=" + std::to_string(perm.perTxLimitCents)
+            LOG_DEBUG_HTTP(std::string("💰 Payment engine decision: ")
+                + decisionKindToString(decision.kind)
+                + " promptType=" + decision.promptType
+                + " | " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
+                + " tx_limit=" + std::to_string(perm.perTxLimitCents)
                 + " session_spent=" + std::to_string(sessionSpent)
                 + " session_limit=" + std::to_string(perm.perSessionLimitCents)
                 + " tx_count=" + std::to_string(txCount)
-                + " max_tx_per_session=" + std::to_string(perm.maxTxPerSession));
+                + " max_tx=" + std::to_string(perm.maxTxPerSession)
+                + " | reason=" + decision.reason);
 
-            if (withinTxLimit && withinSessionLimit) {
-                // Auto-approve: within both limits
+            if (decision.kind == hodos::PermissionDecision::Kind::Silent) {
                 LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
                 preCalculatedCents_ = cents;
                 wasAutoApprovedPayment_ = true;
@@ -2020,22 +1964,54 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
                 return true;
-            } else {
-                // Over limit — show payment confirmation with limit context
-                LOG_DEBUG_HTTP("💰 Over limit — showing payment confirmation for " + requestDomain_);
-                preCalculatedCents_ = cents;
+            }
 
-                std::string exceeded = "";
-                if (!withinTxLimit && !withinSessionLimit) exceeded = "both";
-                else if (!withinTxLimit) exceeded = "per_tx";
-                else exceeded = "per_session";
-
-                triggerPaymentConfirmationModal(requestDomain_, satoshis, cents, bsvPrice,
-                    exceeded, perm.perTxLimitCents, perm.perSessionLimitCents, sessionSpent);
-                postAuthTimeout(60000, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
+            if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
+                LOG_DEBUG_HTTP("💰 Engine denied payment for " + requestDomain_ + ": " + decision.reason);
+                onHTTPResponseReceived(
+                    "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
                 handle_request = true;
                 return true;
             }
+
+            // Prompt — derive the exceededLimit string from the same context
+            // the engine used. This matches what the inline cascade fed the
+            // React modals so the UX banner copy is unchanged.
+            preCalculatedCents_ = cents;
+            std::string exceeded;
+            if (!priceAvailable) {
+                exceeded = "price_unavailable";
+            } else if (rateCount >= perm.rateLimitPerMin && perm.rateLimitPerMin > 0) {
+                exceeded = "rate_limit";
+            } else if (txCount >= perm.maxTxPerSession && perm.maxTxPerSession > 0) {
+                exceeded = "session_tx_count";
+            } else {
+                const bool overTx = cents > perm.perTxLimitCents;
+                const bool overSession = (sessionSpent + cents) > perm.perSessionLimitCents;
+                if (overTx && overSession) exceeded = "both";
+                else if (overTx) exceeded = "per_tx";
+                else exceeded = "per_session";
+            }
+
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents)
+                                    + "&bsvPrice=" + (priceAvailable ? std::to_string(bsvPrice) : std::string("0"))
+                                    + "&exceededLimit=" + exceeded
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                    + "&sessionSpent=" + std::to_string(sessionSpent);
+            if (decision.promptType == "rate_limit_exceeded") {
+                extraParams += "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                             + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
+                             + "&txCount=" + std::to_string(txCount);
+            }
+
+            PendingRequestManager::GetInstance().addRequest(
+                requestDomain_, method_, endpoint_, body_, this, decision.promptType);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask(decision.promptType, requestDomain_, extraParams));
+            postAuthTimeout(60000, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
+            handle_request = true;
+            return true;
         }
 
         // Non-payment endpoint from approved domain — forward immediately
