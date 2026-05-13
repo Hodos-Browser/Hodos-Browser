@@ -48,6 +48,15 @@ bool HasPendingBrc121ReloadForDomain(const std::string& domain);
 // URL with the right "X sats" caption. 0 if no price has been stored.
 int64_t GetPendingBrc121PriceForDomain(const std::string& domain);
 
+// B+3 polish — mark a BRC-121 article URL as one-shot approved. Called from
+// simple_handler.cpp's brc100_auth_response handler when the user approves
+// a payment_confirmation / rate_limit_exceeded modal whose stored endpoint
+// is an http(s) article URL. On the next 402 for that URL,
+// TryHandleBrc121_402 atomically pops the marker and bypasses the cap check
+// exactly once, so the user's just-approved payment proceeds without
+// re-prompting. Subsequent visits to the same URL re-check caps normally.
+void MarkBrc121PaymentApproved(const std::string& url);
+
 // Phase 1 polish — failed-URL registry. Async402ResourceHandler registers a
 // URL after MAX_UPSTREAM_RETRIES with a non-2xx upstream status. OnLoadError
 // in simple_handler.cpp consumes the entry and swaps the failed-load page

@@ -38,6 +38,7 @@ std::string g_pendingModalDomain = "";
 #include <ctime>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 #include <iomanip>
 #ifdef _WIN32
 #include <windows.h>
@@ -3042,6 +3043,26 @@ struct Brc121FailedEntry {
 std::mutex s_brc121_failed_urls_mutex;
 std::unordered_map<std::string, Brc121FailedEntry> s_brc121_failed_urls;
 
+// B+3 polish — one-shot approved-URL registry for BRC-121 over-cap modals.
+// Populated by MarkBrc121PaymentApproved() (called from simple_handler.cpp's
+// brc100_auth_response approval handler) when the user approves a
+// payment_confirmation / rate_limit_exceeded modal whose stored endpoint is
+// an http(s) article URL. Atomically popped by TryHandleBrc121_402 BEFORE
+// the cap-check on the reload that follows approval, so the user's just-
+// approved payment proceeds without re-prompting. Strict one-shot: pop
+// consumes, so subsequent visits to the same URL re-check caps normally —
+// no permanent cap bypass, no infinite-loop risk.
+std::mutex s_brc121_approved_urls_mutex;
+std::unordered_set<std::string> s_brc121_approved_urls;
+
+bool popBrc121ApprovedUrl(const std::string& url) {
+    std::lock_guard<std::mutex> lock(s_brc121_approved_urls_mutex);
+    auto it = s_brc121_approved_urls.find(url);
+    if (it == s_brc121_approved_urls.end()) return false;
+    s_brc121_approved_urls.erase(it);
+    return true;
+}
+
 void registerPendingBrc121Reload(const std::string& domain,
                                  CefRefPtr<CefBrowser> browser,
                                  const std::string& url) {
@@ -3669,17 +3690,36 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
                        // approval auto-pays.
     }
 
+    // B+3 polish — one-shot bypass for previously-approved over-cap payments.
+    // If the user approved this exact URL on a prior payment_confirmation /
+    // rate_limit_exceeded modal, MarkBrc121PaymentApproved put the URL in
+    // s_brc121_approved_urls. popBrc121ApprovedUrl consumes the entry
+    // atomically; subsequent visits to the same URL re-check caps normally
+    // (no permanent bypass). When set, skip ALL cap-check branches below
+    // and fall through to the auto-approve path.
+    const bool oneShotApproved = popBrc121ApprovedUrl(url);
+    if (oneShotApproved) {
+        LOG_INFO_HTTP("💰 BRC-121: one-shot approved URL — bypassing cap check for "
+                      + url);
+    }
+
     // Sats → USD cents. If BSV price is unavailable, fire payment_confirmation
     // with exceededLimit=price_unavailable (same as createAction's safety branch).
     double bsvPrice = BSVPriceCache::GetInstance().getPrice();
     int browserId = browser ? browser->GetIdentifier() : 0;
     SessionManager::GetInstance().getSession(browserId, domain);
 
-    if (bsvPrice <= 0) {
+    if (!oneShotApproved && bsvPrice <= 0) {
         LOG_DEBUG_HTTP("💰 BRC-121: BSV price unavailable — firing payment_confirmation modal");
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
         PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, "payment_confirmation");
+        // Register the pending reload + price so OnLoadError swaps the
+        // failed-load page for /payment-pending and TriggerPendingBrc121Reloads
+        // can re-navigate the tab after approval (mirrors the unapproved-
+        // domain branch above).
+        registerPendingBrc121Reload(domain, browser, url);
+        SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
             std::string extraParams = "&satoshis=" + std::to_string(satoshis)
                                     + "&cents=0"
@@ -3693,16 +3733,24 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
-    int64_t cents = static_cast<int64_t>(
-        (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+    int64_t cents = (bsvPrice > 0)
+        ? static_cast<int64_t>(
+            (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0)
+        : 0;
     int64_t spent = SessionManager::GetInstance().getSpentCents(browserId, domain);
     int txCount = SessionManager::GetInstance().getPaymentCount(browserId, domain);
 
     // Helper lambda: fire payment_confirmation modal with limit context.
+    // Also registers the pending reload + per-domain price so OnLoadError
+    // swaps the failed-load page for /payment-pending (matches the
+    // unapproved-domain branch) and TriggerPendingBrc121Reloads can
+    // re-navigate the tab after the user clicks Approve.
     auto firePaymentModal = [&](const std::string& exceededLimit) {
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
         PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, "payment_confirmation");
+        registerPendingBrc121Reload(domain, browser, url);
+        SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
             std::string extraParams = "&satoshis=" + std::to_string(satoshis)
                                     + "&cents=" + std::to_string(cents)
@@ -3719,7 +3767,7 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
     bool withinTxLimit = cents <= perm.perTxLimitCents;
     bool withinSessionLimit = (spent + cents) <= perm.perSessionLimitCents;
 
-    if (!withinTxLimit || !withinSessionLimit) {
+    if (!oneShotApproved && (!withinTxLimit || !withinSessionLimit)) {
         std::string exceeded = "both";
         if (withinTxLimit && !withinSessionLimit) exceeded = "per_session";
         else if (!withinTxLimit && withinSessionLimit) exceeded = "per_tx";
@@ -3729,11 +3777,13 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
-    if (txCount >= perm.maxTxPerSession) {
+    if (!oneShotApproved && txCount >= perm.maxTxPerSession) {
         LOG_DEBUG_HTTP("💰 BRC-121: max-tx-per-session reached — firing rate_limit_exceeded modal");
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
         PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, "rate_limit_exceeded");
+        registerPendingBrc121Reload(domain, browser, url);
+        SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
             std::string extraParams = "&satoshis=" + std::to_string(satoshis)
                                     + "&cents=" + std::to_string(cents)
@@ -3749,12 +3799,14 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         return false;
     }
 
-    if (!SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
+    if (!oneShotApproved && !SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
         LOG_DEBUG_HTTP("💰 BRC-121: rate limit (" + std::to_string(perm.rateLimitPerMin)
                        + "/min) exceeded — firing rate_limit_exceeded modal");
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
         PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, "rate_limit_exceeded");
+        registerPendingBrc121Reload(domain, browser, url);
+        SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
             std::string extraParams = "&satoshis=" + std::to_string(satoshis)
                                     + "&cents=" + std::to_string(cents)
@@ -3885,6 +3937,18 @@ int64_t GetPendingBrc121PriceForDomain(const std::string& domain) {
     std::lock_guard<std::mutex> lock(s_brc121_pending_reloads_mutex);
     auto it = s_brc121_pending_sats.find(domain);
     return it == s_brc121_pending_sats.end() ? 0 : it->second;
+}
+
+// B+3 polish — external-linkage helper called from simple_handler.cpp's
+// brc100_auth_response approval IPC when the user approves a BRC-121
+// over-cap modal. Adds the article URL to the one-shot approved-URL
+// registry; TryHandleBrc121_402 atomically pops it on the next 402 for
+// the same URL and bypasses the cap-check exactly once.
+void MarkBrc121PaymentApproved(const std::string& url) {
+    std::lock_guard<std::mutex> lock(s_brc121_approved_urls_mutex);
+    s_brc121_approved_urls.insert(url);
+    LOG_INFO_HTTP("💰 BRC-121: URL marked one-shot approved (will bypass next cap check): "
+                  + url);
 }
 
 // Phase 1 polish — failed-URL registry. RegisterBrc121FailedUrl is called

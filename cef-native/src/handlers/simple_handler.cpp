@@ -4059,6 +4059,40 @@ bool SimpleHandler::OnProcessMessageReceived(
                     if (found) {
                         LOG_DEBUG_BROWSER("🔐 Found pending auth request for: " + pendingReq.domain);
 
+                        // B+3 polish — BRC-121 over-cap approval short-circuit.
+                        // For BRC-121, pendingReq.endpoint is the article URL
+                        // (e.g. "https://now.bsvblockchain.tech/articles/X"),
+                        // NOT a wallet path. The standard AuthResponseHandler
+                        // below would build a malformed URL
+                        // ("http://localhost:31301https://...") and fail.
+                        // Instead: mark this URL as one-shot approved in the
+                        // BRC-121 registry, consume the pending request,
+                        // and trigger a tab reload. The reload's 402 will pop
+                        // the one-shot flag and bypass the cap check exactly
+                        // once — proceeding to the normal auto-pay path.
+                        // Loop-safe: pop is atomic, subsequent visits to the
+                        // same URL re-check caps normally.
+                        const bool brc121OverCapApproval =
+                            (pendingReq.type == "payment_confirmation"
+                             || pendingReq.type == "rate_limit_exceeded")
+                            && (pendingReq.endpoint.rfind("http://", 0) == 0
+                                || pendingReq.endpoint.rfind("https://", 0) == 0);
+                        if (brc121OverCapApproval) {
+                            LOG_INFO_BROWSER(
+                                "🔐 BRC-121 over-cap approved — marking URL one-shot"
+                                " and reloading tab: " + pendingReq.endpoint);
+                            // Consume the pending entry so it doesn't sit
+                            // around stale; the regular handleAuthResponse
+                            // path would have popped it via popRequest, but
+                            // we're not going through that path for BRC-121.
+                            PendingAuthRequest discarded;
+                            PendingRequestManager::GetInstance().popRequest(requestId, discarded);
+                            MarkBrc121PaymentApproved(pendingReq.endpoint);
+                            TriggerPendingBrc121Reloads(pendingReq.domain);
+                            g_pendingModalDomain = "";
+                            return true;
+                        }
+
                         // For certificate_disclosure: if user selected a subset of fields,
                         // modify the request body to only reveal those fields
                         if (pendingReq.type == "certificate_disclosure" &&
@@ -4143,11 +4177,19 @@ bool SimpleHandler::OnProcessMessageReceived(
                         handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
                     }
 
-                    // BRC-121 polish: if this was a domain_approval modal, the
-                    // tab is sitting on /payment-pending. Navigate it back so
-                    // the placeholder doesn't linger after the user said no.
-                    if (found && pendingReq.type == "domain_approval"
-                        && !pendingReq.domain.empty()) {
+                    // BRC-121 polish: if this was a modal that had stashed a
+                    // pending reload (domain_approval OR — per B+3 — over-cap
+                    // payment_confirmation / rate_limit_exceeded with an http
+                    // article URL), the tab is sitting on /payment-pending.
+                    // Navigate it back so the placeholder doesn't linger.
+                    const bool brc121OverCapModal = found
+                        && (pendingReq.type == "payment_confirmation"
+                            || pendingReq.type == "rate_limit_exceeded")
+                        && (pendingReq.endpoint.rfind("http://", 0) == 0
+                            || pendingReq.endpoint.rfind("https://", 0) == 0);
+                    if (found && !pendingReq.domain.empty()
+                        && (pendingReq.type == "domain_approval"
+                            || brc121OverCapModal)) {
                         CancelPendingBrc121Reloads(pendingReq.domain);
                     }
 
