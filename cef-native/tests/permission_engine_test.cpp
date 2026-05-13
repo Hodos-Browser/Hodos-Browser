@@ -300,6 +300,107 @@ TEST(PermissionEngine, PaymentPriceAvailableWithZeroCentsStillSilent) {
     EXPECT_EQ(d.kind, Kind::Silent);
 }
 
+// ----------------------------------------------------------------------------
+// Commit E — Payment with missing scope returns scope-permission prompt
+// BEFORE the cap check fires. Both gates are independent: scope first,
+// then payment cap on the re-issued request.
+// ----------------------------------------------------------------------------
+
+TEST(PermissionEngine, PaymentWithMissingProtocolPromptsProtocolPermission) {
+    // createAction references a protocol the site doesn't have a grant for.
+    // Cents are well within cap, so the cap path would normally Silent.
+    // Engine must return scope prompt FIRST.
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 5;                          // well within caps
+    ctx.perTxLimitCents = 100;
+    ctx.perSessionLimitCents = 1000;
+    ctx.paymentScopeKindMissing = "protocol";
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "protocol_permission_prompt");
+}
+
+TEST(PermissionEngine, PaymentWithMissingBasketPromptsBasketPermission) {
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 5;
+    ctx.perTxLimitCents = 100;
+    ctx.perSessionLimitCents = 1000;
+    ctx.paymentScopeKindMissing = "basket";
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "basket_permission_prompt");
+}
+
+TEST(PermissionEngine, PaymentWithMissingCounterpartyPromptsCounterpartyPermission) {
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 5;
+    ctx.perTxLimitCents = 100;
+    ctx.perSessionLimitCents = 1000;
+    ctx.paymentScopeKindMissing = "counterparty";
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "counterparty_permission_prompt");
+}
+
+TEST(PermissionEngine, PaymentScopeMissingTakesPriorityOverCapExceedance) {
+    // BOTH scope missing AND over cap. Engine returns scope prompt; the cap
+    // prompt fires on the re-issued request after scope is approved.
+    // This is the "independent gates" invariant — caller must see scope
+    // first, then payment second.
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 1000;                       // way over cap
+    ctx.perTxLimitCents = 10;
+    ctx.perSessionLimitCents = 100;
+    ctx.paymentScopeKindMissing = "protocol";
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "protocol_permission_prompt");  // NOT payment_confirmation
+}
+
+TEST(PermissionEngine, PaymentNoScopeMissingFallsThroughToCapChecks) {
+    // No scope missing → engine proceeds to the existing cap-check cascade.
+    // This is the "scope already granted, so cap path runs" case (the
+    // re-issued request after a scope approval, or a payment to a site
+    // with a persistent protocol grant).
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 1000;                       // over cap
+    ctx.perTxLimitCents = 10;
+    // paymentScopeKindMissing left empty — scope is fine.
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "payment_confirmation");  // cap path, not scope path
+}
+
+TEST(PermissionEngine, PaymentUnknownScopeValueDefaultsToProtocolPrompt) {
+    // Defensive: an unrecognized paymentScopeKindMissing string should not
+    // crash or fall through silently. Engine treats it as missing protocol
+    // (the most common case) so the user still sees a prompt.
+    auto ctx = baselineApproved();
+    ctx.callKind = PermissionCallKind::Payment;
+    ctx.bsvPriceAvailable = true;
+    ctx.requestedCents = 5;
+    ctx.paymentScopeKindMissing = "garbage_value_xyz";
+
+    auto d = PermissionEngine::Decide(ctx);
+    EXPECT_EQ(d.kind, Kind::Prompt);
+    EXPECT_EQ(d.promptType, "protocol_permission_prompt");
+}
+
 // ============================================================================
 // Branch 5: Cert disclosure (non-sensitive fields)
 // ============================================================================

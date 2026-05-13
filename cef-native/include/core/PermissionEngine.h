@@ -93,6 +93,17 @@ struct PermissionContext {
     // The caller queries the V18 sub-permission tables before calling Decide,
     // and reports whether a matching active grant exists.
     bool scopedGrantExists = false;
+
+    // Phase 1.5 Step 6 (Commit E) — for Payment kind, if the createAction body
+    // also references a protocol/basket/counterparty scope the site does NOT
+    // have a grant for, the caller sets this field to indicate which scope
+    // kind is missing. DecidePayment short-circuits on this BEFORE the cap
+    // checks, returning the matching scope-permission prompt. After the user
+    // approves the scope, the request is re-issued and this field comes back
+    // empty (caller saw the grant materialize), so the cap checks then run.
+    // Valid values: empty (no missing scope, or non-Payment kind),
+    // "protocol", "basket", "counterparty". Other values treated as empty.
+    std::string paymentScopeKindMissing;
 };
 
 // The engine's decision.

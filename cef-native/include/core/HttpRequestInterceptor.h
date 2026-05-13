@@ -57,6 +57,7 @@ int64_t GetPendingBrc121PriceForDomain(const std::string& domain);
 // re-prompting. Subsequent visits to the same URL re-check caps normally.
 void MarkBrc121PaymentApproved(const std::string& url);
 
+
 // Phase 1 polish — failed-URL registry. Async402ResourceHandler registers a
 // URL after MAX_UPSTREAM_RETRIES with a non-2xx upstream status. OnLoadError
 // in simple_handler.cpp consumes the entry and swaps the failed-load page

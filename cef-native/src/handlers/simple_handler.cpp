@@ -4374,6 +4374,97 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "grant_scoped_permission") {
+        // Phase 1.5 Step 6 (Commit E) — user clicked "Always allow for this
+        // site" on a protocol_permission_prompt / basket_permission_prompt /
+        // counterparty_permission_prompt modal. React fires this IPC FIRST
+        // to write the V18 row, then fires brc100_auth_response which
+        // re-issues the original request via the standard AuthResponseHandler
+        // flow. Future calls from the page query SubPermissionCache, find
+        // the new persistent grant, and proceed silently.
+        //
+        // Payload (JSON): {
+        //   domain: string,
+        //   kind: "protocol" | "basket" | "counterparty",
+        //   // protocol fields:
+        //   protocolLevel?: int, protocolName?: string,
+        //   protocolKeyId?: string, protocolCounterparty?: string,
+        //   // basket fields:
+        //   basket?: string, basketAccess?: string,
+        //   // counterparty field:
+        //   counterparty?: string
+        // }
+        LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission received from role: " + role_);
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            std::string payloadJson = args->GetString(0).ToString();
+            LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission payload: " + payloadJson);
+            try {
+                nlohmann::json data = nlohmann::json::parse(payloadJson);
+                std::string domain = data.value("domain", "");
+                std::string kind = data.value("kind", "");
+
+                if (domain.empty() || kind.empty()) {
+                    LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission missing required fields");
+                    return true;
+                }
+
+                // Build the matching Rust endpoint URL + body, then fire-and-
+                // forget POST on a background task. Mirrors the cert-field
+                // permission task pattern below.
+                class ScopedGrantTask : public CefTask {
+                public:
+                    ScopedGrantTask(std::string url, std::string body, std::string domain)
+                        : url_(std::move(url)), body_(std::move(body)), domain_(std::move(domain)) {}
+                    void Execute() override {
+                        HttpResponse resp = SyncHttpClient::Post(url_, "application/json", body_, 3000);
+                        if (resp.success && resp.statusCode >= 200 && resp.statusCode < 300) {
+                            LOG_INFO_BROWSER("🛡️ Scoped grant written for " + domain_);
+                            extern void invalidateSubPermissionCacheForDomain(const std::string& domain);
+                            invalidateSubPermissionCacheForDomain(domain_);
+                        } else {
+                            LOG_DEBUG_BROWSER("🛡️ Scoped grant POST failed for " + domain_
+                                              + " (status=" + std::to_string(resp.statusCode) + ")");
+                        }
+                    }
+                private:
+                    std::string url_, body_, domain_;
+                    IMPLEMENT_REFCOUNTING(ScopedGrantTask);
+                    DISALLOW_COPY_AND_ASSIGN(ScopedGrantTask);
+                };
+
+                std::string url;
+                nlohmann::json reqBody;
+                reqBody["domain"] = domain;
+                if (kind == "protocol") {
+                    url = "http://localhost:31301/domain/permissions/protocol";
+                    reqBody["securityLevel"] = data.value("protocolLevel", 2);
+                    reqBody["protocolName"] = data.value("protocolName", "");
+                    reqBody["keyId"] = data.value("protocolKeyId", "*");
+                    if (data.contains("protocolCounterparty") && !data["protocolCounterparty"].get<std::string>().empty()) {
+                        reqBody["counterparty"] = data["protocolCounterparty"];
+                    }
+                } else if (kind == "basket") {
+                    url = "http://localhost:31301/domain/permissions/basket";
+                    reqBody["basket"] = data.value("basket", "");
+                    reqBody["access"] = data.value("basketAccess", "read");
+                } else if (kind == "counterparty") {
+                    url = "http://localhost:31301/domain/permissions/counterparty";
+                    reqBody["counterparty"] = data.value("counterparty", "");
+                } else {
+                    LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission unknown kind: " + kind);
+                    return true;
+                }
+
+                CefPostTask(TID_FILE_USER_BLOCKING,
+                    new ScopedGrantTask(url, reqBody.dump(), domain));
+            } catch (const std::exception& e) {
+                LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission parse error: " + std::string(e.what()));
+            }
+        }
+        return true;
+    }
+
     if (message_name == "approve_cert_fields") {
         LOG_DEBUG_BROWSER("📋 approve_cert_fields message received from role: " + role_);
 

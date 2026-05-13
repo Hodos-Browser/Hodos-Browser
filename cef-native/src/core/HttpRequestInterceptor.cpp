@@ -1058,6 +1058,13 @@ static hodos::PermissionContext buildPermissionContext(
 
     // Scoped grant lookups — only fetch the cache for the relevant kind, so
     // a Payment call doesn't HTTP-fetch the protocol cache pointlessly.
+    // scopedGrantExists is true iff a matching V18 row exists. For "Allow
+    // once" (single-call grant without V18 write), the existing approve →
+    // re-issue flow in simple_handler.cpp bypasses Open() entirely via
+    // CefURLRequest, so the in-flight call doesn't need a one-shot bypass
+    // — it's satisfied by the re-issue. For "Always allow", simple_handler
+    // writes the V18 row + invalidates SubPermissionCache before re-issuing,
+    // so any subsequent calls from the page see the persistent grant.
     switch (ctx.callKind) {
         case K::ProtocolUse:
         case K::CounterpartyUse:
@@ -1071,6 +1078,28 @@ static hodos::PermissionContext buildPermissionContext(
                 ctx.scopedGrantExists = SubPermissionCache::GetInstance().isBasketGranted(
                     domain, basket.basket, basket.requiredAccess);
             }
+            break;
+        case K::Payment:
+            // Commit E v1 — paymentScopeKindMissing is deliberately NOT
+            // populated here yet. The engine handles it correctly when set
+            // (see PermissionEngine.cpp::DecidePayment + unit tests
+            // PaymentWithMissing{Protocol,Basket,Counterparty}*), but
+            // populating it requires the approve flow to re-run Open() on
+            // the original request so the cap gate fires AFTER scope is
+            // granted. simple_handler.cpp's brc100_auth_response approve
+            // path currently re-issues via CefURLRequest which bypasses
+            // GetResourceRequestHandler entirely — so a Payment scope
+            // approval would NOT re-trigger the cap check, silently
+            // bypassing the cap gate. That breaks the "both gates apply
+            // independently" invariant the user requires.
+            //
+            // Commit E v1 ships scope gates for non-payment endpoints
+            // (createSignature, listOutputs, etc.) where there's a single
+            // gate per call and the existing approve→re-issue flow works
+            // correctly. Sequenced scope-then-cap for Payment lands in a
+            // follow-up that wires AsyncWalletResourceHandler to re-run
+            // its gate evaluation on approval rather than just re-issuing
+            // the upstream request.
             break;
         default:
             // Other kinds don't use scopedGrantExists; leave default false.
@@ -1985,6 +2014,83 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
         }
 
+        // Phase 1.5 Step 6 (Commit E) — scoped-grant gate for non-payment,
+        // non-perimeter, non-cert endpoints that reference a protocol /
+        // basket / counterparty tuple. Targets endpoints like
+        // /createSignature, /createHmac, /encrypt, /decrypt, /listOutputs.
+        // The engine's DecideScopedGrant returns Silent when a matching V18
+        // grant or one-shot approval exists, else Prompt with the
+        // appropriate promptType (protocol_permission_prompt /
+        // basket_permission_prompt / counterparty_permission_prompt).
+        //
+        // Payment endpoints (createAction etc.) are handled below by the
+        // existing payment branch, which now also surfaces missing-scope
+        // prompts via PermissionContext.paymentScopeKindMissing before the
+        // cap check fires.
+        if (!isPaymentEndpoint(endpoint_)
+            && !isGetPublicKeyEndpoint(endpoint_)
+            && !isKeyLinkageEndpoint(endpoint_)
+            && !isProveCertificateEndpoint(endpoint_)) {
+            ProtocolScope proto_scope = extractProtocolScope(endpoint_, body_);
+            BasketScope basket_scope = extractBasketScope(endpoint_, body_);
+            const bool hasScope = proto_scope.valid || basket_scope.valid;
+            if (hasScope) {
+                hodos::PermissionContext ctx = buildPermissionContext(
+                    requestDomain_, endpoint_, body_, perm,
+                    /*requestedCents=*/0, /*sessionSpentCents=*/0,
+                    /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
+                    /*bsvPriceAvailable=*/true);
+                hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
+
+                LOG_DEBUG_HTTP(std::string("🛡️ Scoped-grant engine decision: ")
+                    + decisionKindToString(decision.kind)
+                    + " promptType=" + decision.promptType
+                    + " callKind=" + callKindToString(ctx.callKind)
+                    + " | reason=" + decision.reason);
+
+                if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
+                    LOG_DEBUG_HTTP("🛡️ Scoped grant denied for " + requestDomain_
+                                   + ": " + decision.reason);
+                    onHTTPResponseReceived(
+                        "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+                    handle_request = true;
+                    return true;
+                }
+
+                if (decision.kind == hodos::PermissionDecision::Kind::Prompt) {
+                    // Build extraParams so the React modal can render the
+                    // specific scope being requested. The scope fields are
+                    // distinct per kind; React reads only the ones it needs
+                    // for the current promptType.
+                    std::string extraParams;
+                    if (decision.promptType == "protocol_permission_prompt") {
+                        // Level/keyId/counterparty default-safe if unset.
+                        extraParams = "&protocolLevel=" + std::to_string(proto_scope.level)
+                                    + "&protocolName=" + proto_scope.name
+                                    + "&protocolKeyId=" + proto_scope.keyId
+                                    + "&protocolCounterparty=" + proto_scope.counterparty;
+                    } else if (decision.promptType == "basket_permission_prompt") {
+                        extraParams = "&basket=" + basket_scope.basket
+                                    + "&basketAccess=" + basket_scope.requiredAccess;
+                    } else if (decision.promptType == "counterparty_permission_prompt") {
+                        extraParams = "&counterparty=" + proto_scope.counterparty;
+                    }
+                    LOG_DEBUG_HTTP("🛡️ Scoped grant prompt required for " + requestDomain_
+                                   + " (" + decision.promptType + ")");
+                    PendingRequestManager::GetInstance().addRequest(
+                        requestDomain_, method_, endpoint_, body_, this, decision.promptType);
+                    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+                        decision.promptType, requestDomain_, extraParams));
+                    postAuthTimeout(60000,
+                        "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
+                    handle_request = true;
+                    return true;
+                }
+
+                // Silent — fall through to normal forwarding below.
+            }
+        }
+
         if (isPaymentEndpoint(endpoint_)) {
             // Phase 1.5 Step 6 (Commit B) — payment gate is now driven by
             // PermissionEngine::Decide(). The C++ side still owns:
@@ -2044,9 +2150,52 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 return true;
             }
 
-            // Prompt — derive the exceededLimit string from the same context
-            // the engine used. This matches what the inline cascade fed the
-            // React modals so the UX banner copy is unchanged.
+            // Commit E — engine may return a scope-permission prompt
+            // (protocol/basket/counterparty) for a Payment kind when the
+            // createAction body references an ungranted scope. Build the
+            // scope-specific extraParams instead of payment-cap params.
+            // After the user approves the scope, the request re-issues and
+            // the cap gate runs separately (true independent gates per
+            // user requirement).
+            if (decision.promptType == "protocol_permission_prompt"
+                || decision.promptType == "basket_permission_prompt"
+                || decision.promptType == "counterparty_permission_prompt") {
+                preCalculatedCents_ = cents;
+                ProtocolScope proto_scope_pay = extractProtocolScope(endpoint_, body_);
+                BasketScope basket_scope_pay = extractBasketScope(endpoint_, body_);
+                std::string extraParams;
+                if (decision.promptType == "protocol_permission_prompt") {
+                    extraParams = "&protocolLevel=" + std::to_string(proto_scope_pay.level)
+                                + "&protocolName=" + proto_scope_pay.name
+                                + "&protocolKeyId=" + proto_scope_pay.keyId
+                                + "&protocolCounterparty=" + proto_scope_pay.counterparty
+                                + "&satoshis=" + std::to_string(satoshis)
+                                + "&cents=" + std::to_string(cents);
+                } else if (decision.promptType == "basket_permission_prompt") {
+                    extraParams = "&basket=" + basket_scope_pay.basket
+                                + "&basketAccess=" + basket_scope_pay.requiredAccess
+                                + "&satoshis=" + std::to_string(satoshis)
+                                + "&cents=" + std::to_string(cents);
+                } else {
+                    extraParams = "&counterparty=" + proto_scope_pay.counterparty
+                                + "&satoshis=" + std::to_string(satoshis)
+                                + "&cents=" + std::to_string(cents);
+                }
+                LOG_DEBUG_HTTP("🛡️ Payment scope prompt required for " + requestDomain_
+                               + " (" + decision.promptType + ")");
+                PendingRequestManager::GetInstance().addRequest(
+                    requestDomain_, method_, endpoint_, body_, this, decision.promptType);
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+                    decision.promptType, requestDomain_, extraParams));
+                postAuthTimeout(60000,
+                    "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
+            }
+
+            // Standard payment Prompt — derive the exceededLimit string from
+            // the same context the engine used. This matches what the inline
+            // cascade fed the React modals so the UX banner copy is unchanged.
             preCalculatedCents_ = cents;
             std::string exceeded;
             if (!priceAvailable) {

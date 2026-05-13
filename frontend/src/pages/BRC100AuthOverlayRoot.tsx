@@ -272,6 +272,17 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [linkageKeyId, setLinkageKeyId] = useState<string>('');
   const [rememberPrivacy, setRememberPrivacy] = useState<boolean>(false);
 
+  // Phase 1.5 Step 6 Commit E — scoped permission prompts (protocol_permission_prompt,
+  // basket_permission_prompt, counterparty_permission_prompt). Three fields per
+  // scope kind, populated by applyParams from the C++ extraParams query string.
+  const [scopedProtocolLevel, setScopedProtocolLevel] = useState<number>(2);
+  const [scopedProtocolName, setScopedProtocolName] = useState<string>('');
+  const [scopedProtocolKeyId, setScopedProtocolKeyId] = useState<string>('*');
+  const [scopedProtocolCounterparty, setScopedProtocolCounterparty] = useState<string>('');
+  const [scopedBasket, setScopedBasket] = useState<string>('');
+  const [scopedBasketAccess, setScopedBasketAccess] = useState<string>('read');
+  const [scopedCounterparty, setScopedCounterparty] = useState<string>('');
+
   // Phase 1.5 Step 1 — "Allow this site to identify you" checkbox in the
   // domain_approval modal. Defaults ON so the common case (user trusts the
   // site enough to approve it at all) avoids a second sequential popup for
@@ -382,6 +393,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const certifierParam = params.get('certifier');
     setCertifier(certifierParam || '');
     setRememberFields(true);
+
+    // Phase 1.5 Step 6 Commit E — scoped permission params. Each prompt type
+    // uses a different subset of fields; reading all of them up-front is fine
+    // because unused state stays at the default empty values.
+    const protoLevelParam = params.get('protocolLevel');
+    setScopedProtocolLevel(protoLevelParam ? parseInt(protoLevelParam) : 2);
+    setScopedProtocolName(params.get('protocolName') || '');
+    setScopedProtocolKeyId(params.get('protocolKeyId') || '*');
+    setScopedProtocolCounterparty(params.get('protocolCounterparty') || '');
+    setScopedBasket(params.get('basket') || '');
+    setScopedBasketAccess(params.get('basketAccess') || 'read');
+    setScopedCounterparty(params.get('counterparty') || '');
 
     // Phase 1.5 Step 1 — privacy-perimeter params
     setLinkageKind(params.get('kind') || '');
@@ -617,6 +640,90 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       window.cefMessage?.send('overlay_close', []);
     } catch (error) {
       console.error('Error modifying limits:', error);
+    }
+  };
+
+  // ── Phase 1.5 Step 6 Commit E — scoped permission handlers ──
+  // Three buttons across all three scoped-prompt types:
+  //   handleScopedAllowOnce      → just approve; no DB write. The approve →
+  //                                re-issue flow in simple_handler delivers
+  //                                this one call's response; future calls
+  //                                re-prompt.
+  //   handleScopedAlwaysAllow    → fire grant_scoped_permission IPC first
+  //                                (writes V18 row + invalidates
+  //                                SubPermissionCache), then approve. Future
+  //                                same-scope calls find the persistent grant
+  //                                and pass silently.
+  //   handleScopedDeny           → reject; existing CefURLRequest reply path
+  //                                returns the timeout error to the page.
+  const scopedKindFromNotificationType = (): 'protocol' | 'basket' | 'counterparty' | null => {
+    if (notificationType === 'protocol_permission_prompt') return 'protocol';
+    if (notificationType === 'basket_permission_prompt') return 'basket';
+    if (notificationType === 'counterparty_permission_prompt') return 'counterparty';
+    return null;
+  };
+
+  const buildScopedGrantPayload = () => {
+    const kind = scopedKindFromNotificationType();
+    if (!kind) return null;
+    const base = { domain: notificationDomain, kind } as Record<string, unknown>;
+    if (kind === 'protocol') {
+      base.protocolLevel = scopedProtocolLevel;
+      base.protocolName = scopedProtocolName;
+      base.protocolKeyId = scopedProtocolKeyId;
+      if (scopedProtocolCounterparty) {
+        base.protocolCounterparty = scopedProtocolCounterparty;
+      }
+    } else if (kind === 'basket') {
+      base.basket = scopedBasket;
+      base.basketAccess = scopedBasketAccess;
+    } else if (kind === 'counterparty') {
+      base.counterparty = scopedCounterparty;
+    }
+    return base;
+  };
+
+  const handleScopedAllowOnce = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: true }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error allowing scoped permission once:', error);
+    }
+  };
+
+  const handleScopedAlwaysAllow = () => {
+    try {
+      const payload = buildScopedGrantPayload();
+      if (window.cefMessage && payload) {
+        // Write V18 row first so the cache invalidation lands before any
+        // future same-scope call hits the engine.
+        window.cefMessage.send('grant_scoped_permission', [JSON.stringify(payload)]);
+        // Then approve this request so the page gets its response.
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: true }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error always-allowing scoped permission:', error);
+    }
+  };
+
+  const handleScopedDeny = () => {
+    try {
+      if (window.cefMessage) {
+        window.cefMessage.send('brc100_auth_response', [
+          JSON.stringify({ approved: false }),
+        ]);
+      }
+      window.cefMessage?.send('overlay_close', []);
+    } catch (error) {
+      console.error('Error denying scoped permission:', error);
     }
   };
 
@@ -1232,6 +1339,125 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               </div>
             </>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Phase 1.5 Step 6 Commit E — scoped permission prompts ──
+  // Shared modal for protocol_permission_prompt, basket_permission_prompt,
+  // and counterparty_permission_prompt. Three buttons: Allow once / Always
+  // allow for site / Deny. Differs from payment_confirmation in that the
+  // grant is scope-tuple-keyed (V18 child tables) rather than spending-cap-
+  // keyed (domain_permissions columns).
+  if (notificationType === 'protocol_permission_prompt'
+      || notificationType === 'basket_permission_prompt'
+      || notificationType === 'counterparty_permission_prompt') {
+    // Per-kind copy + scope display.
+    const scopedCopy = (() => {
+      if (notificationType === 'protocol_permission_prompt') {
+        const tag = scopedProtocolCounterparty
+          ? ` (with counterparty ${scopedProtocolCounterparty.slice(0, 12)}…)`
+          : '';
+        return {
+          title: 'Protocol access',
+          subtitle: 'wants permission to use a protocol',
+          scopeLabel: 'Protocol',
+          scopeValue: `${scopedProtocolName} (level ${scopedProtocolLevel}${tag})`,
+          explanation:
+            scopedProtocolLevel === 2
+              ? `${cleanDomain} wants to derive a key for a specific counterparty. Each (site, protocol, counterparty) tuple is isolated by default — granting it here lets this site use this protocol without re-prompting.`
+              : `${cleanDomain} wants to use protocol "${scopedProtocolName}" to derive a site-specific key. The derived key is bound to this origin and protocol — it does not link back to your identity key.`,
+        };
+      }
+      if (notificationType === 'basket_permission_prompt') {
+        return {
+          title: 'Basket access',
+          subtitle: `wants ${scopedBasketAccess === 'read_write' ? 'read + write' : 'read'} access to a basket`,
+          scopeLabel: 'Basket',
+          scopeValue: `${scopedBasket} (${scopedBasketAccess === 'read_write' ? 'read + write' : 'read-only'})`,
+          explanation: scopedBasketAccess === 'read_write'
+            ? `${cleanDomain} wants to read AND modify the "${scopedBasket}" basket. Granting this lets the site insert, list, and remove UTXOs in that basket — payment caps still gate any spend.`
+            : `${cleanDomain} wants to view the "${scopedBasket}" basket contents. Read-only — the site cannot move or spend any UTXOs in this basket.`,
+        };
+      }
+      // counterparty_permission_prompt
+      return {
+        title: 'Counterparty access',
+        subtitle: 'wants to derive keys with a specific counterparty',
+        scopeLabel: 'Counterparty',
+        scopeValue: scopedCounterparty.length > 24
+          ? `${scopedCounterparty.slice(0, 24)}…`
+          : scopedCounterparty,
+        explanation: `${cleanDomain} wants permission to derive shared keys with the counterparty above. This is required for encrypted messaging or P2P payments via this site.`,
+      };
+    })();
+
+    return (
+      <div style={overlayBackdrop}>
+        <div style={cardStyle}>
+          <HodosWalletHeader />
+          {/* Domain row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '18px' }}>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
+                {cleanDomain}
+              </div>
+              <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
+                {scopedCopy.subtitle}
+              </div>
+            </div>
+          </div>
+
+          {/* Scope summary box */}
+          <div style={{
+            background: COLORS.subduedGold,
+            borderRadius: '10px',
+            padding: '14px 16px',
+            marginBottom: '18px',
+          }}>
+            <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              {scopedCopy.scopeLabel}
+            </div>
+            <div style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textDark, wordBreak: 'break-all' }}>
+              {scopedCopy.scopeValue}
+            </div>
+          </div>
+
+          {/* Explanation */}
+          <div style={{
+            fontSize: '13px',
+            color: COLORS.textMuted,
+            lineHeight: 1.5,
+            marginBottom: '22px',
+          }}>
+            {scopedCopy.explanation}
+          </div>
+
+          {/* Buttons — three actions: Deny, Allow once, Always allow */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+            <HodosButton variant="secondary" onClick={handleScopedDeny}>
+              Deny
+            </HodosButton>
+            <HodosButton variant="secondary" onClick={handleScopedAllowOnce}>
+              Allow once
+            </HodosButton>
+            <HodosButton variant="primary" onClick={handleScopedAlwaysAllow}>
+              Always allow for this site
+            </HodosButton>
+          </div>
         </div>
       </div>
     );

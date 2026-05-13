@@ -121,6 +121,32 @@ PermissionDecision PermissionEngine::DecidePayment(const PermissionContext& ctx)
         return d;
     }
 
+    // Phase 1.5 Step 6 (Commit E) — independent gates: a createAction that
+    // references a protocol/basket/counterparty the site doesn't have a grant
+    // for prompts for the scope FIRST, before the payment cap check. Both
+    // gates apply independently: if scope is missing AND over cap, the user
+    // approves scope, the request is re-issued, then payment cap fires
+    // (separate prompt). On the re-issue, paymentScopeKindMissing comes back
+    // empty (caller observed the grant) and the cap path runs.
+    if (!ctx.paymentScopeKindMissing.empty()) {
+        d.kind = PermissionDecision::Kind::Prompt;
+        if (ctx.paymentScopeKindMissing == "protocol") {
+            d.promptType = "protocol_permission_prompt";
+            d.reason = "createAction references a protocol this site does not have a grant for";
+        } else if (ctx.paymentScopeKindMissing == "basket") {
+            d.promptType = "basket_permission_prompt";
+            d.reason = "createAction references a basket this site does not have a grant for";
+        } else if (ctx.paymentScopeKindMissing == "counterparty") {
+            d.promptType = "counterparty_permission_prompt";
+            d.reason = "createAction references a counterparty this site does not have a grant for";
+        } else {
+            // Unknown value — treat as missing protocol scope (most common).
+            d.promptType = "protocol_permission_prompt";
+            d.reason = "createAction references an ungranted scope";
+        }
+        return d;
+    }
+
     // BSV/USD price unavailable — we cannot evaluate the per-tx or per-session
     // caps in cents, so the cap checks below would be misleading. Prompt
     // payment_confirmation so the user sees the satoshi amount and decides
