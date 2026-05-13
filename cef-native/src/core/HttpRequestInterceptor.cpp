@@ -1837,25 +1837,57 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 + " reason=" + shadowDecision.reason);
         }
 
-        // Phase 1.5 Step 1 -- privacy-perimeter check #1: identity-key reveal.
-        // Intercept /getPublicKey requests whose body would return the master
-        // identity key, regardless of domain approval, unless this site has the
-        // "Always allow" opt-in -- either via the persistent column populated
-        // from the domain_approval checkbox (perm.identityKeyDisclosureAllowed)
-        // or the in-memory session cache used as a transient fallback while
-        // the DB write is in flight.
+        // Phase 1.5 Step 6 (Commit C) — identity-key reveal gate is now driven
+        // by PermissionEngine::Decide(). The C++ side still owns:
+        //   1. The endpoint+body classification (the outer if-check already
+        //      narrowed us to identity-key-style /getPublicKey).
+        //   2. Modal dispatch via triggerIdentityKeyRevealModal +
+        //      postAuthTimeout.
+        //   3. Auto-approve fast path: identityKeyApproved_ + StartAsyncHTTPRequestTask.
+        // The engine owns whether to Silent / Deny / Prompt based on the
+        // persistent column (perm.identityKeyDisclosureAllowed) and the
+        // in-memory session opt-in cache (IdentityKeyApprovalCache).
+        // buildPermissionContext already populates both fields (lines 1044 +
+        // 1052), so the engine has exactly the inputs the inline cascade did.
         if (isGetPublicKeyEndpoint(endpoint_) && isIdentityKeyStyleGetPublicKey(body_)) {
-            bool persistent_grant = perm.identityKeyDisclosureAllowed;
-            bool cache_grant = IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_);
-            if (persistent_grant || cache_grant) {
-                LOG_DEBUG_HTTP("🛡️ identity-key reveal silently approved for " + requestDomain_
-                               + " (db=" + (persistent_grant ? "1" : "0")
-                               + ", cache=" + (cache_grant ? "1" : "0") + ")");
+            // Payment fields unused for identity-key reveal; pass 0s. The
+            // engine never reads them when callKind != Payment.
+            hodos::PermissionContext ctx = buildPermissionContext(
+                requestDomain_, endpoint_, body_, perm,
+                /*requestedCents=*/0, /*sessionSpentCents=*/0,
+                /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
+                /*bsvPriceAvailable=*/true);
+            hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
+
+            LOG_DEBUG_HTTP(std::string("🛡️ Identity-key engine decision: ")
+                + decisionKindToString(decision.kind)
+                + " promptType=" + decision.promptType
+                + " | persistent_grant=" + (perm.identityKeyDisclosureAllowed ? "1" : "0")
+                + " session_optin=" + (IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
+                + " | reason=" + decision.reason);
+
+            if (decision.kind == hodos::PermissionDecision::Kind::Silent) {
+                LOG_DEBUG_HTTP("🛡️ identity-key reveal silently approved for " + requestDomain_);
                 identityKeyApproved_ = true;
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
                 return true;
             }
+
+            if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
+                // Defensive: DecidePrivacyPerimeter does not return Deny for
+                // IdentityKeyReveal today, but if a future engine version does
+                // (e.g. a blocked-identity-key list), surface the reason
+                // cleanly instead of falling through to a prompt.
+                LOG_DEBUG_HTTP("🛡️ identity-key reveal denied for " + requestDomain_
+                               + ": " + decision.reason);
+                onHTTPResponseReceived(
+                    "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+                handle_request = true;
+                return true;
+            }
+
+            // Prompt branch.
             LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
             triggerIdentityKeyRevealModal(requestDomain_);
             postAuthTimeout(60000, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
