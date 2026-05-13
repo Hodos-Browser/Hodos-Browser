@@ -906,14 +906,22 @@ static bool parseProtocolId(const nlohmann::json& v, int& outLevel, std::string&
 }
 
 // Extract protocol scope from a BRC-100 call body. Returns valid=true only
-// for endpoints that genuinely use a protocolID/keyID tuple.
+// for endpoints that genuinely use a protocolID/keyID tuple to derive a key
+// FROM the user's wallet.
+//
+// Verify-only endpoints (verifySignature, verifyHmac) are deliberately
+// excluded — they take a pubkey + message + signature as inputs and run
+// pure verification. No key is derived from the user's wallet, no key
+// material is exposed, and there is no privacy implication. Matrix A in
+// PERMISSION_UX_DESIGN.md classifies them as "Silent always". Including
+// them here caused a Commit E regression where socialcert.net's X
+// verification flow fired 7+ unnecessary prompts in 60 seconds and
+// timed out (see project_phase15_commit_e_verify_bug memory note).
 static ProtocolScope extractProtocolScope(const std::string& endpoint, const std::string& body) {
     ProtocolScope s;
     const bool isProtocolEndpoint =
         endpoint.find("/createSignature") != std::string::npos ||
-        endpoint.find("/verifySignature") != std::string::npos ||
         endpoint.find("/createHmac") != std::string::npos ||
-        endpoint.find("/verifyHmac") != std::string::npos ||
         endpoint.find("/encrypt") != std::string::npos ||
         endpoint.find("/decrypt") != std::string::npos;
     if (!isProtocolEndpoint || body.empty()) return s;
