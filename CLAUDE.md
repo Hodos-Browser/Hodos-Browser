@@ -451,7 +451,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 **After each sprint, phase, or sub-phase:**
 1. Review this CLAUDE.md — Is it still accurate? Update Key Files table if architecture changed.
-2. Check sprint-specific CLAUDE.md in `development-docs/Final-MVP-Sprint/` or `development-docs/UX_UI/`.
+2. Check sprint-specific CLAUDE.md in `development-docs/Final-MVP-Sprint/` or `development-docs/Sigma-BRC121-Sprint/`.
 3. Add new patterns/gotchas to the relevant context file.
 
 **Goal:** Context files should always reflect current reality. They're the institutional memory that lets any AI (or human) pick up where the last session left off.
@@ -462,6 +462,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 |--------|---------|
 | `development-docs/Final-MVP-Sprint/` | Active sprint: testing, optimization, security, macOS port |
 | `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
-| `development-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) |
+| `development-docs/Sigma-BRC121-Sprint/` | Active sprint: BRC-100 surface completion (Phase 1.5 permission UX) |
+| `archived-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) — completed sprint, archived |
 | `development-docs/Possible-MVP-Features/` | Roadmap items and feature research |
 | `build-instructions/` | Platform-specific build guides (Windows, macOS) |
