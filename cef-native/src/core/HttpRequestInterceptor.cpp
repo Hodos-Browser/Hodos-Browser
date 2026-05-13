@@ -1075,10 +1075,29 @@ static hodos::PermissionContext buildPermissionContext(
     // so any subsequent calls from the page see the persistent grant.
     switch (ctx.callKind) {
         case K::ProtocolUse:
-        case K::CounterpartyUse:
             if (proto.valid) {
                 ctx.scopedGrantExists = SubPermissionCache::GetInstance().isProtocolGranted(
                     domain, proto.level, proto.name, proto.keyId, proto.counterparty);
+            }
+            break;
+        case K::CounterpartyUse:
+            // CounterpartyUse fires when the call has BOTH a protocolID and
+            // a counterparty. Two distinct grants can satisfy it:
+            //   1. A standalone counterparty grant ("this site can derive
+            //      keys with this peer at all") — written when user clicks
+            //      Always-allow on counterparty_permission_prompt.
+            //   2. A protocol grant bound to this specific counterparty —
+            //      narrower scope, when user wants to allow the specific
+            //      protocol-with-peer combination.
+            // Either match silences the gate. Check counterparty grant
+            // first since it's the broader trust signal.
+            if (proto.valid) {
+                const bool cpGranted = SubPermissionCache::GetInstance().isCounterpartyGranted(
+                    domain, proto.counterparty);
+                const bool protoGranted = cpGranted
+                    || SubPermissionCache::GetInstance().isProtocolGranted(
+                        domain, proto.level, proto.name, proto.keyId, proto.counterparty);
+                ctx.scopedGrantExists = cpGranted || protoGranted;
             }
             break;
         case K::BasketAccess:

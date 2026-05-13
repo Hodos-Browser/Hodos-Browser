@@ -4443,7 +4443,18 @@ bool SimpleHandler::OnProcessMessageReceived(
                     url = "http://localhost:31301/domain/permissions/protocol";
                     reqBody["securityLevel"] = data.value("protocolLevel", 2);
                     reqBody["protocolName"] = data.value("protocolName", "");
-                    reqBody["keyId"] = data.value("protocolKeyId", "*");
+                    // Always-allow writes use the wildcard keyId ("*") rather
+                    // than the specific keyId from the triggering call. Many
+                    // dApps (e.g. SocialCert) generate session-unique keyIds
+                    // (often raw pubkey bytes) — saving the specific keyId
+                    // would mean each new session re-prompts even after the
+                    // user said "always allow." SubPermissionCache.isProtocolGranted
+                    // already treats stored "*" as matching any lookup keyId
+                    // (HttpRequestInterceptor.cpp:769), so this preserves the
+                    // user's "trust this protocol on this site forever" intent.
+                    // Allow-once does NOT call this IPC, so it stays per-call
+                    // by virtue of writing nothing.
+                    reqBody["keyId"] = "*";
                     if (data.contains("protocolCounterparty") && !data["protocolCounterparty"].get<std::string>().empty()) {
                         reqBody["counterparty"] = data["protocolCounterparty"];
                     }
