@@ -1090,8 +1090,48 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     );
   }
 
-  // ── Rate limit exceeded notification ──
+  // ── Rate limit / session-tx-count / price-unavailable notification ──
+  // C++ uses one overlay type ("rate_limit_exceeded") for three engine
+  // outcomes; `exceededLimit` URL param differentiates the banner copy.
   if (notificationType === 'rate_limit_exceeded') {
+    const limitCopy = (() => {
+      if (exceededLimit === 'session_tx_count') {
+        return {
+          subtitle: 'has reached its session transaction limit',
+          explanation: (
+            <>
+              This site has used all {maxTxPerSession} transactions allowed per
+              session. You can approve this request, deny it, or adjust the
+              session limit for this site.
+            </>
+          ),
+        };
+      }
+      if (exceededLimit === 'price_unavailable') {
+        return {
+          subtitle: 'is requesting a payment',
+          explanation: (
+            <>
+              The BSV/USD price is currently unavailable, so spending caps
+              cannot be evaluated automatically. Review the satoshi amount
+              above before approving, or deny to retry once the price feed
+              is back.
+            </>
+          ),
+        };
+      }
+      // Default — rate_limit branch (and any unrecognized exceededLimit value).
+      return {
+        subtitle: 'is making frequent requests',
+        explanation: (
+          <>
+            This site is sending payment requests faster than your rate limit
+            of {rateLimit} per minute. You can approve this request, deny it,
+            or adjust your limits for this site.
+          </>
+        ),
+      };
+    })();
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
@@ -1115,7 +1155,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 {cleanDomain}
               </div>
               <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
-                is making frequent requests
+                {limitCopy.subtitle}
               </div>
             </div>
           </div>
@@ -1153,9 +1193,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             lineHeight: 1.5,
             marginBottom: showModifyLimits ? '14px' : '22px',
           }}>
-            This site is sending payment requests faster than your rate limit
-            of {rateLimit} per minute. You can approve this request, deny it,
-            or adjust your limits for this site.
+            {limitCopy.explanation}
           </div>
 
           {/* Modify limits form (collapsible) */}
