@@ -783,18 +783,52 @@ public:
                             const std::string& keyId, const std::string& counterparty) {
         const std::string key = "p:" + std::to_string(level) + ":" + name + ":" + keyId + ":" + counterparty;
         return queryAndCache(domain, key, [&]() {
+            LOG_DEBUG_HTTP("🛡️ isProtocolGranted FETCH domain=" + domain
+                           + " level=" + std::to_string(level)
+                           + " name='" + name + "'"
+                           + " keyId.size=" + std::to_string(keyId.size())
+                           + " counterparty.empty=" + (counterparty.empty() ? "1" : "0"));
             return fetchBool("/domain/permissions/protocol", domain, [&](const nlohmann::json& perms) {
+                LOG_DEBUG_HTTP("🛡️ isProtocolGranted GOT " + std::to_string(perms.size())
+                               + " rows for " + domain);
+                int row = 0;
                 for (const auto& p : perms) {
-                    int plvl = p.value("securityLevel", -1);
-                    std::string pname = p.value("protocolName", "");
-                    std::string pkey = p.value("keyId", "");
-                    std::string pcp = p.value("counterparty", "");
-                    if (plvl == level && pname == name
-                        && (pkey == keyId || pkey == "*")
-                        && (counterparty.empty() || pcp.empty() || pcp == counterparty)) {
-                        return true;
+                    const int rowIdx = row++;
+                    // Per-row try/catch: one malformed legacy row (binary
+                    // keyId, null where string expected, etc.) must NOT
+                    // poison the entire scan. Log the offender and skip.
+                    try {
+                        int plvl = p.value("securityLevel", -1);
+                        std::string pname = p.value("protocolName", "");
+                        std::string pkey = p.value("keyId", "");
+                        std::string pcp = p.value("counterparty", "");
+                        const bool levelMatch = (plvl == level);
+                        const bool nameMatch = (pname == name);
+                        const bool keyMatch = (pkey == keyId || pkey == "*");
+                        const bool cpMatch = (counterparty.empty() || pcp.empty() || pcp == counterparty);
+                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx) + "]: lvl=" + std::to_string(plvl)
+                                       + " name='" + pname + "'"
+                                       + " keyStored=" + (pkey == "*" ? "WILDCARD" : ("size=" + std::to_string(pkey.size())))
+                                       + " pcp.empty=" + (pcp.empty() ? "1" : "0")
+                                       + " | levelMatch=" + (levelMatch ? "1" : "0")
+                                       + " nameMatch=" + (nameMatch ? "1" : "0")
+                                       + " keyMatch=" + (keyMatch ? "1" : "0")
+                                       + " cpMatch=" + (cpMatch ? "1" : "0"));
+                        if (levelMatch && nameMatch && keyMatch && cpMatch) {
+                            LOG_DEBUG_HTTP("🛡️   → MATCH, returning true");
+                            return true;
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx)
+                                       + "] EXCEPTION (" + std::string(e.what())
+                                       + ") — skipping. Raw: "
+                                       + p.dump().substr(0, std::min<size_t>(p.dump().size(), 200)));
+                    } catch (...) {
+                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx)
+                                       + "] UNKNOWN EXCEPTION — skipping");
                     }
                 }
+                LOG_DEBUG_HTTP("🛡️   no row matched, returning false");
                 return false;
             });
         });
@@ -881,7 +915,14 @@ private:
             auto j = nlohmann::json::parse(resp.body);
             if (!j.contains("permissions") || !j["permissions"].is_array()) return false;
             return scan(j["permissions"]);
+        } catch (const std::exception& e) {
+            LOG_DEBUG_HTTP("🛡️ fetchBool EXCEPTION (" + std::string(e.what())
+                           + ") body preview: "
+                           + resp.body.substr(0, std::min<size_t>(resp.body.size(), 800)));
+            return false;
         } catch (...) {
+            LOG_DEBUG_HTTP("🛡️ fetchBool UNKNOWN EXCEPTION, body preview: "
+                           + resp.body.substr(0, std::min<size_t>(resp.body.size(), 800)));
             return false;
         }
     }
