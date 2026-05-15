@@ -798,10 +798,25 @@ public:
                     // keyId, null where string expected, etc.) must NOT
                     // poison the entire scan. Log the offender and skip.
                     try {
-                        int plvl = p.value("securityLevel", -1);
-                        std::string pname = p.value("protocolName", "");
-                        std::string pkey = p.value("keyId", "");
-                        std::string pcp = p.value("counterparty", "");
+                        // nlohmann::json gotcha: p.value(key, default) throws
+                        // json::type_error if the stored value is null and the
+                        // default's type doesn't match. Counterparty IS null on
+                        // every protocol row that's not counterparty-bound, so
+                        // we MUST use null-safe accessors here. This bug was
+                        // silently aborting the entire scan and triggering
+                        // spurious "Always allow doesn't stick" reports.
+                        auto safeStr = [](const nlohmann::json& obj, const char* key) -> std::string {
+                            auto it = obj.find(key);
+                            if (it == obj.end() || !it->is_string()) return "";
+                            return it->get<std::string>();
+                        };
+                        int plvl = -1;
+                        if (auto it = p.find("securityLevel"); it != p.end() && it->is_number_integer()) {
+                            plvl = it->get<int>();
+                        }
+                        std::string pname = safeStr(p, "protocolName");
+                        std::string pkey = safeStr(p, "keyId");
+                        std::string pcp = safeStr(p, "counterparty");
                         const bool levelMatch = (plvl == level);
                         const bool nameMatch = (pname == name);
                         const bool keyMatch = (pkey == keyId || pkey == "*");
@@ -839,11 +854,22 @@ public:
         const std::string key = "b:" + basket + ":" + requiredAccess;
         return queryAndCache(domain, key, [&]() {
             return fetchBool("/domain/permissions/basket", domain, [&](const nlohmann::json& perms) {
+                // Same null-safe accessor as the protocol scan — nlohmann's
+                // p.value(key, default) throws on null values.
+                auto safeStr = [](const nlohmann::json& obj, const char* k) -> std::string {
+                    auto it = obj.find(k);
+                    if (it == obj.end() || !it->is_string()) return "";
+                    return it->get<std::string>();
+                };
                 for (const auto& p : perms) {
-                    if (p.value("basket", "") != basket) continue;
-                    const std::string access = p.value("access", "");
-                    if (access == "read_write") return true;
-                    if (access == "read" && requiredAccess == "read") return true;
+                    try {
+                        if (safeStr(p, "basket") != basket) continue;
+                        const std::string access = safeStr(p, "access");
+                        if (access == "read_write") return true;
+                        if (access == "read" && requiredAccess == "read") return true;
+                    } catch (...) {
+                        // Skip malformed row, continue.
+                    }
                 }
                 return false;
             });
@@ -854,8 +880,17 @@ public:
         const std::string key = "c:" + counterparty;
         return queryAndCache(domain, key, [&]() {
             return fetchBool("/domain/permissions/counterparty", domain, [&](const nlohmann::json& perms) {
+                auto safeStr = [](const nlohmann::json& obj, const char* k) -> std::string {
+                    auto it = obj.find(k);
+                    if (it == obj.end() || !it->is_string()) return "";
+                    return it->get<std::string>();
+                };
                 for (const auto& p : perms) {
-                    if (p.value("counterparty", "") == counterparty) return true;
+                    try {
+                        if (safeStr(p, "counterparty") == counterparty) return true;
+                    } catch (...) {
+                        // Skip malformed row, continue.
+                    }
                 }
                 return false;
             });
