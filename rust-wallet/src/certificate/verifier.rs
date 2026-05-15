@@ -459,7 +459,27 @@ pub async fn check_revocation_status(
 
     log::debug!("   Querying WhatsOnChain: {}", url);
 
-    let client = reqwest::Client::new();
+    // Bounded timeout on the WhatsOnChain call. Without this, a slow or
+    // unresponsive WoC API hangs the entire /acquireCertificate handler
+    // until the upstream C++ wallet-request timeout fires at 45s, which
+    // breaks the user-visible cert flow (SocialCert sees "wallet request
+    // timeout" and shows an error page even though the cert gets inserted
+    // into the wallet DB seconds later). The downstream caller already
+    // treats fetch failures as "active" (proceeds with cert acquisition),
+    // so a timeout here cleanly degrades to the same code path that
+    // handles intentional unreachability.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("   Failed to build reqwest client: {}", e);
+            return Err(CertificateError::Database(
+                format!("Failed to build HTTP client: {}", e)
+            ));
+        }
+    };
     let response = match client.get(&url).send().await {
         Ok(resp) => resp,
         Err(e) => {
