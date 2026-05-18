@@ -1109,7 +1109,10 @@ async fn acquire_certificate_issuance(
 
     // Send initialRequest to /.well-known/auth (matching TypeScript SDK's SimplifiedFetchTransport)
     // NOTE: The SDK always uses /.well-known/auth, NOT /initialRequest
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let well_known_auth_url = if certifier_url.ends_with('/') {
         format!("{}.well-known/auth", certifier_url)
     } else {
@@ -2976,7 +2979,10 @@ async fn create_certificate_transaction(
             let mut spent_utxos = Vec::new();
             for utxo in &selected_utxos {
                 let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
                 match client.get(&url).send().await {
                     Ok(response) => {
                         if response.status() == 404 {

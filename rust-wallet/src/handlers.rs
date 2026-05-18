@@ -6104,7 +6104,10 @@ pub(crate) async fn create_action_internal(
 
 // Query confirmation status - tries ARC first, falls back to WhatsOnChain
 async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Try ARC first
     match query_arc_tx_status(&client, txid).await {
@@ -6154,7 +6157,10 @@ async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), Strin
 pub(crate) async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
     log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Try ARC first
     match query_arc_tx_status(&client, txid).await {
@@ -7051,7 +7057,10 @@ pub async fn sign_action(
     }
 
     // Fetch WALLET parent transactions and their Merkle proofs (with caching)
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     for (wallet_idx, utxo) in input_utxos.iter().enumerate() {
         let i = wallet_idx; // Keep original variable name for compatibility
         log::info!("   📥 Processing parent tx {}/{}: {}", i + 1, input_utxos.len(), utxo.txid);
@@ -15536,7 +15545,10 @@ pub async fn get_height(_body: web::Bytes) -> HttpResponse {
 
     // Fetch current blockchain height from WhatsOnChain API
     let url = "https://api.whatsonchain.com/v1/bsv/main/chain/info";
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     match client.get(url).send().await {
         Ok(response) => {
@@ -15610,7 +15622,10 @@ pub async fn get_header_for_height(
     // Fetch from WhatsOnChain API
     // First, get block info by height to get the hash
     let block_info_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", req.height);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Step 1: Get block hash from height
     let block_hash = match client.get(&block_info_url).send().await {
@@ -16414,6 +16429,7 @@ pub async fn peerpay_check(
     log::info!("📬 /wallet/peerpay/check called");
 
     // Trigger immediate poll (same as background task)
+    // dummy — task_check_peerpay::run ignores the client arg (sig is `_client:`); intentional no-timeout.
     let dummy_client = reqwest::Client::new();
     if let Err(e) = crate::monitor::task_check_peerpay::run(&state, &dummy_client).await {
         log::warn!("   peerpay_check poll error: {}", e);
@@ -17930,7 +17946,10 @@ pub async fn debug_validate_beef(
     };
 
     let mut beef = crate::beef::Beef::new();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Build ancestry for each input
     let mut input_details = Vec::new();
@@ -18131,7 +18150,10 @@ pub async fn debug_broadcast_nosend(
 
     // Build BEEF with full ancestry
     let mut beef = crate::beef::Beef::new();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     for input in &parsed.inputs {
         if beef.find_txid(&input.prev_txid).is_some() {

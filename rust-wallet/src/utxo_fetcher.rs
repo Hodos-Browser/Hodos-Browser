@@ -84,7 +84,10 @@ const BULK_BATCH_SIZE: usize = 20;
 pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
     log::info!("   Fetching UTXOs for address: {}", address);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Try WhatsOnChain first
     match fetch_utxos_woc(&client, address, address_index).await {
@@ -111,7 +114,10 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Resul
 /// unconfirmed UTXOs (unconfirmed have height=0). No GorillaPool fallback
 /// since GorillaPool doesn't expose unconfirmed.
 pub async fn fetch_utxos_single_address_with_unconfirmed(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     fetch_utxos_woc(&client, address, address_index).await
 }
 
@@ -212,7 +218,10 @@ async fn fetch_utxos_gorillapool(client: &reqwest::Client, address: &str, addres
 /// API (new): https://api.whatsonchain.com/v1/bsv/main/address/{address}/confirmed/history
 /// API (old, deprecated): https://api.whatsonchain.com/v1/bsv/main/address/{address}/history
 pub async fn address_has_history(address: &str) -> Result<bool, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Try new WoC endpoint first: /address/{addr}/confirmed/history
     // Returns: {"address":"...","result":[{"tx_hash":"...","height":...}, ...],"error":""}
@@ -313,7 +322,10 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
     const MAX_RETRIES: u32 = 3;
     const INITIAL_DELAY_MS: u64 = 1000;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut all_utxos = Vec::new();
     let mut total_success_count: usize = 0;
 

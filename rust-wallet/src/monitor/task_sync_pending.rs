@@ -331,7 +331,10 @@ async fn cache_parent_transactions(state: &web::Data<AppState>, txids: &[String]
     }
 
     info!("   📦 Caching parent tx data for {} new transaction(s)...", txids.len());
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     for txid in txids {
         let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid);
