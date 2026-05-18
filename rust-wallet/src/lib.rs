@@ -18,6 +18,7 @@ pub mod script;
 pub mod balance_cache;
 pub mod price_cache;
 pub mod overlay;
+pub mod services;
 
 // Re-export commonly used modules for convenience
 pub use crypto::brc2;

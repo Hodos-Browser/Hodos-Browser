@@ -29,6 +29,7 @@ mod messagebox;  // MessageBox API client with BRC-2 encryption
 mod paymail;  // Paymail (bsvalias) client for human-readable address resolution
 mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 certificates)
 mod overlay;  // BSV Overlay Services client for certificate publish/unpublish
+mod services;  // Phase 1.6d.B: WalletServices facade — IndexerProvider trait + provider chains
 
 // Re-export for monitor tasks (avoids rust-analyzer resolution issues when only lib is checked)
 pub use cache_helpers::verify_tsc_proof_against_block;
@@ -83,6 +84,7 @@ pub struct AppState {
     pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
     pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
     pub price_cache: Arc<price_cache::PriceCache>,  // BSV/USD exchange rate (CryptoCompare + CoinGecko)
+    pub services: Arc<services::WalletServices>,  // Phase 1.6d.B: WalletServices facade (dormant — 1.6d.C wires call sites)
     pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
     pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
@@ -510,6 +512,10 @@ async fn main() -> std::io::Result<()> {
     // Create shutdown token for graceful shutdown (Phase 8D)
     let shutdown_token = tokio_util::sync::CancellationToken::new();
 
+    // Phase 1.6d.B: WalletServices facade — dormant infrastructure; 1.6d.C wires call sites
+    let services = Arc::new(services::WalletServices::new());
+    println!("✅ WalletServices facade initialized (dormant — 1.6d.C wires call sites)");
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
@@ -517,6 +523,7 @@ async fn main() -> std::io::Result<()> {
         balance_cache,
         fee_rate_cache,
         price_cache,
+        services,
         utxo_selection_lock: Arc::new(tokio::sync::Mutex::new(())),  // Prevents concurrent UTXO selection
         create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache
