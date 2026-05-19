@@ -22,7 +22,7 @@ Subdirectories `crypto/`, `database/`, `transaction/`, `certificate/`, `script/`
 | `beef.rs` | BRC-62 BEEF parser: V1/V2/Atomic markers, `MerkleProof`, `ParsedTransaction`, raw TX extraction |
 | `beef_helpers.rs` | BEEF building helpers: `build_beef_for_txid()` with ancestry walk (MAX_BEEF_ANCESTORS = 50), `fetch_transaction_for_beef()` |
 | `cache_errors.rs` | `CacheError` enum (Database, Api, InvalidData, HexDecode, Json) and `CacheResult<T>` alias |
-| `cache_helpers.rs` | Shared SPV cache functions: `fetch_parent_transaction_from_api()`, `fetch_tsc_proof_from_api()` (ARC primary, WoC fallback), `verify_txid()` |
+| `cache_helpers.rs` | Shared SPV cache functions: `fetch_parent_transaction_from_api()`, `fetch_tsc_proof_from_api()`, `fetch_and_cache_block_header()` — all route through `services::WalletServices` chain (ARC GP → WoC → JungleBus → Bitails) post-1.6d.C. Plus `verify_txid()`, `verify_tsc_proof_against_block()` (latter still uses raw `reqwest::Client`). |
 | `fee_rate_cache.rs` | `FeeRateCache` — 1-hour TTL, fetches from ARC `/v1/policy`, defaults to 1000 sat/KB |
 | `identity_resolver.rs` | `IdentityResolver` — resolves identity keys to names/avatars via BSV Overlay Services (BRC-52 certificates), 10-min cache |
 | `json_storage.rs` | Legacy JSON file storage (`Wallet`, `AddressInfo`). Superseded by database; kept for backward compatibility |
@@ -158,8 +158,8 @@ external_api_call().await; // safe
 | API | Module | Endpoint | Purpose |
 |-----|--------|----------|---------|
 | WhatsOnChain | `utxo_fetcher.rs`, `cache_helpers.rs` | `/v1/bsv/main/address/{addr}/unspent` | UTXO fetch |
-| WhatsOnChain | `cache_helpers.rs` | `/v1/bsv/main/tx/{txid}/hex` | Raw TX fetch |
-| WhatsOnChain | `cache_helpers.rs` | `/v1/bsv/main/tx/{txid}/proof/tsc` | TSC merkle proof |
+| WhatsOnChain | `cache_helpers.rs` | `/v1/bsv/main/tx/{txid}/hex` | Raw TX fetch — **post-1.6d.C** WoC is 2nd-tier behind ARC GP, with JungleBus and Bitails as 3rd/4th tier fallbacks via `WalletServices::get_raw_tx` |
+| WhatsOnChain | `cache_helpers.rs` | `/v1/bsv/main/tx/{txid}/proof/tsc` | TSC merkle proof — **post-1.6d.C** same 4-tier Services chain |
 | ARC (GorillaPool) | `fee_rate_cache.rs` | `/v1/policy` | Mining fee rate |
 | ARC (GorillaPool) | `cache_helpers.rs` | `/v1/tx/{txid}/bump` | BUMP merkle proof |
 | CryptoCompare | `price_cache.rs` | `/data/price?fsym=BSV&tsyms=USD` | BSV/USD price (primary) |

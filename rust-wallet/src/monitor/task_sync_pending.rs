@@ -331,29 +331,22 @@ async fn cache_parent_transactions(state: &web::Data<AppState>, txids: &[String]
     }
 
     info!("   📦 Caching parent tx data for {} new transaction(s)...", txids.len());
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
 
+    // Phase 1.6d.C: was inline WoC; now routes through Services chain via the cache
+    // helper (ARC GP → WoC → JungleBus → Bitails). cache_helpers also handles the
+    // cache write internally, but this function does its own upsert downstream for the
+    // local parent_transactions cache — keep that behavior.
     for txid in txids {
-        let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid);
-        match client.get(&tx_url).send().await {
-            Ok(response) if response.status().is_success() => {
-                match response.text().await {
-                    Ok(raw_hex) => {
-                        if let Ok(db) = state.database.lock() {
-                            let parent_tx_repo = ParentTransactionRepository::new(db.connection());
-                            match parent_tx_repo.upsert(None, txid, &raw_hex) {
-                                Ok(_) => debug!("   💾 Cached parent tx {}", txid),
-                                Err(e) => warn!("   ⚠️  Failed to cache parent tx {}: {}", txid, e),
-                            }
-                        }
+        match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, txid).await {
+            Ok(raw_hex) => {
+                if let Ok(db) = state.database.lock() {
+                    let parent_tx_repo = ParentTransactionRepository::new(db.connection());
+                    match parent_tx_repo.upsert(None, txid, &raw_hex) {
+                        Ok(_) => debug!("   💾 Cached parent tx {}", txid),
+                        Err(e) => warn!("   ⚠️  Failed to cache parent tx {}: {}", txid, e),
                     }
-                    Err(e) => warn!("   ⚠��  Failed to read parent tx response for {}: {}", txid, e),
                 }
             }
-            Ok(response) => warn!("   ⚠️  WoC returned {} for tx {}", response.status(), txid),
             Err(e) => warn!("   ⚠️  Failed to fetch parent tx {}: {}", txid, e),
         }
     }

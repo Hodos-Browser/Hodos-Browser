@@ -4,163 +4,80 @@
 
 use crate::cache_errors::{CacheError, CacheResult};
 use crate::database::{BlockHeaderRepository, WalletDatabase};
+use crate::services::{BlockKey, IndexerError, WalletServices};
 use reqwest::Client;
 use serde_json::Value;
 
-/// Fetch parent transaction from WhatsOnChain API
+/// Map a Services `IndexerError` into the cache-layer `CacheError` taxonomy.
+fn indexer_to_cache_err(e: IndexerError) -> CacheError {
+    match e {
+        IndexerError::InvalidResponse { reason, .. } => CacheError::InvalidData(reason),
+        other => CacheError::Api(other.to_string()),
+    }
+}
+
+/// Fetch parent transaction raw hex via the Services facade.
+///
+/// Phase 1.6d.C: was WoC-only (`/v1/bsv/main/tx/{txid}/hex`), now routes through the
+/// 4-tier `WalletServices::get_raw_tx` chain (ARC GP → WoC → JungleBus → Bitails).
+/// Soft timeout 8s per provider; demote-on-SoftTimeout. `NotFound` short-circuits the
+/// chain (positive "tx doesn't exist" signal).
+///
+/// Returns the raw tx as hex string (preserved from the pre-1.6d.C contract so existing
+/// callers don't need return-type changes).
 pub async fn fetch_parent_transaction_from_api(
-    client: &Client,
+    services: &WalletServices,
     txid: &str,
 ) -> CacheResult<String> {
-    let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid);
-    let response = client.get(&tx_url).send().await
-        .map_err(|e| CacheError::Api(format!("Failed to fetch parent tx {}: {}", txid, e)))?;
-
-    if !response.status().is_success() {
-        return Err(CacheError::Api(format!(
-            "API returned status {} for tx {}", response.status(), txid
-        )));
-    }
-
-    response.text().await
-        .map_err(|e| CacheError::Api(format!("Failed to read parent tx response: {}", e)))
+    let bytes = services
+        .get_raw_tx(txid)
+        .await
+        .map_err(indexer_to_cache_err)?;
+    Ok(hex::encode(bytes))
 }
 
-/// Fetch TSC Merkle proof - tries ARC first, falls back to WhatsOnChain
+/// Fetch TSC Merkle proof via the Services facade with post-processing.
 ///
-/// ARC returns merkle proofs in BUMP format (BRC-74) which we convert to TSC.
-/// WhatsOnChain returns TSC format directly.
-/// ARC is preferred because it's the same service we broadcast to, so it's
-/// more likely to have proofs for recently-mined transactions.
+/// Phase 1.6d.C: was an inline ARC-primary + WoC-fallback implementation, now routes
+/// through `WalletServices::get_merkle_proof_tsc` (ARC GP → WoC → JungleBus → Bitails;
+/// ARC's BUMP→TSC conversion happens inside the provider impl). Soft timeout 10s.
+///
+/// Post-processing: roundtrip verifies the returned TSC, and on failure attempts a
+/// byte-order fix (WoC quirk — sometimes returns natural-order hashes rather than
+/// display-order). If both fail, returns the proof as-is (matches pre-1.6d.C behavior
+/// — caller may still find it usable for the height/index parts even if nodes are
+/// malformed).
+///
+/// `NotFound` from the chain → `Ok(None)` (proof not yet available / tx still in mempool).
 pub async fn fetch_tsc_proof_from_api(
-    client: &Client,
+    services: &WalletServices,
     txid: &str,
 ) -> CacheResult<Option<Value>> {
-    // Try ARC first
-    match fetch_tsc_proof_from_arc(client, txid).await {
-        Ok(Some(tsc)) => {
-            log::info!("   ✅ Got merkle proof from ARC for {}", txid);
-            // Verify roundtrip: TSC → BUMP → check txid matches
-            if verify_tsc_proof_roundtrip(txid, &tsc) {
-                return Ok(Some(tsc));
-            }
-            log::warn!("   ⚠️  ARC proof failed roundtrip verification for {}, trying WhatsOnChain...", txid);
+    let tsc = match services.get_merkle_proof_tsc(txid).await {
+        Ok(v) => v,
+        Err(IndexerError::NotFound) => {
+            log::info!("   ℹ️  No merkle proof available yet for {}", txid);
+            return Ok(None);
         }
-        Ok(None) => {
-            log::info!("   ℹ️  ARC has no merkle proof for {} (not yet mined), trying WhatsOnChain...", txid);
-        }
-        Err(e) => {
-            log::warn!("   ⚠️  ARC merkle proof fetch failed for {}: {}, trying WhatsOnChain...", txid, e);
-        }
-    }
-
-    // Fall back to WhatsOnChain
-    match fetch_tsc_proof_from_whatsonchain(client, txid).await {
-        Ok(Some(tsc)) => {
-            // Verify roundtrip for WoC proof too
-            if verify_tsc_proof_roundtrip(txid, &tsc) {
-                return Ok(Some(tsc));
-            }
-            // If WoC proof fails with normal byte order, try WITHOUT reversing
-            // (WoC may return natural byte order instead of display)
-            log::warn!("   ⚠️  WoC proof failed roundtrip - attempting byte order fix for {}", txid);
-            if let Some(fixed_tsc) = fix_tsc_byte_order(txid, &tsc) {
-                log::info!("   ✅ Fixed WoC proof byte order for {}", txid);
-                return Ok(Some(fixed_tsc));
-            }
-            log::error!("   ❌ Could not fix WoC proof byte order for {}", txid);
-            Ok(Some(tsc)) // Return as-is, let caller handle
-        }
-        other => other,
-    }
-}
-
-/// Fetch merkle proof from ARC and convert BUMP to TSC format
-async fn fetch_tsc_proof_from_arc(
-    client: &Client,
-    txid: &str,
-) -> CacheResult<Option<Value>> {
-    let arc_response = crate::handlers::query_arc_tx_status(client, txid).await
-        .map_err(|e| CacheError::Api(format!("ARC query failed: {}", e)))?;
-
-    let status = arc_response.tx_status.as_deref().unwrap_or("UNKNOWN");
-
-    if status != "MINED" {
-        // Transaction not yet mined - no merkle proof available
-        return Ok(None);
-    }
-
-    // Extract merklePath and convert from BUMP to TSC
-    let merkle_path = match arc_response.merkle_path {
-        Some(ref path) if !path.is_empty() => path,
-        _ => return Ok(None),
+        Err(e) => return Err(indexer_to_cache_err(e)),
     };
 
-    let tsc = crate::beef::parse_bump_hex_to_tsc(merkle_path)
-        .map_err(|e| CacheError::InvalidData(format!("Failed to parse ARC BUMP: {}", e)))?;
+    log::info!("   ✅ Got merkle proof for {} via Services chain", txid);
 
-    // ARC's BUMP includes block_height but not the target hash.
-    // The TSC from parse_bump_hex_to_tsc has height, index, nodes, and target="".
-    // We need to add block height from the ARC response if not already present.
-    let mut tsc = tsc;
-    if let Some(height) = arc_response.block_height {
-        tsc["height"] = serde_json::json!(height);
+    if verify_tsc_proof_roundtrip(txid, &tsc) {
+        return Ok(Some(tsc));
     }
 
+    // Roundtrip failed — most commonly a WoC byte-order quirk. Reverse all node hashes
+    // and verify again. If still failing, return as-is and let the caller handle.
+    log::warn!("   ⚠️  TSC proof failed roundtrip — attempting byte-order fix for {}", txid);
+    if let Some(fixed_tsc) = fix_tsc_byte_order(txid, &tsc) {
+        log::info!("   ✅ Fixed TSC proof byte order for {}", txid);
+        return Ok(Some(fixed_tsc));
+    }
+
+    log::error!("   ❌ Could not fix TSC proof byte order for {}", txid);
     Ok(Some(tsc))
-}
-
-/// Fetch TSC Merkle proof from WhatsOnChain API (with retry logic for null proofs)
-async fn fetch_tsc_proof_from_whatsonchain(
-    client: &Client,
-    txid: &str,
-) -> CacheResult<Option<Value>> {
-    let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", txid);
-
-    // First attempt
-    let response = client.get(&proof_url).send().await
-        .map_err(|e| CacheError::Api(format!("Failed to fetch TSC proof for {}: {}", txid, e)))?;
-
-    if !response.status().is_success() {
-        return Err(CacheError::Api(format!(
-            "TSC proof API returned status {}", response.status()
-        )));
-    }
-
-    let proof_text = response.text().await
-        .map_err(|e| CacheError::Api(format!("Failed to read TSC proof response: {}", e)))?;
-
-    let tsc_json: Value = serde_json::from_str(&proof_text)?;
-
-    // If null, retry once after brief delay (transaction might be confirming)
-    if tsc_json.is_null() {
-        log::warn!("   ⚠️  TSC proof is null - retrying after 500ms...");
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        let retry_response = client.get(&proof_url).send().await
-            .map_err(|e| CacheError::Api(format!("Retry failed: {}", e)))?;
-
-        if retry_response.status().is_success() {
-            let retry_text = retry_response.text().await
-                .map_err(|e| CacheError::Api(format!("Failed to read retry response: {}", e)))?;
-            let retry_json: Value = serde_json::from_str(&retry_text)?;
-
-            if retry_json.is_null() {
-                return Ok(None); // Still null after retry
-            }
-            return Ok(Some(retry_json));
-        }
-        return Ok(None);
-    }
-
-    // Normalize array response to single object
-    let tsc_obj = if tsc_json.is_array() {
-        tsc_json.get(0).cloned().unwrap_or(tsc_json)
-    } else {
-        tsc_json
-    };
-
-    Ok(Some(tsc_obj))
 }
 
 /// Verify a TSC proof by doing a roundtrip: TSC → BUMP → check that the txid
@@ -330,37 +247,35 @@ pub fn get_cached_block_height(
     }
 }
 
-/// Fetch block header from WhatsOnChain API and cache it (async, manages own lock)
+/// Fetch block header via the Services facade and cache it (async, manages own lock).
+///
+/// Phase 1.6d.C: was WoC-only (`/v1/bsv/main/block/hash/{hash}`), now routes through
+/// `WalletServices::get_block_header(BlockKey::Hash(...))` chain (WoC → JungleBus →
+/// Bitails per DESIGN §3). Soft timeout 8s.
+///
+/// JungleBus's provider impl returns an empty `header_hex` (the JungleBus block_header
+/// endpoint doesn't expose prev_hash, so the full 80-byte header can't be reconstructed).
+/// The cache write tolerates an empty header_hex — the height is what most callers need.
+/// Cache-no-poison invariant preserved: a failed fetch returns `Err` and writes nothing.
 pub async fn fetch_and_cache_block_header(
-    client: &Client,
+    services: &WalletServices,
     db: &std::sync::Mutex<WalletDatabase>,
     target_hash: &str,
 ) -> CacheResult<u32> {
-    let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target_hash);
-    let response = client.get(&block_header_url).send().await
-        .map_err(|e| CacheError::Api(format!("Failed to fetch block header: {}", e)))?;
+    let header = services
+        .get_block_header(BlockKey::Hash(target_hash.to_string()))
+        .await
+        .map_err(indexer_to_cache_err)?;
 
-    if !response.status().is_success() {
-        return Err(CacheError::Api(format!(
-            "Block header API returned status {}", response.status()
-        )));
-    }
-
-    let header_json: serde_json::Value = response.json().await
-        .map_err(|e| CacheError::Api(format!("Failed to parse block header JSON: {}", e)))?;
-
-    let height = header_json["height"].as_u64()
-        .ok_or_else(|| CacheError::InvalidData("Missing height in block header".to_string()))? as u32;
-
-    // Brief lock to cache the header
-    let header_hex = header_json["header"].as_str().unwrap_or("");
+    // Brief lock to cache the header. Empty header_hex is acceptable — JungleBus
+    // returns it that way and callers that only need height are unaffected.
     {
         let db_guard = db.lock().unwrap();
         let block_header_repo = BlockHeaderRepository::new(db_guard.connection());
-        block_header_repo.upsert(target_hash, height, header_hex)?;
+        block_header_repo.upsert(target_hash, header.height, &header.header_hex)?;
     }
 
-    Ok(height)
+    Ok(header.height)
 }
 
 /// Verify that transaction bytes match expected TXID

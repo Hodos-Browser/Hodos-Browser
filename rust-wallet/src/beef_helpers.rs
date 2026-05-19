@@ -6,7 +6,7 @@
 use crate::beef::{Beef, ParsedTransaction};
 use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository, ProvenTxRepository, BlockHeaderRepository};
 use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api, get_cached_block_height, fetch_and_cache_block_header};
-use reqwest::Client;
+use crate::services::WalletServices;
 use std::sync::Mutex;
 use sha2::{Sha256, Digest};
 
@@ -29,7 +29,7 @@ pub struct FetchedTx {
 pub async fn fetch_transaction_for_beef(
     txid: &str,
     db: &Mutex<WalletDatabase>,
-    client: &Client,
+    services: &WalletServices,
 ) -> Result<FetchedTx, String> {
     // Step 1: Check transactions table (wallet's own transactions)
     // IMPORTANT: Lock must be scoped so it's dropped before Step 2
@@ -114,7 +114,7 @@ pub async fn fetch_transaction_for_beef(
     }
 
     // Step 3: Fetch from API
-    match fetch_parent_transaction_from_api(client, txid).await {
+    match fetch_parent_transaction_from_api(services, txid).await {
         Ok(parent_tx_hex) => {
             match hex::decode(&parent_tx_hex) {
                 Ok(bytes) => {
@@ -170,7 +170,7 @@ pub async fn build_beef_for_txid(
     txid: &str,
     beef: &mut Beef,
     db: &Mutex<WalletDatabase>,
-    client: &Client,
+    services: &WalletServices,
 ) -> Result<(), String> {
     use std::collections::HashSet;
 
@@ -202,7 +202,7 @@ pub async fn build_beef_for_txid(
         // Fetch transaction (from cache or API)
         // If fetch fails, this ancestor is unfetchable (ghost/phantom) — track it
         // but continue walking to discover ALL missing ancestors for a complete error message.
-        let fetched = match fetch_transaction_for_beef(&current_txid, db, client).await {
+        let fetched = match fetch_transaction_for_beef(&current_txid, db, services).await {
             Ok(f) => f,
             Err(e) => {
                 log::error!("   ❌ Failed to fetch ancestor {}: {} — ancestry chain broken", current_txid, e);
@@ -266,7 +266,7 @@ pub async fn build_beef_for_txid(
                 },
                 None => {
                     log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
-                    match fetch_tsc_proof_from_api(client, &current_txid).await {
+                    match fetch_tsc_proof_from_api(services, &current_txid).await {
                         Ok(Some(tsc_json)) => {
                             // Enhance with block height (lock scoped, dropped before any network I/O)
                             let enhanced_result = {
@@ -284,7 +284,7 @@ pub async fn build_beef_for_txid(
                                         // Step B: Fetch from API on miss (no lock held)
                                         let height_result = match cached_height {
                                             Ok(Some(h)) => Ok(h),
-                                            Ok(None) => fetch_and_cache_block_header(client, db, hash).await,
+                                            Ok(None) => fetch_and_cache_block_header(services, db, hash).await,
                                             Err(e) => Err(e),
                                         };
 
@@ -383,14 +383,15 @@ pub async fn build_beef_for_txid(
         // it was never successfully broadcast or was dropped from all mempools.
         // Including it in BEEF will cause SEEN_IN_ORPHAN_MEMPOOL from ARC.
         if !has_bump && !verified_on_network {
-            let woc_url = format!(
-                "https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}",
-                current_txid
-            );
-            match client.get(&woc_url).send().await {
-                Ok(resp) if resp.status().as_u16() == 404 => {
+            // Ghost detection via Services chain (Phase 1.6d.C — was inline WoC fetch).
+            // NotFound from the chain short-circuits → tx doesn't exist anywhere we can
+            // reach → ghost. Other errors are inconclusive and we proceed cautiously
+            // (include the parent and let ARC decide on broadcast).
+            let status_result = services.tx_status(&current_txid).await;
+            match status_result {
+                Err(crate::services::IndexerError::NotFound) => {
                     log::error!(
-                        "   ❌ Unconfirmed parent {} NOT FOUND on WoC (404) — ghost transaction, excluding from BEEF",
+                        "   ❌ Unconfirmed parent {} NOT FOUND via Services — ghost transaction, excluding from BEEF",
                         &current_txid[..std::cmp::min(16, current_txid.len())]
                     );
                     // Clean up: mark any outputs from this ghost tx as not spendable
@@ -415,21 +416,15 @@ pub async fn build_beef_for_txid(
                     processed.insert(current_txid);
                     continue;
                 }
-                Ok(resp) if resp.status().is_success() => {
+                Ok(_) => {
                     log::info!(
-                        "   ✅ Unconfirmed parent {} verified on WoC (exists in mempool/chain)",
+                        "   ✅ Unconfirmed parent {} verified via Services (exists in mempool/chain)",
                         &current_txid[..std::cmp::min(16, current_txid.len())]
-                    );
-                }
-                Ok(resp) => {
-                    log::warn!(
-                        "   ⚠️  WoC returned {} for {} — proceeding cautiously",
-                        resp.status(), &current_txid[..std::cmp::min(16, current_txid.len())]
                     );
                 }
                 Err(e) => {
                     log::warn!(
-                        "   ⚠️  WoC check failed for {}: {} — proceeding without verification",
+                        "   ⚠️  Services tx_status check failed for {}: {} — proceeding without verification",
                         &current_txid[..std::cmp::min(16, current_txid.len())], e
                     );
                 }

@@ -7105,7 +7105,7 @@ pub async fn sign_action(
                                 Err(e) => {
                                     log::warn!("   ⚠️  Failed to decode cached parent tx {}: {}, fetching from API", utxo.txid, e);
                                     // Fall through to API fetch
-                                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                                    match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &utxo.txid).await {
                                         Ok(parent_tx_hex) => {
                                             match hex::decode(&parent_tx_hex) {
                                                 Ok(bytes) => {
@@ -7146,7 +7146,7 @@ pub async fn sign_action(
                             log::warn!("   ⚠️  Cached parent tx {} failed TXID verification, fetching from API", utxo.txid);
                             drop(db); // Release lock
                             // Fall through to API fetch
-                            match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                            match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &utxo.txid).await {
                                 Ok(parent_tx_hex) => {
                                     match hex::decode(&parent_tx_hex) {
                                         Ok(bytes) => {
@@ -7185,7 +7185,7 @@ pub async fn sign_action(
                             log::warn!("   ⚠️  Error verifying cached parent tx {}: {}, fetching from API", utxo.txid, e);
                             drop(db); // Release lock
                             // Fall through to API fetch
-                            match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                            match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &utxo.txid).await {
                                 Ok(parent_tx_hex) => {
                                     match hex::decode(&parent_tx_hex) {
                                         Ok(bytes) => {
@@ -7245,7 +7245,7 @@ pub async fn sign_action(
                         drop(db); // Release lock before API call
                         log::info!("   🌐 Cache miss - fetching parent tx {} from API...", utxo.txid);
                         // Fetch from API
-                        match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                        match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &utxo.txid).await {
                         Ok(parent_tx_hex) => {
                             match hex::decode(&parent_tx_hex) {
                                 Ok(bytes) => {
@@ -7293,7 +7293,7 @@ pub async fn sign_action(
                     drop(db); // Release lock
                     log::warn!("   ⚠️  Database error checking cache: {}, fetching from API", e);
                     // Fall through to API fetch
-                    match crate::cache_helpers::fetch_parent_transaction_from_api(&client, &utxo.txid).await {
+                    match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &utxo.txid).await {
                         Ok(parent_tx_hex) => {
                             match hex::decode(&parent_tx_hex) {
                                 Ok(bytes) => {
@@ -7340,7 +7340,7 @@ pub async fn sign_action(
                     // No proven_txs record — fetch from API
                     log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
 
-                    match crate::cache_helpers::fetch_tsc_proof_from_api(&client, &utxo.txid).await {
+                    match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &utxo.txid).await {
                         Ok(Some(tsc_json)) => {
                             // Enhance with block height (lock scoped, dropped before any network I/O)
                             let enhanced_result = {
@@ -7358,7 +7358,7 @@ pub async fn sign_action(
                                         // Step B: Fetch from API on miss (no lock held)
                                         let height_result = match cached_height {
                                             Ok(Some(h)) => Ok(h),
-                                            Ok(None) => crate::cache_helpers::fetch_and_cache_block_header(&client, &state.database, hash).await,
+                                            Ok(None) => crate::cache_helpers::fetch_and_cache_block_header(&state.services, &state.database, hash).await,
                                             Err(e) => Err(e),
                                         };
 
@@ -7497,7 +7497,7 @@ pub async fn sign_action(
                         ancestor_txid,
                         &mut beef,
                         &state.database,
-                        &client,
+                        &state.services,
                     ).await {
                         Ok(_) => {
                             log::info!("   ✅ Added ancestry chain for {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())]);
@@ -13077,7 +13077,7 @@ pub async fn do_onchain_backup(
                 continue;
             }
             match crate::beef_helpers::build_beef_for_txid(
-                ancestor_txid, &mut beef, &state.database, &client,
+                ancestor_txid, &mut beef, &state.database, &state.services,
             ).await {
                 Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
                 Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
@@ -14062,7 +14062,7 @@ async fn refetch_stripped_data(
     // Fetch raw tx + merkle proof for each txid
     for txid in &txids_to_fetch {
         // 1. Fetch raw transaction hex
-        let raw_tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&client, txid).await {
+        let raw_tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, txid).await {
             Ok(hex) => {
                 raw_tx_fetched += 1;
                 Some(hex)
@@ -14135,7 +14135,7 @@ async fn refetch_stripped_data(
         }
 
         // 2. Fetch merkle proof (TSC format)
-        match crate::cache_helpers::fetch_tsc_proof_from_api(&client, txid).await {
+        match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, txid).await {
             Ok(Some(proof_json)) => {
                 let db = state.database.lock().unwrap();
                 // Store proof as BLOB in proven_txs
@@ -15331,17 +15331,15 @@ pub async fn list_outputs(
         if include_transactions {
             // Check if transaction already in BEEF (deduplication)
             if beef.find_txid(txid).is_none() {
-                if let Some(ref client_ref) = client {
-                    // Build BEEF for this output's transaction and its parents
-                    if let Err(e) = crate::beef_helpers::build_beef_for_txid(
-                        txid,
-                        &mut beef,
-                        &state.database,
-                        client_ref,
-                    ).await {
-                        log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", txid, e);
-                        // Continue processing other outputs even if one fails
-                    }
+                // Services is always available on AppState; no Option wrapping needed
+                if let Err(e) = crate::beef_helpers::build_beef_for_txid(
+                    txid,
+                    &mut beef,
+                    &state.database,
+                    &state.services,
+                ).await {
+                    log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", txid, e);
+                    // Continue processing other outputs even if one fails
                 }
             } else {
                 log::info!("   ⏭️  Transaction {} already in BEEF, skipping", txid);
@@ -17961,7 +17959,7 @@ pub async fn debug_validate_beef(
             parent_txid,
             &mut beef,
             &state.database,
-            &client,
+            &state.services,
         ).await {
             Ok(_) => {
                 input_details.push(serde_json::json!({
@@ -18160,7 +18158,7 @@ pub async fn debug_broadcast_nosend(
             continue;
         }
         if let Err(e) = crate::beef_helpers::build_beef_for_txid(
-            &input.prev_txid, &mut beef, &state.database, &client,
+            &input.prev_txid, &mut beef, &state.database, &state.services,
         ).await {
             log::warn!("   ⚠️  Failed to build ancestry for {}: {}", &input.prev_txid[..16], e);
         }

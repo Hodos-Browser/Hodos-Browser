@@ -4582,7 +4582,7 @@ async fn unpublish_certificate_core(
                 continue;
             }
             match crate::beef_helpers::build_beef_for_txid(
-                ancestor_txid, &mut beef, &state.database, &client,
+                ancestor_txid, &mut beef, &state.database, &state.services,
             ).await {
                 Ok(_) => log::info!("   ✅ Added ancestry for {}", &ancestor_txid[..16.min(ancestor_txid.len())]),
                 Err(e) => log::warn!("   ⚠️  Ancestry failed for {}: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
@@ -4854,18 +4854,10 @@ pub async fn admin_prepare_unpublish(
 
     let mut steps: Vec<String> = Vec::new();
 
-    // Step 1: Fetch raw tx from WoC and store in parent_transactions
-    let tx_hex = match client
-        .get(&format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid))
-        .send().await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.text().await {
-                Ok(hex) => hex.trim().to_string(),
-                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to read tx hex: {}", e)})),
-            }
-        }
-        _ => return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to fetch raw tx from WoC"})),
+    // Step 1: Fetch raw tx via Services (Phase 1.6d.C — was inline WoC) and store in parent_transactions
+    let tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &txid).await {
+        Ok(hex) => hex,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to fetch raw tx: {}", e)})),
     };
     log::info!("   ✅ Fetched raw tx: {} hex chars", tx_hex.len());
 
@@ -4971,7 +4963,7 @@ pub async fn admin_prepare_unpublish(
 
     // Step 4: Fetch and store merkle proof
     {
-        let proof_result = crate::cache_helpers::fetch_tsc_proof_from_api(&client, &txid).await;
+        let proof_result = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &txid).await;
         match proof_result {
             Ok(Some(tsc_json)) => {
                 let db = state.database.lock().unwrap();
@@ -5377,7 +5369,7 @@ async fn try_resubmit_spending_tx(
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
     match crate::beef_helpers::build_beef_for_txid(
-        &spending_txid, &mut beef, &state.database, &client,
+        &spending_txid, &mut beef, &state.database, &state.services,
     ).await {
         Ok(_) => {}
         Err(e) => {
@@ -5473,28 +5465,18 @@ async fn try_cleanup_via_woc(
         // see the spending tx consumes the admitted PushDrop output.
         let mut beef = crate::beef::Beef::new();
 
-        // 1. Add publish tx from WoC + its merkle proof
-        let parent_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", publish_txid);
-        if let Ok(resp) = client.get(&parent_url).send().await {
-            if resp.status().as_u16() == 200 {
-                if let Ok(parent_hex) = resp.text().await {
-                    if let Ok(parent_bytes) = hex::decode(parent_hex.trim()) {
-                        beef.add_parent_transaction(parent_bytes);
-                        log::info!("cleanup: added publish tx {} to BEEF", txid_short);
-                    }
-                }
+        // 1. Add publish tx via Services + its merkle proof (Phase 1.6d.C — was inline WoC)
+        if let Ok(parent_hex) = crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, publish_txid).await {
+            if let Ok(parent_bytes) = hex::decode(&parent_hex) {
+                beef.add_parent_transaction(parent_bytes);
+                log::info!("cleanup: added publish tx {} to BEEF", txid_short);
             }
         }
 
-        let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", publish_txid);
-        if let Ok(proof_resp) = client.get(&proof_url).send().await {
-            if proof_resp.status().as_u16() == 200 {
-                if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
-                    match resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &client).await {
-                        Ok(()) => log::info!("cleanup: added merkle proof for publish tx {}", txid_short),
-                        Err(e) => log::warn!("cleanup: publish tx proof failed: {}", e),
-                    }
-                }
+        if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
+            match resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &client).await {
+                Ok(()) => log::info!("cleanup: added merkle proof for publish tx {}", txid_short),
+                Err(e) => log::warn!("cleanup: publish tx proof failed: {}", e),
             }
         }
 
@@ -5838,31 +5820,21 @@ async fn auto_spend_pushdrop(
     // Step 9: Build BEEF for broadcast
     let mut beef = crate::beef::Beef::new();
 
-    // Add publish tx (parent) from WoC
-    let parent_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", publish_txid);
-    if let Ok(resp) = client.get(&parent_url).send().await {
-        if resp.status().as_u16() == 200 {
-            if let Ok(phex) = resp.text().await {
-                if let Ok(parent_bytes) = hex::decode(phex.trim()) {
-                    beef.add_parent_transaction(parent_bytes);
-                }
-            }
+    // Add publish tx (parent) via Services (Phase 1.6d.C — was inline WoC)
+    if let Ok(phex) = crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, publish_txid).await {
+        if let Ok(parent_bytes) = hex::decode(&phex) {
+            beef.add_parent_transaction(parent_bytes);
         }
     }
 
-    // Add merkle proof for publish tx
-    let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", publish_txid);
-    if let Ok(proof_resp) = client.get(&proof_url).send().await {
-        if proof_resp.status().as_u16() == 200 {
-            if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
-                let _ = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, client).await;
-            }
-        }
+    // Add merkle proof for publish tx via Services (Phase 1.6d.C — was inline WoC)
+    if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
+        let _ = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, client).await;
     }
 
     // Add ancestry for funding UTXO
     match crate::beef_helpers::build_beef_for_txid(
-        &funding_txid, &mut beef, &state.database, client,
+        &funding_txid, &mut beef, &state.database, &state.services,
     ).await {
         Ok(_) => log::info!("cleanup/auto-spend: added BEEF ancestry for funding UTXO"),
         Err(e) => log::warn!("cleanup/auto-spend: BEEF ancestry failed: {}", e),
@@ -6016,46 +5988,42 @@ async fn overlay_only_spend_pushdrop(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    // 6a: Fetch the publish tx's parent transactions (the "grandparents") from WoC
-    // These should be confirmed on-chain since they're old funding UTXOs
+    // 6a: Fetch the publish tx's parent transactions (the "grandparents") via Services
+    // (Phase 1.6d.C — was inline WoC). These should be confirmed on-chain since they're
+    // old funding UTXOs.
     let mut grandparents_added = 0usize;
     for input in &parsed.inputs {
         let parent_txid = &input.prev_txid;
         let ptxid_short = &parent_txid[..16.min(parent_txid.len())];
 
-        // Fetch raw tx from WoC
-        let tx_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", parent_txid);
-        match client.get(&tx_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(hex_str) = resp.text().await {
-                    if let Ok(bytes) = hex::decode(hex_str.trim()) {
-                        out_beef.add_parent_transaction(bytes);
-                        log::info!("cleanup/overlay-spend: added grandparent tx {}", ptxid_short);
+        // Fetch raw tx via Services
+        match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, parent_txid).await {
+            Ok(hex_str) => {
+                if let Ok(bytes) = hex::decode(&hex_str) {
+                    out_beef.add_parent_transaction(bytes);
+                    log::info!("cleanup/overlay-spend: added grandparent tx {}", ptxid_short);
 
-                        // Fetch merkle proof for the grandparent
-                        let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", parent_txid);
-                        if let Ok(proof_resp) = client.get(&proof_url).send().await {
-                            if proof_resp.status().is_success() {
-                                if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
-                                    match resolve_and_add_tsc_proof_to_beef(
-                                        &mut out_beef, &proof_json, parent_txid, &client,
-                                    ).await {
-                                        Ok(()) => {
-                                            log::info!("cleanup/overlay-spend: added merkle proof for {}", ptxid_short);
-                                            grandparents_added += 1;
-                                        }
-                                        Err(e) => log::warn!("cleanup/overlay-spend: merkle proof failed for {}: {}", ptxid_short, e),
-                                    }
+                    // Fetch merkle proof for the grandparent via Services
+                    match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, parent_txid).await {
+                        Ok(Some(proof_json)) => {
+                            match resolve_and_add_tsc_proof_to_beef(
+                                &mut out_beef, &proof_json, parent_txid, &client,
+                            ).await {
+                                Ok(()) => {
+                                    log::info!("cleanup/overlay-spend: added merkle proof for {}", ptxid_short);
+                                    grandparents_added += 1;
                                 }
-                            } else {
-                                log::warn!("cleanup/overlay-spend: no merkle proof available for {} (HTTP {})", ptxid_short, proof_resp.status());
+                                Err(e) => log::warn!("cleanup/overlay-spend: merkle proof failed for {}: {}", ptxid_short, e),
                             }
+                        }
+                        Ok(None) => {
+                            log::warn!("cleanup/overlay-spend: no merkle proof available yet for {}", ptxid_short);
+                        }
+                        Err(e) => {
+                            log::warn!("cleanup/overlay-spend: proof fetch failed for {}: {}", ptxid_short, e);
                         }
                     }
                 }
-            }
-            Ok(resp) => {
-                log::warn!("cleanup/overlay-spend: WoC returned {} for grandparent tx {}", resp.status(), ptxid_short);
             }
             Err(e) => {
                 log::warn!("cleanup/overlay-spend: failed to fetch grandparent tx {}: {}", ptxid_short, e);

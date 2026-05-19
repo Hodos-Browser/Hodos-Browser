@@ -116,38 +116,23 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         // Build BEEF: publish tx (from WoC) + spending tx (from DB), both with merkle proofs
         let mut beef = crate::beef::Beef::new();
 
-        // Add publish tx from WoC
-        let parent_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", publish_txid);
-        if let Ok(resp) = client.get(&parent_url).send().await {
-            if resp.status().as_u16() == 200 {
-                if let Ok(parent_hex) = resp.text().await {
-                    if let Ok(parent_bytes) = hex::decode(parent_hex.trim()) {
-                        beef.add_parent_transaction(parent_bytes);
-                    }
-                }
+        // Add publish tx via Services (Phase 1.6d.C — was inline WoC)
+        if let Ok(parent_hex) = crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, publish_txid).await {
+            if let Ok(parent_bytes) = hex::decode(&parent_hex) {
+                beef.add_parent_transaction(parent_bytes);
             }
         }
 
-        // Add merkle proof for publish tx
-        let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", publish_txid);
-        if let Ok(proof_resp) = client.get(&proof_url).send().await {
-            if proof_resp.status().as_u16() == 200 {
-                if let Ok(proof_json) = proof_resp.json::<serde_json::Value>().await {
-                    // Resolve block height from target hash
-                    let proof_obj = if let Some(arr) = proof_json.as_array() {
-                        arr.first().cloned().unwrap_or(proof_json.clone())
-                    } else {
-                        proof_json.clone()
-                    };
-
-                    let block_height = resolve_block_height(&proof_obj, client).await;
-                    if let Some(height) = block_height {
-                        let mut tsc = proof_obj.clone();
-                        tsc["height"] = serde_json::json!(height);
-                        if let Some(tx_idx) = beef.find_txid(publish_txid) {
-                            let _ = beef.add_tsc_merkle_proof(publish_txid, tx_idx, &tsc);
-                        }
-                    }
+        // Add merkle proof for publish tx via Services
+        if let Ok(Some(proof_obj)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
+            // resolve_block_height still needs a reqwest::Client because it hits a
+            // hash→height endpoint not yet on the Services facade. Out of T1 scope.
+            let block_height = resolve_block_height(&proof_obj, client).await;
+            if let Some(height) = block_height {
+                let mut tsc = proof_obj.clone();
+                tsc["height"] = serde_json::json!(height);
+                if let Some(tx_idx) = beef.find_txid(publish_txid) {
+                    let _ = beef.add_tsc_merkle_proof(publish_txid, tx_idx, &tsc);
                 }
             }
         }

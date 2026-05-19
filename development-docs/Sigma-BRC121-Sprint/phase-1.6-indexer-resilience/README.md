@@ -49,8 +49,8 @@ Initial known offenders (non-exhaustive):
 
 | Where | Endpoint | Currently |
 |---|---|---|
-| `cache_helpers.rs:15` | WoC `/tx/{txid}/hex` | ARC primary + WoC fallback (per CLAUDE.md) |
-| `cache_helpers.rs:118` | WoC `/tx/{txid}/proof/tsc` | ARC primary + WoC fallback |
+| `cache_helpers.rs:15` | WoC `/tx/{txid}/hex` | **Post-1.6d.C:** Services chain (ARC GP → WoC → JungleBus → Bitails). Before: WoC-only. |
+| `cache_helpers.rs:118` | WoC `/tx/{txid}/proof/tsc` | **Post-1.6d.C:** Services chain. Before: ARC-primary + WoC fallback inline. |
 | `cache_helpers.rs:261, 295, 339` | WoC block hash/height | WoC only |
 | `beef_helpers.rs:387` | WoC `/tx/hash/{txid}` | WoC only |
 | `certificate/verifier.rs:455` | WoC `/tx/{txid}/outspend/{vout}` | WoC only, 8s timeout ✅ (b9124bb) |
@@ -90,7 +90,7 @@ Translate the analysis into a unified architecture:
 1. **Timeout standards** — define a `WoCClient`/`IndexerClient` abstraction with per-operation-class default timeouts (lookups 5s, proofs 10s, broadcasts 30s, etc.)
 2. **Fallback chain pattern** — `try_indexers!(arc, woc, junglebus)` macro or helper that tries each in order on timeout/failure
 3. **Cache extension** — what new tables/fields go into the SQLite DB:
-   - `parent_tx_cache` already exists (`parent_transactions` table) — make sure publish path actually uses it
+   - `parent_transactions` table already exists — make sure publish path actually uses it
    - Merkle proof cache via `proven_txs` (V16) — make sure publish path uses it
    - Block header cache via `block_headers` table — verify usage
    - Outspend cache? (mutable data — short TTL or rely on fresh fetches)
@@ -157,8 +157,8 @@ Verify behavior under network unavailability:
 
 The user's "we should be doing most of this correctly already but....." instinct is right — we have partial implementations:
 
-- `cache_helpers.rs::fetch_parent_transaction_from_api` does ARC-primary, WoC-fallback for tx hex
-- `cache_helpers.rs::fetch_tsc_proof_from_api` does ARC-primary for proofs
+- `cache_helpers.rs::fetch_parent_transaction_from_api` does ARC-primary + WoC + JungleBus + Bitails for tx hex (post-1.6d.C; was WoC-only before)
+- `cache_helpers.rs::fetch_tsc_proof_from_api` does ARC-primary + WoC + JungleBus + Bitails for proofs (post-1.6d.C; was ARC-primary + WoC inline before)
 - `parent_transactions` table caches tx hex
 - `proven_txs` (V16) caches merkle proofs
 - `block_headers` table caches headers
