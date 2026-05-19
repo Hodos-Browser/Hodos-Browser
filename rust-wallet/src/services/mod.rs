@@ -79,19 +79,12 @@ impl WalletServices {
 
         Self {
             client,
-            raw_tx: ProviderCollection::new(vec![
-                arc_gp.clone(),
-                woc.clone(),
-                jb.clone(),
-                bt.clone(),
-            ]),
-            proof: ProviderCollection::new(vec![
-                arc_gp.clone(),
-                woc.clone(),
-                jb.clone(),
-                bt.clone(),
-            ]),
-            header: ProviderCollection::new(vec![woc.clone(), jb.clone(), bt.clone()]),
+            // Bitails demoted from raw_tx/proof/header chains: it returns HTTP 500
+            // (instead of a proper 404) for unknown txids, poisoning error messages.
+            // Kept on tx_status where its response shape is reliable.
+            raw_tx: ProviderCollection::new(vec![arc_gp.clone(), woc.clone(), jb.clone()]),
+            proof: ProviderCollection::new(vec![arc_gp.clone(), woc.clone(), jb.clone()]),
+            header: ProviderCollection::new(vec![woc.clone(), jb.clone()]),
             tx_status_chain: ProviderCollection::new(vec![
                 arc_gp.clone(),
                 woc.clone(),

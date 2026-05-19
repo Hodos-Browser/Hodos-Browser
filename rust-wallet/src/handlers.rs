@@ -7509,7 +7509,7 @@ pub async fn sign_action(
                     }
                 }
                 if !ancestry_errors.is_empty() {
-                    log::error!("   ❌ BEEF ancestry has {} broken chain(s) — will abort before broadcast", ancestry_errors.len());
+                    log::warn!("   ⚠️ BEEF ancestry has {} broken chain(s) — will broadcast via EF (which only needs immediate parents)", ancestry_errors.len());
                 }
 
                 // Sort transactions topologically (parents before children) as required by BRC-62
@@ -7584,30 +7584,14 @@ pub async fn sign_action(
                 report.confirmed_txs, report.unconfirmed_txs, beef.bumps.len());
         }
         Err(e) => {
-            log::error!("   ❌ BEEF ancestry INCOMPLETE — aborting broadcast: {}", e);
-            // Clean up: mark tx as failed, restore inputs, delete ghost outputs
-            {
-                let db = state.database.lock().unwrap();
-                let tx_repo = crate::database::TransactionRepository::new(db.connection());
-                let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
-                let output_repo = crate::database::OutputRepository::new(db.connection());
-                let _ = output_repo.disable_by_txid(&txid);
-                let _ = output_repo.restore_spent_by_txid(&txid);
-                // Clean up commission
-                if let Ok(tx_id) = db.connection().query_row(
-                    "SELECT id FROM transactions WHERE txid = ?1",
-                    rusqlite::params![&txid],
-                    |row| row.get::<_, i64>(0),
-                ) {
-                    let commission_repo = crate::database::CommissionRepository::new(db.connection());
-                    let _ = commission_repo.delete_by_transaction_id(tx_id);
-                }
-            }
-            state.balance_cache.invalidate();
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("BEEF ancestry validation failed: {}", e),
-                "code": "ERR_BEEF_ANCESTRY_INCOMPLETE"
-            }));
+            // 1.6d.C-patch fix #3: don't hard-abort here. broadcast_transaction
+            // converts BEEF → EF before sending to ARC, and EF only needs the
+            // *immediate* parent outputs (which we have from the first BEEF level).
+            // Confirmed parents we couldn't trace via merkle proofs still get
+            // validated by ARC against its own indexed state. The original
+            // "permanent graveyard" concern only applied if we sent malformed BEEF
+            // directly to ARC; we don't — we send EF.
+            log::warn!("   ⚠️ BEEF ancestry incomplete: {} — falling back to EF (no merkle proofs needed for ARC to validate against indexed parents)", e);
         }
     }
 

@@ -90,11 +90,14 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
                 }
                 Ok(Err(IndexerError::NotFound)) => {
                     self.bump(provider.name(), |s| s.not_found += 1);
-                    // Short-circuit: the tx genuinely doesn't exist on this provider's view
-                    // of the chain. Trying other providers risks racing with mempool
-                    // propagation, but per DESIGN §2.2 this is treated as a positive
-                    // signal. Caller decides what to do.
-                    return Err(IndexerError::NotFound);
+                    last_err = Some(IndexerError::NotFound);
+                    // Advance to next provider. DESIGN §2.2 originally said NotFound
+                    // should short-circuit as a positive "tx doesn't exist" signal — but
+                    // that was wrong. A provider's NotFound only means *that provider*
+                    // doesn't have the tx. ARC (a tx processor, not an archive) returns
+                    // NotFound for old confirmed txs that WoC has — short-circuiting
+                    // there hides them. We only return NotFound to the caller after
+                    // every eligible provider has said NotFound.
                 }
                 Ok(Err(err)) => {
                     self.bump(provider.name(), |s| s.hard_errors += 1);
@@ -336,11 +339,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_short_circuits_on_not_found() {
+    async fn call_advances_past_not_found_to_next_provider() {
+        // Regression test: ARC returns NotFound for old confirmed txs because ARC is
+        // a tx processor not an archive. We must NOT short-circuit on NotFound — WoC
+        // (the next provider) has the proof and would have answered.
         let a = Arc::new(TestProvider::new("a", 1)); // NotFound
-        let b = Arc::new(TestProvider::new("b", 0)); // success — should NOT be called
+        let b = Arc::new(TestProvider::new("b", 0)); // success — MUST be tried
         let a_count = a.counter();
         let b_count = b.counter();
+        let coll = collection_with(vec![a, b]);
+
+        let r = coll
+            .call(ProviderOp::RawTx, Duration::from_secs(1), |p| {
+                Box::pin(async move { p.get_raw_tx("anything").await })
+            })
+            .await
+            .expect("should advance past NotFound and succeed via b");
+
+        assert_eq!(r, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(a_count.load(Ordering::SeqCst), 1, "a should have been tried");
+        assert_eq!(b_count.load(Ordering::SeqCst), 1, "b must be tried after a's NotFound");
+    }
+
+    #[tokio::test]
+    async fn call_returns_not_found_only_when_all_providers_say_not_found() {
+        let a = Arc::new(TestProvider::new("a", 1)); // NotFound
+        let b = Arc::new(TestProvider::new("b", 1)); // NotFound too
         let coll = collection_with(vec![a, b]);
 
         let err = coll
@@ -348,11 +372,9 @@ mod tests {
                 Box::pin(async move { p.get_raw_tx("anything").await })
             })
             .await
-            .expect_err("should short-circuit");
+            .expect_err("should return NotFound after all providers said NotFound");
 
         assert!(matches!(err, IndexerError::NotFound));
-        assert_eq!(a_count.load(Ordering::SeqCst), 1);
-        assert_eq!(b_count.load(Ordering::SeqCst), 0, "b must not be tried after NotFound");
     }
 
     #[tokio::test]
