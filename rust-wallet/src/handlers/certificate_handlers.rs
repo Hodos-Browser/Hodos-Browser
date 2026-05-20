@@ -924,19 +924,27 @@ async fn acquire_certificate_direct(
         Ok(certificate_id) => {
             log::info!("   ✅ Certificate stored with ID: {}", certificate_id);
 
-            // Return certificate with PUBLIC keyring (encrypted for "anyone")
+            // Return certificate including BOTH keyringForSubject AND a public keyring.
             //
-            // NEVER expose the master keyring (keyringForSubject) — it's an internal
-            // wallet secret encrypted for subject+certifier. Instead, generate the
-            // public keyring (encrypted for the "anyone" verifier) so the PushDrop
-            // can be built with fields anyone can decrypt.
+            // History: e4b73fe (2026-03-19) stripped keyringForSubject from the response
+            // to prevent SocialCert's old IdentityClient from accidentally putting
+            // subject-only-decryptable keys into the on-chain PushDrop. SocialCert's
+            // newer SDK uses publiclyRevealAttributes(), which goes through the wallet's
+            // gated /proveCertificate to transform keys before they hit the PushDrop —
+            // so the original "old problem" doesn't apply.
             //
-            // SocialCert's IdentityClient spreads the cert object into the PushDrop
-            // without overriding keyring from proveCertificate, so we must provide
-            // the correct public keyring here.
+            // Restoring keyringForSubject is required for the new SDK flow. The values
+            // in it are encrypted for the subject (the user themself), and the
+            // per-field decrypt gate lives in C++ HttpRequestInterceptor →
+            // /proveCertificate, NOT in field presence on the cert object. So returning
+            // keyringForSubject doesn't bypass user approval — only the wallet can
+            // decrypt those keys, and the gate still fires on each field.
+            //
+            // We also keep the public `keyring` field for any older caller that relied
+            // on it.
             let mut response_cert = cert_json_value.clone();
             if let Some(obj) = response_cert.as_object_mut() {
-                obj.remove("keyringForSubject");
+                // Intentionally NOT removing keyringForSubject — see history above.
 
                 // Generate public keyring for "anyone" verifier
                 let anyone_pubkey = hex::decode(ANYONE_PUBKEY_HEX).unwrap();
@@ -2321,6 +2329,17 @@ async fn acquire_certificate_issuance(
     if content_type_header_value != content_type {
         log::error!("   ❌ Content-Type mismatch! Serialized: '{}', Sending: '{}'", content_type, content_type_header_value);
     }
+
+    // VERIFICATION (project_cert_acquire_hodos_bug): shadow the outer 8s `client`
+    // (declared at /.well-known/auth, line ~1112) with a dedicated 60s client for
+    // /signCertificate. The certifier does server-side decrypt-decrypt-sign-persist
+    // for every field and routinely needs 10-25s — 8s post-1.6d.A budget was too
+    // tight and caused 502s with nothing reaching the certificates table.
+    // If verification passes, promote to a proper per-call-class policy.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     let response = match client
         .post(&sign_url)

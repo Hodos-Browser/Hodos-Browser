@@ -2410,9 +2410,34 @@ void AsyncWalletResourceHandler::postAuthTimeout(int delayMs, const std::string&
 }
 
 void AsyncWalletResourceHandler::postHttpTimeout() {
-    // Recovery scans can take 60+ seconds; use 120s timeout for recover endpoints
+    // CEF outer safety net. Primary timeouts live inside the wallet per call-class
+    // (Phase 1.6 Services facade tiers). This cap exists so a truly hung wallet
+    // (deadlock / panic) cannot freeze the page indefinitely — it is NOT the
+    // primary timeout for any call.
+    //
+    // Default short enough to surface true hangs quickly.
     int timeoutMs = 45000;
-    if (endpoint_.find("/wallet/recover") != std::string::npos) {
+
+    // Endpoints with legitimate slow paths must cap above the wallet's internal
+    // max so the wallet's structured response (success or proper error) always
+    // wins over this outer fallback. Otherwise CEF chops the call, sends back
+    // {"error":"Wallet request timeout","status":"error"} as HTTP 200, and the
+    // page treats the timeout body as the response — silent corruption.
+    //
+    //   /wallet/recover      — gap-limit address scan over WoC (60–120s)
+    //   /acquireCertificate  — BRC-53 handshake + third-party /signCertificate
+    //                          (certifier server, observed 30–50s; wallet caps
+    //                          internally at 60s via shadowed reqwest client)
+    //   /proveCertificate    — per-field decrypt + re-encrypt for verifier;
+    //                          paired with /acquireCertificate flows
+    //
+    // TODO (1.6d.D follow-up): replace this CEF-side endpoint switch with the
+    // per-call-class timeout tier policy (8s indexer-with-fallback / 15s
+    // indexer-single-shot / 60s third-party / 120s long-scan) living in
+    // WalletServices. CEF then keeps one or two outer caps as a safety net only.
+    if (endpoint_.find("/wallet/recover")     != std::string::npos ||
+        endpoint_.find("/acquireCertificate") != std::string::npos ||
+        endpoint_.find("/proveCertificate")   != std::string::npos) {
         timeoutMs = 120000;
     }
     CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), timeoutMs);
