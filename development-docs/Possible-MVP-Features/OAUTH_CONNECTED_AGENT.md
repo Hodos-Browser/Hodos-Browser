@@ -35,6 +35,54 @@ Ruth Heasman (@ruthheasman) reply — https://x.com/ruthheasman/status/205392000
 
 **Revisit prompt** (use when revisiting this doc 6+ months out): "Did we ship OAuth-Connected Personal Data Agent? Has @hbgnostic's workflow gotten easier in the broader ecosystem, or is the gap Bridget described still there? Has anyone else closed it?"
 
+---
+
+## ⚠️ Critical path — Google OAuth verification (read first, plan the cost)
+
+**TL;DR for future-us:** Hodos must register as a Google OAuth client to ship this feature. Sensitive/restricted scopes (YouTube management, Gmail mutations, Drive full access) require Google verification — weeks to months of process — and **restricted** scopes additionally require an annual third-party security assessment (CASA) that costs real money. Start the verification submission **the moment a working demo exists**, not at launch.
+
+### What "OAuth client" means here
+
+When a user clicks "Connect YouTube" in Hodos and Google shows them a consent screen, the screen reads *"Hodos Browser wants to manage your YouTube channel."* That registered identity — "Hodos Browser" — is the OAuth client. It is registered by Marston Enterprises in Google Cloud Console, gets a client ID shipped inside the binary, and is the thing Google reviews. Hodos being a Chromium browser is irrelevant to Google's process; what matters is that Hodos is the third-party application requesting scopes on the user's behalf.
+
+This is the same shape as Notion (when it imports your Calendar), Slack (when it pulls Drive previews), or Claude's Gmail MCP server (which Anthropic registered + verified). Chrome is exempt only because Google made Chrome. Brave / Vivaldi don't hit this because they don't call Google APIs on the user's behalf.
+
+**Distinction worth keeping straight:** YouTube web UI login (cookie-based session) — every Chromium browser including Hodos already does this with zero registration. YouTube Data API (OAuth-token-based) — a separate surface a *program* uses to act on the user's behalf, and the program must be a registered OAuth client. The agent walks through Door 2, the user walks through Door 1.
+
+### Scope tiers and what each costs
+
+| Scope tier | Examples | Verification | Annual cost | Timeline (first submit) |
+|---|---|---|---|---|
+| Non-sensitive | Basic profile, public YouTube read-only | None required | Free | Immediate |
+| Sensitive | YouTube channel management (`youtube`, `youtube.force-ssl`), Calendar mutations | Google review only (no CASA) | Free | 4–8 weeks typical |
+| Restricted | Gmail read/modify/send, Drive full access | Google review **+ annual CASA assessment** | **~$3K–$15K+/year** (CASA) | 8–16+ weeks |
+
+CASA = Cloud Application Security Assessment, performed by a Google-approved third-party assessor (Bishop Fox, NCC Group, and others). Required annually for as long as Hodos uses restricted scopes. Cost varies by assessor and app complexity. Not negotiable for restricted scopes once Hodos wants more than 100 test users.
+
+Until verification ships, Hodos can operate in **test mode** with up to 100 explicitly added test users — fine for closed alpha, kills public GA.
+
+### Application timing — start when you have a demo, not when you launch
+
+The verification submission requires:
+- A registered OAuth client with the actual production scopes
+- A privacy policy URL on a real domain (Hodos has one — hodosbrowser.com)
+- A homepage describing the integration
+- A demo video walking through the OAuth flow and what the agent does with the scopes
+- A scope justification document explaining *why* a desktop browser needs each scope
+
+You can't submit these from a research doc — you need a working integration to film the demo. The real timing rule: **submit the moment the integration spike produces a recordable demo**, then build the rest of the feature while verification runs in parallel. Submitting only after launch readiness = 4–16+ week wall in front of public availability.
+
+### Two ways to dodge or reduce the cost
+
+1. **Ship Stage 1 with non-sensitive / read scopes only.** "Agent reads your channel and recommends a reorg" — no mutations, no verification needed, all users get it. Stage 2 with mutation scopes then has its own ship gate. This is the smallest-risk first step and gets a credible demo on the public record fast.
+2. **Let Dolphin Milk be the OAuth client.** John Calhoun registers Dolphin Milk as the Google OAuth client and eats the verification cost. Downsides: shared rate limits across all Dolphin Milk users (Hodos + standalone), shared liability for misuse, less Hodos branding on the consent screen. Upside: Marston Enterprises doesn't pay CASA. This is a coordination conversation, not an engineering one — worth raising with John before either side starts the verification clock.
+
+### What to track in marketing/intelligence
+
+Strategic/cost dimensions of this — CASA assessor selection, scope-tier decisions, Calhoun coordination — belong in `marketing/intelligence/features/oauth-connected-agent/` once that folder lands. This engineering doc stays the technical reference; the marketing folder holds the business decisions and external-relationship notes.
+
+---
+
 ## The idea in one sentence
 
 Let Hodos users say "agent, reorganize my YouTube channel into topical playlists" (or "clean up my inbox", "organize my Drive", "consolidate my X bookmarks") — and have it actually happen, with the user's own OAuth token transparently brokered by the browser, the agent's reasoning paid for via x402, and a verifiable on-chain proof of what was done.
@@ -111,11 +159,12 @@ The unit of value is **"AI agent that can act on your behalf because it's alread
 
 ### 1. OAuth client registration and per-app credentials
 
-Google requires OAuth clients to be registered per application. "Hodos Browser" would need to register with Google, get its own client ID/secret, and ship them. This has implications:
+See the **"Critical path — Google OAuth verification"** section at the top of this doc for the full breakdown of scope tiers, verification timeline, CASA cost, and the application-timing rule. Outstanding questions specific to client setup (not covered in the top block):
 
-- Google's review process for OAuth apps that request sensitive scopes (full YouTube management, full Gmail, full Drive) — Hodos may need to go through Google's verification.
-- Per-platform client ID (Windows, macOS, Linux) may or may not be needed.
-- Rate limits and quota are partly tied to the OAuth client — many Hodos users sharing one client ID may push limits.
+- Per-platform client ID — does Google require separate clients per OS (Windows / macOS / Linux), or does one Desktop client cover all? Lean toward one client; confirm before submission.
+- Rate limits and quota are tied to the OAuth client — if all Hodos users share one client ID, per-client quota becomes a scaling constraint worth modeling before public launch.
+- Refresh-token expiry behavior — Google rotates refresh tokens; what happens if a Hodos user goes 6 months without using the agent? Need a graceful re-consent flow, not an opaque failure.
+- Brand / consent-screen UX — the consent screen displays the OAuth client name + logo + verified status. "Hodos Browser" should be the displayed name; logo must be uploaded with the verification submission.
 
 ### 2. Token storage and security
 

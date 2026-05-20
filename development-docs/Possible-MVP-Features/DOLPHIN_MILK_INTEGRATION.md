@@ -5,6 +5,8 @@
 **First logged:** 2026-05-11
 **Source repo:** `C:\Users\archb\Dolphin_Milk\rust-bsv-worm` (upstream per README: `https://github.com/Calgooon/rust-bsv-worm`)
 
+> **Downstream dependency:** This integration is a prerequisite for `OAUTH_CONNECTED_AGENT.md` (agent-with-OAuth-tools to act on Google/Gmail/Drive/YouTube on behalf of the user). That feature has a **Google OAuth verification critical path** — 4–16+ weeks of review, plus potential annual CASA assessment cost (~$3K–$15K+/year) for restricted scopes. If pursuing OAuth-Connected-Agent on top of this integration, read the **"Critical path — Google OAuth verification"** section at the top of `OAUTH_CONNECTED_AGENT.md` before locking the timeline here. The verification submission window should open the moment a working demo exists, not at launch.
+
 ## The idea in one sentence
 
 Bundle John Calhoun's **Dolphin Milk** open-source AI agent (Rust binary + Lit web UI) inside Hodos so users get a working AI agent with a BSV wallet **without ever touching a terminal**.
