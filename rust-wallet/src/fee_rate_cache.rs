@@ -46,7 +46,7 @@ impl FeeRateCache {
         Self {
             cache: RwLock::new(None),
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(crate::services::CallClass::IndexerAsync.timeout())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }

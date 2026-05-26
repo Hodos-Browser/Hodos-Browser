@@ -4,6 +4,7 @@
 //! (1.6d.C through 1.6d.F) migrate existing call sites onto it. See
 //! `development-docs/Sigma-BRC121-Sprint/phase-1.6-indexer-resilience/DESIGN.md`.
 
+pub mod call_class;
 pub mod collection;
 pub mod provider;
 pub mod providers;
@@ -13,6 +14,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+pub use call_class::CallClass;
 pub use collection::{BoxFut, ProviderCollection, ProviderStats};
 pub use provider::{
     BlockHeader, BlockKey, BroadcastResult, IndexerError, IndexerProvider, OutspendStatus,

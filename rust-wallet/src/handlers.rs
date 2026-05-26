@@ -6105,7 +6105,7 @@ pub(crate) async fn create_action_internal(
 // Query confirmation status - tries ARC first, falls back to WhatsOnChain
 async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -6158,7 +6158,7 @@ pub(crate) async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String>
     log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -7058,7 +7058,7 @@ pub async fn sign_action(
 
     // Fetch WALLET parent transactions and their Merkle proofs (with caching)
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     for (wallet_idx, utxo) in input_utxos.iter().enumerate() {
@@ -12055,7 +12055,7 @@ pub async fn do_onchain_backup(
     let mut extra_markers: Vec<(String, u32, i64, String)> = Vec::new(); // (txid, vout, sats, script_hex)
     {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(crate::services::CallClass::IndexerSync.timeout())
             .build().unwrap_or_else(|_| reqwest::Client::new());
         let utxo_url = format!(
             "https://api.whatsonchain.com/v1/bsv/main/address/{}/unspent/all",
@@ -12532,7 +12532,7 @@ pub async fn do_onchain_backup(
     // only the placeholder reservation remains, which is cleaned up at startup.
     let beef_bytes = {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(crate::services::CallClass::IndexerBulk.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -13053,7 +13053,7 @@ async fn fetch_onchain_backup(
     // The marker is a standard P2PKH output that WoC indexes by address.
     // The PushDrop (nonstandard) lives in the same tx at vout 0.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -13518,7 +13518,7 @@ async fn refetch_stripped_data(
     use crate::database::{TransactionRepository, OutputRepository, ParentTransactionRepository};
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -14750,7 +14750,7 @@ pub async fn list_outputs(
     // Create HTTP client for BEEF building (if needed) with timeout to prevent hanging
     let client = if include_transactions {
         Some(reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(crate::services::CallClass::IndexerBulk.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()))
     } else {
@@ -15031,7 +15031,7 @@ pub async fn get_height(_body: web::Bytes) -> HttpResponse {
     // Fetch current blockchain height from WhatsOnChain API
     let url = "https://api.whatsonchain.com/v1/bsv/main/chain/info";
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -15108,7 +15108,7 @@ pub async fn get_header_for_height(
     // First, get block info by height to get the hash
     let block_info_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", req.height);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -17432,7 +17432,7 @@ pub async fn debug_validate_beef(
 
     let mut beef = crate::beef::Beef::new();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -17636,7 +17636,7 @@ pub async fn debug_broadcast_nosend(
     // Build BEEF with full ancestry
     let mut beef = crate::beef::Beef::new();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

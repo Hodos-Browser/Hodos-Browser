@@ -85,7 +85,7 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Resul
     log::info!("   Fetching UTXOs for address: {}", address);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -115,7 +115,7 @@ pub async fn fetch_utxos_for_address(address: &str, address_index: i32) -> Resul
 /// since GorillaPool doesn't expose unconfirmed.
 pub async fn fetch_utxos_single_address_with_unconfirmed(address: &str, address_index: i32) -> Result<Vec<UTXO>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     fetch_utxos_woc(&client, address, address_index).await
@@ -219,7 +219,7 @@ async fn fetch_utxos_gorillapool(client: &reqwest::Client, address: &str, addres
 /// API (old, deprecated): https://api.whatsonchain.com/v1/bsv/main/address/{address}/history
 pub async fn address_has_history(address: &str) -> Result<bool, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerAsync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -323,7 +323,7 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
     const INITIAL_DELAY_MS: u64 = 1000;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerAsync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut all_utxos = Vec::new();

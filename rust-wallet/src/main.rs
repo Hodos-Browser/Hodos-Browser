@@ -637,7 +637,7 @@ async fn main() -> std::io::Result<()> {
                 log::info!("🔍 Startup phantom sweep: checking {} externally-received output(s)...", candidates.len());
 
                 let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
+                    .timeout(crate::services::CallClass::IndexerSync.timeout())
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new());
 

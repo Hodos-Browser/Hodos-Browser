@@ -65,10 +65,16 @@ pub struct IdentityResolver {
 }
 
 impl IdentityResolver {
-    /// Create a new IdentityResolver with a 2-second HTTP timeout per endpoint
+    /// Create a new IdentityResolver. HTTP timeout sourced from
+    /// `CallClass::IndexerSync` (8s) — the resolver iterates multiple overlay
+    /// endpoints (US + EU), so a longer per-endpoint timeout multiplies the
+    /// total wallclock. 8s is the sweet spot: tolerant of brief blips but
+    /// fast-fails to the next endpoint on real outage. NOT `ThirdPartyNoFallback`
+    /// despite being a third-party call, because the multi-endpoint iteration
+    /// IS the fallback.
     pub fn new() -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
+            .timeout(crate::services::CallClass::IndexerSync.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

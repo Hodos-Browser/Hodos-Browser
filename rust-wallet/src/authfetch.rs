@@ -62,7 +62,7 @@ impl AuthFetchClient {
     /// * `private_key` - 32-byte private key
     pub fn new(identity_key: Vec<u8>, private_key: Vec<u8>) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

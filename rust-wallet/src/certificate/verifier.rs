@@ -469,7 +469,7 @@ pub async fn check_revocation_status(
     // so a timeout here cleanly degrades to the same code path that
     // handles intentional unreachability.
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
     {
         Ok(c) => c,

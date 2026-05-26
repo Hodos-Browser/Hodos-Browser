@@ -88,7 +88,7 @@ pub struct Monitor {
 impl Monitor {
     pub fn new(state: web::Data<AppState>) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(crate::services::CallClass::IndexerAsync.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

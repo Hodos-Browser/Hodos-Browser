@@ -53,11 +53,9 @@ const TOPIC_IDENTITY: &str = "tm_identity";
 /// SHIP host cache TTL (5 minutes, matching TS SDK)
 const SHIP_CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// SHIP discovery timeout per tracker
-const SHIP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Overlay submission timeout per host (reduced from 30s since we now submit to 3+ hosts)
-const SUBMIT_TIMEOUT: Duration = Duration::from_secs(15);
+// Per-call timeouts now sourced from `crate::services::CallClass`:
+//   - SHIP discovery + overlay submit/lookup → `CallClass::ThirdPartyNoFallback` (90s)
+// See `services/call_class.rs` for the policy table.
 
 // ═══════════════════════════════════════════════════════════════
 // SHIP Host Discovery Cache
@@ -117,7 +115,7 @@ pub async fn submit_to_topic(topic: &str, beef_bytes: &[u8]) -> Result<bool, Str
     }
 
     let client = reqwest::Client::builder()
-        .timeout(SUBMIT_TIMEOUT)
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -172,7 +170,7 @@ pub async fn lookup_published_certificate(
     serial_number_b64: &str,
 ) -> Result<Option<(Vec<u8>, usize)>, String> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -274,7 +272,7 @@ pub async fn lookup_certificates_by_identity_key(
     certifiers: &[&str],
 ) -> Result<Vec<OverlayCertificateOutput>, String> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -486,7 +484,7 @@ async fn discover_hosts_for_service(_service: &str) -> Vec<String> {
 /// Returns map of host_url → Set<topic>.
 async fn query_ship_advertisements(topics: &[String]) -> HashMap<String, HashSet<String>> {
     let client = reqwest::Client::builder()
-        .timeout(SHIP_DISCOVERY_TIMEOUT)
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

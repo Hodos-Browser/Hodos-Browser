@@ -382,7 +382,7 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
     };
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

@@ -111,10 +111,12 @@ pub struct PaymailClient {
 }
 
 impl PaymailClient {
-    /// Create a new PaymailClient with a 15-second HTTP timeout
+    /// Create a new PaymailClient. HTTP timeout sourced from
+    /// `CallClass::ThirdPartyNoFallback` — paymail hosts are third parties
+    /// with no Hodos-side fallback.
     pub fn new() -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

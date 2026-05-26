@@ -1118,7 +1118,7 @@ async fn acquire_certificate_issuance(
     // Send initialRequest to /.well-known/auth (matching TypeScript SDK's SimplifiedFetchTransport)
     // NOTE: The SDK always uses /.well-known/auth, NOT /initialRequest
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let well_known_auth_url = if certifier_url.ends_with('/') {
@@ -2330,14 +2330,13 @@ async fn acquire_certificate_issuance(
         log::error!("   ❌ Content-Type mismatch! Serialized: '{}', Sending: '{}'", content_type, content_type_header_value);
     }
 
-    // VERIFICATION (project_cert_acquire_hodos_bug): shadow the outer 8s `client`
-    // (declared at /.well-known/auth, line ~1112) with a dedicated 60s client for
-    // /signCertificate. The certifier does server-side decrypt-decrypt-sign-persist
-    // for every field and routinely needs 10-25s — 8s post-1.6d.A budget was too
-    // tight and caused 502s with nothing reaching the certificates table.
-    // If verification passes, promote to a proper per-call-class policy.
+    // Per-call-class timeout policy (CallClass enum). /signCertificate is a
+    // third-party call with no fallback — SocialCert does server-side
+    // decrypt-decrypt-sign-persist for every field and routinely needs 10-50s.
+    // Past history: bumped from 8s (1.6d.A regression) to 60s (project_cert_acquire_hodos_bug)
+    // to 90s (CallClass::ThirdPartyNoFallback). 30s buffer under CEF's 120s cap.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -2999,7 +2998,7 @@ async fn create_certificate_transaction(
             for utxo in &selected_utxos {
                 let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
                 let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(8))
+                    .timeout(crate::services::CallClass::IndexerSync.timeout())
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new());
                 match client.get(&url).send().await {
@@ -4582,7 +4581,7 @@ async fn unpublish_certificate_core(
     // Build proper BEEF with full ancestry chain
     let beef_bytes = {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(crate::services::CallClass::IndexerBulk.timeout())
             .build()
             .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -4867,7 +4866,7 @@ pub async fn admin_prepare_unpublish(
     log::info!("📋 POST /admin/prepare-unpublish: {}:{}", &txid[..16.min(txid.len())], vout);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -5383,7 +5382,7 @@ async fn try_resubmit_spending_tx(
     // Build BEEF for the spending transaction
     let mut beef = crate::beef::Beef::new();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -5440,7 +5439,7 @@ async fn try_cleanup_via_woc(
     log::info!("cleanup/woc: checking {}:{}", txid_short, output_index);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerSync.timeout())
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -6003,7 +6002,7 @@ async fn overlay_only_spend_pushdrop(
     let mut out_beef = crate::beef::Beef::new();
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
