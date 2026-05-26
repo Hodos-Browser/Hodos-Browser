@@ -325,7 +325,7 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
                 info!("   📡 PeerPay tx {} NOT on-chain, attempting broadcast...", &subject_txid[..16]);
                 let raw_tx_hex = hex::encode(&main_tx_bytes);
                 match crate::handlers::broadcast_transaction(
-                    &raw_tx_hex, Some(&state.database), Some(&subject_txid)
+                    &raw_tx_hex, &state.services, Some(&state.database), Some(&subject_txid)
                 ).await {
                     Ok(broadcast_msg) => {
                         info!("   ✅ PeerPay tx broadcast succeeded: {}", broadcast_msg);

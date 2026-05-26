@@ -200,6 +200,21 @@ pub(crate) fn interpret_broadcast_response(
         });
     }
 
+    // ANNOUNCED_TO_NETWORK is step 5 of 10 in ARC's lifecycle — ARC sent an INV
+    // message but no peer has yet requested the tx, let alone accepted it. We
+    // deliberately diverge from canonical wallet-toolbox (which treats ANNOUNCED
+    // as primary-broadcast success) and advance the ProviderCollection chain to
+    // the next broadcaster. Mirrors today's handlers.rs:8294-8297 fall-through.
+    // See memory `reference_arc_tx_status_ladder` for the full ladder + rationale.
+    if tx_status_str == "ANNOUNCED_TO_NETWORK" {
+        return Err(IndexerError::ProviderStatus {
+            provider: NAME,
+            status: http_status,
+            body: "ANNOUNCED_TO_NETWORK — weak signal, advancing chain to next broadcaster"
+                .to_string(),
+        });
+    }
+
     match http_status {
         200 | 201 => Ok(BroadcastResult {
             provider: NAME,
@@ -354,6 +369,27 @@ mod tests {
             interpret_broadcast_response(200, &arc, ""),
             Err(IndexerError::ProviderStatus { .. })
         ));
+    }
+
+    #[test]
+    fn broadcast_announced_to_network_is_err_so_chain_advances() {
+        // Hodos policy (Phase 1.6d.D): ANNOUNCED_TO_NETWORK is step 5/10 in ARC's
+        // lifecycle ladder. ARC sent INV; no peer has acknowledged. We deliberately
+        // diverge from canonical wallet-toolbox (which treats this as primary-broadcast
+        // success) and advance the ProviderCollection chain to the next broadcaster.
+        // See memory `reference_arc_tx_status_ladder` and handlers.rs:8294-8297
+        // for the existing fall-through that this preserves.
+        let arc = arc_from_json(json!({
+            "txid": "deadbeef",
+            "txStatus": "ANNOUNCED_TO_NETWORK"
+        }));
+        match interpret_broadcast_response(200, &arc, "") {
+            Err(IndexerError::ProviderStatus { provider, body, .. }) => {
+                assert_eq!(provider, NAME);
+                assert!(body.contains("ANNOUNCED_TO_NETWORK"));
+            }
+            other => panic!("expected ProviderStatus Err for ANNOUNCED, got {:?}", other),
+        }
     }
 
     #[test]

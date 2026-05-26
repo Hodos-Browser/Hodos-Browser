@@ -158,6 +158,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         }
         match crate::handlers::broadcast_transaction(
             &broadcast_hex,
+            &state.services,
             Some(&state.database),
             Some(&txid),
         ).await {

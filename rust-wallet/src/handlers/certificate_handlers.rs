@@ -2986,7 +2986,7 @@ async fn create_certificate_transaction(
         .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize transaction: {}", e)))?;
 
     log::info!("   📡 Broadcasting certificate transaction...");
-    let broadcast_result = broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await;
+    let broadcast_result = broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await;
 
     // Handle "Missing inputs" error by checking UTXOs and retrying
     if let Err(ref e) = broadcast_result {
@@ -4700,7 +4700,7 @@ async fn unpublish_certificate_core(
 
     // Broadcast using BEEF (not raw tx) so ARC can validate parent transactions
     let beef_hex = hex::encode(&beef_bytes);
-    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ Unpublish broadcast successful");
             // Certificate unpublished — always trigger backup check
@@ -5867,7 +5867,7 @@ async fn auto_spend_pushdrop(
 
     // Step 10: Broadcast
     let beef_hex = hex::encode(&beef_v1);
-    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&spend_txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&spend_txid)).await {
         Ok(msg) => {
             log::info!("cleanup/auto-spend: ✅ broadcast successful: {}", msg);
             let db = state.database.lock().unwrap();

@@ -5704,7 +5704,7 @@ pub(crate) async fn create_action_internal(
             let beef_hex = hex::encode(tx_bytes);
             log::info!("   📡 Broadcasting transaction to network...");
 
-            match broadcast_transaction(&beef_hex, Some(&state.database), Some(&final_txid)).await {
+            match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&final_txid)).await {
                 Ok(_broadcast_msg) => {
                     log::info!("   ✅ Broadcast successful: {}", _broadcast_msg);
 
@@ -5965,7 +5965,7 @@ pub(crate) async fn create_action_internal(
             match sw_beef_hex {
                 Some(raw_tx_hex) => {
                     // Broadcast the raw transaction
-                    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(sw_txid)).await {
+                    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(sw_txid)).await {
                         Ok(msg) => {
                             log::info!("   ✅ sendWith broadcast success for {}: {}", &sw_txid[..16], msg);
                             // Update broadcast status
@@ -7811,7 +7811,7 @@ pub async fn sign_action(
     // ARC is idempotent — duplicate broadcasts return "already known" (safe).
     if !effective_no_send && unsigned_inputs.is_empty() {
         log::info!("   📡 Broadcasting fully-signed transaction to network...");
-        match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+        match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
             Ok(msg) => {
                 log::info!("   ✅ Broadcast successful: {}", msg);
                 {
@@ -7996,7 +7996,7 @@ pub async fn process_action(
     let status = if should_broadcast {
         log::info!("   Broadcasting to network...");
 
-        let broadcast_result = broadcast_transaction(&raw_tx, Some(&state.database), Some(&txid)).await;
+        let broadcast_result = broadcast_transaction(&raw_tx, &state.services, Some(&state.database), Some(&txid)).await;
 
         // Handle double-spend errors by marking inputs as SUSPECTED (not confirmed).
         // TaskVerifyDoubleSpend will verify independently against WoC.
@@ -8134,7 +8134,197 @@ fn is_fatal_broadcast_error(error: &str) -> bool {
 //
 // Each broadcaster is tried up to MAX_BROADCAST_ATTEMPTS times with exponential backoff
 // for transient errors. Fatal errors (invalid tx) stop all retries immediately.
+/// Broadcast a transaction through the Phase 1.6d.D `WalletServices` chain
+/// (ARC GorillaPool → TAAL ARC → GorillaPool MAPI → WhatsOnChain).
+///
+/// `services` provides the 4-tier provider chain with adaptive soft-timeout
+/// (5s + 50ms/KiB cap 30s) and `moveServiceToLast` demotion. The hand-rolled
+/// retry loops + per-broadcaster fall-through from pre-1.6d.D are gone — chain
+/// advancement handles fallback. Behaviors preserved as wrapper logic around
+/// the chain call: fatal-error short-circuit, ARC-409-timeout → tx_status
+/// confirmation, ARC merkle-proof caching, broadcast_status=confirmed update,
+/// and txid-collision detection.
+///
+/// `beef_or_raw_hex` accepts BEEF (V1, V2, or Atomic) or raw tx hex. Raw tx is
+/// wrapped in a minimal V1 BEEF (no BUMPs, one tx, no proof) before being
+/// handed to the chain — providers extract the main tx via `Beef::from_bytes`.
 pub(crate) async fn broadcast_transaction(
+    beef_or_raw_hex: &str,
+    services: &crate::services::WalletServices,
+    db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
+    txid_for_cache: Option<&str>,
+) -> Result<String, String> {
+    let is_beef = beef_or_raw_hex.starts_with("0100beef")
+        || beef_or_raw_hex.starts_with("0200beef")
+        || beef_or_raw_hex.starts_with("01010101");
+
+    // Decode hex → bytes. Raw tx input gets wrapped in a minimal V1 BEEF
+    // (matches `Beef::to_v1_bytes` shape for 0 BUMPs / 1 tx / no proof).
+    let beef_bytes: Vec<u8> = if is_beef {
+        match hex::decode(beef_or_raw_hex) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to decode BEEF hex: {}", e)),
+        }
+    } else {
+        match hex::decode(beef_or_raw_hex) {
+            Ok(raw) => {
+                let mut beef = Vec::with_capacity(raw.len() + 8);
+                beef.extend_from_slice(&crate::beef::BEEF_V1_MARKER);
+                beef.push(0x00); // varint: 0 BUMPs
+                beef.push(0x01); // varint: 1 transaction
+                beef.extend_from_slice(&raw);
+                beef.push(0x00); // has_bump = 0
+                beef
+            }
+            Err(e) => return Err(format!("Failed to decode raw tx hex: {}", e)),
+        }
+    };
+
+    log::info!(
+        "   📡 Broadcasting via Services chain (ARC GP → TAAL → MAPI → WoC): {} bytes (is_beef={})",
+        beef_bytes.len(),
+        is_beef
+    );
+
+    match services.broadcast_beef(&beef_bytes).await {
+        Ok(br) => {
+            log::info!(
+                "   🎉 {} accepted: txid={}, status={}",
+                br.provider,
+                &br.txid[..br.txid.len().min(32)],
+                br.tx_status
+            );
+
+            // txid collision detection — mirrors handlers.rs (pre-1.6d.D) :8222-8239.
+            // BEEF ancestry can legitimately return a proof for a PARENT tx that
+            // just got mined; that's signalled by merkle_path_bump being present.
+            // Different txid + no merkle path = genuine collision (e.g. CVE-2026-40069).
+            if let Some(expected_txid) = txid_for_cache {
+                if !br.txid.is_empty() && br.txid != expected_txid {
+                    if br.merkle_path_bump.is_some() {
+                        log::info!(
+                            "   ℹ️  {} txid differs (BEEF ancestry): {} vs {} — merklePath present, proceeding",
+                            br.provider,
+                            &expected_txid[..expected_txid.len().min(16)],
+                            &br.txid[..br.txid.len().min(16)]
+                        );
+                    } else {
+                        let msg = format!(
+                            "TX collision: {} returned txid {} instead of our {} (status: {})",
+                            br.provider,
+                            &br.txid[..br.txid.len().min(16)],
+                            &expected_txid[..expected_txid.len().min(16)],
+                            br.tx_status,
+                        );
+                        log::error!("   ❌ {}", msg);
+                        return Err(msg);
+                    }
+                }
+            }
+
+            // Cache merkle proof under the PROVIDER'S returned txid (NOT our
+            // submitted txid). When ARC returns a BEEF-ancestry merkle path it
+            // refers to a parent tx that just got mined — storing the parent's
+            // proof under our txid causes "Invalid BUMPs" on next use.
+            // Mirrors handlers.rs (pre-1.6d.D) :8263-8274.
+            if let (Some(ref merkle_path), Some(db)) = (&br.merkle_path_bump, db_for_cache) {
+                if !merkle_path.is_empty() && !br.txid.is_empty() {
+                    log::info!(
+                        "   📋 {} returned merklePath ({} hex chars) for txid={}",
+                        br.provider,
+                        merkle_path.len(),
+                        &br.txid[..br.txid.len().min(16)]
+                    );
+                    cache_arc_merkle_proof(db, &br.txid, merkle_path);
+                }
+            }
+
+            // Update broadcast_status="confirmed" on immediately-MINED. Mirrors
+            // handlers.rs (pre-1.6d.D) :8277-8287.
+            if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
+                if br.tx_status == "MINED" {
+                    if let Some(height) = br.block_height {
+                        log::info!("   📦 {} reports MINED at height {}", br.provider, height);
+                        if let Ok(db_guard) = db.lock() {
+                            let tx_repo = crate::database::TransactionRepository::new(
+                                db_guard.connection(),
+                            );
+                            let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                        }
+                    }
+                }
+            }
+
+            Ok(format!(
+                "{} accepted: {} ({})",
+                br.provider, br.txid, br.tx_status
+            ))
+        }
+        Err(err) => {
+            let err_str = err.to_string();
+            log::warn!("   ⚠️ Services broadcast chain exhausted: {}", err_str);
+
+            // Fatal short-circuit. `is_fatal_broadcast_error` covers script-verify
+            // failures, missing-inputs, and similar tx-level invalidity signals —
+            // the chain already tried every provider and they all said the same.
+            if is_fatal_broadcast_error(&err_str) {
+                log::error!("   ❌ Fatal broadcast error: {}", err_str);
+                return Err(extract_core_error(&err_str));
+            }
+
+            // ARC 409-timeout → tx_status confirmation. If the last error in the
+            // chain looks like ARC's "DeadlineExceeded" signal, check whether the
+            // tx made it on-chain anyway. Uses the Services tx_status chain (ARC
+            // GP → WoC → JungleBus → Bitails). Mirrors handlers.rs (pre-1.6d.D)
+            // :8312-8334.
+            let body_lower = err_str.to_lowercase();
+            let looks_like_arc_timeout = body_lower.contains("deadlineexceeded")
+                || body_lower.contains("context deadline exceeded")
+                || body_lower.contains("arc timeout/error (409)");
+            if looks_like_arc_timeout {
+                if let Some(expected_txid) = txid_for_cache {
+                    log::info!(
+                        "   🔍 ARC timeout signal in last err — checking tx_status for {}",
+                        &expected_txid[..expected_txid.len().min(16)]
+                    );
+                    match services.tx_status(expected_txid).await {
+                        Ok(status) => {
+                            use crate::services::TxState;
+                            if matches!(status.state, TxState::Mined | TxState::InMempool) {
+                                let msg = format!(
+                                    "ARC timed out but tx confirmed on-chain (state={:?}): {}",
+                                    status.state, expected_txid
+                                );
+                                log::info!("   ✅ {}", msg);
+                                return Ok(msg);
+                            }
+                            log::info!(
+                                "   ℹ️  tx_status returned state={:?} — broadcast genuinely failed",
+                                status.state
+                            );
+                        }
+                        Err(e) => {
+                            log::info!(
+                                "   ℹ️  tx_status lookup also failed ({}) — broadcast genuinely failed",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            Err(extract_core_error(&err_str))
+        }
+    }
+}
+
+// ===== Legacy broadcast helpers — DEAD AFTER 1.6d.D-1, deleted in 1.6d.D-2 =====
+// Kept temporarily so the migration is single-commit revert-safe.
+//
+// (original body retained verbatim below for the dead-code preservation period)
+
+#[allow(dead_code, non_snake_case)]
+async fn _broadcast_transaction_LEGACY_for_revert_safety(
     beef_or_raw_hex: &str,
     db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
     txid_for_cache: Option<&str>,
@@ -9514,7 +9704,7 @@ pub async fn send_transaction(
     // broadcast_transaction detects the 01010101 Atomic BEEF prefix, strips the header,
     // converts to BEEF V1, and submits to ARC. This allows ARC to validate unconfirmed
     // parent transactions that would be rejected as "missing inputs" in raw tx broadcast.
-    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
 
@@ -11313,7 +11503,7 @@ pub async fn internalize_action(
 
         // Broadcast the transaction ourselves
         let raw_tx_hex = hex::encode(&main_tx_bytes);
-        match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
+        match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await {
             Ok(broadcast_msg) => {
                 // broadcast_transaction returns a message string, not a txid.
                 // Our locally-computed txid is authoritative (passed via txid_for_cache).
@@ -13084,7 +13274,7 @@ pub async fn do_onchain_backup(
 
     // Broadcast — if this fails, only the placeholder reservation exists (no ghost outputs)
     let beef_hex = hex::encode(&beef_bytes);
-    match broadcast_transaction(&beef_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
         }
@@ -14987,7 +15177,7 @@ pub async fn wallet_recover_external(
         log::info!("   📡 Broadcasting sweep tx {}/{} ({} sats, fee {} sats)...",
                   i + 1, sweep_txs.len(), output_value, fee);
 
-        match crate::handlers::broadcast_transaction(raw_hex, None, None).await {
+        match crate::handlers::broadcast_transaction(raw_hex, &state.services, None, None).await {
             Ok(msg) => {
                 log::info!("   ✅ Sweep tx {}/{} broadcast: {}", i + 1, sweep_txs.len(), msg);
 
@@ -16322,7 +16512,7 @@ pub async fn peerpay_send(
     let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
 
     // Broadcast the transaction
-    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   ✅ PeerPay broadcast OK: {} - {}", txid, msg);
             let db = state.database.lock().unwrap();
@@ -17052,7 +17242,7 @@ pub async fn broadcast_nosend(
         }
     };
 
-    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&req.txid)).await {
+    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&req.txid)).await {
         Ok(msg) => {
             log::info!("   ✅ broadcast-nosend OK: {} - {}", req.txid, msg);
             // Move nosend → sending so the Monitor's existing pipeline picks
@@ -17305,7 +17495,7 @@ pub async fn paymail_send(
     let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
 
     // Broadcast the transaction
-    match broadcast_transaction(&atomic_beef_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   Paymail broadcast OK: {} - {}", txid, msg);
             let db = state.database.lock().unwrap();
@@ -18175,7 +18365,7 @@ pub async fn debug_broadcast_nosend(
     log::info!("   📡 Broadcasting {} bytes of BEEF V1 to ARC...", beef_v1_hex.len() / 2);
 
     // Broadcast to ARC
-    match broadcast_transaction(&beef_v1_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_v1_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   ✅ ARC accepted: {}", msg);
 

@@ -386,7 +386,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
 
     // 13. Broadcast (all inputs are confirmed, so raw tx broadcast is sufficient)
     // ARC will accept raw tx and validate against confirmed parents.
-    match broadcast_transaction(&raw_tx_hex, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(msg) => {
             info!("   ✅ Consolidation broadcast successful: {}", msg);
 
