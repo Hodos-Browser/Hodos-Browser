@@ -2334,7 +2334,9 @@ async fn acquire_certificate_issuance(
     // third-party call with no fallback — SocialCert does server-side
     // decrypt-decrypt-sign-persist for every field and routinely needs 10-50s.
     // Past history: bumped from 8s (1.6d.A regression) to 60s (project_cert_acquire_hodos_bug)
-    // to 90s (CallClass::ThirdPartyNoFallback). 30s buffer under CEF's 120s cap.
+    // to 90s (CallClass::ThirdPartyNoFallback) to 120s on 2026-05-26 after
+    // SocialCert was observed taking 86-90s on degraded days. 120s rides at
+    // the CEF outer cap (zero buffer) — see CallClass module docs.
     let client = reqwest::Client::builder()
         .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
