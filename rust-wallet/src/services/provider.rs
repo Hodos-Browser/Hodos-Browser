@@ -65,6 +65,15 @@ pub struct TxStatus {
     pub block_hash: Option<String>,
     /// BUMP merkle path (hex), when the provider returns one alongside MINED status.
     pub merkle_path_bump: Option<String>,
+    /// Raw status string from the source provider, when the provider has its own
+    /// status vocabulary that's richer than `TxState`. Currently only populated by
+    /// `ArcGorillaPoolProvider` (and by `ArcTaalProvider` for parity), where ARC
+    /// distinguishes states like `ANNOUNCED_TO_NETWORK` vs `SEEN_ON_NETWORK` and
+    /// `SEEN_IN_ORPHAN_MEMPOOL` vs `REJECTED` that `TxState` collapses. Monitor
+    /// tasks (`task_check_for_proofs`, `task_send_waiting`) consume this for
+    /// nuanced rebroadcast / oracle-verification decisions. WoC, JungleBus, and
+    /// Bitails return `None`.
+    pub raw_provider_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

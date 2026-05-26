@@ -316,7 +316,7 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
         }
 
         // 4b. Verify on-chain (async — no DB lock held)
-        let tx_verified = match crate::handlers::check_tx_exists_on_chain(&subject_txid).await {
+        let tx_verified = match crate::handlers::check_tx_exists_on_chain(&state.services, &subject_txid).await {
             Ok(true) => {
                 info!("   ✅ PeerPay tx {} verified on-chain", &subject_txid[..16]);
                 true

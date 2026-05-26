@@ -274,6 +274,7 @@ pub(crate) fn parse_tx_status(txid: &str, json: &Value) -> TxStatus {
         block_height,
         block_hash,
         merkle_path_bump: None, // WoC doesn't return BUMP here.
+        raw_provider_status: None, // WoC has no rich status vocabulary beyond TxState.
     }
 }
 

@@ -6102,116 +6102,80 @@ pub(crate) async fn create_action_internal(
     HttpResponse::Ok().json(response)
 }
 
-// Query confirmation status - tries ARC first, falls back to WhatsOnChain
-async fn get_confirmation_status(txid: &str) -> Result<(u32, Option<u32>), String> {
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerSync.timeout())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    // Try ARC first
-    match query_arc_tx_status(&client, txid).await {
-        Ok(arc_resp) => {
-            let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
-            if status == "MINED" {
-                // ARC reports MINED - return at least 1 confirmation and block height
-                let block_height = arc_resp.block_height.map(|h| h as u32);
-                // ARC doesn't report exact confirmation count, but MINED means >= 1
-                return Ok((1, block_height));
+// Query confirmation status via the Services chain (ARC GP → WoC → JungleBus → Bitails).
+//
+// Returns `(confirmations, block_height)`. ARC + WoC don't report exact confirmation
+// counts here, so we collapse to `>= 1 = Mined → 1 confirmation` and `else 0`.
+async fn get_confirmation_status(
+    services: &crate::services::WalletServices,
+    txid: &str,
+) -> Result<(u32, Option<u32>), String> {
+    use crate::services::TxState;
+    match services.tx_status(txid).await {
+        Ok(status) => {
+            if matches!(status.state, TxState::Mined) {
+                Ok((1, status.block_height))
+            } else {
+                Ok((0, None))
             }
-            // Not yet mined - ARC knows about it but no confirmations
-            return Ok((0, None));
         }
-        Err(e) => {
-            log::warn!("   ⚠️  ARC confirmation check failed for {}: {}, falling back to WhatsOnChain", txid, e);
-        }
+        Err(e) => Err(format!("tx_status chain exhausted: {}", e)),
     }
-
-    // Fall back to WhatsOnChain
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
-
-    let response = client.get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP error: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("API returned status: {}", response.status()));
-    }
-
-    let json: serde_json::Value = response.json()
-        .await
-        .map_err(|e| format!("JSON parse error: {}", e))?;
-
-    let confirmations = json["confirmations"].as_u64().unwrap_or(0) as u32;
-    let block_height = json["blockheight"].as_u64().map(|h| h as u32);
-
-    Ok((confirmations, block_height))
 }
 
-/// Check if a transaction exists on-chain - tries ARC first, falls back to WhatsOnChain
+/// Check if a transaction exists on-chain via the Services chain
+/// (ARC GP → WoC → JungleBus → Bitails).
 ///
-/// Returns Ok(true) if tx exists (even with 0 confirmations - in mempool)
-/// Returns Ok(false) if tx doesn't exist (404)
-/// Returns Err if both APIs fail
-pub(crate) async fn check_tx_exists_on_chain(txid: &str) -> Result<bool, String> {
+/// Returns `Ok(true)` if tx is Mined or InMempool.
+/// Returns `Ok(false)` if tx is in an orphan / stale-block / rejected state, OR if
+/// the entire chain returns NotFound.
+/// Returns `Err` if the chain genuinely failed (transport / 5xx everywhere).
+///
+/// Special-cases ARC's `SEEN_IN_ORPHAN_MEMPOOL` and `MINED_IN_STALE_BLOCK` (both
+/// collapse to `TxState::Rejected` via the enum) by reading `raw_provider_status`
+/// — both mean "not reliably on the live network".
+pub(crate) async fn check_tx_exists_on_chain(
+    services: &crate::services::WalletServices,
+    txid: &str,
+) -> Result<bool, String> {
+    use crate::services::TxState;
     log::info!("   🔍 Checking if transaction exists on-chain: {}", txid);
 
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerSync.timeout())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    // Try ARC first
-    match query_arc_tx_status(&client, txid).await {
-        Ok(arc_resp) => {
-            let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
-            match status {
-                "MINED" | "SEEN_ON_NETWORK"
-                | "ANNOUNCED_TO_NETWORK" | "REQUESTED_BY_NETWORK"
-                | "SENT_TO_NETWORK" | "ACCEPTED_BY_NETWORK" | "STORED"
-                | "QUEUED" | "RECEIVED" => {
-                    log::info!("   ✅ Transaction exists (ARC status: {})", status);
-                    return Ok(true);
-                }
-                "SEEN_IN_ORPHAN_MEMPOOL" | "MINED_IN_STALE_BLOCK" => {
-                    // Orphan/stale = tx is NOT reliably on network
-                    log::warn!("   ⚠️  Transaction in {} — not reliably on network", status);
+    match services.tx_status(txid).await {
+        Ok(status) => {
+            // Honour ARC's richer vocabulary when the responding provider is ARC.
+            // Orphan/stale = tx is NOT reliably on network — return false.
+            if let Some(ref raw) = status.raw_provider_status {
+                if raw == "SEEN_IN_ORPHAN_MEMPOOL" || raw == "MINED_IN_STALE_BLOCK" {
+                    log::warn!("   ⚠️  Transaction in {} — not reliably on network", raw);
                     return Ok(false);
                 }
-                _ => {
-                    log::info!("   ⚠️  ARC returned status: {} - checking WhatsOnChain", status);
+            }
+            match status.state {
+                TxState::Mined | TxState::InMempool => {
+                    log::info!("   ✅ Transaction exists (state: {:?})", status.state);
+                    Ok(true)
+                }
+                TxState::Rejected | TxState::DoubleSpendAttempted => {
+                    log::warn!("   ⚠️  Transaction state: {:?}", status.state);
+                    Ok(false)
+                }
+                TxState::Unknown => {
+                    log::info!("   ⚠️  Transaction state Unknown — treating as not exists");
+                    Ok(false)
                 }
             }
         }
         Err(e) => {
-            // ARC 404 means tx not known to ARC - fall through to WhatsOnChain
-            if e.contains("404") {
-                log::info!("   ℹ️  Transaction not known to ARC, checking WhatsOnChain...");
+            // `tx_status` returns NotFound when all providers 404 — treat as "doesn't exist".
+            let msg = e.to_string();
+            if msg.contains("NotFound") || msg.contains("not found") {
+                log::info!("   ⚠️  Transaction NOT found on-chain (chain exhausted)");
+                Ok(false)
             } else {
-                log::warn!("   ⚠️  ARC check failed: {}, falling back to WhatsOnChain", e);
+                Err(format!("tx_status chain failed: {}", msg))
             }
         }
-    }
-
-    // Fall back to WhatsOnChain
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/hash/{}", txid);
-
-    let response = client.get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP error checking tx: {}", e))?;
-
-    let status = response.status();
-
-    if status.is_success() {
-        log::info!("   ✅ Transaction exists on-chain");
-        Ok(true)
-    } else if status.as_u16() == 404 {
-        log::info!("   ⚠️  Transaction NOT found on-chain (404)");
-        Ok(false)
-    } else {
-        Err(format!("API returned status: {}", status))
     }
 }
 
@@ -6242,7 +6206,7 @@ pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, S
 
     // Query each transaction
     for txid in actions_to_update {
-        match get_confirmation_status(&txid).await {
+        match get_confirmation_status(&state.services, &txid).await {
             Ok((confirmations, block_height)) => {
                 let db = state.database.lock().unwrap();
                 let tx_repo = TransactionRepository::new(db.connection());
@@ -8334,76 +8298,6 @@ fn extract_core_error(error: &str) -> String {
             error.to_string()
         };
         format!("Transaction broadcast failed: {}", truncated)
-    }
-}
-
-/// ARC API response structure
-/// See: https://bitcoin-sv.github.io/arc/api.html
-///
-/// Post-1.6d.D-2: this struct is only used by `query_arc_tx_status` below. It
-/// duplicates `services::providers::arc_gorillapool::ArcResponse`. Migrating
-/// `query_arc_tx_status` to `services.tx_status` (planned 1.6d.D-3) will let
-/// this copy be deleted.
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-pub struct ArcResponse {
-    /// Block hash (when mined)
-    #[serde(rename = "blockHash", default)]
-    pub block_hash: Option<String>,
-    /// Block height (when mined)
-    #[serde(rename = "blockHeight", default)]
-    pub block_height: Option<u64>,
-    /// Extra info from miner
-    #[serde(rename = "extraInfo", default)]
-    pub extra_info: Option<String>,
-    /// Competing transaction IDs (double spend)
-    #[serde(rename = "competingTxs", default)]
-    pub competing_txs: Option<Vec<String>>,
-    /// Merkle path (BUMP hex when mined)
-    #[serde(rename = "merklePath", default)]
-    pub merkle_path: Option<String>,
-    /// Timestamp
-    #[serde(default)]
-    pub timestamp: Option<String>,
-    /// Transaction ID
-    #[serde(default)]
-    pub txid: Option<String>,
-    /// Transaction status string (e.g., "SEEN_ON_NETWORK", "MINED")
-    #[serde(rename = "txStatus", default)]
-    pub tx_status: Option<String>,
-    /// HTTP status code mirrored in body
-    #[serde(default)]
-    pub status: Option<u16>,
-    /// Error title (for error responses)
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Error detail (for error responses)
-    #[serde(default)]
-    pub detail: Option<String>,
-    /// Error type (for error responses)
-    #[serde(rename = "type", default)]
-    pub error_type: Option<String>,
-}
-
-/// Query transaction status from ARC
-///
-/// GET /v1/tx/{txid} - Returns status, merkle path, block info
-pub async fn query_arc_tx_status(client: &reqwest::Client, txid: &str) -> Result<ArcResponse, String> {
-    let url = format!("https://arc.gorillapool.io/v1/tx/{}", txid);
-
-    let response = client.get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("ARC status query HTTP error: {}", e))?;
-
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-
-    if status.is_success() {
-        serde_json::from_str(&text)
-            .map_err(|e| format!("ARC: Failed to parse status response: {} - Body: {}", e, &text[..text.len().min(200)]))
-    } else {
-        Err(format!("ARC status query failed: HTTP {} - {}", status.as_u16(), &text[..text.len().min(200)]))
     }
 }
 
@@ -10799,7 +10693,7 @@ pub async fn internalize_action(
     // SECURITY: Verify transaction exists on-chain before storing
     // This prevents attackers from sending fake BEEF that was never broadcast
     // ========================================================================
-    let tx_exists = match check_tx_exists_on_chain(&txid).await {
+    let tx_exists = match check_tx_exists_on_chain(&state.services, &txid).await {
         Ok(exists) => exists,
         Err(e) => {
             log::error!("   ❌ Failed to verify transaction on-chain: {}", e);
@@ -15334,7 +15228,7 @@ pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> Ht
         let is_on_chain = if let Some(&cached) = checked_txids.get(txid) {
             cached
         } else {
-            let result = check_tx_exists_on_chain(txid).await.unwrap_or(false);
+            let result = check_tx_exists_on_chain(&state.services, txid).await.unwrap_or(false);
             checked_txids.insert(txid.clone(), result);
             result
         };

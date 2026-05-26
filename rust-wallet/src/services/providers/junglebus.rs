@@ -128,6 +128,7 @@ pub(crate) fn parse_jb_tx_status(txid: &str, json: &Value) -> TxStatus {
         block_height,
         block_hash,
         merkle_path_bump: None, // see module-level note re: MerkleProof deferral
+        raw_provider_status: None, // JungleBus doesn't expose a richer status string.
     }
 }
 

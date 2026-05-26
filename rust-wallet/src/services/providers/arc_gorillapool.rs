@@ -19,9 +19,10 @@ use crate::services::provider::{
 const NAME: &str = "arc_gorillapool";
 const BASE: &str = "https://arc.gorillapool.io/v1";
 
-/// ARC API response shape. Local mirror of `crate::handlers::ArcResponse` —
-/// duplicated rather than imported because `handlers` is the binary's module tree
-/// (not exposed in `lib.rs`). Shared with `arc_taal.rs` via `pub(crate)`.
+/// ARC API response shape. Post-1.6d.D-3 this is the canonical wallet-side
+/// definition of an ARC `/v1/tx` response — the duplicate in `crate::handlers`
+/// was deleted when `query_arc_tx_status` migrated to `services.tx_status`.
+/// Shared with `arc_taal.rs` via `pub(crate)`.
 #[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct ArcResponse {
@@ -175,6 +176,10 @@ pub(crate) fn arc_response_to_tx_status(
         block_height: arc.block_height.map(|h| h as u32),
         block_hash: arc.block_hash.clone(),
         merkle_path_bump: arc.merkle_path.clone(),
+        // Preserve ARC's rich status vocabulary for callers that need to
+        // distinguish ANNOUNCED_TO_NETWORK vs SEEN_ON_NETWORK,
+        // SEEN_IN_ORPHAN_MEMPOOL vs REJECTED, etc.
+        raw_provider_status: arc.tx_status.clone(),
     }
 }
 

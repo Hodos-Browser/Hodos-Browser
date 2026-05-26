@@ -164,20 +164,34 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             // Not on WoC yet — still check ARC below (it might be in mempool)
         }
 
-        // Query ARC for status
-        match crate::handlers::query_arc_tx_status(client, txid).await {
-            Ok(arc_resp) => {
-                let status = arc_resp.tx_status.as_deref().unwrap_or("UNKNOWN");
+        // Query via Services chain (ARC GP → WoC → JungleBus → Bitails). When ARC
+        // responds, `raw_provider_status` carries ARC's full vocabulary
+        // (ANNOUNCED_TO_NETWORK, SEEN_IN_ORPHAN_MEMPOOL, etc.). When a fallback
+        // tier responds, that field is `None` and we map `TxState` → a synthetic
+        // ARC-style label so the rich match below still works.
+        match state.services.tx_status(txid).await {
+            Ok(tx_status) => {
+                use crate::services::TxState;
+                let status: &str = match tx_status.raw_provider_status.as_deref() {
+                    Some(s) => s,
+                    None => match tx_status.state {
+                        TxState::Mined => "MINED",
+                        TxState::InMempool => "SEEN_ON_NETWORK",
+                        TxState::Rejected => "REJECTED",
+                        TxState::DoubleSpendAttempted => "DOUBLE_SPEND_ATTEMPTED",
+                        TxState::Unknown => "UNKNOWN",
+                    },
+                };
 
                 match status {
                     "MINED" => {
-                        let block_height = arc_resp.block_height.unwrap_or(0);
+                        let block_height = tx_status.block_height.unwrap_or(0) as u64;
                         info!("   ⛏️ {} MINED (block {})", txid, block_height);
 
-                        if let Some(ref merkle_path_hex) = arc_resp.merkle_path {
+                        if let Some(ref merkle_path_hex) = tx_status.merkle_path_bump {
                             match create_proven_tx_from_arc(
                                 state, client, txid, merkle_path_hex, block_height,
-                                arc_resp.block_hash.as_deref().unwrap_or(""),
+                                tx_status.block_hash.as_deref().unwrap_or(""),
                             ).await {
                                 Ok(proven_tx_id) => {
                                     info!("   ✅ Created proven_txs {} for {}", proven_tx_id, txid);
@@ -352,9 +366,10 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 // (GorillaPool non-ARC), and Bitails — all keyless, all indexing
                 // both mempool and chain by txid. ARC's health is no longer a
                 // prerequisite for detecting a failed broadcast.
-                info!("   ℹ️ {} ARC unavailable ({}), running oracle quorum",
+                let err_str = e.to_string();
+                info!("   ℹ️ {} chain exhausted ({}), running oracle quorum",
                       &txid[..txid.len().min(16)],
-                      e.lines().next().unwrap_or(&e));
+                      err_str.lines().next().unwrap_or(&err_str));
                 match oracle_quorum_check(client, txid).await {
                     OracleVerdict::Present { any_confirmed } => {
                         if any_confirmed {

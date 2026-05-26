@@ -136,6 +136,7 @@ pub(crate) fn parse_bitails_tx_status(txid: &str, json: &Value) -> TxStatus {
         block_height,
         block_hash,
         merkle_path_bump: None,
+        raw_provider_status: None, // Bitails doesn't expose a richer status string.
     }
 }
 

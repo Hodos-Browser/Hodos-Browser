@@ -89,10 +89,24 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             continue;
         }
 
-        // Step 1: Check ARC if tx was already accepted (crash after successful broadcast)
-        match crate::handlers::query_arc_tx_status(client, &txid).await {
-            Ok(arc_resp) => {
-                let status = arc_resp.tx_status.as_deref().unwrap_or("");
+        // Step 1: Check via Services chain (ARC GP → WoC → JungleBus → Bitails).
+        // When ARC responds, `raw_provider_status` carries ARC's rich vocabulary
+        // (SEEN_IN_ORPHAN_MEMPOOL, DOUBLE_SPEND_ATTEMPTED, etc.) that drives
+        // distinct cleanup paths. When a fallback tier responds, we map `TxState`
+        // → a synthetic ARC-style label so the match below still works.
+        match state.services.tx_status(&txid).await {
+            Ok(tx_status) => {
+                use crate::services::TxState;
+                let status: &str = match tx_status.raw_provider_status.as_deref() {
+                    Some(s) => s,
+                    None => match tx_status.state {
+                        TxState::Mined => "MINED",
+                        TxState::InMempool => "SEEN_ON_NETWORK",
+                        TxState::Rejected => "REJECTED",
+                        TxState::DoubleSpendAttempted => "DOUBLE_SPEND_ATTEMPTED",
+                        TxState::Unknown => "",
+                    },
+                };
                 match status {
                     "MINED" => {
                         info!("   ✅ {} already MINED on ARC — promoting to completed", short_txid);

@@ -84,17 +84,21 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             continue;
         }
 
-        // Step 2: Query ARC
-        match crate::handlers::query_arc_tx_status(client, txid).await {
-            Ok(arc_resp) => {
-                if arc_resp.tx_status.as_deref() == Some("MINED") {
-                    let block_height = arc_resp.block_height.unwrap_or(0);
-                    info!("   ⛏️ {} found MINED on ARC! Recovering...", short_txid);
+        // Step 2: Query via Services chain (ARC GP → WoC → JungleBus → Bitails).
+        // Only ARC populates `merkle_path_bump` from tx_status; the other tiers
+        // return `None`, in which case we fall through to the inline WoC proof
+        // fetch below for the BUMP.
+        match state.services.tx_status(txid).await {
+            Ok(status) => {
+                use crate::services::TxState;
+                if matches!(status.state, TxState::Mined) {
+                    let block_height = status.block_height.unwrap_or(0);
+                    info!("   ⛏️ {} found MINED via Services chain! Recovering...", short_txid);
 
-                    if let Some(ref merkle_path_hex) = arc_resp.merkle_path {
+                    if let Some(ref merkle_path_hex) = status.merkle_path_bump {
                         match create_proven_tx_and_recover(
-                            state, txid, merkle_path_hex, block_height,
-                            arc_resp.block_hash.as_deref().unwrap_or(""),
+                            state, txid, merkle_path_hex, block_height as u64,
+                            status.block_hash.as_deref().unwrap_or(""),
                         ) {
                             Ok(_) => { recovered_count += 1; }
                             Err(e) => { warn!("   ⚠️ Recovery failed for {}: {}", short_txid, e); }
