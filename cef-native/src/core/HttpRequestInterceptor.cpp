@@ -54,6 +54,26 @@ std::string g_pendingModalDomain = "";
 #define LOG_WARNING_HTTP(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_HTTP(msg) Logger::Log(msg, 3, 2)
 
+// Permission-prompt modal timeout (delay before postAuthTimeout fires the
+// "{...timeout...}" error response to the dApp). Applies to all six prompt
+// kinds: domain approval, identity-key reveal, key-linkage reveal, certificate
+// disclosure, scoped permission (protocol/basket/counterparty), and payment
+// confirmation.
+//
+// Bumped 60s → 600s on 2026-05-26 after a live SocialCert cert acquire failed:
+// the counterparty_permission_prompt fired correctly (new "auth message
+// signature" counterparty), the user took longer than 60s to read and click
+// Allow, the modal returned "scoped permission timeout" to the dApp, and the
+// cert acquire flow aborted. The user's eventual click only persisted the
+// grant for next time — the in-flight request was already lost.
+//
+// 600s (10 min) is functionally "unbounded" for any reasonable human decision
+// time while still bounding the worst case (orphaned modals, crashed
+// subprocess, OS sleep). If practical experience shows we want truly "off",
+// that becomes a Phase-2 cleanup-path audit (tab close, navigate-away,
+// subprocess crash) before removing the backstop entirely.
+static constexpr int kPromptAuthTimeoutMs = 600000;
+
 // In-memory cache for domain permissions backed by the Rust DB via REST
 class DomainPermissionCache {
 public:
@@ -1945,7 +1965,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             }
         }
 
-        postAuthTimeout(60000, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
+        postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
         handle_request = true;
         return true;
     }
@@ -2050,7 +2070,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             // Prompt branch.
             LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
             triggerIdentityKeyRevealModal(requestDomain_);
-            postAuthTimeout(60000, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
+            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
             handle_request = true;
             return true;
         }
@@ -2105,7 +2125,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             // verifier identity the page is asking about.
             LOG_DEBUG_HTTP("🛡️ key-linkage reveal prompt required for " + requestDomain_);
             triggerKeyLinkageRevealModal(requestDomain_, endpoint_, body_);
-            postAuthTimeout(60000, "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
+            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
             handle_request = true;
             return true;
         }
@@ -2136,7 +2156,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 } else {
                     LOG_DEBUG_HTTP("📋 Unapproved cert fields — showing disclosure notification for " + requestDomain_);
                     triggerCertificateDisclosureModal(requestDomain_, certInfo);
-                    postAuthTimeout(60000, "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}");
+                    postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}");
                     handle_request = true;
                     return true;
                 }
@@ -2212,7 +2232,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                         requestDomain_, method_, endpoint_, body_, this, decision.promptType);
                     CefPostTask(TID_UI, new CreateNotificationOverlayTask(
                         decision.promptType, requestDomain_, extraParams));
-                    postAuthTimeout(60000,
+                    postAuthTimeout(kPromptAuthTimeoutMs,
                         "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
                     handle_request = true;
                     return true;
@@ -2318,7 +2338,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                     requestDomain_, method_, endpoint_, body_, this, decision.promptType);
                 CefPostTask(TID_UI, new CreateNotificationOverlayTask(
                     decision.promptType, requestDomain_, extraParams));
-                postAuthTimeout(60000,
+                postAuthTimeout(kPromptAuthTimeoutMs,
                     "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
                 handle_request = true;
                 return true;
@@ -2359,7 +2379,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             PendingRequestManager::GetInstance().addRequest(
                 requestDomain_, method_, endpoint_, body_, this, decision.promptType);
             CefPostTask(TID_UI, new CreateNotificationOverlayTask(decision.promptType, requestDomain_, extraParams));
-            postAuthTimeout(60000, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
+            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
             handle_request = true;
             return true;
         }
@@ -2374,7 +2394,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     // Fallback: unknown trust level — show domain approval
     LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " has unrecognized trust level: " + perm.trustLevel + ", triggering approval");
     triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
-    postAuthTimeout(60000, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
+    postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
     handle_request = true;
     return true;
 }
@@ -2969,7 +2989,7 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
                 + requestDomain_ + " (drain-forward or sibling-forward) — firing "
                 + "identity_key_reveal prompt instead of sending a doomed request to Rust");
             triggerIdentityKeyRevealModal(requestDomain_);
-            postAuthTimeout(60000, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
+            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
             return;
         }
     }
