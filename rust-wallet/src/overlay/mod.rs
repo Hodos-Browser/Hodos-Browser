@@ -520,8 +520,16 @@ pub struct OverlayCertificateOutput {
 
 /// Query ALL overlay nodes for certificates matching a given identity key.
 ///
-/// Returns all certificate outputs found across all nodes, deduplicated by serialNumber.
-/// Used for stale certificate cleanup — need to see everything the overlay has for us.
+/// Returns all certificate outputs found across all nodes, deduplicated by
+/// (publish_txid, output_index) — the actual on-chain UTXO identifier.
+/// Used for stale certificate cleanup — need to see every UTXO the overlays
+/// have for us, including multiple historical publishes of the same serial.
+///
+/// Pre-2026-05-27 this deduplicated by serialNumber alone. That hid the
+/// existence of multiple historical publishes (same cert serial, different
+/// publish txids) from the cleanup endpoint, so when a serial had N
+/// historical UTXOs lingering on overlays, cleanup could only attempt one
+/// removal per invocation and the other N-1 were permanently invisible.
 pub async fn lookup_certificates_by_identity_key(
     identity_key_hex: &str,
     certifiers: &[&str],
@@ -548,7 +556,10 @@ pub async fn lookup_certificates_by_identity_key(
     let hosts: Vec<String> = host_set.into_iter().collect();
 
     let mut results: Vec<OverlayCertificateOutput> = Vec::new();
-    let mut seen_serials: HashSet<String> = HashSet::new();
+    // Dedup key = (publish_txid, output_index), the actual on-chain UTXO ID.
+    // We must NOT dedup by serial — multiple historical publishes of the same
+    // cert (different publish_txids) are exactly the case cleanup needs to see.
+    let mut seen_utxos: HashSet<(String, usize)> = HashSet::new();
 
     for host in &hosts {
         let url = format!("{}/lookup", host);
@@ -611,14 +622,17 @@ pub async fn lookup_certificates_by_identity_key(
 
             // Extract serialNumber and publish txid from the BEEF
             let (serial, publish_txid) = extract_cert_info_from_beef(&beef_bytes, output_index);
-            let serial_str = serial.clone().unwrap_or_default();
 
-            // Dedup by serialNumber
-            if !serial_str.is_empty() && seen_serials.contains(&serial_str) {
-                continue;
-            }
-            if !serial_str.is_empty() {
-                seen_serials.insert(serial_str);
+            // Dedup by (publish_txid, output_index) — the on-chain UTXO identifier.
+            // Entries without an extractable publish_txid are kept (no dedup) so the
+            // cleanup loop can still surface them; try_resubmit_spending_tx will
+            // handle the missing-publish_txid case gracefully.
+            if let Some(ref ptx) = publish_txid {
+                let key = (ptx.clone(), output_index);
+                if seen_utxos.contains(&key) {
+                    continue;
+                }
+                seen_utxos.insert(key);
             }
 
             results.push(OverlayCertificateOutput {
