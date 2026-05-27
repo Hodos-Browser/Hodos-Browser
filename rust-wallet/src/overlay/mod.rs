@@ -602,91 +602,133 @@ async fn discover_hosts_for_service(_service: &str) -> Vec<String> {
     Vec::new() // Empty = will use fallback
 }
 
+/// Per-tracker hard timeout for SHIP discovery (POST /lookup).
+///
+/// SLAP trackers should respond in well under a second; 5s leaves generous
+/// headroom for the cold-DNS, cold-TLS, busy-server case while bounding worst-
+/// case discovery wallclock at ~5s even when an individual tracker (notably
+/// `users.bapp.dev`) is taking 90-130s. Trackers that exceed this are skipped
+/// for the current call; whatever the other trackers returned still gets used.
+const SHIP_TRACKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Query SLAP trackers for SHIP advertisements matching the given topics.
 ///
 /// SHIP discovery protocol:
-/// 1. POST /lookup to each SLAP tracker
+/// 1. POST /lookup to each SLAP tracker (in parallel, each with `SHIP_TRACKER_TIMEOUT`)
 /// 2. Request: { "service": "ls_ship", "query": { "topics": ["tm_identity"] } }
 /// 3. Response: { "type": "output-list", "outputs": [{ "beef": "...", "outputIndex": N }] }
 /// 4. Parse BEEF outputs to extract SHIP advertisement scripts
 /// 5. Decode PushDrop scripts to get protocol/domain/topic
 ///
-/// Returns map of host_url → Set<topic>.
+/// Returns map of host_url → Set<topic>. Trackers that fail or time out are
+/// skipped silently — results from the trackers that did respond are still
+/// merged and returned.
+///
+/// Pre-2026-05-27 this ran the trackers SEQUENTIALLY with a 240s reqwest
+/// timeout, so a single slow tracker could block the whole discovery call
+/// for up to 4 minutes (and 4×240s=16min worst case across all 4). Combined
+/// with `ship_cache`'s blocking MISS branch, that made cold-start publish
+/// take 132s+. This rewrite caps each tracker at 5s in parallel, so worst-
+/// case discovery wallclock is ~5s.
 pub(super) async fn query_ship_advertisements(topics: &[String]) -> HashMap<String, HashSet<String>> {
     let client = reqwest::Client::builder()
         .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let query_body = serde_json::json!({
+    let query_body = Arc::new(serde_json::json!({
         "service": "ls_ship",
         "query": {
             "topics": topics
         }
-    });
+    }));
+    let topics_owned: Arc<Vec<String>> = Arc::new(topics.to_vec());
 
-    let mut all_hosts: HashMap<String, HashSet<String>> = HashMap::new();
+    // Spawn one task per tracker, each with its own hard timeout. JoinSet
+    // collects results as they arrive; trackers that exceed `SHIP_TRACKER_TIMEOUT`
+    // are aborted and counted as failures.
+    let mut set: tokio::task::JoinSet<(&'static str, Option<HashMap<String, HashSet<String>>>)> =
+        tokio::task::JoinSet::new();
 
     for tracker in DEFAULT_SLAP_TRACKERS {
-        let url = format!("{}/lookup", tracker);
-        debug!("SHIP discovery: querying {} for topics {:?}", url, topics);
+        let tracker: &'static str = *tracker;
+        let client = client.clone();
+        let query_body = Arc::clone(&query_body);
+        let topics_owned = Arc::clone(&topics_owned);
 
-        let response = match client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&query_body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("SHIP discovery: {} failed: {}", tracker, e);
-                continue;
-            }
-        };
+        set.spawn(async move {
+            let url = format!("{}/lookup", tracker);
+            debug!("SHIP discovery: querying {} for topics {:?}", url, topics_owned.as_slice());
 
-        if response.status().as_u16() != 200 {
-            warn!("SHIP discovery: {} returned HTTP {}", tracker, response.status());
-            continue;
-        }
+            let fetch = async {
+                let response = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(query_body.as_ref())
+                    .send()
+                    .await
+                    .map_err(|e| format!("HTTP error: {}", e))?;
 
-        let json: serde_json::Value = match response.json().await {
-            Ok(j) => j,
-            Err(e) => {
-                warn!("SHIP discovery: {} JSON parse error: {}", tracker, e);
-                continue;
-            }
-        };
-
-        // Validate response type
-        let answer_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if answer_type != "output-list" {
-            warn!("SHIP discovery: {} returned unexpected type '{}'", tracker, answer_type);
-            continue;
-        }
-
-        // Parse outputs — each contains a BEEF with a SHIP advertisement
-        let outputs = match json.get("outputs").and_then(|v| v.as_array()) {
-            Some(o) => o,
-            None => {
-                debug!("SHIP discovery: {} returned no outputs", tracker);
-                continue;
-            }
-        };
-
-        info!("SHIP discovery: {} returned {} advertisement(s)", tracker, outputs.len());
-
-        for output in outputs {
-            match parse_ship_advertisement(output, topics) {
-                Some((domain, topic)) => {
-                    all_hosts.entry(domain).or_default().insert(topic);
+                if response.status().as_u16() != 200 {
+                    return Err(format!("HTTP {}", response.status()));
                 }
-                None => continue,
+
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("JSON parse error: {}", e))?;
+
+                let answer_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if answer_type != "output-list" {
+                    return Err(format!("unexpected type '{}'", answer_type));
+                }
+
+                let outputs = json
+                    .get("outputs")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                info!("SHIP discovery: {} returned {} advertisement(s)", tracker, outputs.len());
+
+                let mut tracker_hosts: HashMap<String, HashSet<String>> = HashMap::new();
+                for output in &outputs {
+                    if let Some((domain, topic)) = parse_ship_advertisement(output, topics_owned.as_slice()) {
+                        tracker_hosts.entry(domain).or_default().insert(topic);
+                    }
+                }
+                Ok::<_, String>(tracker_hosts)
+            };
+
+            match tokio::time::timeout(SHIP_TRACKER_TIMEOUT, fetch).await {
+                Ok(Ok(hosts)) => (tracker, Some(hosts)),
+                Ok(Err(e)) => {
+                    warn!("SHIP discovery: {} failed: {}", tracker, e);
+                    (tracker, None)
+                }
+                Err(_) => {
+                    warn!(
+                        "SHIP discovery: {} exceeded {}s tracker timeout — skipping",
+                        tracker,
+                        SHIP_TRACKER_TIMEOUT.as_secs()
+                    );
+                    (tracker, None)
+                }
+            }
+        });
+    }
+
+    // Merge results from all trackers. Slow/failed trackers contribute nothing,
+    // which is fine — the surviving trackers' results still give us a usable
+    // host set. Different trackers may have different SHIP advertisements; we
+    // union them (matches the SDK's tracker-merge behavior).
+    let mut all_hosts: HashMap<String, HashSet<String>> = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((_tracker, Some(tracker_hosts))) = joined {
+            for (domain, topic_set) in tracker_hosts {
+                all_hosts.entry(domain).or_default().extend(topic_set);
             }
         }
-
-        // Query ALL trackers and merge results (matching SDK behavior).
-        // Different trackers may have different SHIP advertisements.
     }
 
     if !all_hosts.is_empty() {

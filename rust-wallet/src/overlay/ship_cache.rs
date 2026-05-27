@@ -12,9 +12,16 @@
 //! FRESH_TTL <= age < STALE_TTL   → return cached + spawn bg refresh (dedup'd)
 //! age >= STALE_TTL (30 min)      → block on fresh fetch
 //!                                  on fail: return stale-but-served entry
-//! no entry                       → block on fresh fetch
-//!                                  on fail: return empty (no poison)
+//! no entry                       → return empty + spawn bg refresh (dedup'd)
+//!                                  caller merges with hardcoded fallbacks
 //! ```
+//!
+//! Cold-start MISS does NOT block (post-2026-05-27): the prior block-on-fetch
+//! behavior coupled publish/unpublish wallclock to the slowest SLAP tracker
+//! (`users.bapp.dev` regularly takes 90-130s). The caller (`overlay::submit_to_topic`)
+//! already merges discovered hosts with 3 hardcoded fallback hosts, so a cold
+//! cache still produces 3 usable hosts immediately. The bg refresh warms the
+//! cache for subsequent calls.
 //!
 //! No-poison invariant: empty fetch results NEVER overwrite a cached entry,
 //! and failed fetches NEVER store an empty default. The cache either reflects
@@ -145,8 +152,25 @@ impl ShipDiscoveryCache {
                 }
             }
             CacheStatus::Empty => {
-                info!("ShipCache: MISS for '{}'; blocking on fresh fetch", topic);
-                self.fetch_and_store(topic).await.unwrap_or_default()
+                // Cold-start MISS: do NOT block. Spawn bg refresh and return empty.
+                // The caller (overlay submit/lookup) merges with hardcoded fallback
+                // hosts, so an empty discovery result still yields 3 usable hosts.
+                // Pre-2026-05-27 this branch blocked the publish flow on a sequential
+                // SLAP tracker fan-out — one slow tracker (`users.bapp.dev` regularly
+                // takes 90-130s) added ~130s to every cold-start publish/unpublish.
+                info!(
+                    "ShipCache: MISS for '{}'; returning empty (bg refresh kicked off, caller uses fallbacks)",
+                    topic
+                );
+                if self.try_claim_refresh(topic) {
+                    let cache = Arc::clone(self);
+                    let topic_owned = topic.to_string();
+                    tokio::spawn(async move {
+                        cache.fetch_and_store(&topic_owned).await;
+                        cache.release_refresh(&topic_owned);
+                    });
+                }
+                Vec::new()
             }
         }
     }
