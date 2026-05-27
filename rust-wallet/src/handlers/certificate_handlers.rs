@@ -4732,14 +4732,18 @@ async fn unpublish_certificate_core(
 
     // Submit spending tx to overlay and verify removal
     let overlay_removed = {
+        // For unpublish, use the early-return-on-any-response variant: overlay-express's
+        // STEAK is ambiguous for removals (often empty even on success), so waiting for
+        // a true acceptance is pointless. As soon as one host responds we proceed to
+        // lookup-verify (the actual confirmation). Remaining hosts drain in background.
         let overlay_result = match crate::beef::Beef::from_bytes(&beef_bytes).and_then(|b| b.to_v1_bytes()) {
             Ok(v1_bytes) => {
-                log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay", v1_bytes.len());
-                crate::overlay::submit_to_identity_overlay(&state.ship_cache, &v1_bytes).await
+                log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay (early-return-on-any-response)", v1_bytes.len());
+                crate::overlay::submit_to_identity_overlay_early_return(&state.ship_cache, &v1_bytes).await
             }
             Err(e) => {
                 log::warn!("   ⚠️  BEEF V1 conversion failed: {}, trying raw", e);
-                crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_bytes).await
+                crate::overlay::submit_to_identity_overlay_early_return(&state.ship_cache, &beef_bytes).await
             }
         };
 

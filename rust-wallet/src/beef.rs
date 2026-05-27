@@ -125,11 +125,13 @@ impl Beef {
         // Check if this is Atomic BEEF format (BRC-95)
         // Atomic BEEF starts with 01010101 followed by 32-byte txid, then standard BEEF
         let actual_bytes = if bytes.len() >= 36 && bytes[0..4] == ATOMIC_BEEF_MARKER {
-            log::info!("📦 Detected Atomic BEEF format, stripping 36-byte header");
+            // Debug-level only — SHIP discovery parses 240+ Atomic BEEFs per refresh
+            // (one per advertisement) and the per-BEEF info logs flood the journal.
+            // Useful when troubleshooting BEEF parsing, but not for normal operation.
             let txid_bytes = &bytes[4..36];
             let mut txid_le = txid_bytes.to_vec();
             txid_le.reverse(); // Convert to little-endian for display
-            log::info!("   Atomic BEEF subject txid: {}", hex::encode(&txid_le));
+            log::debug!("📦 Detected Atomic BEEF format, stripping 36-byte header (subject txid: {})", hex::encode(&txid_le));
             &bytes[36..] // Skip the 36-byte Atomic header
         } else {
             bytes

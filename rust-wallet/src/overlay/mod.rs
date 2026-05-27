@@ -80,7 +80,20 @@ pub async fn submit_to_identity_overlay(
     ship_cache: &Arc<ShipDiscoveryCache>,
     beef_bytes: &[u8],
 ) -> Result<bool, String> {
-    submit_to_topic(ship_cache, TOPIC_IDENTITY, beef_bytes).await
+    submit_to_topic(ship_cache, TOPIC_IDENTITY, beef_bytes, false).await
+}
+
+/// Like `submit_to_identity_overlay`, but returns as soon as ANY host responds
+/// (success, rejection, or per-host error) rather than waiting for the first
+/// definitive `Ok(true)`. Use this when the caller verifies the outcome via a
+/// separate `/lookup` query — e.g. unpublish, where overlay-express's STEAK is
+/// ambiguous for removals and `lookup_published_certificate` is the actual
+/// confirmation step.
+pub async fn submit_to_identity_overlay_early_return(
+    ship_cache: &Arc<ShipDiscoveryCache>,
+    beef_bytes: &[u8],
+) -> Result<bool, String> {
+    submit_to_topic(ship_cache, TOPIC_IDENTITY, beef_bytes, true).await
 }
 
 /// Get all known overlay lookup endpoints for identity resolution.
@@ -124,6 +137,7 @@ pub async fn submit_to_topic(
     ship_cache: &Arc<ShipDiscoveryCache>,
     topic: &str,
     beef_bytes: &[u8],
+    early_return_on_any_response: bool,
 ) -> Result<bool, String> {
     if beef_bytes.is_empty() {
         return Err("Empty BEEF bytes — nothing to submit".to_string());
@@ -168,6 +182,27 @@ pub async fn submit_to_topic(
     // Step 3: Drain the set until we see the first Ok(true) OR exhaust all hosts.
     let mut last_error = String::new();
 
+    // Helper: spawn a bg-drain task taking ownership of the remaining JoinSet.
+    // JoinSet aborts its tasks on Drop, so we MUST move it into a spawned task
+    // to let remaining submissions complete naturally.
+    fn drain_in_background(set: tokio::task::JoinSet<(String, Result<bool, String>)>, topic_bg: String) {
+        if set.is_empty() { return; }
+        tokio::spawn(async move {
+            let mut set = set;
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((h, Ok(true)))  => info!("Overlay (bg): {} also accepted for '{}'", h, topic_bg),
+                    Ok((h, Ok(false))) => warn!("Overlay (bg): {} rejected for '{}'", h, topic_bg),
+                    Ok((h, Err(e)))    => warn!("Overlay (bg): {} error for '{}': {}", h, topic_bg, e),
+                    Err(e)             => warn!("Overlay (bg): task panic for '{}': {}", topic_bg, e),
+                }
+            }
+            info!("Overlay (bg): all background submissions for '{}' completed", topic_bg);
+        });
+    }
+
+    let mut any_response_seen = false;
+
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((host, Ok(true))) => {
@@ -176,34 +211,36 @@ pub async fn submit_to_topic(
                     "Overlay: ✅ {} accepted for '{}' (early return; {} task(s) continue in background)",
                     host, topic_owned, remaining,
                 );
-                // Move the remaining JoinSet into a spawned drain task so the
-                // other hosts still receive the BEEF. JoinSet aborts its tasks
-                // on Drop, so we MUST consume it in a spawned task — dropping
-                // it here would cancel the background submissions and leave
-                // some overlays unaware of the publish.
-                if remaining > 0 {
-                    let topic_bg = topic_owned.clone();
-                    tokio::spawn(async move {
-                        let mut set = set; // move into the task
-                        while let Some(joined) = set.join_next().await {
-                            match joined {
-                                Ok((h, Ok(true)))  => info!("Overlay (bg): {} also accepted for '{}'", h, topic_bg),
-                                Ok((h, Ok(false))) => warn!("Overlay (bg): {} rejected for '{}'", h, topic_bg),
-                                Ok((h, Err(e)))    => warn!("Overlay (bg): {} error for '{}': {}", h, topic_bg, e),
-                                Err(e)             => warn!("Overlay (bg): task panic for '{}': {}", topic_bg, e),
-                            }
-                        }
-                        info!("Overlay (bg): all background submissions for '{}' completed", topic_bg);
-                    });
-                }
+                drain_in_background(set, topic_owned.clone());
                 return Ok(true);
             }
-            Ok((host, Ok(false))) => warn!("Overlay: {} rejected for '{}'", host, topic_owned),
+            Ok((host, Ok(false))) => {
+                warn!("Overlay: {} rejected for '{}'", host, topic_owned);
+                any_response_seen = true;
+            }
             Ok((host, Err(e))) => {
                 warn!("Overlay: {} error for '{}': {}", host, topic_owned, e);
                 last_error = e;
+                any_response_seen = true;
             }
             Err(e) => warn!("Overlay: task panic for '{}': {}", topic_owned, e),
+        }
+
+        // For unpublish-style callers: as soon as ANY host has responded (success,
+        // rejection, or per-host error), return — caller will verify via /lookup.
+        // The remaining hosts continue draining in the background so every overlay
+        // still receives the BEEF (we don't gossip — must reach all hosts eventually).
+        if early_return_on_any_response && any_response_seen {
+            let remaining = set.len();
+            info!(
+                "Overlay: first response received for '{}' (early-return-on-any-response; {} task(s) continue in background)",
+                topic_owned, remaining,
+            );
+            drain_in_background(set, topic_owned.clone());
+            // Return Ok(false) so the caller knows to verify via lookup.
+            // (Not Err — the submit phase itself didn't fail, it's just that no
+            // host returned a definitive Ok(true), which is normal for unpublish.)
+            return Ok(false);
         }
     }
 
@@ -216,10 +253,79 @@ pub async fn submit_to_topic(
     }
 }
 
+/// Per-host lookup helper. Returns:
+/// - `Ok(Some((beef, idx)))` — cert found on this host
+/// - `Ok(None)` — host returned 200 but cert not present
+/// - `Err(msg)` — network error, non-200 status, or parse failure (skip this host)
+async fn lookup_certificate_on_host(
+    client: reqwest::Client,
+    host: String,
+    body: serde_json::Value,
+    serial_number_b64: String,
+) -> Result<Option<(Vec<u8>, usize)>, String> {
+    let url = format!("{}/lookup", host);
+    debug!("Overlay lookup: POST {} for serialNumber {}", url, serial_number_b64);
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error from {}: {}", host, e))?;
+
+    if response.status().as_u16() != 200 {
+        return Err(format!("HTTP {} from {}", response.status(), host));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error from {}: {}", host, e))?;
+
+    let outputs = json.get("outputs").and_then(|v| v.as_array());
+    if let Some(outputs) = outputs {
+        if !outputs.is_empty() {
+            if let Some(first) = outputs.first() {
+                let output_index = first.get("outputIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+                use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                let beef_bytes = if let Some(s) = first.get("beef").and_then(|v| v.as_str()) {
+                    BASE64.decode(s).ok()
+                } else if let Some(arr) = first.get("beef").and_then(|v| v.as_array()) {
+                    Some(arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect::<Vec<u8>>())
+                } else {
+                    None
+                };
+
+                if let Some(beef_bytes) = beef_bytes.filter(|b| !b.is_empty()) {
+                    info!("Overlay lookup: found certificate on {} ({} bytes BEEF, outputIndex {})", host, beef_bytes.len(), output_index);
+                    return Ok(Some((beef_bytes, output_index)));
+                }
+                // BEEF couldn't be decoded — treat as "not a definitive answer" so we let other hosts respond
+                return Err(format!("Could not decode BEEF from {}", host));
+            }
+        }
+    }
+
+    debug!("Overlay lookup: certificate not found on {}", host);
+    Ok(None)
+}
+
 /// Query the overlay to check if a certificate is published.
 ///
 /// Queries by serialNumber for exact match.
 /// Returns the BEEF bytes and output index if found.
+///
+/// Parallelizes across all known hosts (SHIP-discovered + hardcoded fallback)
+/// and returns on the first definitive answer:
+/// - First `Ok(Some)` (cert found) → return immediately, bg-drain rest
+/// - First `Ok(None)` (cert not present) → return immediately, bg-drain rest
+/// - All hosts errored → return Err
+///
+/// This is the verify-step companion to `submit_to_topic`. Before this change,
+/// a sequential `for host in &hosts` loop could block the user for up to the
+/// per-host timeout (240s) if the first host iterated was slow/dead.
 pub async fn lookup_published_certificate(
     serial_number_b64: &str,
 ) -> Result<Option<(Vec<u8>, usize)>, String> {
@@ -235,76 +341,68 @@ pub async fn lookup_published_certificate(
         }
     });
 
-    // Merge discovered + fallback hosts for lookups (same as submit pattern)
     let discovered = discover_hosts_for_service("ls_identity").await;
     let fallbacks = fallback_hosts_for_topic(TOPIC_IDENTITY);
     let mut host_set: HashSet<String> = HashSet::new();
     for h in discovered { host_set.insert(h); }
     for h in fallbacks { host_set.insert(h.to_string()); }
     let hosts: Vec<String> = host_set.into_iter().collect();
+    let n_hosts = hosts.len();
 
-    for host in &hosts {
-        let url = format!("{}/lookup", host);
-        debug!("Overlay lookup: POST {} for serialNumber {}", url, serial_number_b64);
-
-        let response = match client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Overlay lookup failed for {}: {}", host, e);
-                continue;
-            }
-        };
-
-        if response.status().as_u16() != 200 {
-            warn!("Overlay lookup returned HTTP {} from {}", response.status(), host);
-            continue;
-        }
-
-        let json: serde_json::Value = match response.json().await {
-            Ok(j) => j,
-            Err(e) => {
-                warn!("Overlay lookup JSON parse failed from {}: {}", host, e);
-                continue;
-            }
-        };
-
-        let outputs = json.get("outputs").and_then(|v| v.as_array());
-        if let Some(outputs) = outputs {
-            if !outputs.is_empty() {
-                if let Some(first) = outputs.first() {
-                    let output_index = first.get("outputIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-                    // BEEF can be base64 string OR number array (SDK format)
-                    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-                    let beef_bytes = if let Some(s) = first.get("beef").and_then(|v| v.as_str()) {
-                        BASE64.decode(s).ok()
-                    } else if let Some(arr) = first.get("beef").and_then(|v| v.as_array()) {
-                        Some(arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect::<Vec<u8>>())
-                    } else {
-                        None
-                    };
-
-                    if let Some(beef_bytes) = beef_bytes.filter(|b| !b.is_empty()) {
-                        info!("Overlay lookup: found certificate ({} bytes BEEF, outputIndex {})", beef_bytes.len(), output_index);
-                        return Ok(Some((beef_bytes, output_index)));
-                    } else {
-                        warn!("Overlay lookup: could not decode BEEF from response");
-                    }
-                }
-            }
-        }
-
-        debug!("Overlay lookup: certificate not found on {}", host);
-        return Ok(None);
+    // Spawn parallel lookups via JoinSet.
+    let mut set: tokio::task::JoinSet<(String, Result<Option<(Vec<u8>, usize)>, String>)> =
+        tokio::task::JoinSet::new();
+    for host in hosts {
+        let client = client.clone();
+        let body = body.clone();
+        let serial = serial_number_b64.to_string();
+        set.spawn(async move {
+            let result = lookup_certificate_on_host(client, host.clone(), body, serial).await;
+            (host, result)
+        });
     }
 
-    Err("All overlay hosts failed during lookup".to_string())
+    let mut last_error = String::new();
+
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((host, Ok(answer))) => {
+                let remaining = set.len();
+                info!(
+                    "Overlay lookup: ✅ {} returned definitive answer for '{}' (early return; {} task(s) drain in background)",
+                    host,
+                    if answer.is_some() { "found" } else { "not found" },
+                    remaining,
+                );
+                // Move remaining JoinSet into a spawned drain task — same pattern as submit_to_topic.
+                if remaining > 0 {
+                    tokio::spawn(async move {
+                        let mut set = set;
+                        while let Some(joined) = set.join_next().await {
+                            match joined {
+                                Ok((h, Ok(Some(_)))) => debug!("Overlay lookup (bg): {} also found cert", h),
+                                Ok((h, Ok(None)))    => debug!("Overlay lookup (bg): {} also reports not found", h),
+                                Ok((h, Err(e)))     => debug!("Overlay lookup (bg): {} error: {}", h, e),
+                                Err(e)              => debug!("Overlay lookup (bg): task panic: {}", e),
+                            }
+                        }
+                    });
+                }
+                return Ok(answer);
+            }
+            Ok((host, Err(e))) => {
+                warn!("Overlay lookup: {} error: {}", host, e);
+                last_error = e;
+            }
+            Err(e) => warn!("Overlay lookup: task panic: {}", e),
+        }
+    }
+
+    Err(format!(
+        "All {} overlay host(s) failed during lookup. Last error: {}",
+        n_hosts,
+        if last_error.is_empty() { "no hosts responded".to_string() } else { last_error },
+    ))
 }
 
 /// Represents a certificate found on the overlay network.
