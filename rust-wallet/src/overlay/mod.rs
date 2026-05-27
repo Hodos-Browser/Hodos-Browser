@@ -101,7 +101,25 @@ pub async fn get_identity_lookup_endpoints(ship_cache: &Arc<ShipDiscoveryCache>)
 
 /// Submit a BEEF transaction to all overlay hosts serving a given topic.
 ///
-/// Uses SHIP discovery with hardcoded fallback.
+/// Phase 1.6d polish (2026-05-27): parallel submission with early-return + bg drain.
+///
+/// Overlays do not gossip among themselves (no GASP), so we must reach every
+/// known host eventually. But the user only needs ONE host to admit for the
+/// publish to be considered successful — overlays are idempotent and any
+/// subsequent /lookup will hit at least the admitting host's index. So:
+///
+/// 1. Discover hosts (SHIP cache hit, ~instant per Step 1)
+/// 2. Spawn parallel submissions to ALL hosts via `JoinSet`
+/// 3. Return `Ok(true)` as soon as ANY host accepts (typically 2–5s)
+/// 4. Move the remaining `JoinSet` into a `tokio::spawn`'d drain task so
+///    slow/hung hosts continue to receive the BEEF in the background. Since
+///    overlays are idempotent, late submissions to already-admitted txs are
+///    no-ops on the overlay side.
+///
+/// Failure path: if all hosts complete without acceptance, return `Ok(false)`
+/// (everything rejected cleanly) or `Err` (last network error). The user
+/// waits for the SLOWEST host in this case — acceptable because it only
+/// happens when the publish actually failed.
 pub async fn submit_to_topic(
     ship_cache: &Arc<ShipDiscoveryCache>,
     topic: &str,
@@ -117,7 +135,6 @@ pub async fn submit_to_topic(
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // Step 1: Merge SHIP-discovered hosts with hardcoded fallbacks (SDK pattern).
-    // Overlays don't auto-sync (no GASP), so we must submit to ALL known hosts.
     let discovered_hosts = discover_hosts_for_topic(ship_cache, topic).await;
     let fallbacks = fallback_hosts_for_topic(topic);
 
@@ -125,37 +142,77 @@ pub async fn submit_to_topic(
     for h in &discovered_hosts { host_set.insert(h.clone()); }
     for h in &fallbacks { host_set.insert(h.to_string()); }
     let hosts: Vec<String> = host_set.into_iter().collect();
+    let n_hosts = hosts.len();
 
     info!("Overlay: {} host(s) for '{}' ({} discovered + {} fallback, {} unique)",
-        hosts.len(), topic, discovered_hosts.len(), fallbacks.len(), hosts.len());
+        n_hosts, topic, discovered_hosts.len(), fallbacks.len(), n_hosts);
 
-    // Step 3: Submit to ALL hosts (overlays are idempotent, more coverage is better)
-    let mut any_accepted = false;
+    // Step 2: Spawn parallel submissions. Share large/owned values via Arc so
+    // each spawned task captures cheaply (and so they live past this function
+    // when we move the JoinSet into the bg-drain task).
+    let beef = std::sync::Arc::new(beef_bytes.to_vec());
+    let topics_json = std::sync::Arc::new(serde_json::json!([topic]).to_string());
+    let topic_owned = topic.to_string();
+
+    let mut set: tokio::task::JoinSet<(String, Result<bool, String>)> = tokio::task::JoinSet::new();
+    for host in hosts {
+        let client = client.clone();
+        let beef = std::sync::Arc::clone(&beef);
+        let topics_json = std::sync::Arc::clone(&topics_json);
+        set.spawn(async move {
+            let result = submit_beef_to_host(&client, &host, &beef, &topics_json).await;
+            (host, result)
+        });
+    }
+
+    // Step 3: Drain the set until we see the first Ok(true) OR exhaust all hosts.
     let mut last_error = String::new();
-    let topics_json = serde_json::json!([topic]).to_string();
 
-    for host in &hosts {
-        match submit_beef_to_host(&client, host, beef_bytes, &topics_json).await {
-            Ok(true) => {
-                info!("Overlay: {} accepted the transaction for '{}'", host, topic);
-                any_accepted = true;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((host, Ok(true))) => {
+                let remaining = set.len();
+                info!(
+                    "Overlay: ✅ {} accepted for '{}' (early return; {} task(s) continue in background)",
+                    host, topic_owned, remaining,
+                );
+                // Move the remaining JoinSet into a spawned drain task so the
+                // other hosts still receive the BEEF. JoinSet aborts its tasks
+                // on Drop, so we MUST consume it in a spawned task — dropping
+                // it here would cancel the background submissions and leave
+                // some overlays unaware of the publish.
+                if remaining > 0 {
+                    let topic_bg = topic_owned.clone();
+                    tokio::spawn(async move {
+                        let mut set = set; // move into the task
+                        while let Some(joined) = set.join_next().await {
+                            match joined {
+                                Ok((h, Ok(true)))  => info!("Overlay (bg): {} also accepted for '{}'", h, topic_bg),
+                                Ok((h, Ok(false))) => warn!("Overlay (bg): {} rejected for '{}'", h, topic_bg),
+                                Ok((h, Err(e)))    => warn!("Overlay (bg): {} error for '{}': {}", h, topic_bg, e),
+                                Err(e)             => warn!("Overlay (bg): task panic for '{}': {}", topic_bg, e),
+                            }
+                        }
+                        info!("Overlay (bg): all background submissions for '{}' completed", topic_bg);
+                    });
+                }
+                return Ok(true);
             }
-            Ok(false) => {
-                warn!("Overlay: {} rejected the transaction for '{}'", host, topic);
-            }
-            Err(e) => {
-                warn!("Overlay: {} error for '{}': {}", host, topic, e);
+            Ok((host, Ok(false))) => warn!("Overlay: {} rejected for '{}'", host, topic_owned),
+            Ok((host, Err(e))) => {
+                warn!("Overlay: {} error for '{}': {}", host, topic_owned, e);
                 last_error = e;
             }
+            Err(e) => warn!("Overlay: task panic for '{}': {}", topic_owned, e),
         }
     }
 
-    if any_accepted {
-        Ok(true)
-    } else if last_error.is_empty() {
-        Ok(false) // All rejected, no errors
+    // All hosts completed without acceptance.
+    warn!("Overlay: all {} host(s) completed for '{}' without acceptance", n_hosts, topic_owned);
+    if last_error.is_empty() {
+        Ok(false)
     } else {
-        Err(format!("All overlay hosts failed for '{}'. Last error: {}", topic, last_error))
+        Err(format!("All overlay hosts failed for '{}'. Last error: {}", topic_owned, last_error))
     }
 }
 

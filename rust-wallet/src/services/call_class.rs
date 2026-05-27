@@ -12,25 +12,31 @@
 //! | `IndexerSync` | 8s | Indexer call in front of a UI-blocking request; has a Services-chain fallback. |
 //! | `IndexerAsync` | 15s | Background indexer call (Monitor task, cache refresh); has a Services-chain fallback. |
 //! | `IndexerBulk` | 30s | Indexer call returning a big payload (BEEF ancestry, gap-limit sweep); has a Services-chain fallback. |
-//! | `ThirdPartyNoFallback` | 120s | Third-party service (cert, paymail, MessageBox, overlay) with no alternate provider. Single attempt. |
+//! | `ThirdPartyNoFallback` | 240s | Third-party service (cert, paymail, MessageBox, overlay) with no alternate provider. Single attempt. |
 //!
-//! ## Why 120s for `ThirdPartyNoFallback`
+//! ## Why 240s for `ThirdPartyNoFallback`
 //!
 //! - 8s/15s budgets assume a provider chain absorbs one tier's failure. Third
 //!   parties have no chain — a tight timeout just fails the user.
-//! - The CEF outer cap on wallet HTTP requests is 120s
-//!   (see `cef-native` and [[project_publish_on_acquire_restored]]). At 120s
-//!   inner = 120s outer there is **no buffer**: if CEF's cancel wins the race,
-//!   the wallet's response never reaches React. Bumped from 90s to 120s after
-//!   SocialCert was observed taking 86-90s on degraded days (live smoke on
-//!   2026-05-26 hit 86.06s for a successful second attempt while the first
-//!   attempt timed out at exactly 90s). If the race becomes a real problem,
-//!   bump CEF's outer cap in tandem and restore the buffer here.
+//! - The CEF outer cap for cert endpoints is 300s
+//!   (see `cef-native/src/core/HttpRequestInterceptor.cpp::postHttpTimeout`).
+//!   240s wallet inner + 300s CEF outer = 60s buffer — the wallet's structured
+//!   response always wins over CEF's outer fallback.
+//! - History: 8s (1.6d.A regression) → 60s → 90s → 120s → 240s. Each bump came
+//!   after live observation of SocialCert response times exceeding the prior
+//!   ceiling. 2026-05-27 testing showed `/signCertificate` regularly taking
+//!   100-120s and occasionally exceeding 120s, causing first-attempt timeouts
+//!   that then required a SocialCert frontend auto-retry. Bumping to 240s
+//!   should let the first attempt complete normally even on degraded backend
+//!   days.
 //! - This is a class-level setting — it applies to all third-party-no-fallback
 //!   sites (paymail, MessageBox/AuthFetch, overlay SHIP/lookup/submit, cert
 //!   handlers). Intentional: site-specific overrides do not belong in the
 //!   wallet. If a single host needs different semantics, redesign the class
 //!   matrix rather than special-casing a hostname.
+//! - Per-host overlay submit now parallelizes (see `src/overlay/mod.rs::submit_to_topic`),
+//!   so a single slow overlay host hanging for the full 240s does not block
+//!   the user — it just keeps running in the background drain task.
 
 use std::time::Duration;
 
@@ -43,8 +49,8 @@ pub enum CallClass {
     IndexerAsync,
     /// 30s — indexer call, large payload (BEEF ancestry, gap scan), has chain fallback.
     IndexerBulk,
-    /// 120s — third-party service with no alternate provider; single attempt.
-    /// Rides at the CEF outer cap (no buffer) — see module docs.
+    /// 240s — third-party service with no alternate provider; single attempt.
+    /// CEF outer cap for cert endpoints is 300s, giving 60s buffer — see module docs.
     ThirdPartyNoFallback,
 }
 
@@ -55,7 +61,7 @@ impl CallClass {
             CallClass::IndexerSync => Duration::from_secs(8),
             CallClass::IndexerAsync => Duration::from_secs(15),
             CallClass::IndexerBulk => Duration::from_secs(30),
-            CallClass::ThirdPartyNoFallback => Duration::from_secs(120),
+            CallClass::ThirdPartyNoFallback => Duration::from_secs(240),
         }
     }
 }
@@ -80,10 +86,10 @@ mod tests {
     }
 
     #[test]
-    fn third_party_no_fallback_is_120s() {
+    fn third_party_no_fallback_is_240s() {
         assert_eq!(
             CallClass::ThirdPartyNoFallback.timeout(),
-            Duration::from_secs(120)
+            Duration::from_secs(240)
         );
     }
 
@@ -112,19 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn third_party_does_not_exceed_cef_120s_cap() {
-        // CEF's outer wallet-request cap is 120s. ThirdPartyNoFallback must
-        // not exceed it, otherwise CEF will cancel the request before the
-        // wallet's reqwest timeout fires and our error never reaches React.
-        //
-        // As of 2026-05-26 we deliberately ride AT the cap (120s = 120s, zero
-        // buffer) — chosen over 90s after SocialCert was observed taking
-        // 86-90s on degraded days. If the race becomes a real problem, bump
-        // CEF's outer cap first, then restore a buffer here.
+    fn third_party_does_not_exceed_cef_cert_cap() {
+        // CEF's outer cap for cert endpoints is 300s (see
+        // cef-native/src/core/HttpRequestInterceptor.cpp::postHttpTimeout —
+        // the 300000ms branch for /acquireCertificate and /proveCertificate).
+        // ThirdPartyNoFallback must stay below it (with margin) so the wallet's
+        // structured response always wins over CEF's outer fallback. The
+        // /signCertificate POST inside acquireCertificate is the dominant
+        // consumer of this budget.
+        const CEF_CERT_OUTER_CAP_SECS: u64 = 300;
         assert!(
-            CallClass::ThirdPartyNoFallback.timeout() <= Duration::from_secs(120),
-            "ThirdPartyNoFallback ({}s) exceeds CEF cap (120s) — CEF will cancel before our timeout fires",
-            CallClass::ThirdPartyNoFallback.timeout().as_secs()
+            CallClass::ThirdPartyNoFallback.timeout() < Duration::from_secs(CEF_CERT_OUTER_CAP_SECS),
+            "ThirdPartyNoFallback ({}s) exceeds CEF cert cap ({}s) — CEF will cancel before our timeout fires",
+            CallClass::ThirdPartyNoFallback.timeout().as_secs(),
+            CEF_CERT_OUTER_CAP_SECS,
         );
     }
 }

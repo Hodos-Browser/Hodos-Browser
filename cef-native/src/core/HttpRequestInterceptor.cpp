@@ -2446,19 +2446,24 @@ void AsyncWalletResourceHandler::postHttpTimeout() {
     //
     //   /wallet/recover      — gap-limit address scan over WoC (60–120s)
     //   /acquireCertificate  — BRC-53 handshake + third-party /signCertificate
-    //                          (certifier server, observed 30–50s; wallet caps
-    //                          internally at 60s via shadowed reqwest client)
+    //                          (certifier server, observed 100–120s on degraded
+    //                          days; wallet caps internally at 240s via
+    //                          CallClass::ThirdPartyNoFallback). 300s outer
+    //                          gives 60s buffer above the wallet cap so wallet's
+    //                          structured response always wins.
     //   /proveCertificate    — per-field decrypt + re-encrypt for verifier;
     //                          paired with /acquireCertificate flows
     //
     // TODO (1.6d.D follow-up): replace this CEF-side endpoint switch with the
     // per-call-class timeout tier policy (8s indexer-with-fallback / 15s
-    // indexer-single-shot / 60s third-party / 120s long-scan) living in
+    // indexer-single-shot / 240s third-party / 120s long-scan) living in
     // WalletServices. CEF then keeps one or two outer caps as a safety net only.
-    if (endpoint_.find("/wallet/recover")     != std::string::npos ||
-        endpoint_.find("/acquireCertificate") != std::string::npos ||
-        endpoint_.find("/proveCertificate")   != std::string::npos) {
+    if (endpoint_.find("/wallet/recover")     != std::string::npos) {
         timeoutMs = 120000;
+    }
+    if (endpoint_.find("/acquireCertificate") != std::string::npos ||
+        endpoint_.find("/proveCertificate")   != std::string::npos) {
+        timeoutMs = 300000;
     }
     CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), timeoutMs);
 }

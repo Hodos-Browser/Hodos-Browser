@@ -2332,11 +2332,12 @@ async fn acquire_certificate_issuance(
 
     // Per-call-class timeout policy (CallClass enum). /signCertificate is a
     // third-party call with no fallback — SocialCert does server-side
-    // decrypt-decrypt-sign-persist for every field and routinely needs 10-50s.
-    // Past history: bumped from 8s (1.6d.A regression) to 60s (project_cert_acquire_hodos_bug)
-    // to 90s (CallClass::ThirdPartyNoFallback) to 120s on 2026-05-26 after
-    // SocialCert was observed taking 86-90s on degraded days. 120s rides at
-    // the CEF outer cap (zero buffer) — see CallClass module docs.
+    // decrypt-decrypt-sign-persist for every field and routinely needs 10-120s.
+    // Past history: 8s → 60s → 90s → 120s → 240s. 2026-05-27 testing showed
+    // SocialCert regularly taking 100-120s and sometimes exceeding 120s,
+    // causing first-attempt timeouts. Bumped to 240s class-wide; CEF outer
+    // cap on /acquireCertificate raised to 300s in lockstep (60s buffer).
+    // See CallClass module docs and HttpRequestInterceptor.cpp::postHttpTimeout.
     let client = reqwest::Client::builder()
         .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()
