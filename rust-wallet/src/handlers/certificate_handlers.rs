@@ -4787,14 +4787,19 @@ async fn unpublish_certificate_core(
         }
     };
 
-    // Update certificate publish status based on overlay result
+    // Update certificate publish status based on overlay result.
+    //
+    // PRESERVE publish_txid + publish_vout even after unpublish — TaskReplayOverlay
+    // needs them to rebuild the removal-BEEF if the overlay didn't accept the first
+    // submission. Pre-2026-05-27 this nulled them out, which silently broke the
+    // retry path for every cert with status='unpublished_pending_overlay'.
     let final_status = if overlay_removed { "unpublished" } else { "unpublished_pending_overlay" };
     {
         let db = state.database.lock().unwrap();
         let cert_repo = CertificateRepository::new(db.connection());
         let _ = cert_repo.update_publish_status(
             type_bytes, serial_bytes, certifier_bytes,
-            final_status, None, None,
+            final_status, Some(publish_txid), Some(publish_vout as i32),
         );
     }
 
@@ -4811,6 +4816,8 @@ async fn unpublish_certificate_core(
         let serial_owned = serial_bytes.to_vec();
         let certifier_owned = certifier_bytes.to_vec();
         let serial_b64_owned = BASE64.encode(serial_bytes);
+        let publish_txid_owned = publish_txid.to_string();
+        let publish_vout_owned = publish_vout as i32;
 
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -4822,7 +4829,7 @@ async fn unpublish_certificate_core(
                     let cert_repo = CertificateRepository::new(db.connection());
                     let _ = cert_repo.update_publish_status(
                         &type_owned, &serial_owned, &certifier_owned,
-                        "unpublished", None, None,
+                        "unpublished", Some(&publish_txid_owned), Some(publish_vout_owned),
                     );
                 }
                 Ok(Some(_)) => {

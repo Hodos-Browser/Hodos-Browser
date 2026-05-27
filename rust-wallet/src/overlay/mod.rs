@@ -433,45 +433,79 @@ pub async fn lookup_published_certificate(
 
     let mut last_error = String::new();
 
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((host, Ok(answer))) => {
+    // Lookup-verify semantics (post-2026-05-27 fix):
+    //
+    // Pre-fix this returned on the FIRST `Ok(answer)` regardless of whether `answer`
+    // was Some or None. That treated "this host doesn't have the cert" (which could
+    // just mean "this host never received the publish at all") as proof of removal,
+    // marking unpublishes as successful when other hosts still had the cert indexed.
+    //
+    // Correct semantics:
+    //   - `Ok(Some(_))` from ANY host → return immediately (early-return; cert IS
+    //     still indexed somewhere — that's definitive)
+    //   - `Ok(None)` is NOT definitive on its own — wait for all hosts
+    //   - After all hosts respond:
+    //       * if any host returned `Ok(None)` → return `Ok(None)` (at least one
+    //         responding host confirmed the cert is not there; combined with no
+    //         `Some` having appeared, treat as removed)
+    //       * otherwise (all hosts errored) → return `Err`
+    //
+    // This is conservative: a partial result that's all errors counts as "we
+    // don't know", which lets callers (e.g. unpublish_certificate_core) keep
+    // the cert in `unpublished_pending_overlay` so TaskReplayOverlay retries.
+    let mut any_none_seen = false;
+    loop {
+        match set.join_next().await {
+            None => break, // all hosts completed
+            Some(Ok((host, Ok(Some(found))))) => {
                 let remaining = set.len();
                 info!(
-                    "Overlay lookup: ✅ {} returned definitive answer for '{}' (early return; {} task(s) drain in background)",
-                    host,
-                    if answer.is_some() { "found" } else { "not found" },
-                    remaining,
+                    "Overlay lookup: ✅ {} returned 'found' (early return; {} task(s) drain in background)",
+                    host, remaining,
                 );
-                // Move remaining JoinSet into a spawned drain task — same pattern as submit_to_topic.
                 if remaining > 0 {
                     tokio::spawn(async move {
                         let mut set = set;
                         while let Some(joined) = set.join_next().await {
                             match joined {
                                 Ok((h, Ok(Some(_)))) => debug!("Overlay lookup (bg): {} also found cert", h),
-                                Ok((h, Ok(None)))    => debug!("Overlay lookup (bg): {} also reports not found", h),
+                                Ok((h, Ok(None)))    => debug!("Overlay lookup (bg): {} reports not found", h),
                                 Ok((h, Err(e)))     => debug!("Overlay lookup (bg): {} error: {}", h, e),
                                 Err(e)              => debug!("Overlay lookup (bg): task panic: {}", e),
                             }
                         }
                     });
                 }
-                return Ok(answer);
+                return Ok(Some(found));
             }
-            Ok((host, Err(e))) => {
+            Some(Ok((host, Ok(None)))) => {
+                debug!(
+                    "Overlay lookup: {} reports not found (NOT definitive on its own; waiting for all hosts)",
+                    host
+                );
+                any_none_seen = true;
+            }
+            Some(Ok((host, Err(e)))) => {
                 warn!("Overlay lookup: {} error: {}", host, e);
                 last_error = e;
             }
-            Err(e) => warn!("Overlay lookup: task panic: {}", e),
+            Some(Err(e)) => warn!("Overlay lookup: task panic: {}", e),
         }
     }
 
-    Err(format!(
-        "All {} overlay host(s) failed during lookup. Last error: {}",
-        n_hosts,
-        if last_error.is_empty() { "no hosts responded".to_string() } else { last_error },
-    ))
+    if any_none_seen {
+        info!(
+            "Overlay lookup: all {} host(s) completed; no host reports 'found' and at least one reports 'not found' — treating as removed",
+            n_hosts
+        );
+        Ok(None)
+    } else {
+        Err(format!(
+            "All {} overlay host(s) failed during lookup; cannot confirm removal. Last error: {}",
+            n_hosts,
+            if last_error.is_empty() { "no hosts responded".to_string() } else { last_error },
+        ))
+    }
 }
 
 /// Represents a certificate found on the overlay network.

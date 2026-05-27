@@ -81,7 +81,11 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
     for (type_bytes, serial_bytes, certifier_bytes, publish_txid, retry_count) in &pending_certs {
         let publish_txid_str = String::from_utf8_lossy(publish_txid.as_bytes());
         if publish_txid.is_empty() {
-            warn!("   ⚠️ Certificate has no publish_txid — cannot replay");
+            // Orphan row — no publish_txid means we can't rebuild the removal-BEEF.
+            // Increment retry count so this row eventually self-quiets at 20 attempts
+            // (~100 min) instead of spamming the warning forever.
+            warn!("   ⚠️ Certificate has no publish_txid — cannot replay (orphan; will self-quiet)");
+            increment_retry_count(state, publish_txid);
             continue;
         }
 
