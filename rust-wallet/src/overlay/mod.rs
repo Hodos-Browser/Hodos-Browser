@@ -168,6 +168,75 @@ pub async fn submit_to_topic(
     let topics_json = std::sync::Arc::new(serde_json::json!([topic]).to_string());
     let topic_owned = topic.to_string();
 
+    // Cold-start catch-up: if SHIP discovery returned empty, the ship_cache
+    // spawned a bg refresh (see ship_cache::get_hosts Empty branch). Our
+    // current fan-out only reaches the hardcoded fallback hosts (~3 hosts).
+    // Spawn a catch-up task that waits for the bg refresh to finish and then
+    // submits the BEEF to any newly-discovered hosts that weren't in the
+    // initial fan-out set. Overlays don't gossip, so this is required to
+    // honor the "every host eventually receives the BEEF" invariant.
+    if discovered_hosts.is_empty() {
+        let ship_cache_cl = Arc::clone(ship_cache);
+        let topic_for_catchup = topic_owned.clone();
+        let client_for_catchup = client.clone();
+        let beef_for_catchup = std::sync::Arc::clone(&beef);
+        let topics_json_for_catchup = std::sync::Arc::clone(&topics_json);
+        let already_submitted: HashSet<String> = hosts.iter().cloned().collect();
+        tokio::spawn(async move {
+            // Wait up to 10s for the bg refresh to populate the cache.
+            // SHIP_TRACKER_TIMEOUT is 5s; allow 2× slack for HTTP + parse.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if matches!(
+                    ship_cache_cl.classify(&topic_for_catchup),
+                    ship_cache::CacheStatus::Fresh(_)
+                ) {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    warn!(
+                        "Overlay (catchup): bg refresh did not complete within 10s for '{}'; \
+                         skipping catch-up — newly-discovered hosts will get the next publish",
+                        topic_for_catchup
+                    );
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+
+            let now_discovered = ship_cache_cl.get_hosts(&topic_for_catchup).await;
+            let catchup_hosts: Vec<String> = now_discovered
+                .into_iter()
+                .filter(|h| !already_submitted.contains(h))
+                .collect();
+
+            if catchup_hosts.is_empty() {
+                info!(
+                    "Overlay (catchup): bg refresh discovered no new hosts for '{}' beyond fallbacks",
+                    topic_for_catchup
+                );
+                return;
+            }
+
+            info!(
+                "Overlay (catchup): submitting BEEF to {} newly-discovered host(s) for '{}': {:?}",
+                catchup_hosts.len(), topic_for_catchup, catchup_hosts
+            );
+
+            for host in catchup_hosts {
+                let r = submit_beef_to_host(
+                    &client_for_catchup, &host, &beef_for_catchup, &topics_json_for_catchup
+                ).await;
+                match r {
+                    Ok(true)  => info!("Overlay (catchup): ✅ {} accepted for '{}'", host, topic_for_catchup),
+                    Ok(false) => warn!("Overlay (catchup): {} rejected for '{}'", host, topic_for_catchup),
+                    Err(e)    => warn!("Overlay (catchup): {} error for '{}': {}", host, topic_for_catchup, e),
+                }
+            }
+            info!("Overlay (catchup): all catch-up submissions complete for '{}'", topic_for_catchup);
+        });
+    }
+
     let mut set: tokio::task::JoinSet<(String, Result<bool, String>)> = tokio::task::JoinSet::new();
     for host in hosts {
         let client = client.clone();
