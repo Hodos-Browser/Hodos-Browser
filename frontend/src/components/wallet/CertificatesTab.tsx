@@ -27,10 +27,12 @@ const CertificatesTab: React.FC = () => {
   const [deleting, setDeleting] = useState(false);
   const [publishingCert, setPublishingCert] = useState<string | null>(null); // serial_number of cert being published/unpublished
 
-  const fetchCertificates = useCallback(async () => {
+  // `silent=true` skips toggling `loading` (avoids the full-table spinner
+  // flashing during 3s polling). The initial mount fetch passes silent=false.
+  const fetchCertificates = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (!silent) setLoading(true);
+      if (!silent) setError(null);
       const res = await fetch('http://127.0.0.1:31301/listCertificates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -40,9 +42,11 @@ const CertificatesTab: React.FC = () => {
       const data = await res.json();
       setCertificates(data.certificates || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load certificates');
+      // Silent polls shouldn't surface transient network errors; only the
+      // initial mount and click-driven refreshes show the error banner.
+      if (!silent) setError(err instanceof Error ? err.message : 'Failed to load certificates');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -57,6 +61,23 @@ const CertificatesTab: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [success]);
+
+  // Step 2: poll /listCertificates every 3s ONLY while at least one cert is
+  // in a transitional state (`broadcast` or `unpublished_pending_overlay`).
+  // The effect's mount/unmount is bound to this component's lifecycle — when
+  // the user switches to another wallet tab (Dashboard, Activity, etc.) or
+  // closes the wallet overlay, CertificatesTab unmounts and the cleanup
+  // below clears the interval. Zero polling when idle.
+  const hasTransitional = certificates.some(
+    c => c.publish_status === 'broadcast' || c.publish_status === 'unpublished_pending_overlay'
+  );
+  useEffect(() => {
+    if (!hasTransitional) return;
+    const id = setInterval(() => {
+      fetchCertificates(true);
+    }, 3000);
+    return () => clearInterval(id);
+  }, [hasTransitional, fetchCertificates]);
 
   const getTypeIcon = (typeName: string): string => {
     switch (typeName) {
@@ -99,10 +120,40 @@ const CertificatesTab: React.FC = () => {
            cert.revocation_outpoint.length > 10;
   };
 
+  const renderInlineSpinner = () => (
+    <span
+      style={{
+        display: 'inline-block',
+        width: '9px',
+        height: '9px',
+        marginRight: '5px',
+        border: '1.5px solid rgba(166, 124, 0, 0.25)',
+        borderTopColor: '#a67c00',
+        borderRadius: '50%',
+        animation: 'wd-spin 0.8s linear infinite',
+        verticalAlign: '-1px',
+      }}
+    />
+  );
+
   const getPublishStatusBadge = (cert: Certificate) => {
     const status = cert.publish_status || 'unpublished';
     if (status === 'published') {
       return <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(34,197,94,0.15)', color: '#22c55e' }}>Public</span>;
+    }
+    if (status === 'broadcast') {
+      return (
+        <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(166,124,0,0.15)', color: '#a67c00', display: 'inline-flex', alignItems: 'center' }}>
+          {renderInlineSpinner()}Publishing…
+        </span>
+      );
+    }
+    if (status === 'unpublished_pending_overlay') {
+      return (
+        <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(166,124,0,0.15)', color: '#a67c00', display: 'inline-flex', alignItems: 'center' }}>
+          {renderInlineSpinner()}Unpublishing…
+        </span>
+      );
     }
     return <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '3px', background: 'rgba(107,114,128,0.15)', color: '#6b7280' }}>Private</span>;
   };
@@ -111,6 +162,13 @@ const CertificatesTab: React.FC = () => {
     setPublishingCert(cert.serial_number);
     setError(null);
     setSuccess(null);
+
+    // Optimistic: flip the badge to "Publishing…" immediately so the user
+    // sees feedback within one frame instead of waiting for the next 3s poll.
+    // Polling overwrites this with authoritative server state on next tick.
+    setCertificates(prev => prev.map(c =>
+      c.serial_number === cert.serial_number ? { ...c, publish_status: 'broadcast' } : c
+    ));
 
     try {
       const fieldNames = Object.keys(cert.decrypted_fields || {});
@@ -134,7 +192,6 @@ const CertificatesTab: React.FC = () => {
 
       if (data.success) {
         setSuccess(`${cert.type_name} certificate is now public.`);
-        fetchCertificates();
       } else {
         throw new Error(data.error || 'Publish failed');
       }
@@ -142,6 +199,14 @@ const CertificatesTab: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Failed to publish certificate');
     } finally {
       setPublishingCert(null);
+      // Reconcile optimistic badge state with authoritative server state on
+      // both success AND error paths. If the publish errored before the tx
+      // broadcast, the cert is back to `unpublished` and we clear "Publishing…".
+      // If broadcast succeeded but overlay rejected, status stays `broadcast`
+      // and the polling effect picks up further changes from TaskReplayOverlay.
+      // Silent: avoid full-table spinner flash after the user has been staring
+      // at the optimistic "Publishing…" badge for 10–95s.
+      fetchCertificates(true);
     }
   };
 
@@ -149,6 +214,12 @@ const CertificatesTab: React.FC = () => {
     setPublishingCert(cert.serial_number);
     setError(null);
     setSuccess(null);
+
+    // Optimistic: flip the badge to "Unpublishing…" immediately. Polling
+    // overwrites with authoritative server state on next tick.
+    setCertificates(prev => prev.map(c =>
+      c.serial_number === cert.serial_number ? { ...c, publish_status: 'unpublished_pending_overlay' } : c
+    ));
 
     try {
       const res = await fetch('http://127.0.0.1:31301/wallet/certificate/unpublish', {
@@ -169,7 +240,6 @@ const CertificatesTab: React.FC = () => {
 
       if (data.success) {
         setSuccess(`${cert.type_name} certificate is now private.`);
-        fetchCertificates();
       } else {
         throw new Error(data.error || 'Unpublish failed');
       }
@@ -177,6 +247,8 @@ const CertificatesTab: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Failed to unpublish certificate');
     } finally {
       setPublishingCert(null);
+      // See note on handlePublish — reconcile optimistic state regardless of outcome.
+      fetchCertificates(true);
     }
   };
 
