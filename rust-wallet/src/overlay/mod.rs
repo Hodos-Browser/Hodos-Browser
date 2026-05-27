@@ -13,8 +13,11 @@
 
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+
+pub mod ship_cache;
+
+use ship_cache::ShipDiscoveryCache;
 
 // ═══════════════════════════════════════════════════════════════
 // Constants
@@ -48,29 +51,16 @@ fn fallback_hosts_for_topic(topic: &str) -> Vec<&'static str> {
 }
 
 /// Topic for identity certificates
-const TOPIC_IDENTITY: &str = "tm_identity";
-
-/// SHIP host cache TTL (5 minutes, matching TS SDK)
-const SHIP_CACHE_TTL: Duration = Duration::from_secs(300);
+pub const TOPIC_IDENTITY: &str = "tm_identity";
 
 // Per-call timeouts now sourced from `crate::services::CallClass`:
 //   - SHIP discovery + overlay submit/lookup → `CallClass::ThirdPartyNoFallback` (90s)
 // See `services/call_class.rs` for the policy table.
-
-// ═══════════════════════════════════════════════════════════════
-// SHIP Host Discovery Cache
-// ═══════════════════════════════════════════════════════════════
-
-/// Cached SHIP discovery results with TTL
-struct CachedHosts {
-    hosts: HashMap<String, HashSet<String>>, // host_url → Set<topic>
-    discovered_at: Instant,
-}
-
-use once_cell::sync::Lazy;
-
-/// Global SHIP host cache (topic → cached hosts)
-static SHIP_CACHE: Lazy<Mutex<HashMap<String, CachedHosts>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+//
+// SHIP host discovery cache lives in `ship_cache::ShipDiscoveryCache` on
+// `AppState`. Hosts for `tm_identity` are kept warm by
+// `monitor::task_refresh_ship_cache` so publish/unpublish never blocks on
+// SHIP discovery during normal usage.
 
 // ═══════════════════════════════════════════════════════════════
 // Public API
@@ -86,15 +76,18 @@ static SHIP_CACHE: Lazy<Mutex<HashMap<String, CachedHosts>>> = Lazy::new(|| Mute
 /// Returns Ok(true) if at least one host accepted the transaction.
 /// Returns Ok(false) if all hosts rejected (but no network error).
 /// Returns Err on total failure.
-pub async fn submit_to_identity_overlay(beef_bytes: &[u8]) -> Result<bool, String> {
-    submit_to_topic(TOPIC_IDENTITY, beef_bytes).await
+pub async fn submit_to_identity_overlay(
+    ship_cache: &Arc<ShipDiscoveryCache>,
+    beef_bytes: &[u8],
+) -> Result<bool, String> {
+    submit_to_topic(ship_cache, TOPIC_IDENTITY, beef_bytes).await
 }
 
 /// Get all known overlay lookup endpoints for identity resolution.
 /// Combines SHIP-discovered hosts with hardcoded fallbacks, deduplicates.
 /// Returns URLs with `/lookup` path appended.
-pub async fn get_identity_lookup_endpoints() -> Vec<String> {
-    let discovered = discover_hosts_for_topic(TOPIC_IDENTITY).await;
+pub async fn get_identity_lookup_endpoints(ship_cache: &Arc<ShipDiscoveryCache>) -> Vec<String> {
+    let discovered = discover_hosts_for_topic(ship_cache, TOPIC_IDENTITY).await;
     let fallbacks = fallback_hosts_for_topic(TOPIC_IDENTITY);
 
     let mut host_set: HashSet<String> = HashSet::new();
@@ -109,7 +102,11 @@ pub async fn get_identity_lookup_endpoints() -> Vec<String> {
 /// Submit a BEEF transaction to all overlay hosts serving a given topic.
 ///
 /// Uses SHIP discovery with hardcoded fallback.
-pub async fn submit_to_topic(topic: &str, beef_bytes: &[u8]) -> Result<bool, String> {
+pub async fn submit_to_topic(
+    ship_cache: &Arc<ShipDiscoveryCache>,
+    topic: &str,
+    beef_bytes: &[u8],
+) -> Result<bool, String> {
     if beef_bytes.is_empty() {
         return Err("Empty BEEF bytes — nothing to submit".to_string());
     }
@@ -121,7 +118,7 @@ pub async fn submit_to_topic(topic: &str, beef_bytes: &[u8]) -> Result<bool, Str
 
     // Step 1: Merge SHIP-discovered hosts with hardcoded fallbacks (SDK pattern).
     // Overlays don't auto-sync (no GASP), so we must submit to ALL known hosts.
-    let discovered_hosts = discover_hosts_for_topic(topic).await;
+    let discovered_hosts = discover_hosts_for_topic(ship_cache, topic).await;
     let fallbacks = fallback_hosts_for_topic(topic);
 
     let mut host_set: HashSet<String> = HashSet::new();
@@ -430,35 +427,13 @@ fn extract_cert_info_from_beef(beef_bytes: &[u8], output_index: usize) -> (Optio
 
 /// Discover overlay hosts serving a specific topic via SHIP protocol.
 ///
-/// Queries SLAP trackers for `ls_ship` service with the given topic.
-/// Parses SHIP advertisement outputs to extract host URLs.
-/// Results are cached for 5 minutes.
-///
-/// Returns list of host URLs, or empty vec if discovery fails.
-async fn discover_hosts_for_topic(topic: &str) -> Vec<String> {
-    // Check cache first
-    if let Ok(cache) = SHIP_CACHE.lock() {
-        if let Some(cached) = cache.get(topic) {
-            if cached.discovered_at.elapsed() < SHIP_CACHE_TTL {
-                let hosts: Vec<String> = cached.hosts.keys().cloned().collect();
-                debug!("Overlay: SHIP cache hit for '{}': {} host(s)", topic, hosts.len());
-                return hosts;
-            }
-        }
-    }
-
-    // Query SLAP trackers
-    let hosts = query_ship_advertisements(&[topic.to_string()]).await;
-
-    // Cache results (even if empty, to avoid repeated failed queries)
-    if let Ok(mut cache) = SHIP_CACHE.lock() {
-        cache.insert(topic.to_string(), CachedHosts {
-            hosts: hosts.clone(),
-            discovered_at: Instant::now(),
-        });
-    }
-
-    hosts.keys().cloned().collect()
+/// Delegates to `state.ship_cache` for stale-while-revalidate semantics.
+/// See `ship_cache::ShipDiscoveryCache` for the per-call decision tree
+/// (fresh hit / stale + bg refresh / block-fetch on miss). The Monitor's
+/// `task_refresh_ship_cache` keeps `tm_identity` warm so this call is
+/// nearly always a synchronous cache hit during normal usage.
+async fn discover_hosts_for_topic(ship_cache: &Arc<ShipDiscoveryCache>, topic: &str) -> Vec<String> {
+    ship_cache.get_hosts(topic).await
 }
 
 /// Discover overlay hosts serving a specific lookup service.
@@ -482,7 +457,7 @@ async fn discover_hosts_for_service(_service: &str) -> Vec<String> {
 /// 5. Decode PushDrop scripts to get protocol/domain/topic
 ///
 /// Returns map of host_url → Set<topic>.
-async fn query_ship_advertisements(topics: &[String]) -> HashMap<String, HashSet<String>> {
+pub(super) async fn query_ship_advertisements(topics: &[String]) -> HashMap<String, HashSet<String>> {
     let client = reqwest::Client::builder()
         .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
         .build()

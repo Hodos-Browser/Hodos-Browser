@@ -4212,7 +4212,7 @@ pub async fn publish_certificate(
         log::info!("   📡 Submitting {} bytes of plain BEEF to overlay...", beef_bytes.len());
         log::info!("   📡 BEEF starts with: {:02x}{:02x}{:02x}{:02x}",
             beef_bytes[0], beef_bytes[1], beef_bytes[2], beef_bytes[3]);
-        crate::overlay::submit_to_identity_overlay(&beef_bytes).await
+        crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_bytes).await
     } else {
         Err("No BEEF bytes available".to_string())
     };
@@ -4734,11 +4734,11 @@ async fn unpublish_certificate_core(
         let overlay_result = match crate::beef::Beef::from_bytes(&beef_bytes).and_then(|b| b.to_v1_bytes()) {
             Ok(v1_bytes) => {
                 log::info!("   📡 Submitting unpublish BEEF V1 ({} bytes) to overlay", v1_bytes.len());
-                crate::overlay::submit_to_identity_overlay(&v1_bytes).await
+                crate::overlay::submit_to_identity_overlay(&state.ship_cache, &v1_bytes).await
             }
             Err(e) => {
                 log::warn!("   ⚠️  BEEF V1 conversion failed: {}, trying raw", e);
-                crate::overlay::submit_to_identity_overlay(&beef_bytes).await
+                crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_bytes).await
             }
         };
 
@@ -5406,7 +5406,7 @@ async fn try_resubmit_spending_tx(
         .map_err(|e| format!("BEEF serialization failed: {}", e))?;
 
     // Submit to overlay
-    match crate::overlay::submit_to_identity_overlay(&beef_bytes).await {
+    match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_bytes).await {
         Ok(true) => {
             log::info!("cleanup: ✅ spending tx re-submitted successfully for serial {}", serial_short);
             Ok(true)
@@ -5521,7 +5521,7 @@ async fn try_cleanup_via_woc(
 
         log::info!("cleanup: submitting to overlay ({} bytes — publish + spending tx, no miners)", beef_v1.len());
 
-        match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+        match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_v1).await {
             Ok(accepted) => {
                 log::info!("cleanup: ✅ overlay accepted={}", accepted);
                 return Ok(true);
@@ -5891,7 +5891,7 @@ async fn auto_spend_pushdrop(
     state.balance_cache.invalidate();
 
     // Step 11: Submit spending BEEF to overlay
-    match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+    match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_v1).await {
         Ok(_) => log::info!("cleanup/auto-spend: ✅ overlay submission done"),
         Err(e) => log::warn!("cleanup/auto-spend: overlay submission error: {}", e),
     }
@@ -6066,7 +6066,7 @@ async fn overlay_only_spend_pushdrop(
     log::info!("cleanup/overlay-spend: submitting to overlay ({} bytes, {} grandparents)", beef_v1.len(), grandparents_added);
 
     // Step 7: Submit to overlay only — no miner broadcast
-    match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+    match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_v1).await {
         Ok(accepted) => {
             log::info!("cleanup/overlay-spend: ✅ overlay accepted={}", accepted);
             Ok(true)

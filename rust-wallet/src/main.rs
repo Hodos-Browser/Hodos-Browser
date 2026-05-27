@@ -85,6 +85,7 @@ pub struct AppState {
     pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
     pub price_cache: Arc<price_cache::PriceCache>,  // BSV/USD exchange rate (CryptoCompare + CoinGecko)
     pub services: Arc<services::WalletServices>,  // Phase 1.6d.B: WalletServices facade (dormant — 1.6d.C wires call sites)
+    pub ship_cache: Arc<overlay::ship_cache::ShipDiscoveryCache>,  // Phase 1.6d polish Step 1: SWR cache for SHIP host discovery
     pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
     pub create_action_lock: Arc<tokio::sync::Mutex<()>>,  // Serializes entire createAction flow (select→sign→BEEF→broadcast)
     pub derived_key_cache: Arc<Mutex<HashMap<String, DerivedKeyInfo>>>,  // Maps derived pubkey hex → derivation params (for PushDrop signing)
@@ -516,6 +517,12 @@ async fn main() -> std::io::Result<()> {
     let services = Arc::new(services::WalletServices::new());
     println!("✅ WalletServices facade initialized (dormant — 1.6d.C wires call sites)");
 
+    // Phase 1.6d polish Step 1: SHIP discovery SWR cache.
+    // Eliminates the ~75s blocking SHIP round-trip on every certificate
+    // publish/unpublish. Kept warm by monitor::task_refresh_ship_cache.
+    let ship_cache = overlay::ship_cache::ShipDiscoveryCache::new();
+    println!("✅ SHIP discovery cache initialized (SWR: 5-min fresh, 30-min stale)");
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
@@ -524,6 +531,7 @@ async fn main() -> std::io::Result<()> {
         fee_rate_cache,
         price_cache,
         services,
+        ship_cache,
         utxo_selection_lock: Arc::new(tokio::sync::Mutex::new(())),  // Prevents concurrent UTXO selection
         create_action_lock: Arc::new(tokio::sync::Mutex::new(())),  // Serializes createAction end-to-end
         derived_key_cache: Arc::new(Mutex::new(HashMap::new())),  // PushDrop signing cache

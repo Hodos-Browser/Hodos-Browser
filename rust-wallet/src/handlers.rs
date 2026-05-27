@@ -5770,7 +5770,7 @@ pub(crate) async fn create_action_internal(
                             }
                         }
 
-                        match crate::overlay::submit_to_identity_overlay(overlay_beef).await {
+                        match crate::overlay::submit_to_identity_overlay(&state.ship_cache, overlay_beef).await {
                             Ok(true) => {
                                 log::info!("   ✅ Overlay accepted the identity token");
                                 // Mark certificate as published in DB

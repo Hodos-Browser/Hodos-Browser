@@ -70,6 +70,9 @@ cargo check              # Fast type-check without building
 | `src/monitor/task_sync_pending.rs` | Periodic UTXO sync for addresses with `pending_utxo_check=1` (30s interval) |
 | `src/monitor/task_review_status.rs` | Status consistency: proven_tx_reqs → transactions → outputs |
 | `src/monitor/task_purge.rs` | Cleanup old monitor_events (7d) and completed proof requests (30d) |
+| `src/monitor/task_refresh_ship_cache.rs` | Phase 1.6d polish Step 1: keeps `AppState.ship_cache` warm for `tm_identity` every 5 min. Runs OUTSIDE `db_available()` gate (pure network + memory, no DB touch) so a busy DB never starves SHIP refresh. |
+| `src/overlay/mod.rs` | SHIP-discovery + overlay submit/lookup client for `tm_identity`. Public API takes `&Arc<ShipDiscoveryCache>` (not `&AppState`) so the module stays decoupled from main-binary state. |
+| `src/overlay/ship_cache.rs` | `ShipDiscoveryCache` — SWR cache for SHIP host discovery (fresh < 5 min / stale 5–30 min spawns bg refresh / very-stale ≥ 30 min blocks). No-poison invariant: empty fetch results never overwrite or store. 9 unit tests. |
 | `src/beef.rs` | BEEF parser, `tsc_proof_to_bump`, `parse_bump_hex_to_tsc` — Merkle proof format conversion |
 | `src/beef_helpers.rs` | Recursive BEEF building with ancestry chain and proof fetching |
 | `src/transaction/sighash.rs` | BSV ForkID SIGHASH implementation |

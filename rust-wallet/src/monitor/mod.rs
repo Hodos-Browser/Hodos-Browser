@@ -30,6 +30,7 @@ pub mod task_replay_overlay;
 pub mod task_consolidate_dust;
 pub mod task_verify_double_spend;
 pub mod task_retry_peerpay_outbox;
+pub mod task_refresh_ship_cache;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -56,6 +57,7 @@ struct TaskSchedule {
     consolidate_dust: u64,
     verify_double_spend: u64,
     retry_peerpay_outbox: u64,
+    refresh_ship_cache: u64,
 }
 
 impl Default for TaskSchedule {
@@ -74,6 +76,7 @@ impl Default for TaskSchedule {
             consolidate_dust: 86400,  // 24 hours — daily dust consolidation check
             verify_double_spend: 60,  // 1 minute — fast verification for suspected double-spends
             retry_peerpay_outbox: 30, // 30 seconds — fast tick, actual retry governed by next_retry_at
+            refresh_ship_cache: 300,  // 5 min — matches ship_cache::FRESH_TTL so cache never enters stale window
         }
     }
 }
@@ -136,7 +139,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 12 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 13 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -149,6 +152,7 @@ impl Monitor {
         info!("   TaskReplayOverlay: every {}s (pending overlay certs)", self.schedule.replay_overlay);
         info!("   TaskConsolidateDust: every {}s (dust UTXO sweep)", self.schedule.consolidate_dust);
         info!("   TaskVerifyDoubleSpend: every {}s (independent DS verification)", self.schedule.verify_double_spend);
+        info!("   TaskRefreshShipCache: every {}s (keeps SHIP discovery warm, runs even on busy-DB ticks)", self.schedule.refresh_ship_cache);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -171,6 +175,7 @@ impl Monitor {
         let mut last_consolidate_dust: u64 = Self::now_secs(); // Don't run on first tick — daily task
         let mut last_verify_double_spend: u64 = 0; // Check on first tick
         let mut last_retry_peerpay_outbox: u64 = 0; // Check on first tick
+        let mut last_refresh_ship_cache: u64 = 0; // 0 = warm cache on first tick (no DB needed)
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -187,14 +192,27 @@ impl Monitor {
                 }
             }
 
-            // Check if DB is available before running any tasks.
+            // Compute `now` before the DB gate — some tasks run regardless of DB state.
+            let now = Self::now_secs();
+
+            // TaskRefreshShipCache runs OUTSIDE the db_available() gate because it's
+            // pure network + memory and never touches SQLite. A busy DB tick should
+            // not starve SHIP cache refresh, or publish/unpublish UX degrades.
+            if now - last_refresh_ship_cache >= self.schedule.refresh_ship_cache {
+                last_refresh_ship_cache = now;
+                if let Err(e) = task_refresh_ship_cache::run(&self.state).await {
+                    warn!("   ⚠️ TaskRefreshShipCache failed: {}", e);
+                    // No log_event() — that touches the DB and the whole point of
+                    // running this task here is to be DB-independent.
+                }
+            }
+
+            // Check if DB is available before running any tasks that touch the DB.
             // If a user HTTP request currently holds the lock, skip this entire tick
             // to avoid blocking the user. Tasks will run on the next tick instead.
             if !self.db_available() {
                 continue;
             }
-
-            let now = Self::now_secs();
 
             // Post-recovery: force immediate validation of restored data
             let recovery_mode = self.state.recovery_just_completed.swap(false, std::sync::atomic::Ordering::SeqCst);

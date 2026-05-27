@@ -162,7 +162,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         info!("   📡 Submitting {} bytes BEEF to overlay (spending tx {})", beef_v1.len(), stxid_short);
 
         // Submit to overlay
-        let overlay_ok = match crate::overlay::submit_to_identity_overlay(&beef_v1).await {
+        let overlay_ok = match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_v1).await {
             Ok(true) => {
                 info!("   ✅ Overlay accepted removal for {}", txid_short);
                 true
