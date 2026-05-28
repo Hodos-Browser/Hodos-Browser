@@ -437,8 +437,11 @@ Once written, the manifest data is thrown away — it was a one-shot input to th
 
 **Test:** existing test suite passes. New fresh-origin tests assert the gate fires.
 
-### Step 7 — Demo prep
+### Step 7 — Demo prep — ROLLED INTO PHASE 4 (2026-05-28)
 
+Per user direction: Step 7 was a placeholder for "build a minimal demo dApp + draft DEV_GUIDE.md." Both are properly the scope of `phase-4-demos/` (which is a separate full sprint with 4 demos + LLM dev guides). The manifest-fetcher smoke target was already exercised implicitly during Step 6 commits B-E against real sites. **Phase 1.5 is considered closed.**
+
+Original (now obsolete) plan:
 - Build a minimal demo dApp shipping a `wallet-manifest.json`. Used as the smoke target for Step 4.
 - Document app-dev best practices in a draft for `phase-4-demos/DEV_GUIDE.md`.
 
@@ -624,11 +627,13 @@ Captured during the B+1..B+3 polish work. None of these gate Commit C/D/E/F — 
 - **K — Plain-language labels on scoped-grant rows.** The DomainPermissionForm "Granted permissions" section currently shows raw BRC-43 terms ("level 1", "level 2") and binary keyIDs. Users don't know what these mean. Two changes: (1) translate level numbers to "Public" / "Site-only" / "Site + peer"; (2) add per-row info icons (ⓘ) with plain-language tooltips explaining what protocol/basket/counterparty grants do. Same icon pattern as Step 5's "across the Metanet" tooltip. Form file: `frontend/src/components/DomainPermissionForm.tsx` around the sub-permission rendering. ~30 min UX polish. Logged 2026-05-13.
 
 - **L — Fallback indexer for outspend / revocation checks.** `rust-wallet/src/certificate/verifier.rs::check_revocation_status` only calls WhatsOnChain (`api.whatsonchain.com/v1/bsv/main/tx/{txid}/outspend/{vout}`) with no API key and no fallback. When WoC is slow or rate-limiting, `/acquireCertificate` hangs until the C++ 45s timeout fires — SocialCert sees "wallet request timeout" and shows error, but Rust eventually completes and the cert lands in the DB anyway (orphaned UX). Same WoC-only dependency exists for tx-hex / TSC proofs in `cache_helpers.rs`, `beef_helpers.rs`, and several spots in `handlers.rs` / `certificate_handlers.rs`. Research + design pass: (1) decide between getting a WoC API key for rate-limit headroom, (2) adding JungleBus (`junglebus.gorillapool.io` — we already use it elsewhere per `bsv-skills:junglebus`) as secondary, (3) deferring revocation check to a background task since the answer can change post-acquisition anyway. Tier-1 mitigation (8s reqwest timeout + graceful degradation) is the immediate fix; this item is the proper architectural follow-up. Logged 2026-05-15. **Land after Phase 1.5 completes (Step 7 demo prep), not now.**
-- [ ] Step 3 — Permission engine (C++).
-- [ ] Step 4 — Manifest fetcher.
-- [ ] Step 5 — Extend existing UI (carries the deferred Step 1 UX work: info icon, list column, form toggle, default setting).
-- [ ] Step 6 — Rewire existing handlers through the engine.
-- [ ] Step 7 — Demo prep.
+- [x] Step 3 — Permission engine (C++). LANDED.
+- [x] Step 4 — Manifest fetcher. LANDED.
+- [x] Step 5 — Extend existing UI. LANDED.
+- [x] Step 6 — Rewire existing handlers through the engine. CLOSED 2026-05-18.
+- [x] Step 7 — Demo prep. ROLLED INTO PHASE 4 (2026-05-28).
+
+**Phase 1.5 closed 2026-05-28.** Real-world engine smoke against more dApps continues opportunistically; deferred follow-ups G/H/I/K queued for post-Phase-2.
 - [ ] `expires_at` default confirmed for Step 2 child tables.
 
 ---

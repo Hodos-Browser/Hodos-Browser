@@ -122,6 +122,32 @@ Verify behavior under network unavailability:
 
 **Output:** new integration tests in `rust-wallet/tests/`. ~2-3 hours.
 
+**Status:** Deferred to opportunistic smoke during Phase 2 work. Today's polish arc (see below) exercised most of these flows organically. Formal integration test suite remains a polish item.
+
+---
+
+## Phase 1.6 polish arc — 2026-05-27/28 (post-1.6d.D)
+
+Closed a series of overlay-side issues surfaced by certificate publish/unpublish testing. Each commit ships independently:
+
+| Commit | What |
+|---|---|
+| `69ab6d4` | SHIP discovery SWR cache (5-min refresh) |
+| ~~`75c7065`~~ | Reverted — optimistic UI + polling didn't deliver perceptible value |
+| `0a4c844` | Parallel overlay submit + bg drain + `/signCertificate` 240s timeout (CEF cap 300s) |
+| `d031adc` | Parallelize lookup + early-return-on-any-response for unpublish |
+| `eb364e2` | Parallel SLAP trackers with 5s per-tracker timeout + non-blocking cold-start MISS |
+| `99eaf2d` | Cold-start catch-up backfill to newly-discovered hosts |
+| `2f4bd2b` | Preserve `publish_txid` on unpublish + correct lookup-verify semantics (only `Ok(None)` after ALL hosts respond) |
+| `ae51a17` | Cleanup dedup by `(publish_txid, output_index)` not serial — surfaces multi-historical-publish leaks |
+| `afd2cff` | Build proper removal-BEEF in cleanup endpoint (publish_tx ancestry + both BUMPs) |
+
+Net effect: publish ~132s → ~4s cold-start; unpublish ~50s → ~5s; cleanup endpoint now constructs correct removal-BEEFs.
+
+**Unresolved (deferred):** 2 leaked certs on overlay-eu-1 + overlay-us-1 — overlay-express-examples v2.1.6 has a state-divergence bug where `applied_transactions` and UTXO storage become inconsistent; no /submit recovery exists. See `tmp/OVERLAY_PROBE_FINDINGS.md` for full investigation + upstream bug report material. Revisit in a day or two; if hosts haven't self-cleaned, file at `bsv-blockchain/overlay-services/issues`.
+
+**Phase 1.6 closed 2026-05-28.** Ready for Phase 2.
+
 ---
 
 ## Total scope estimate
