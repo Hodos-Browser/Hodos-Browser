@@ -5393,29 +5393,54 @@ async fn try_resubmit_spending_tx(
     let txid_short = &spending_txid[..16.min(spending_txid.len())];
     log::info!("cleanup: found spending tx {} for serial {}", txid_short, serial_short);
 
-    // Build BEEF for the spending transaction
+    // Build a proper removal-BEEF: publish tx (parent) + spending tx (main),
+    // both with merkle proofs. Mirrors monitor::task_replay_overlay::run() —
+    // both code paths must produce identical BEEFs because overlays' topic
+    // managers need the publish tx as ancestry to validate the spending tx's
+    // input signature and to find the admitted UTXO being consumed.
+    //
+    // Pre-2026-05-28 this called build_beef_for_txid(spending_txid) which
+    // is optimized for broadcasting to ARC/miners and skips ancestry when
+    // the target tx has a BUMP — producing a 2-tx BEEF with the spending
+    // tx duplicated and NO publish tx. overlays rejected it as "missing
+    // previous transaction" (confirmed by anvil.sendbsv HTTP 400 message),
+    // bsvb hosts silently failed validation and returned the ambiguous
+    // STEAK shape we could not interpret without the anvil error.
     let mut beef = crate::beef::Beef::new();
     let client = reqwest::Client::builder()
         .timeout(crate::services::CallClass::IndexerBulk.timeout())
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    match crate::beef_helpers::build_beef_for_txid(
-        &spending_txid, &mut beef, &state.database, &state.services,
-    ).await {
-        Ok(_) => {}
-        Err(e) => {
-            log::warn!("cleanup: BEEF ancestry build failed: {}", e);
-            // Try submitting with just the raw tx (may work if parents are confirmed)
+    // 1. Add publish tx as parent + its merkle proof via Services chain
+    if let Ok(parent_hex) = crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &publish_txid).await {
+        if let Ok(parent_bytes) = hex::decode(&parent_hex) {
+            beef.add_parent_transaction(parent_bytes);
+        }
+    }
+    if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &publish_txid).await {
+        if let Err(e) = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, &publish_txid, &client).await {
+            log::warn!("cleanup: failed to add merkle proof for publish tx {}: {}", &publish_txid[..16.min(publish_txid.len())], e);
         }
     }
 
+    // 2. Add spending tx as main + its merkle proof from DB (we already have it)
     beef.set_main_transaction(spending_raw_tx);
-    beef.sort_topologically();
+    {
+        let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
+        if let Ok(Some(tsc_json)) = proven_tx_repo.get_merkle_proof_as_tsc(&spending_txid) {
+            if let Some(tx_idx) = beef.find_txid(&spending_txid) {
+                let _ = beef.add_tsc_merkle_proof(&spending_txid, tx_idx, &tsc_json);
+            }
+        }
+    }
 
-    // Convert to V1 bytes for overlay submission
+    beef.sort_topologically();
     let beef_bytes = beef.to_v1_bytes()
         .map_err(|e| format!("BEEF serialization failed: {}", e))?;
+
+    log::info!("cleanup: built removal BEEF ({} bytes) for serial {} — publish + spending + both proofs", beef_bytes.len(), serial_short);
 
     // Submit to overlay
     match crate::overlay::submit_to_identity_overlay(&state.ship_cache, &beef_bytes).await {
