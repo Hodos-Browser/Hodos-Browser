@@ -76,7 +76,7 @@ Brave **always** injects `window.braveEthereum` regardless of the setting, so dA
 **Translation to Hodos:**
 - Inject `window.CWI` as canonical, non-writable.
 - Inject `window.yours` and `window.panda` as **aliases pointing to the same proxy object** for transitional compat — but mark them *writable* so pages or competing wallets can override.
-- **Strongly consider a BSV-equivalent of EIP-6963.** Even just a `metanet:announceProvider` CustomEvent contract. If one doesn't exist yet in BSV, propose one. It's the cleanest long-term answer for multi-wallet coexistence.
+- **Strongly consider a BSV-equivalent of EIP-6963.** Even just a `bsv:announceProvider` CustomEvent contract. If one doesn't exist yet in BSV, propose one. It's the cleanest long-term answer for multi-wallet coexistence.
 - Add a setting equivalent to `brave://settings/wallet` so users with another BSV wallet extension installed can opt out.
 
 ---

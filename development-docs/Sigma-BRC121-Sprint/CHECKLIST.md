@@ -105,7 +105,7 @@ Per root `CLAUDE.md` "Phase kickoff workflow":
 - [ ] IPC routing for legacy `window.yours` methods → translation layer → Rust handlers
 - [ ] Origin + favicon shown on every signing/spending prompt
 - [ ] BRC-100 sub-tier permission flows (per-protocol, grouped, per-counterparty)
-- [ ] EIP-6963-equivalent announce protocol (propose `metanet:announceProvider`?)
+- [ ] EIP-6963-equivalent announce protocol (propose `bsv:announceProvider`?)
 - [ ] "Default wallet" setting for users with other BSV wallet extensions
 
 ## Phase 3 — 1Sat Ordinals

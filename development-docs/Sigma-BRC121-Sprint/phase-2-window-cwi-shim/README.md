@@ -26,7 +26,7 @@ See `../BRAVE_WALLET_REFERENCE.md` for full detail. Top patterns to lift:
 6. **Secure-context-only** (HTTPS or localhost)
 7. **Hide-until-user-gesture** (stricter than Brave; matches Hodos privacy posture)
 8. **Origin + favicon on every signing/spending prompt**
-9. **EIP-6963-equivalent announce protocol** — propose `metanet:announceProvider` CustomEvent if not already specified anywhere
+9. **EIP-6963-equivalent announce protocol** — propose `bsv:announceProvider` CustomEvent if not already specified anywhere
 
 ## Implementation steps
 
