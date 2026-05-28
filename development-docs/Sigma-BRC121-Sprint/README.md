@@ -75,10 +75,8 @@ Real-world adoption check from research:
 ## Phase-specific research/findings already in place
 
 - `phase-0-research/FACT_CHECK_RESULTS.md` — 2026-05-05 ecosystem fact-checks (Yours BRC-100 imminent, Treechat surface, BSVradar Sigma block, Zoide irrelevant)
-- `phase-2-sigma-auth/RESEARCH_FINDINGS.md` — Sigma protocol + ecosystem deep dive (note: §A4's "BAP-permissive" reading is superseded by `FACT_CHECK_RESULTS.md` Q3 — iframe signer kills it)
-- `phase-2-sigma-auth/BRC103_SIGMA_AUTH_GUIDE.md` — developer-facing OAuth integration guide (still useful for Phase 4 demo's "Sign in with Sigma" button)
-- `phase-2-sigma-auth/BRC103_SIGMA_COMPARISON_AND_IMPLEMENTATION.md` — original protocol research (Sigma-interception sections obsolete; BRC-77/BSM signing primitives section is reference material if we ever want content signing)
 - `phase-3-ordinals/RESEARCH_FINDINGS.md` — 1Sat ordinals protocol, indexer endpoints, integration sizing
+- **Sigma OAuth research has moved** to `development-docs/Auth/` (2026-05-28). Browser auth — including Sigma as one of several OAuth providers tested — is its own investigation parked there for the next sprint. The Sigma-BRC121-Sprint Phase 2 is now exclusively `phase-2-window-cwi-shim/`.
 
 ## Pick-up-here guide for future sessions
 
