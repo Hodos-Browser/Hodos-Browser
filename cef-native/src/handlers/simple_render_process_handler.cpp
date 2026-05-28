@@ -20,6 +20,7 @@
 #include "../../include/core/Logger.h"
 #include "../../include/core/FingerprintScript.h"
 #include "../../include/core/FingerprintProtection.h"
+#include "../../include/core/CWIShimScript.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -865,6 +866,36 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     // Register BRC-100 API (cross-platform)
     BRC100Handler::RegisterBRC100API(context);
+
+    // Phase 2 Steps 1 + 2 — inject window.CWI / window.yours / window.panda shim.
+    //
+    // Gating cascade (each rejection reason logged separately for debuggability):
+    //   1. External pages only — Hodos internal UI doesn't need a wallet provider object.
+    //   2. Main frame only — skip all iframes. Matches Yours Wallet + Brave default;
+    //      verified against the live Yours brc100-remote manifest, which omits
+    //      "all_frames": true and so confines content_scripts to top frames.
+    //   3. Secure context (https://) only — matches Brave's "no provider on insecure pages"
+    //      posture. http:// external pages don't get the shim; localhost is already
+    //      excluded by isExternalPage. Developers testing locally should serve dApps via
+    //      https (mkcert, ngrok, etc.).
+    //   4. TODO (future sprint) — Hodos has no private/incognito browsing mode today.
+    //      When one is added, gate the shim here. Per Brave's posture, private windows
+    //      receive NO wallet provider injection at all (matches BRAVE_WALLET_REFERENCE.md
+    //      §6 — "No injection in Private or Tor windows. Period.").
+    //
+    // Each shim method POSTs to http://127.0.0.1:31301/<methodName>, captured by
+    // HttpRequestInterceptor::isWalletEndpoint() and routed through PermissionEngine —
+    // identical gating to canonical BRC-100 calls. No bypass paths.
+    if (isExternalPage) {
+        if (!frame->IsMain()) {
+            LOG_DEBUG_RENDER("⏭️ Phase 2 shim skipped (iframe, not main frame) for " + url);
+        } else if (url.find("https://") != 0) {
+            LOG_DEBUG_RENDER("⏭️ Phase 2 shim skipped (insecure context, not https://) for " + url);
+        } else {
+            LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + url);
+            frame->ExecuteJavaScript(CWI_SHIM_SCRIPT, url, 0);
+        }
+    }
 
     // For overlay browsers, signal that all systems are ready
     if (isOverlayBrowser) {
