@@ -51,4 +51,16 @@ See `../BRAVE_WALLET_REFERENCE.md` for full detail. Top patterns to lift:
 
 ## Status
 
-Not started. Gated on Phase 0.1 + 0.2.
+Steps 1-4 landed (commits `d1e0a7f` Steps 1+2+3, `6cddfde` Step 4) on 2026-05-28. The shim
+ships `window.CWI` (28 canonical BRC-100 methods, non-writable), `window.yours` (28 canonical
++ 16 legacy methods with yours-legacy-v1 convention, writable), `window.panda` (alias). V8
+injection gated on external-page + main-frame + https://. `bsv:announceProvider` payload
+embeds Hodos_Gold_Wallet_Icon.svg as a base64 data URL.
+
+**Step 3b deferred polish (next pickup, not blocking)**: Base58Check address derivation
+(real getAddresses/getPubKeys), wire `sendBsv` once P2PKH locking scripts can be built from
+plain addresses, ECIES Electrum compatibility decision (separate scope —
+see [[phase2-step3-ecies-electrum]]).
+
+**Smoke test pending**: requires closing the running Hodos browser to relink, then DevTools
+verification per the test plan documented in [[phase2-step4-landed]].
