@@ -5,6 +5,7 @@
 pub mod brc42;
 pub mod brc43;
 pub mod brc2;
+pub mod bie1;
 pub mod key_linkage;
 pub mod ghash;
 pub mod aesgcm_custom;

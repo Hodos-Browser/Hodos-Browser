@@ -41,6 +41,10 @@ hex = "0.4"
 thiserror = "1.0"
 aes-gcm = "0.10"
 aes = "0.8"
+# AES-CBC for BIE1 (ECIES Electrum) legacy Yours-era encrypt/decrypt — Phase 2 Step 3c.
+# `alloc` feature gives us encrypt_padded_vec_mut / decrypt_padded_vec_mut; `block-padding`
+# (default) re-exports cipher::block_padding::Pkcs7, so no separate block-padding dep.
+cbc = { version = "0.1", features = ["alloc"] }
 subtle = "2"
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
