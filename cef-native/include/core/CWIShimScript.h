@@ -537,13 +537,32 @@ R"JS(
             }).then(function(r) { return !!(r && r.valid); });
         }));
 
-        // ----- getSignatures: stub w/ typed error pointing to canonical createAction+signAction -----
+        // ----- getSignatures: typed NOT_IMPL w/ architectural reason + migration path -----
+        // Step 3b.5 tightened the error message from a generic "not yet implemented" to
+        // explain WHY there is no 1:1 translation and what to do instead. Yours's
+        // getSignatures is a low-level "sign these inputs of this raw tx" primitive;
+        // BRC-100 signAction is reference-based and wallet-controlled, so the wallet
+        // owns input selection / output building. A generic translator would have to
+        // reverse-engineer transaction intent from raw bytes; Hodos is tracking that
+        // work explicitly in Step 3d (STEP_3D_RESEARCH.md). For the common use case
+        // (partial-tx atomic swaps / Yours-era ordinal sales using SIGHASH_SINGLE |
+        // ANYONECANPAY), the canonical BRC-100 equivalent is createAction with
+        // signOutputs:'single' + noSend:true, then signAction.
         defineLegacyProp(legacy, 'getSignatures', makeLegacyMethod(function() {
             warnDeprecated('getSignatures');
             return Promise.reject(typedError(
                 LEGACY_ERR.NOT_IMPL, 'getSignatures',
-                'translation not yet implemented. Use window.CWI.createAction({inputs, outputs}) ' +
-                'followed by window.CWI.signAction({reference, spends}) — see SHIM_TRANSLATION_SPEC.'
+                'window.yours.getSignatures has no generic translation to BRC-100. The ' +
+                'legacy API is a low-level "sign these inputs of this raw tx" primitive; ' +
+                'BRC-100 signAction is reference-based and wallet-controlled, so there is ' +
+                'no 1:1 mapping. For the canonical partial-tx atomic-swap pattern (the ' +
+                'primary Yours-era use case — SIGHASH_SINGLE | ANYONECANPAY ordinal sales), ' +
+                'use: window.CWI.createAction({inputs, outputs, options: ' +
+                '{signOutputs: "single", acceptDelayedBroadcast: false, noSend: true}}) ' +
+                'followed by window.CWI.signAction({reference, spends}). A generic ' +
+                'translator for the specific Yours-era flows is tracked in Step 3d ' +
+                '(STEP_3D_RESEARCH.md); for now dApps should call createAction + signAction ' +
+                'directly.'
             ));
         }));
 )JS"
@@ -725,10 +744,56 @@ R"JS(
                     'removed in BRC-100. ' + hint));
             });
         }
-        defineLegacyProp(legacy, 'getExchangeRate', removed('getExchangeRate',
-            'Fetch BSV/USD from a public price source (CryptoCompare, CoinGecko).'));
-        defineLegacyProp(legacy, 'getSocialProfile', removed('getSocialProfile',
-            'Use BRC-100 acquireCertificate + Sigma OAuth provider for identity profile.'));
+        // ----- getExchangeRate: real BSV/USD via the existing wallet price cache (Step 3b.5) -----
+        // The wallet's /wallet/bsv-price endpoint already feeds the C++ auto-approve engine
+        // with a 5-min-TTL CryptoCompare primary + CoinGecko fallback price. Step 3b.5
+        // exposes that to legacy yours callers in the {rate, currency: 'USD'} shape they
+        // expect. Defensive about the response field name (priceUsd | usd | price) to
+        // match the same tolerance the legacy getBalance translator already applies.
+        defineLegacyProp(legacy, 'getExchangeRate', makeLegacyMethod(function() {
+            warnDeprecated('getExchangeRate');
+            return fetch(ENDPOINT_BASE + '/wallet/bsv-price', {
+                method: 'GET',
+                mode: 'cors',
+                credentials: 'omit'
+            }).then(function(r) {
+                if (!r.ok) {
+                    throw typedError(LEGACY_ERR.NOT_IMPL, 'getExchangeRate',
+                        'price fetch failed: HTTP ' + r.status);
+                }
+                return r.json();
+            }).then(function(price) {
+                var rate = (price && typeof price.priceUsd === 'number') ? price.priceUsd :
+                           (price && typeof price.usd === 'number') ? price.usd :
+                           (price && typeof price.price === 'number') ? price.price : null;
+                if (rate == null) {
+                    throw typedError(LEGACY_ERR.NOT_IMPL, 'getExchangeRate',
+                        'price endpoint returned unrecognized shape (no priceUsd/usd/price field)');
+                }
+                return { rate: rate, currency: 'USD' };
+            });
+        }));
+
+        // ----- getSocialProfile: typed NOT_IMPL deferred (was REMOVED) -----
+        // Step 3b.5 reframed this from REMOVED to NOT_IMPL because the capability still
+        // exists conceptually — it's just not wired in Hodos yet. The BRC-100 path is
+        // acquireCertificate + listCertificates with a SocialCert type. A unified
+        // resolver (sigma OAuth username + paymail-derived avatar + identity-key fallback)
+        // will land as ecosystem demand surfaces; until then dApps should fall back to
+        // identity-key-only flows or call canonical.discoverByIdentityKey for cert-based
+        // profile lookup.
+        defineLegacyProp(legacy, 'getSocialProfile', makeLegacyMethod(function() {
+            warnDeprecated('getSocialProfile');
+            return Promise.reject(typedError(
+                LEGACY_ERR.NOT_IMPL, 'getSocialProfile',
+                'social profile resolution is deferred, not removed. The legacy Yours/RelayX ' +
+                'backend returned {username, avatar, paymail}; the BRC-100 path is ' +
+                'window.CWI.acquireCertificate + window.CWI.listCertificates with a SocialCert ' +
+                'type, or window.CWI.discoverByIdentityKey for cert-based lookup. Hodos will ' +
+                'add a unified resolver as ecosystem demand surfaces. For now, dApps should ' +
+                'fall back to identity-key-only flows.'
+            ));
+        }));
 
         // ----- Ordinal methods: typed NOT_IMPLEMENTED error pointing to Phase 3 -----
         function notImpl(name) {
