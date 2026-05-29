@@ -396,23 +396,36 @@ R"JS(
             });
         }));
 
-        // ----- getAddresses(): placeholder; returns three null slots with deprecation warning -----
-        // Spec calls for BRC-42 fresh-address generator with per-origin keyID. The shim has
-        // the public keys (canonical.getPublicKey works) but encoding pubkey → P2PKH BSV
-        // address needs ripemd160 + Base58Check, which is ~250 lines of JS crypto. Step 3b
-        // either bundles that or adds a Rust /wallet/derive-address helper endpoint. For
-        // first Step 3 commit, return null slots — Treechat displays the user's identity-key
-        // pubkey separately and tolerates missing addresses. Logs a clear deprecation note.
+        // ----- getAddresses(): consolidated Yours-legacy address derivation (Step 3b.3) -----
+        // Single round-trip to POST /wallet/yours-legacy-addresses (Step 3b.1). The wallet
+        // server does the 3× BRC-42 self-derivation + Base58Check encoding using the same
+        // yours-legacy-v1 constants this shim emits via getPubKeys (protocolID prefix
+        // "2-yours-legacy-receive" / "2-yours-legacy-ord-receive", keyID "yours-{host}").
+        // Identity slot may come back null if the user has not granted identity-key
+        // disclosure for this origin — bsv/ord still flow through. dApps that need a
+        // prompt-on-demand identity address can call canonical.getPublicKey({identityKey:true}).
         defineLegacyProp(legacy, 'getAddresses', makeLegacyMethod(function() {
             warnDeprecated('getAddresses');
-            try {
-                console.warn('[Hodos] window.yours.getAddresses: address derivation arrives in Step 3b. ' +
-                    'For now this returns null slots. Use window.CWI.getPublicKey for raw pubkeys.');
-            } catch (e) {}
-            return Promise.resolve({
-                bsvAddress: null,
-                ordAddress: null,
-                identityAddress: null
+            var nullSlots = { bsvAddress: null, ordAddress: null, identityAddress: null };
+            return fetch(ENDPOINT_BASE + '/wallet/yours-legacy-addresses', {
+                method: 'POST',
+                mode: 'cors',
+                credentials: 'omit',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ origin: window.location.host })
+            }).then(function(r) {
+                // Backend rejected (no wallet, bad origin, internal error). Gracefully
+                // degrade to null slots — matches Yours's tolerance for missing fields.
+                return r.ok ? r.json() : nullSlots;
+            }).then(function(j) {
+                return {
+                    bsvAddress: (j && j.bsvAddress) || null,
+                    ordAddress: (j && j.ordAddress) || null,
+                    identityAddress: (j && j.identityAddress) || null
+                };
+            }).catch(function() {
+                // Network/transport failure — never throw to a legacy caller.
+                return nullSlots;
             });
         }));
 
