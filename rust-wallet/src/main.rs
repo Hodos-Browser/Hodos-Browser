@@ -864,6 +864,11 @@ async fn main() -> std::io::Result<()> {
             // `yours.sendBsv` translator to resolve each {address, amount} payment to a
             // canonical createAction output (lockingScript + script_type).
             .route("/wallet/address-to-script", web::post().to(handlers::address_to_script))
+            // Phase 2 Step 3c.2: BIE1 (ECIES Electrum) legacy encrypt/decrypt for Yours-era
+            // dApps that store / receive ciphertexts under the pre-BRC-2 format. Both gated
+            // by check_domain_approved just like canonical /encrypt and /decrypt.
+            .route("/wallet/encrypt-bie1", web::post().to(handlers::encrypt_bie1_handler))
+            .route("/wallet/decrypt-bie1", web::post().to(handlers::decrypt_bie1_handler))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/backup/onchain", web::post().to(handlers::wallet_backup_onchain))
             .route("/wallet/backup/onchain/verify", web::post().to(handlers::wallet_backup_onchain_verify))

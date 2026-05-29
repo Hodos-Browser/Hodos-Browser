@@ -1950,6 +1950,250 @@ pub async fn decrypt(
 }
 
 // ============================================================================
+// BIE1 (ECIES Electrum) — Phase 2 Step 3c.2 legacy Yours-era encrypt/decrypt
+// ============================================================================
+//
+// HTTP face of `crypto::bie1`. Distinct from canonical BRC-100 encrypt/decrypt
+// (BRC-2 / AES-256-GCM) — BIE1 and BRC-2 are wire-incompatible cryptographic
+// schemes, so silently routing one through the other would break ciphertext
+// continuity for any Yours-era dApp that stored ciphertexts under BIE1 (see
+// [[phase2-step3-ecies-electrum]]). These endpoints are reachable only via the
+// `window.yours.encrypt` / `window.yours.decrypt` shim translators (Step 3c.3);
+// the canonical `window.CWI.encrypt` / `window.CWI.decrypt` path remains BRC-2.
+//
+// Permission gating mirrors the canonical encrypt/decrypt path: both endpoints
+// route through `check_domain_approved` because they use the user's identity-
+// tied master private key (for the ECDH on the recipient side during decrypt,
+// and as the deterministic sender identity during encrypt if the dApp opts in).
+
+#[derive(Debug, Deserialize)]
+pub struct EncryptBie1Request {
+    /// Plaintext payload. Interpretation depends on `encoding`.
+    pub message: String,
+    /// `"utf8"` (default) | `"hex"` | `"base64"` — how to decode `message` into bytes.
+    #[serde(default)]
+    pub encoding: Option<String>,
+    /// Recipient's compressed secp256k1 public key, hex-encoded (33 bytes → 66 chars).
+    #[serde(rename = "recipientPublicKey")]
+    pub recipient_public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EncryptBie1Response {
+    /// Full BIE1 envelope hex-encoded:
+    /// `MAGIC || ephemeral_pub || AES-128-CBC ciphertext || HMAC-SHA256 (32B)`.
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecryptBie1Request {
+    /// BIE1 envelope, hex-encoded.
+    pub ciphertext: String,
+    /// `"utf8"` (default) | `"hex"` | `"base64"` — how to re-encode the decrypted bytes
+    /// for the JSON response so the caller never has to handle raw Vec<u8>.
+    #[serde(rename = "outputEncoding")]
+    #[serde(default)]
+    pub output_encoding: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DecryptBie1Response {
+    /// Decrypted plaintext, encoded per `outputEncoding`.
+    pub plaintext: String,
+}
+
+/// Decode a `message` field into raw bytes per the `encoding` discriminator.
+/// Returns a clear error on unknown encoding so the shim caller can surface it.
+fn decode_message_bytes(message: &str, encoding: Option<&str>) -> Result<Vec<u8>, String> {
+    match encoding.unwrap_or("utf8") {
+        "utf8" | "utf-8" => Ok(message.as_bytes().to_vec()),
+        "hex" => hex::decode(message)
+            .map_err(|e| format!("hex decode failed: {}", e)),
+        "base64" => general_purpose::STANDARD
+            .decode(message)
+            .map_err(|e| format!("base64 decode failed: {}", e)),
+        other => Err(format!(
+            "unsupported encoding '{}': expected 'utf8' | 'hex' | 'base64'",
+            other
+        )),
+    }
+}
+
+/// Re-encode decrypted bytes for the JSON response per the `outputEncoding` discriminator.
+/// utf8 path returns a lossy String — non-UTF-8 input still round-trips through the
+/// `hex` / `base64` variants, so dApps that expect binary should pass those.
+fn encode_plaintext_bytes(bytes: &[u8], encoding: Option<&str>) -> Result<String, String> {
+    match encoding.unwrap_or("utf8") {
+        "utf8" | "utf-8" => Ok(String::from_utf8_lossy(bytes).to_string()),
+        "hex" => Ok(hex::encode(bytes)),
+        "base64" => Ok(general_purpose::STANDARD.encode(bytes)),
+        other => Err(format!(
+            "unsupported outputEncoding '{}': expected 'utf8' | 'hex' | 'base64'",
+            other
+        )),
+    }
+}
+
+/// `POST /wallet/encrypt-bie1`
+///
+/// Encrypts `message` for `recipientPublicKey` using BIE1 (ECIES Electrum).
+/// The sender ephemeral key is freshly generated from the OS CSPRNG — no
+/// deterministic-sender option is exposed via HTTP because that's a footgun
+/// for callers (ciphertext reuse is detectable; identity binding would need
+/// a separate audited code path).
+pub async fn encrypt_bie1_handler(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Json<EncryptBie1Request>,
+) -> HttpResponse {
+    log::info!("🔒 /wallet/encrypt-bie1 called");
+
+    // Defense-in-depth domain gate. Mirrors canonical /encrypt — BIE1 still uses
+    // the user's master keypair on the sender side (and shares the recipient
+    // pubkey with a peer), so an un-approved dApp must NOT be able to reach
+    // this endpoint silently.
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let plaintext = match decode_message_bytes(&body.message, body.encoding.as_deref()) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("   message decode failed: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid message encoding: {}", e)
+            }));
+        }
+    };
+
+    let recipient_pub = match hex::decode(&body.recipient_public_key) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("   recipientPublicKey hex decode failed: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("recipientPublicKey must be hex: {}", e)
+            }));
+        }
+    };
+
+    match crate::crypto::bie1::encrypt_bie1(&plaintext, &recipient_pub, None) {
+        Ok(envelope) => {
+            log::info!(
+                "   ✅ BIE1 encrypt: {} plaintext bytes → {} envelope bytes",
+                plaintext.len(),
+                envelope.len()
+            );
+            HttpResponse::Ok().json(EncryptBie1Response {
+                ciphertext: hex::encode(envelope),
+            })
+        }
+        Err(e) => {
+            log::error!("   BIE1 encrypt failed: {}", e);
+            // Map secp256k1 / curve failures to 400 (caller-fixable input);
+            // unexpected AES/HMAC init failures get 500.
+            match &e {
+                crate::crypto::bie1::Bie1Error::InvalidRecipientPublicKey(_)
+                | crate::crypto::bie1::Bie1Error::InvalidSenderPrivateKey(_) => {
+                    HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("{}", e)
+                    }))
+                }
+                _ => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("BIE1 encrypt failed: {}", e)
+                })),
+            }
+        }
+    }
+}
+
+/// `POST /wallet/decrypt-bie1`
+///
+/// Decrypts a BIE1 envelope using the wallet's master private key as the
+/// recipient secret. Matches Yours v4.5.6 behavior, which used a single
+/// identity-tied key for all envelope recipients on a given wallet.
+pub async fn decrypt_bie1_handler(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Json<DecryptBie1Request>,
+) -> HttpResponse {
+    log::info!("🔓 /wallet/decrypt-bie1 called");
+
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let envelope = match hex::decode(&body.ciphertext) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("   ciphertext hex decode failed: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("ciphertext must be hex: {}", e)
+            }));
+        }
+    };
+
+    let master_privkey = {
+        let db = state.database.lock().unwrap();
+        match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("   Failed to get master private key: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get master key: {}", e)
+                }));
+            }
+        }
+    };
+
+    let plaintext_bytes = match crate::crypto::bie1::decrypt_bie1(&envelope, &master_privkey) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("   BIE1 decrypt failed: {}", e);
+            // Distinguish "the caller gave us garbage / wrong recipient" (400) from
+            // "we couldn't even set up our crypto primitives" (500). Padding errors
+            // CAN'T leak via this path because the MAC fires first — see bie1.rs.
+            match &e {
+                crate::crypto::bie1::Bie1Error::EnvelopeTooShort { .. }
+                | crate::crypto::bie1::Bie1Error::InvalidMagic
+                | crate::crypto::bie1::Bie1Error::InvalidEphemeralPublicKey
+                | crate::crypto::bie1::Bie1Error::MacMismatch
+                | crate::crypto::bie1::Bie1Error::InvalidPadding
+                | crate::crypto::bie1::Bie1Error::InvalidRecipientPrivateKey(_) => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("{}", e)
+                    }));
+                }
+                _ => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("BIE1 decrypt failed: {}", e)
+                    }));
+                }
+            }
+        }
+    };
+
+    match encode_plaintext_bytes(&plaintext_bytes, body.output_encoding.as_deref()) {
+        Ok(plaintext) => {
+            log::info!(
+                "   ✅ BIE1 decrypt: {} envelope bytes → {} plaintext bytes",
+                envelope.len(),
+                plaintext_bytes.len()
+            );
+            HttpResponse::Ok().json(DecryptBie1Response { plaintext })
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Invalid outputEncoding: {}", e)
+        })),
+    }
+}
+
+// ============================================================================
 // BRC-72 style key linkage revelation handlers (Phase 1.5 Step 1)
 // ============================================================================
 
