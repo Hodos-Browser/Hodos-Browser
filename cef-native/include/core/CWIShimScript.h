@@ -546,15 +546,101 @@ R"JS(
                 'followed by window.CWI.signAction({reference, spends}) — see SHIM_TRANSLATION_SPEC.'
             ));
         }));
-
-        // ----- sendBsv: stub w/ typed error (P2PKH script construction lands in Step 3b) -----
+)JS"
+R"JS(
+        // ----- sendBsv: translate [{address, satoshis|amount}] → canonical createAction (Step 3b.4) -----
+        // The Yours-era sendBsv API takes plain BSV addresses + satoshi amounts and
+        // returns { txid }. We translate by resolving each address to a P2PKH locking
+        // script via /wallet/address-to-script (Step 3b.2), then calling the canonical
+        // createAction with the resulting outputs.
+        //
+        // CRITICAL: this MUST route through canonical.createAction unchanged. The C++
+        // permission engine applies the same auto-approve / per-domain prompt path it
+        // does for any BRC-100 payment, AND the success path fires the
+        // payment_success_indicator IPC chain (the user's primary visual safeguard
+        // against silent payment abuse). Do NOT shortcut, batch, or bypass that path.
         defineLegacyProp(legacy, 'sendBsv', makeLegacyMethod(function(payments) {
             warnDeprecated('sendBsv');
-            return Promise.reject(typedError(
-                LEGACY_ERR.NOT_IMPL, 'sendBsv',
-                'plain-address translation lands in Step 3b. ' +
-                'For now use window.CWI.createAction({outputs: [{satoshis, lockingScript: <P2PKH hex>}]}).'
-            ));
+            if (!Array.isArray(payments) || payments.length === 0) {
+                return Promise.reject(typedError(
+                    LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
+                    'sendBsv expects a non-empty array of {address, satoshis|amount} objects'
+                ));
+            }
+            // Normalize + validate every item BEFORE any backend calls so a bad item
+            // doesn't leave us with partially-resolved scripts and a half-built tx.
+            // Yours v4.5.6 used `satoshis`; Hodos's plan used `amount`; accept both
+            // to maximize compat with both ecosystem variants.
+            var normalized = [];
+            for (var i = 0; i < payments.length; i++) {
+                var p = payments[i];
+                if (!p || typeof p.address !== 'string' || p.address.length === 0) {
+                    return Promise.reject(typedError(
+                        LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
+                        'payment[' + i + '].address must be a non-empty string'
+                    ));
+                }
+                var sats = (typeof p.satoshis === 'number') ? p.satoshis : p.amount;
+                if (typeof sats !== 'number' || !isFinite(sats) || sats <= 0 ||
+                    Math.floor(sats) !== sats) {
+                    return Promise.reject(typedError(
+                        LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
+                        'payment[' + i + '].satoshis (or amount) must be a positive integer'
+                    ));
+                }
+                // Reject Yours-legacy fields we don't yet translate. Silent skip
+                // would mismatch the dApp's actual intent (e.g. OP_RETURN data
+                // payload missing, no error surfaced).
+                if (p.data) {
+                    return Promise.reject(typedError(
+                        LEGACY_ERR.NOT_IMPL, 'sendBsv',
+                        'payment[' + i + '].data (OP_RETURN) is not yet translated. ' +
+                        'Use canonical createAction with an explicit OP_RETURN lockingScript.'
+                    ));
+                }
+                if (p.script) {
+                    return Promise.reject(typedError(
+                        LEGACY_ERR.NOT_IMPL, 'sendBsv',
+                        'payment[' + i + '].script (raw locking script) is not yet translated. ' +
+                        'Pass the script directly via canonical createAction.'
+                    ));
+                }
+                normalized.push({ address: p.address, satoshis: sats });
+            }
+            return withMutex('sendBsv', function() {
+                // One /wallet/address-to-script round-trip per payment. N is small in
+                // practice — Yours-era dApps almost always send a single output. The
+                // wallet enforces mainnet checksum + version-byte validation here
+                // (Step 3b.0); the shim never builds locking scripts itself.
+                return Promise.all(normalized.map(function(p) {
+                    return fetch(ENDPOINT_BASE + '/wallet/address-to-script', {
+                        method: 'POST',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ address: p.address })
+                    }).then(function(r) {
+                        return r.json().then(function(j) {
+                            if (!r.ok) {
+                                throw typedError(LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
+                                    'address-to-script failed for "' + p.address + '": ' +
+                                    ((j && j.error) || ('HTTP ' + r.status)));
+                            }
+                            return { satoshis: p.satoshis, lockingScript: j.lockingScript };
+                        });
+                    });
+                })).then(function(outputs) {
+                    return canonical.createAction({
+                        description: 'window.yours.sendBsv',
+                        outputs: outputs
+                    });
+                }).then(function(actionResult) {
+                    // Legacy callers expect { txid }. Canonical createAction returns
+                    // the full action; we extract the txid only. dApps that need rawtx
+                    // can use canonical.listActions or the canonical createAction return.
+                    return { txid: actionResult && actionResult.txid };
+                });
+            });
         }));
 
         // ----- broadcast({ rawtx }): try internalizeAction, fall back to /wallet/broadcast -----
@@ -692,7 +778,9 @@ R"JS(
 )JS"
 // Phase 2 Step 4 — split between provider installation and announceProvider scaffolding.
 // The icon data URL embedded below pushes the announce block's text past MSVC's 16380-
-// char per-literal cap, so the bundle now uses four adjacent R"JS(...)JS" literals.
+// char per-literal cap. Step 3b.4 added another split inside the legacy provider block
+// to keep the new sendBsv translator's bytes inside its containing literal's budget, so
+// the bundle now uses five adjacent R"JS(...)JS" literals.
 // C++ auto-concatenates them; the injected JS sees one continuous string.
 R"JS(
 
