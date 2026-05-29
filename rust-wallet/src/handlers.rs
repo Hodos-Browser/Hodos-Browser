@@ -4846,9 +4846,9 @@ pub(crate) async fn create_action_internal(
             }
             }
         } else if let Some(address) = &output.address {
-            // Convert address to P2PKH script
+            // Convert address to P2PKH script (mainnet, with checksum + version-byte validation).
             log::info!("   Output {}: Converting address to script: {}", i, address);
-            match address_to_script(address) {
+            match crate::recovery::address_to_p2pkh_script(address) {
                 Ok(script) => script,
                 Err(e) => {
                     log::error!("   Failed to convert address '{}': {}", address, e);
@@ -4907,7 +4907,7 @@ pub(crate) async fn create_action_internal(
     }
 
     // Add Hodos service fee output
-    let fee_script = address_to_script(HODOS_FEE_ADDRESS)
+    let fee_script = crate::recovery::address_to_p2pkh_script(HODOS_FEE_ADDRESS)
         .expect("HODOS_FEE_ADDRESS constant is invalid");
     tx.add_output(TxOutput::new(HODOS_SERVICE_FEE_SATS, fee_script));
     log::info!("   💰 Added Hodos service fee output: {} satoshis to {}", HODOS_SERVICE_FEE_SATS, HODOS_FEE_ADDRESS);
@@ -5441,7 +5441,7 @@ pub(crate) async fn create_action_internal(
                     satoshis: HODOS_SERVICE_FEE_SATS,
                     key_offset: "hodos-service-fee".to_string(),
                     is_redeemed: false,
-                    locking_script: address_to_script(HODOS_FEE_ADDRESS).unwrap(),
+                    locking_script: crate::recovery::address_to_p2pkh_script(HODOS_FEE_ADDRESS).unwrap(),
                     created_at: 0,
                     updated_at: 0,
                 };
@@ -6230,34 +6230,10 @@ pub async fn update_confirmations(state: web::Data<AppState>) -> Result<usize, S
     Ok(updated_count)
 }
 
-// Parse address from P2PKH script (76a914{20-byte-hash}88ac)
-/// Convert a Bitcoin address to a P2PKH locking script
-pub fn address_to_script(address: &str) -> Result<Vec<u8>, String> {
-    // Decode base58 address
-    let decoded = match bs58::decode(address).into_vec() {
-        Ok(v) => v,
-        Err(e) => return Err(format!("Base58 decode error: {}", e)),
-    };
-
-    // Address format: [version byte][20-byte pubkey hash][4-byte checksum]
-    if decoded.len() != 25 {
-        return Err(format!("Invalid address length: {}", decoded.len()));
-    }
-
-    // Extract pubkey hash (skip version byte, remove checksum)
-    let pubkey_hash = &decoded[1..21];
-
-    // Create P2PKH script: OP_DUP OP_HASH160 <pubkey_hash> OP_EQUALVERIFY OP_CHECKSIG
-    let mut script = Vec::new();
-    script.push(0x76); // OP_DUP
-    script.push(0xa9); // OP_HASH160
-    script.push(0x14); // Push 20 bytes
-    script.extend_from_slice(pubkey_hash);
-    script.push(0x88); // OP_EQUALVERIFY
-    script.push(0xac); // OP_CHECKSIG
-
-    Ok(script)
-}
+// Note: address-to-P2PKH-script conversion lives in `crate::recovery::address_to_p2pkh_script`.
+// Phase 2 Step 3b.0 (2026-05-29) consolidated the previous local `address_to_script` (no checksum
+// or version-byte check) into the safer recovery-module version, which validates checksum AND
+// mainnet version byte (0x00). Use that everywhere.
 
 // Create P2PKH script from a public key (for BRC-29)
 fn create_p2pkh_script_from_pubkey(pubkey: &[u8]) -> Vec<u8> {
@@ -11887,7 +11863,7 @@ pub async fn do_onchain_backup(
     // Step 5: Build P2PKH marker script for backup address (for on-chain discovery)
     let backup_address = pubkey_to_address(&backup_pubkey)
         .unwrap_or_default();
-    let marker_script = address_to_script(&backup_address)
+    let marker_script = crate::recovery::address_to_p2pkh_script(&backup_address)
         .unwrap_or_default();
     let marker_sats: i64 = 546; // Dust limit — smallest discoverable output
     log::info!("   📍 Backup marker address: {}", backup_address);
@@ -12873,7 +12849,7 @@ fn reconcile_backup_tx(
 
                 let change_script_bytes = hex::decode(script_hex).unwrap_or_default();
                 addresses.iter().find_map(|a| {
-                    let addr_script = crate::handlers::address_to_script(&a.address);
+                    let addr_script = crate::recovery::address_to_p2pkh_script(&a.address);
                     if let Ok(s) = addr_script {
                         if s == change_script_bytes { Some(a.index) } else { None }
                     } else { None }

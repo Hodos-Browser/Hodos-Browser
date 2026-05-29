@@ -16,7 +16,8 @@ use crate::database::{WalletRepository, AddressRepository, BasketRepository, Com
 use crate::database::{TransactionRepository, ParentTransactionRepository, get_master_private_key_from_db, get_master_public_key_from_db};
 use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
 use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
-use crate::handlers::{estimate_transaction_size, calculate_fee, address_to_script, broadcast_transaction, HODOS_FEE_ADDRESS, HODOS_SERVICE_FEE_SATS};
+use crate::handlers::{estimate_transaction_size, calculate_fee, broadcast_transaction, HODOS_FEE_ADDRESS, HODOS_SERVICE_FEE_SATS};
+use crate::recovery::address_to_p2pkh_script;
 use crate::crypto::brc42::derive_child_public_key;
 use crate::action_storage::TransactionStatus;
 
@@ -250,7 +251,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
     tx.add_output(TxOutput::new(net_value, change_script_bytes.clone()));
 
     // Output 1: service fee
-    let fee_script = address_to_script(HODOS_FEE_ADDRESS)
+    let fee_script = address_to_p2pkh_script(HODOS_FEE_ADDRESS)
         .map_err(|e| format!("Fee script: {}", e))?;
     tx.add_output(TxOutput::new(HODOS_SERVICE_FEE_SATS, fee_script));
 
@@ -369,7 +370,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                     satoshis: HODOS_SERVICE_FEE_SATS,
                     key_offset: "hodos-service-fee".to_string(),
                     is_redeemed: false,
-                    locking_script: address_to_script(HODOS_FEE_ADDRESS).unwrap(),
+                    locking_script: address_to_p2pkh_script(HODOS_FEE_ADDRESS).unwrap(),
                     created_at: 0,
                     updated_at: 0,
                 });

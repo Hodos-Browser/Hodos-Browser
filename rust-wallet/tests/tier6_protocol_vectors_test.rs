@@ -1164,8 +1164,10 @@ fn t6_07_base58check_address() {
         Ok(())
     });
 
-    // Different version bytes still work (address_to_p2pkh_script doesn't check version)
-    check!("addr/05", "testnet-version-byte-accepted", {
+    // Testnet version byte (0x6f) is rejected after Phase 2 Step 3b.0:
+    // address_to_p2pkh_script now enforces mainnet-only (0x00) to prevent
+    // silently building a P2PKH locking script from a non-mainnet hash160.
+    check!("addr/05", "testnet-version-byte-rejected", {
         let pubkey_hash = [0xcc; 20];
         let mut payload = vec![0x6f]; // testnet version byte
         payload.extend_from_slice(&pubkey_hash);
@@ -1173,13 +1175,12 @@ fn t6_07_base58check_address() {
         payload.extend_from_slice(&checksum[..4]);
         let address = bs58::encode(&payload).into_string();
 
-        let script = address_to_p2pkh_script(&address)
-            .map_err(|e| format!("script: {}", e))?;
-        // Should produce valid P2PKH script regardless of version byte
-        if script.len() != 25 {
-            return Err(format!("script should be 25 bytes, got {}", script.len()));
+        let result = address_to_p2pkh_script(&address);
+        match result {
+            Err(e) if e.contains("0x6f") => Ok(()),
+            Err(e) => Err(format!("expected 0x6f version-byte error, got: {}", e)),
+            Ok(_) => Err("testnet 0x6f version byte should be rejected".into()),
         }
-        Ok(())
     });
 
     // All-zero pubkey hash produces valid script

@@ -2809,7 +2809,7 @@ async fn create_certificate_transaction(
     log::info!("   📤 Added certificate output: {} satoshis", certificate_output_amount);
 
     // Add Hodos service fee output
-    let fee_script = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+    let fee_script = crate::recovery::address_to_p2pkh_script(crate::handlers::HODOS_FEE_ADDRESS)
         .expect("HODOS_FEE_ADDRESS constant is invalid");
     tx.add_output(TxOutput::new(crate::handlers::HODOS_SERVICE_FEE_SATS, fee_script));
     log::info!("   💰 Added Hodos service fee: {} satoshis", crate::handlers::HODOS_SERVICE_FEE_SATS);
@@ -4442,7 +4442,7 @@ async fn unpublish_certificate_core(
     }
 
     // Add Hodos service fee output
-    let fee_script = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+    let fee_script = crate::recovery::address_to_p2pkh_script(crate::handlers::HODOS_FEE_ADDRESS)
         .expect("HODOS_FEE_ADDRESS constant is invalid");
     tx.add_output(TxOutput::new(crate::handlers::HODOS_SERVICE_FEE_SATS, fee_script));
     log::info!("   💰 Added Hodos service fee: {} satoshis", crate::handlers::HODOS_SERVICE_FEE_SATS);
@@ -5739,7 +5739,7 @@ async fn auto_spend_pushdrop(
     tx.add_input(TxInput::new(OutPoint::new(funding_txid.clone(), funding_vout)));
 
     // Service fee output
-    let fee_script_bytes = crate::handlers::address_to_script(crate::handlers::HODOS_FEE_ADDRESS)
+    let fee_script_bytes = crate::recovery::address_to_p2pkh_script(crate::handlers::HODOS_FEE_ADDRESS)
         .expect("HODOS_FEE_ADDRESS constant is invalid");
     tx.add_output(TxOutput::new(service_fee, fee_script_bytes));
 

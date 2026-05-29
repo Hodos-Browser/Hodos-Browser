@@ -660,7 +660,24 @@ pub fn build_sweep_transactions(
     Ok(results)
 }
 
-/// Convert a Base58Check Bitcoin address to a P2PKH locking script (25 bytes).
+/// Convert a Base58Check BSV mainnet address to a P2PKH locking script (25 bytes).
+///
+/// Validates:
+/// 1. Base58 decoding succeeds
+/// 2. Payload length is exactly 25 bytes (1 version + 20 hash + 4 checksum)
+/// 3. Double-SHA256 checksum matches the trailing 4 bytes
+/// 4. Version byte is `0x00` (BSV mainnet P2PKH)
+///
+/// Rejects testnet addresses (`0x6f`), P2SH addresses (`0x05`), and any other
+/// non-mainnet-P2PKH version byte to prevent silently locking funds to an
+/// uncontrolled hash160. This is the single source of truth used by every
+/// address-derived locking script construction in the wallet — both trusted
+/// (e.g., `HODOS_FEE_ADDRESS`, change addresses) and untrusted (user-supplied
+/// payment destinations from `create_action`, sweep destinations).
+///
+/// Phase 2 Step 3b.0 (2026-05-29): unified the previous unchecked
+/// `handlers::address_to_script` and the partially-checked
+/// `recovery::address_to_p2pkh_script` into this function.
 pub fn address_to_p2pkh_script(address: &str) -> std::result::Result<Vec<u8>, String> {
     let decoded = bs58::decode(address)
         .into_vec()
@@ -678,6 +695,16 @@ pub fn address_to_p2pkh_script(address: &str) -> std::result::Result<Vec<u8>, St
         return Err("Address checksum mismatch".to_string());
     }
 
+    // BSV mainnet P2PKH only. Reject testnet (0x6f), P2SH (0x05), and any
+    // other version byte to prevent silently building a P2PKH locking script
+    // from a hash160 that the user never controlled.
+    if decoded[0] != 0x00 {
+        return Err(format!(
+            "Unsupported address version byte: 0x{:02x} (only mainnet P2PKH 0x00 is supported)",
+            decoded[0]
+        ));
+    }
+
     // Extract 20-byte pubkey hash (skip version byte)
     let pubkey_hash = &decoded[1..21];
 
@@ -685,4 +712,90 @@ pub fn address_to_p2pkh_script(address: &str) -> std::result::Result<Vec<u8>, St
         .map_err(|e| format!("Failed to build P2PKH script: {}", e))?;
 
     Ok(script.bytes)
+}
+
+#[cfg(test)]
+mod address_to_p2pkh_script_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn build_address(version_byte: u8, hash160: &[u8; 20]) -> String {
+        let mut payload = vec![version_byte];
+        payload.extend_from_slice(hash160);
+        let checksum = Sha256::digest(&Sha256::digest(&payload));
+        payload.extend_from_slice(&checksum[..4]);
+        bs58::encode(&payload).into_string()
+    }
+
+    #[test]
+    fn known_mainnet_address_to_script() {
+        // Hodos service fee address — a known-good mainnet P2PKH address.
+        let address = "1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT";
+        let script = address_to_p2pkh_script(address).expect("known address must decode");
+        assert_eq!(script.len(), 25);
+        assert_eq!(script[0], 0x76); // OP_DUP
+        assert_eq!(script[1], 0xa9); // OP_HASH160
+        assert_eq!(script[2], 0x14); // push 20
+        assert_eq!(script[23], 0x88); // OP_EQUALVERIFY
+        assert_eq!(script[24], 0xac); // OP_CHECKSIG
+    }
+
+    #[test]
+    fn synthetic_mainnet_address_round_trip() {
+        let hash160 = [0xaau8; 20];
+        let address = build_address(0x00, &hash160);
+        let script = address_to_p2pkh_script(&address).unwrap();
+        // The 20-byte pubkey hash must round-trip into the script.
+        assert_eq!(&script[3..23], &hash160[..]);
+    }
+
+    #[test]
+    fn rejects_malformed_base58() {
+        // '0', 'O', 'I', 'l' are not valid Base58 characters.
+        let result = address_to_p2pkh_script("0OIl");
+        assert!(result.is_err(), "malformed Base58 must error");
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let result = address_to_p2pkh_script("");
+        assert!(result.is_err(), "empty address must error");
+    }
+
+    #[test]
+    fn rejects_bad_checksum() {
+        let hash160 = [0xbbu8; 20];
+        let mut payload = vec![0x00u8];
+        payload.extend_from_slice(&hash160);
+        let mut checksum = Sha256::digest(&Sha256::digest(&payload))[..4].to_vec();
+        checksum[0] ^= 0xff; // corrupt
+        payload.extend_from_slice(&checksum);
+        let address = bs58::encode(&payload).into_string();
+        let err = address_to_p2pkh_script(&address).unwrap_err();
+        assert!(err.contains("checksum"), "expected checksum error, got: {}", err);
+    }
+
+    #[test]
+    fn rejects_testnet_version_byte() {
+        let hash160 = [0xccu8; 20];
+        let address = build_address(0x6f, &hash160);
+        let err = address_to_p2pkh_script(&address).unwrap_err();
+        assert!(err.contains("0x6f"), "expected 0x6f-version error, got: {}", err);
+    }
+
+    #[test]
+    fn rejects_p2sh_version_byte() {
+        let hash160 = [0xddu8; 20];
+        let address = build_address(0x05, &hash160);
+        let err = address_to_p2pkh_script(&address).unwrap_err();
+        assert!(err.contains("0x05"), "expected 0x05-version error, got: {}", err);
+    }
+
+    #[test]
+    fn rejects_short_address() {
+        // Encoding only 20 bytes — decode succeeds but length check fires.
+        let short = bs58::encode(&[0u8; 20]).into_string();
+        let result = address_to_p2pkh_script(&short);
+        assert!(result.is_err(), "20-byte payload must error on length check");
+    }
 }
