@@ -854,6 +854,10 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
             .route("/wallet/addresses", web::get().to(handlers::get_all_addresses))
             .route("/wallet/address/current", web::get().to(handlers::get_current_address))
+            // Phase 2 Step 3b.1: consolidated legacy Yours address derivation.
+            // Returns {bsvAddress, ordAddress, identityAddress} in a single round-trip
+            // using BRC-42 with the yours-legacy-v1 protocol IDs and `yours-{origin}` keyID.
+            .route("/wallet/yours-legacy-addresses", web::post().to(handlers::yours_legacy_addresses))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/backup/onchain", web::post().to(handlers::wallet_backup_onchain))
             .route("/wallet/backup/onchain/verify", web::post().to(handlers::wallet_backup_onchain_verify))

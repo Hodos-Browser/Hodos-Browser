@@ -8383,6 +8383,285 @@ fn pubkey_to_address(pubkey: &[u8]) -> Result<String, String> {
     Ok(bs58::encode(&addr_bytes).into_string())
 }
 
+// ============================================================================
+// Yours-legacy v1 address derivation (Phase 2 Step 3b.1)
+// ============================================================================
+//
+// `POST /wallet/yours-legacy-addresses` consolidates the three derivations that
+// pre-BRC-100 Yours-era dApps expect from `window.yours.getAddresses()` into a
+// single round-trip:
+//
+//   * `bsvAddress`  — BRC-42 child of master, protocol "2-yours-legacy-receive",
+//                     counterparty=self, keyID="yours-{origin}", then mainnet
+//                     P2PKH (silent — BRC-42 child key derivation does not
+//                     reveal the identity key).
+//   * `ordAddress`  — same as bsvAddress with the "2-yours-legacy-ord-receive"
+//                     protocol. Phase 3 ordinal logic will key off UTXOs landing
+//                     at this address.
+//   * `identityAddress` — mainnet P2PKH of the master identity public key. This
+//                     reveals cross-site correlation and is gated by the SAME
+//                     identity-key disclosure check that `/getPublicKey` applies
+//                     for identityKey-style requests; when disclosure is denied
+//                     for the calling domain, the identity slot is returned as
+//                     `null` and the other two slots are still populated. The
+//                     shim's `getAddresses` caller tolerates a null identity
+//                     slot — dApps that need the identity address can prompt
+//                     explicitly via `canonical.getPublicKey({ identityKey: true })`.
+//
+// The protocol-id + keyID convention MUST stay in sync with the JS side
+// (`CWIShimScript.h` → `YOURS_LEGACY_V1`), otherwise the addresses Hodos emits
+// will not match the addresses Yours-era dApps derive on their end.
+
+/// BRC-43 protocol ID for legacy Yours bsv-receive derivation: `[2, "yours-legacy-receive"]`
+/// flattened to its BRC-43 invoice prefix.
+pub const YOURS_LEGACY_RECEIVE_PROTOCOL: &str = "2-yours-legacy-receive";
+
+/// BRC-43 protocol ID for legacy Yours ord-receive derivation: `[2, "yours-legacy-ord-receive"]`.
+pub const YOURS_LEGACY_ORD_RECEIVE_PROTOCOL: &str = "2-yours-legacy-ord-receive";
+
+/// Build the BRC-43 `keyID` that Yours-era dApps use for per-origin derivation:
+/// `"yours-" + origin_host`. Matches `CWIShimScript.h` getPubKeys (`var originKey
+/// = 'yours-' + window.location.host`).
+fn yours_legacy_key_id(origin: &str) -> String {
+    format!("yours-{}", origin)
+}
+
+/// Pure deterministic core: given the wallet's master keys and a dApp origin,
+/// derive the three Yours-legacy mainnet P2PKH addresses.
+///
+/// Returns `(bsv_address, ord_address, identity_address)`. Each slot may be `None`
+/// if the derivation or Base58Check encoding fails, mirroring the legacy shim's
+/// tolerance for missing fields. The identity slot here is unfiltered — caller
+/// applies the identity-key disclosure gate.
+fn derive_yours_legacy_addresses_core(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    origin: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let key_id = yours_legacy_key_id(origin);
+    let bsv_invoice = format!("{}-{}", YOURS_LEGACY_RECEIVE_PROTOCOL, key_id);
+    let ord_invoice = format!("{}-{}", YOURS_LEGACY_ORD_RECEIVE_PROTOCOL, key_id);
+
+    let bsv_address = derive_child_pubkey_to_address(master_privkey, master_pubkey, &bsv_invoice);
+    let ord_address = derive_child_pubkey_to_address(master_privkey, master_pubkey, &ord_invoice);
+    let identity_address = pubkey_to_address(master_pubkey).ok();
+
+    (bsv_address, ord_address, identity_address)
+}
+
+/// BRC-42 self-derivation (counterparty=self) followed by mainnet P2PKH encoding.
+/// Returns `None` if any step in the pipeline fails; the caller decides how to
+/// surface the empty slot.
+fn derive_child_pubkey_to_address(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    invoice: &str,
+) -> Option<String> {
+    use secp256k1::{Secp256k1, SecretKey, PublicKey};
+    let child_privkey = derive_child_private_key(master_privkey, master_pubkey, invoice).ok()?;
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&child_privkey).ok()?;
+    let child_pubkey = PublicKey::from_secret_key(&secp, &secret).serialize();
+    pubkey_to_address(&child_pubkey).ok()
+}
+
+#[derive(Deserialize)]
+pub struct YoursLegacyAddressesRequest {
+    pub origin: String,
+}
+
+#[derive(Serialize)]
+pub struct YoursLegacyAddressesResponse {
+    #[serde(rename = "bsvAddress")]
+    pub bsv_address: Option<String>,
+    #[serde(rename = "ordAddress")]
+    pub ord_address: Option<String>,
+    #[serde(rename = "identityAddress")]
+    pub identity_address: Option<String>,
+}
+
+pub async fn yours_legacy_addresses(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Json<YoursLegacyAddressesRequest>,
+) -> HttpResponse {
+    log::info!(
+        "🔑 /wallet/yours-legacy-addresses called for origin='{}'",
+        body.origin
+    );
+
+    if body.origin.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "origin is required"
+        }));
+    }
+
+    // Pull master keys in a single short-lived DB lock so the derivation work
+    // below (CPU-bound secp256k1) runs without holding the connection.
+    let (master_privkey, master_pubkey) = {
+        let db = state.database.lock().unwrap();
+        let privkey = match crate::database::get_master_private_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("   Failed to get master private key: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get master key: {}", e)
+                }));
+            }
+        };
+        let pubkey = match crate::database::get_master_public_key_from_db(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("   Failed to get master public key: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to get master key: {}", e)
+                }));
+            }
+        };
+        (privkey, pubkey)
+    };
+
+    let (bsv_addr, ord_addr, identity_addr_unfiltered) =
+        derive_yours_legacy_addresses_core(&master_privkey, &master_pubkey, &body.origin);
+
+    // Identity-key disclosure gate — mirror /getPublicKey. The bsv/ord
+    // derivations stay silent (they are BRC-42 child keys, not the master
+    // identity key); the identity slot reveals cross-site correlation and
+    // therefore respects the same per-domain grant + header pre-approval that
+    // `/getPublicKey` uses. On denial we return `null` for the identity slot
+    // rather than 403-ing the whole call, so bsv/ord still flow through.
+    let requesting_domain = http_req
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let pre_approved_header = http_req
+        .headers()
+        .get("X-Identity-Key-Approved")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let identity_address = if let Some(ref domain) = requesting_domain {
+        let persistent_grant = {
+            let db = state.database.lock().unwrap();
+            let repo = crate::database::DomainPermissionRepository::new(db.connection());
+            match repo.get_by_domain(state.current_user_id, domain) {
+                Ok(Some(perm)) => perm.identity_key_disclosure_allowed,
+                _ => false,
+            }
+        };
+        if pre_approved_header || persistent_grant {
+            identity_addr_unfiltered
+        } else {
+            log::warn!(
+                "🛡️ /wallet/yours-legacy-addresses identity slot withheld for external domain '{}' — no disclosure grant",
+                domain
+            );
+            None
+        }
+    } else {
+        // No X-Requesting-Domain header → internal call (wallet UI, scripts, etc.) → silent pass.
+        identity_addr_unfiltered
+    };
+
+    log::info!(
+        "   ✅ Derived yours-legacy addresses (bsv={}, ord={}, identity={})",
+        bsv_addr.is_some(),
+        ord_addr.is_some(),
+        identity_address.is_some(),
+    );
+
+    HttpResponse::Ok().json(YoursLegacyAddressesResponse {
+        bsv_address: bsv_addr,
+        ord_address: ord_addr,
+        identity_address,
+    })
+}
+
+#[cfg(test)]
+mod yours_legacy_addresses_tests {
+    use super::*;
+    use crate::crypto::keys::derive_public_key;
+
+    /// Build a synthetic but valid master keypair for use in deterministic tests.
+    fn synthetic_master_keys(byte: u8) -> (Vec<u8>, Vec<u8>) {
+        let privkey = vec![byte; 32];
+        let pubkey = derive_public_key(&privkey).expect("synthetic privkey must derive");
+        (privkey, pubkey)
+    }
+
+    #[test]
+    fn key_id_matches_shim_convention() {
+        // Must match `CWIShimScript.h`: `var originKey = 'yours-' + window.location.host`.
+        assert_eq!(yours_legacy_key_id("example.com"), "yours-example.com");
+        assert_eq!(yours_legacy_key_id("app.example.com:8080"), "yours-app.example.com:8080");
+        assert_eq!(yours_legacy_key_id(""), "yours-");
+    }
+
+    #[test]
+    fn three_slots_populated_for_valid_origin() {
+        let (priv_k, pub_k) = synthetic_master_keys(0x11);
+        let (bsv, ord, identity) = derive_yours_legacy_addresses_core(&priv_k, &pub_k, "example.com");
+        assert!(bsv.is_some(), "bsvAddress must derive");
+        assert!(ord.is_some(), "ordAddress must derive");
+        assert!(identity.is_some(), "identityAddress must derive");
+
+        // All three are mainnet P2PKH — round-trip via the unified function
+        // to confirm they pass the same checksum + version-byte validation that
+        // every other locking script in the wallet uses.
+        for slot in [bsv.as_ref().unwrap(), ord.as_ref().unwrap(), identity.as_ref().unwrap()] {
+            let script = crate::recovery::address_to_p2pkh_script(slot)
+                .expect("derived address must be valid mainnet P2PKH");
+            assert_eq!(script.len(), 25);
+            assert_eq!(script[0], 0x76); // OP_DUP
+            assert_eq!(script[24], 0xac); // OP_CHECKSIG
+        }
+    }
+
+    #[test]
+    fn bsv_ord_identity_slots_are_distinct() {
+        let (priv_k, pub_k) = synthetic_master_keys(0x22);
+        let (bsv, ord, identity) =
+            derive_yours_legacy_addresses_core(&priv_k, &pub_k, "example.com");
+        assert_ne!(bsv, ord, "bsv-receive and ord-receive must derive different addresses");
+        assert_ne!(bsv, identity, "bsv-receive must not collide with identity key address");
+        assert_ne!(ord, identity, "ord-receive must not collide with identity key address");
+    }
+
+    #[test]
+    fn deterministic_same_origin_same_addresses() {
+        let (priv_k, pub_k) = synthetic_master_keys(0x33);
+        let first = derive_yours_legacy_addresses_core(&priv_k, &pub_k, "example.com");
+        let second = derive_yours_legacy_addresses_core(&priv_k, &pub_k, "example.com");
+        assert_eq!(first, second, "identical inputs must yield identical addresses");
+    }
+
+    #[test]
+    fn different_origins_yield_different_bsv_and_ord() {
+        let (priv_k, pub_k) = synthetic_master_keys(0x44);
+        let (bsv_a, ord_a, identity_a) =
+            derive_yours_legacy_addresses_core(&priv_k, &pub_k, "alpha.example");
+        let (bsv_b, ord_b, identity_b) =
+            derive_yours_legacy_addresses_core(&priv_k, &pub_k, "beta.example");
+        // bsv/ord depend on origin, so different origins must produce different addresses.
+        assert_ne!(bsv_a, bsv_b, "bsv address must be per-origin");
+        assert_ne!(ord_a, ord_b, "ord address must be per-origin");
+        // identity is independent of origin (it's just the master pubkey address).
+        assert_eq!(identity_a, identity_b, "identity address must NOT depend on origin");
+    }
+
+    #[test]
+    fn different_master_keys_yield_different_identity_addresses() {
+        let (_, pub_a) = synthetic_master_keys(0x55);
+        let (_, pub_b) = synthetic_master_keys(0x66);
+        let id_a = pubkey_to_address(&pub_a).unwrap();
+        let id_b = pubkey_to_address(&pub_b).unwrap();
+        assert_ne!(id_a, id_b);
+    }
+}
+
 pub async fn generate_address(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("🔑 /wallet/address/generate called");
 
