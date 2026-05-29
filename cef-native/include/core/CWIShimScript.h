@@ -695,47 +695,126 @@ R"JS(
             });
         }));
 
-        // ----- encrypt / decrypt: REJECTED — algorithm mismatch with canonical BRC-100 -----
+        // ----- encrypt / decrypt: real BIE1 via Rust endpoints (Step 3c.3) -----
         //
-        // R3 finding (David, 2026-05-28, via Agent task): legacy yours-wallet@v4.5.6
-        // encrypt/decrypt use ECIES Electrum (@bsv/sdk's ECIES.electrumEncrypt, "BIE1"
-        // format: magic + ephemeral pubkey + AES-CBC ciphertext + HMAC). The canonical
-        // BRC-100 encrypt uses BRC-2 (BRC-42 ECDH + AES-256-GCM). These are wire-
-        // incompatible cryptographic schemes — same primitive name, different bytes.
+        // R3 finding (David, 2026-05-28): legacy yours-wallet@v4.5.6 encrypt/decrypt use
+        // ECIES Electrum (@bsv/sdk's ECIES.electrumEncrypt, "BIE1" format: magic +
+        // ephemeral pubkey + AES-128-CBC ciphertext + HMAC-SHA256). The canonical BRC-100
+        // encrypt uses BRC-2 (BRC-42 ECDH + AES-256-GCM). These are wire-incompatible
+        // cryptographic schemes — same primitive name, different bytes. Silently routing
+        // window.yours.encrypt → canonical window.CWI.encrypt would produce ciphertexts
+        // that ARE NOT decryptable by any existing Yours-era ciphertext consumer, so we
+        // never did that. Step 3 shipped explicit typed-error rejection; Step 3c.3 ships
+        // a real BIE1 implementation in Rust (crypto::bie1) reachable via two HTTP
+        // handlers (/wallet/encrypt-bie1 + /wallet/decrypt-bie1, Step 3c.2). The shim
+        // here is a thin pass-through that normalizes the Yours-era request shapes.
         //
-        // Multi-recipient was real (NOT vestigial): legacy yours mapped over pubKeys[]
-        // producing N independent ECIES ciphertexts.
+        // Yours v4.5.6 multi-recipient encrypt accepted pubKeys[] and produced N
+        // independent BIE1 ciphertexts; multi-recipient decrypt mirrored that. Step 3c.3
+        // ships SINGLE-RECIPIENT only — N > 1 rejects with typed MULTI_RECIPIENT error.
+        // Multi-recipient is straightforward to add when demand surfaces (loop over the
+        // array, call the endpoint N times, return [ciphertext_1, ..., ciphertext_N]),
+        // but every concrete Yours-era flow we've audited uses a single recipient.
         //
-        // Reasoned conclusion: silently routing window.yours.encrypt → canonical
-        // window.CWI.encrypt would produce ciphertexts that ARE NOT decryptable by any
-        // existing Yours-era ciphertext consumer, and that the wallet itself could not
-        // decrypt if a dApp ever stored one and tried to read it back via legacy decrypt.
-        // The "translation" would silently produce a different cryptosystem under the
-        // same method name — exactly the kind of silent-divergence trap the shim is
-        // supposed to prevent (cf. SHIM_TRANSLATION_SPEC §"Design posture").
-        //
-        // Step 3 ships explicit typed-error rejection. Two real follow-up paths exist:
-        //   (A) Add a Rust `encrypt_ecies_electrum` / `decrypt_ecies_electrum` handler
-        //       wrapping @bsv/sdk's ECIES.electrumEncrypt (estimate ~200-400 LOC Rust).
-        //   (B) Bundle a JS ECIES Electrum implementation in this shim (needs secp256k1
-        //       in JS — noble-secp256k1 or equivalent, ~80KB bundle bloat).
-        // Decide separately from Phase 2 — not a Step 3 footnote.
-        //
-        // For new ciphertexts dApps should use canonical window.CWI.encrypt (BRC-2).
-        function eciesElectrumNotImplemented(name) {
-            return makeLegacyMethod(function() {
-                warnDeprecated(name);
-                return Promise.reject(typedError(
-                    LEGACY_ERR.NOT_IMPL, name,
-                    'legacy yours.' + name + ' uses ECIES Electrum (BIE1 format) which is not yet ' +
-                    'implemented in the Hodos backend. The canonical window.CWI.' + name +
-                    ' uses BRC-2 (AES-GCM) which is wire-incompatible. For NEW data use ' +
-                    'window.CWI.' + name + '; legacy ECIES Electrum compat is tracked separately.'
-                ));
+        // BRC-2 (AES-GCM via canonical window.CWI.encrypt) remains the recommended path
+        // for NEW data; BIE1 here exists strictly for backward compat with stored
+        // Yours-era ciphertexts.
+
+        defineLegacyProp(legacy, 'encrypt', makeLegacyMethod(function(opts) {
+            warnDeprecated('encrypt');
+            opts = opts || {};
+            if (typeof opts.message !== 'string') {
+                return Promise.reject(typedError(LEGACY_ERR.INVALID_ENCODING, 'encrypt',
+                    'encrypt expects {message: string, pubKey | pubKeys: hex string(s)}'));
+            }
+            // Accept both Yours v4.5.6 (pubKeys: string[]) and the simpler (pubKey: string).
+            var pubKeysArr = Array.isArray(opts.pubKeys) ? opts.pubKeys
+                           : (typeof opts.pubKey === 'string') ? [opts.pubKey]
+                           : null;
+            if (!pubKeysArr || pubKeysArr.length === 0) {
+                return Promise.reject(typedError(LEGACY_ERR.INVALID_ENCODING, 'encrypt',
+                    'recipient pubKey is required (as pubKey: string or pubKeys: [string])'));
+            }
+            if (pubKeysArr.length > 1) {
+                return Promise.reject(typedError(LEGACY_ERR.MULTI_RECIPIENT, 'encrypt',
+                    'multi-recipient encrypt (pubKeys[] with N > 1) is not yet supported. ' +
+                    'Pass a single recipient pubKey; if you need N recipients today, call ' +
+                    'yours.encrypt once per recipient.'));
+            }
+            if (typeof pubKeysArr[0] !== 'string' || pubKeysArr[0].length === 0) {
+                return Promise.reject(typedError(LEGACY_ERR.INVALID_ENCODING, 'encrypt',
+                    'recipient pubKey must be a non-empty hex string'));
+            }
+            return withMutex('encrypt', function() {
+                return fetch(ENDPOINT_BASE + '/wallet/encrypt-bie1', {
+                    method: 'POST',
+                    mode: 'cors',
+                    credentials: 'omit',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: opts.message,
+                        encoding: opts.encoding || 'utf8',
+                        recipientPublicKey: pubKeysArr[0]
+                    })
+                }).then(function(r) {
+                    return r.json().then(function(j) {
+                        if (!r.ok) {
+                            throw typedError(LEGACY_ERR.NOT_IMPL, 'encrypt',
+                                'BIE1 encrypt failed: ' + ((j && j.error) || ('HTTP ' + r.status)));
+                        }
+                        // Mirror the caller's shape: array in, array out (length 1); scalar
+                        // in, scalar out. Keeps Yours-era code paths that destructure
+                        // result[0] working unchanged.
+                        return Array.isArray(opts.pubKeys) ? [j.ciphertext] : j.ciphertext;
+                    });
+                });
             });
-        }
-        defineLegacyProp(legacy, 'encrypt', eciesElectrumNotImplemented('encrypt'));
-        defineLegacyProp(legacy, 'decrypt', eciesElectrumNotImplemented('decrypt'));
+        }));
+)JS"
+R"JS(
+        defineLegacyProp(legacy, 'decrypt', makeLegacyMethod(function(opts) {
+            warnDeprecated('decrypt');
+            opts = opts || {};
+            // Accept both Yours v4.5.6 (messages: string[]) and simpler (ciphertext: string).
+            var messagesArr = Array.isArray(opts.messages) ? opts.messages
+                            : (typeof opts.ciphertext === 'string') ? [opts.ciphertext]
+                            : null;
+            if (!messagesArr || messagesArr.length === 0) {
+                return Promise.reject(typedError(LEGACY_ERR.INVALID_ENCODING, 'decrypt',
+                    'decrypt expects {ciphertext: string} or {messages: [string]}'));
+            }
+            if (messagesArr.length > 1) {
+                return Promise.reject(typedError(LEGACY_ERR.MULTI_RECIPIENT, 'decrypt',
+                    'multi-recipient decrypt (messages[] with N > 1) is not yet supported. ' +
+                    'Pass a single ciphertext; if you need to decrypt N items today, call ' +
+                    'yours.decrypt once per item.'));
+            }
+            if (typeof messagesArr[0] !== 'string' || messagesArr[0].length === 0) {
+                return Promise.reject(typedError(LEGACY_ERR.INVALID_ENCODING, 'decrypt',
+                    'ciphertext must be a non-empty hex string'));
+            }
+            return withMutex('decrypt', function() {
+                return fetch(ENDPOINT_BASE + '/wallet/decrypt-bie1', {
+                    method: 'POST',
+                    mode: 'cors',
+                    credentials: 'omit',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ciphertext: messagesArr[0],
+                        outputEncoding: opts.outputEncoding || 'utf8'
+                    })
+                }).then(function(r) {
+                    return r.json().then(function(j) {
+                        if (!r.ok) {
+                            throw typedError(LEGACY_ERR.DECRYPT_FAILED, 'decrypt',
+                                'BIE1 decrypt failed: ' + ((j && j.error) || ('HTTP ' + r.status)));
+                        }
+                        // Mirror caller shape: array in, array out (length 1); scalar in, scalar out.
+                        return Array.isArray(opts.messages) ? [j.plaintext] : j.plaintext;
+                    });
+                });
+            });
+        }));
 
         // ----- Removed methods: typed REMOVED error -----
         function removed(name, hint) {
@@ -844,9 +923,10 @@ R"JS(
 // Phase 2 Step 4 — split between provider installation and announceProvider scaffolding.
 // The icon data URL embedded below pushes the announce block's text past MSVC's 16380-
 // char per-literal cap. Step 3b.4 added another split inside the legacy provider block
-// to keep the new sendBsv translator's bytes inside its containing literal's budget, so
-// the bundle now uses five adjacent R"JS(...)JS" literals.
-// C++ auto-concatenates them; the injected JS sees one continuous string.
+// to keep the new sendBsv translator's bytes inside its containing literal's budget, and
+// Step 3c.3 added a third split between encrypt and decrypt because the new BIE1 wire-
+// ups pushed the combined region over cap. The bundle now uses six adjacent
+// R"JS(...)JS" literals. C++ auto-concatenates them; the injected JS sees one continuous string.
 R"JS(
 
     // bsv:announceProvider — multi-provider discovery (BSV equivalent of EIP-6963).
