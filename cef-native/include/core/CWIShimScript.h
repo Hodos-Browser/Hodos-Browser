@@ -204,39 +204,26 @@ static const char* CWI_SHIM_SCRIPT = R"JS(
     ];
 
     function makeMethod(methodName) {
-        var endpoint = ENDPOINT_BASE + '/' + methodName;
+        // Phase 2.5: canonical method dispatch goes through the wallet IPC bridge
+        // (window.__hodos_walletCall) instead of fetch. This bypasses page CSP +
+        // wallet CORS and routes the call through CEF's process-message IPC, which
+        // is the documented architecture (main.rs:752-755). See PHASE_2_5_IPC_REFACTOR.md.
+        //
+        // The C++ bridge handler extracts the calling frame's host[:port] from the
+        // frame URL and forwards it as X-Requesting-Domain — same header the
+        // previous fetch path relied on for check_domain_approved.
+        //
+        // Error envelope construction (status, code, body) lives ONCE inside the
+        // bridge JS instead of being repeated per method; the bridge rejects with
+        // a structured Error that downstream callers can inspect via err.code,
+        // err.status, and err.body.
+        var endpoint = '/' + methodName;
         function impl(args, originator) {
-            // originator is implicit — backend reads window.location.host from the
-            // Origin header on this fetch. Caller-supplied originator is ignored by
-            // design; the canonical WalletInterface allows it but auth-gating uses Origin.
-            var body = (args == null) ? {} : args;
-            var bodyJson;
-            try {
-                bodyJson = JSON.stringify(body);
-            } catch (e) {
-                return Promise.reject(new Error('[Hodos][CWI] ' + methodName + ': args not JSON-serializable: ' + e.message));
-            }
-            return fetch(endpoint, {
-                method: 'POST',
-                mode: 'cors',
-                credentials: 'omit',
-                cache: 'no-store',
-                headers: { 'Content-Type': 'application/json' },
-                body: bodyJson
-            }).then(function(r) {
-                if (!r.ok) {
-                    return r.text().then(function(t) {
-                        var err = new Error('[Hodos][CWI] ' + methodName + ' failed: HTTP ' + r.status + (t ? (' ' + t) : ''));
-                        err.status = r.status;
-                        err.body = t;
-                        throw err;
-                    });
-                }
-                return r.text().then(function(t) {
-                    if (!t) return null;
-                    try { return JSON.parse(t); } catch (e) { return t; }
-                });
-            });
+            // originator is implicit — the C++ bridge reads the calling frame's
+            // URL on the UI thread. Caller-supplied originator is ignored by
+            // design; the canonical WalletInterface allows it but auth-gating
+            // uses the frame origin.
+            return window.__hodos_walletCall(methodName, endpoint, args);
         }
         // Proxy with apply trap defends against detached references:
         //   const fn = window.CWI.createSignature; fn({...});
