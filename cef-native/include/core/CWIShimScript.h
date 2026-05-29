@@ -334,9 +334,16 @@ R"JS(
     function buildLegacyProvider(canonical) {
         var legacy = Object.create(null);
 
-        // Pass-through: all 28 canonical methods on window.yours too, so BRC-100-aware
-        // sites targeting window.yours.createSignature etc. continue to work.
+        // Methods where legacy yours semantics differ from canonical CWI and must NOT
+        // pass through. Installed explicitly later with legacy behavior. defineLegacyProp
+        // marks installs as non-configurable, so a pass-through encrypt/decrypt would
+        // block the later legacy override and throw "Cannot redefine property" at load.
+        var LEGACY_OVERRIDES = { encrypt: 1, decrypt: 1 };
+
+        // Pass-through: 28 canonical methods on window.yours too (minus the overrides),
+        // so BRC-100-aware sites targeting window.yours.createSignature etc. work.
         for (var i = 0; i < METHODS.length; i++) {
+            if (LEGACY_OVERRIDES[METHODS[i]]) continue;
             defineLegacyProp(legacy, METHODS[i], canonical[METHODS[i]]);
         }
 
