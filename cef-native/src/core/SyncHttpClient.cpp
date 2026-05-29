@@ -46,7 +46,8 @@ static bool ParseUrl(const std::string& url, std::wstring& host, INTERNET_PORT& 
 }
 
 static HttpResponse WinHttpRequest(const std::string& method, const std::string& url,
-                                   const std::string& body, const std::string& contentType,
+                                   const std::string& body,
+                                   const std::map<std::string, std::string>& headers,
                                    int timeoutMs) {
     HttpResponse response;
 
@@ -85,15 +86,26 @@ static HttpResponse WinHttpRequest(const std::string& method, const std::string&
         return response;
     }
 
-    // Add Content-Type header for POST
+    // Assemble headers as a single CRLF-joined string for WinHttpSendRequest.
+    // WinHTTP wants "Header-Name: value\r\nOther-Header: value" — no trailing CRLF.
+    std::string asciiHeaders;
+    for (const auto& kv : headers) {
+        if (!asciiHeaders.empty()) asciiHeaders += "\r\n";
+        asciiHeaders += kv.first + ": " + kv.second;
+    }
+    std::wstring wideHeaders(asciiHeaders.begin(), asciiHeaders.end());
+
     BOOL sendOk;
-    if (!body.empty() && !contentType.empty()) {
-        std::wstring header = L"Content-Type: " + std::wstring(contentType.begin(), contentType.end());
-        sendOk = WinHttpSendRequest(hRequest, header.c_str(), static_cast<DWORD>(header.length()),
+    if (!body.empty()) {
+        sendOk = WinHttpSendRequest(hRequest,
+                                    wideHeaders.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : wideHeaders.c_str(),
+                                    wideHeaders.empty() ? 0 : static_cast<DWORD>(wideHeaders.length()),
                                     (LPVOID)body.c_str(), static_cast<DWORD>(body.size()),
                                     static_cast<DWORD>(body.size()), 0);
     } else {
-        sendOk = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        sendOk = WinHttpSendRequest(hRequest,
+                                    wideHeaders.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : wideHeaders.c_str(),
+                                    wideHeaders.empty() ? 0 : static_cast<DWORD>(wideHeaders.length()),
                                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     }
 
@@ -128,12 +140,31 @@ static HttpResponse WinHttpRequest(const std::string& method, const std::string&
 }
 
 HttpResponse SyncHttpClient::Get(const std::string& url, int timeoutMs) {
-    return WinHttpRequest("GET", url, "", "", timeoutMs);
+    return WinHttpRequest("GET", url, "", {}, timeoutMs);
+}
+
+HttpResponse SyncHttpClient::Get(const std::string& url,
+                                 const std::map<std::string, std::string>& headers,
+                                 int timeoutMs) {
+    return WinHttpRequest("GET", url, "", headers, timeoutMs);
 }
 
 HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
                                   const std::string& contentType, int timeoutMs) {
-    return WinHttpRequest("POST", url, body, contentType, timeoutMs);
+    std::map<std::string, std::string> headers;
+    if (!contentType.empty()) headers["Content-Type"] = contentType;
+    return WinHttpRequest("POST", url, body, headers, timeoutMs);
+}
+
+HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
+                                  const std::map<std::string, std::string>& headers,
+                                  int timeoutMs) {
+    // Default Content-Type to application/json if caller did not specify one.
+    std::map<std::string, std::string> merged = headers;
+    if (merged.find("Content-Type") == merged.end()) {
+        merged["Content-Type"] = "application/json";
+    }
+    return WinHttpRequest("POST", url, body, merged, timeoutMs);
 }
 
 // =============================================================================
@@ -151,7 +182,8 @@ static size_t SyncWriteCallback(void* contents, size_t size, size_t nmemb, void*
 }
 
 static HttpResponse CurlRequest(const std::string& method, const std::string& url,
-                                const std::string& body, const std::string& contentType,
+                                const std::string& body,
+                                const std::map<std::string, std::string>& headers,
                                 int timeoutMs) {
     HttpResponse response;
 
@@ -171,11 +203,13 @@ static HttpResponse CurlRequest(const std::string& method, const std::string& ur
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(timeoutMs));
 
     // Headers
-    struct curl_slist* headers = nullptr;
-    if (!contentType.empty()) {
-        std::string ctHeader = "Content-Type: " + contentType;
-        headers = curl_slist_append(headers, ctHeader.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    struct curl_slist* curlHeaders = nullptr;
+    for (const auto& kv : headers) {
+        std::string headerLine = kv.first + ": " + kv.second;
+        curlHeaders = curl_slist_append(curlHeaders, headerLine.c_str());
+    }
+    if (curlHeaders) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curlHeaders);
     }
 
     // Method + body
@@ -187,8 +221,8 @@ static HttpResponse CurlRequest(const std::string& method, const std::string& ur
 
     CURLcode res = curl_easy_perform(curl);
 
-    if (headers) {
-        curl_slist_free_all(headers);
+    if (curlHeaders) {
+        curl_slist_free_all(curlHeaders);
     }
 
     if (res != CURLE_OK) {
@@ -207,12 +241,30 @@ static HttpResponse CurlRequest(const std::string& method, const std::string& ur
 }
 
 HttpResponse SyncHttpClient::Get(const std::string& url, int timeoutMs) {
-    return CurlRequest("GET", url, "", "", timeoutMs);
+    return CurlRequest("GET", url, "", {}, timeoutMs);
+}
+
+HttpResponse SyncHttpClient::Get(const std::string& url,
+                                 const std::map<std::string, std::string>& headers,
+                                 int timeoutMs) {
+    return CurlRequest("GET", url, "", headers, timeoutMs);
 }
 
 HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
                                   const std::string& contentType, int timeoutMs) {
-    return CurlRequest("POST", url, body, contentType, timeoutMs);
+    std::map<std::string, std::string> headers;
+    if (!contentType.empty()) headers["Content-Type"] = contentType;
+    return CurlRequest("POST", url, body, headers, timeoutMs);
+}
+
+HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
+                                  const std::map<std::string, std::string>& headers,
+                                  int timeoutMs) {
+    std::map<std::string, std::string> merged = headers;
+    if (merged.find("Content-Type") == merged.end()) {
+        merged["Content-Type"] = "application/json";
+    }
+    return CurlRequest("POST", url, body, merged, timeoutMs);
 }
 
 #else
@@ -220,8 +272,18 @@ HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& bod
 HttpResponse SyncHttpClient::Get(const std::string& url, int timeoutMs) {
     return HttpResponse{};
 }
+HttpResponse SyncHttpClient::Get(const std::string& url,
+                                 const std::map<std::string, std::string>& headers,
+                                 int timeoutMs) {
+    return HttpResponse{};
+}
 HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
                                   const std::string& contentType, int timeoutMs) {
+    return HttpResponse{};
+}
+HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
+                                  const std::map<std::string, std::string>& headers,
+                                  int timeoutMs) {
     return HttpResponse{};
 }
 #endif
