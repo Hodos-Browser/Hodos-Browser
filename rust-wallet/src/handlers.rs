@@ -8580,6 +8580,100 @@ pub async fn yours_legacy_addresses(
     })
 }
 
+// ============================================================================
+// Address → locking-script HTTP wrapper (Phase 2 Step 3b.2)
+// ============================================================================
+//
+// `POST /wallet/address-to-script` is the HTTP face of the unified
+// `recovery::address_to_p2pkh_script` function. The legacy `yours.sendBsv`
+// translator (Step 3b.4) takes an array of `{address, amount}` payments and
+// needs to resolve each address to a locking script before calling
+// `canonical.createAction`. Doing the resolution in the wallet (rather than
+// in the shim) lets every locking script in the system flow through the same
+// mainnet-checksum + version-byte gate that Step 3b.0 installed, without
+// duplicating the validation in JS.
+//
+// The `script_type` field on the response is forward-compat scaffolding for
+// Phase 3. Today the only variant is `"p2pkh"`; Phase 3 may add ordinal-lock
+// or 1Sat-envelope variants for the same address shape, and shim callers
+// will be able to dispatch on the field without changing the request shape.
+// (We deliberately do NOT introduce a Rust `ScriptType` enum yet — YAGNI.)
+
+#[derive(Deserialize)]
+pub struct AddressToScriptRequest {
+    pub address: String,
+}
+
+#[derive(Serialize)]
+pub struct AddressToScriptResponse {
+    #[serde(rename = "lockingScript")]
+    pub locking_script: String,
+    pub script_type: String,
+}
+
+pub async fn address_to_script(
+    body: web::Json<AddressToScriptRequest>,
+) -> HttpResponse {
+    if body.address.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "address is required"
+        }));
+    }
+
+    match crate::recovery::address_to_p2pkh_script(&body.address) {
+        Ok(script_bytes) => {
+            log::info!(
+                "🧱 /wallet/address-to-script: {} → {} bytes",
+                body.address,
+                script_bytes.len()
+            );
+            HttpResponse::Ok().json(AddressToScriptResponse {
+                locking_script: hex::encode(&script_bytes),
+                script_type: "p2pkh".to_string(),
+            })
+        }
+        Err(e) => {
+            log::warn!(
+                "🚫 /wallet/address-to-script rejected '{}': {}",
+                body.address,
+                e
+            );
+            HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid address: {}", e)
+            }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod address_to_script_tests {
+    use super::*;
+
+    #[test]
+    fn response_shape_for_known_mainnet_address() {
+        // Smoke the response struct serialization without touching the handler:
+        // build a response with the values the handler would produce for
+        // HODOS_FEE_ADDRESS and confirm the JSON shape matches what the shim
+        // and `yours.sendBsv` translator will parse.
+        let script_bytes = crate::recovery::address_to_p2pkh_script(HODOS_FEE_ADDRESS)
+            .expect("HODOS_FEE_ADDRESS is mainnet P2PKH");
+        let resp = AddressToScriptResponse {
+            locking_script: hex::encode(&script_bytes),
+            script_type: "p2pkh".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // The shim parses j.lockingScript, so the field name MUST be camelCase.
+        assert!(json.get("lockingScript").is_some(), "response missing camelCase lockingScript field");
+        assert_eq!(json["script_type"], "p2pkh");
+        let hex_script = json["lockingScript"].as_str().unwrap();
+        // P2PKH locking script is 25 bytes = 50 hex chars, prefix 76a914, suffix 88ac.
+        assert_eq!(hex_script.len(), 50);
+        assert!(hex_script.starts_with("76a914"));
+        assert!(hex_script.ends_with("88ac"));
+    }
+}
+
 #[cfg(test)]
 mod yours_legacy_addresses_tests {
     use super::*;

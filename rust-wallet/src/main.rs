@@ -858,6 +858,12 @@ async fn main() -> std::io::Result<()> {
             // Returns {bsvAddress, ordAddress, identityAddress} in a single round-trip
             // using BRC-42 with the yours-legacy-v1 protocol IDs and `yours-{origin}` keyID.
             .route("/wallet/yours-legacy-addresses", web::post().to(handlers::yours_legacy_addresses))
+            // Phase 2 Step 3b.2: address → mainnet P2PKH locking script.
+            // HTTP wrapper around the Step 3b.0 unified `recovery::address_to_p2pkh_script`
+            // (Base58Check + checksum + mainnet version-byte check). Used by the legacy
+            // `yours.sendBsv` translator to resolve each {address, amount} payment to a
+            // canonical createAction output (lockingScript + script_type).
+            .route("/wallet/address-to-script", web::post().to(handlers::address_to_script))
             .route("/wallet/backup", web::post().to(handlers::wallet_backup))
             .route("/wallet/backup/onchain", web::post().to(handlers::wallet_backup_onchain))
             .route("/wallet/backup/onchain/verify", web::post().to(handlers::wallet_backup_onchain_verify))
