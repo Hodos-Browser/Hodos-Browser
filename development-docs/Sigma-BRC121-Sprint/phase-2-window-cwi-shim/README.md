@@ -62,5 +62,17 @@ embeds Hodos_Gold_Wallet_Icon.svg as a base64 data URL.
 plain addresses, ECIES Electrum compatibility decision (separate scope —
 see [[phase2-step3-ecies-electrum]]).
 
+**Step 3b + 3c implementation plan locked** (commit `0c31725`, 2026-05-29) — see
+`STEP_3B_PLAN.md`. Covers address derivation, sendBsv, exchange rate, and BIE1
+(ECIES Electrum) encrypt/decrypt. Implementation pending.
+
+**Step 3d research charter** (2026-05-29) — see `STEP_3D_RESEARCH.md`. Translation
+of legacy `yours.getSignatures` (partial-tx atomic-swap primitive) to BRC-100
+`createAction + signAction` flow. Scheduled after 3b + 3c land and smoke-verify.
+Primary use case: ordinal-sale interop with 3dordi.io and other 1Sat-era
+marketplaces. Research-first (DevTools probe live payloads on 3dordi.io + 2
+other sites), then write `STEP_3D_PLAN.md`. Architectural overlap with Phase 3
+ordinal UTXO classification flagged.
+
 **Smoke test pending**: requires closing the running Hodos browser to relink, then DevTools
 verification per the test plan documented in [[phase2-step4-landed]].
