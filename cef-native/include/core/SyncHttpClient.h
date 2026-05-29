@@ -39,4 +39,15 @@ public:
                              const std::string& body,
                              const std::map<std::string, std::string>& headers,
                              int timeoutMs = 5000);
+
+    // Generic method dispatch (GET / POST / DELETE / PUT / etc.) for callers
+    // that need a verb the typed methods above don't cover. The wallet IPC
+    // bridge uses this for DELETE on /domain/permissions and similar revoke
+    // endpoints. body is sent only for methods that conventionally carry one;
+    // for GET / DELETE pass an empty body.
+    static HttpResponse Request(const std::string& method,
+                                const std::string& url,
+                                const std::string& body,
+                                const std::map<std::string, std::string>& headers,
+                                int timeoutMs = 5000);
 };

@@ -1679,8 +1679,12 @@ bool SimpleHandler::OnProcessMessageReceived(
             HttpResponse resp;
             if (httpMethod == "GET") {
                 resp = SyncHttpClient::Get(url, headers, /*timeoutMs=*/30000);
-            } else {
+            } else if (httpMethod == "POST") {
                 resp = SyncHttpClient::Post(url, bodyJson, headers, /*timeoutMs=*/30000);
+            } else {
+                // DELETE / PUT / PATCH path — pass through to Request.
+                resp = SyncHttpClient::Request(httpMethod, url, bodyJson, headers,
+                                               /*timeoutMs=*/30000);
             }
 
             // Build payload to send back. Successful path: pass response body

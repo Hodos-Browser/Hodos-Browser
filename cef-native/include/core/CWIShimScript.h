@@ -104,7 +104,8 @@ static const char* CWI_SHIM_SCRIPT = R"JS(
     //   method     friendly diagnostic name ('createAction', 'getAddresses', etc.)
     //   endpoint   wallet route, leading slash required ('/createAction')
     //   body       JSON-serializable request payload (omit or pass {} for empty)
-    //   httpMethod 'POST' (default) or 'GET' — wallet endpoint convention
+    //   httpMethod 'POST' (default) | 'GET' | 'DELETE' | 'PUT' | 'PATCH'
+    var VALID_VERBS = { 'GET': 1, 'POST': 1, 'DELETE': 1, 'PUT': 1, 'PATCH': 1 };
     window.__hodos_walletCall = function(method, endpoint, body, httpMethod) {
         if (typeof method !== 'string' || typeof endpoint !== 'string') {
             return Promise.reject(new Error('[Hodos] wallet_call: method and endpoint must be strings'));
@@ -126,7 +127,7 @@ static const char* CWI_SHIM_SCRIPT = R"JS(
             ));
         }
         var requestId = String(nextId++);
-        var verb = (httpMethod === 'GET') ? 'GET' : 'POST';
+        var verb = (httpMethod && VALID_VERBS[httpMethod]) ? httpMethod : 'POST';
         return new Promise(function(resolve, reject) {
             // CRITICAL: populate pending[requestId] SYNCHRONOUSLY before sending the
             // IPC, so a (theoretically impossible) instant response can't race ahead.
@@ -453,11 +454,12 @@ R"JS(
         defineLegacyProp(legacy, 'disconnect', makeLegacyMethod(function() {
             warnDeprecated('disconnect');
             var origin = window.location.host;
-            return fetch(ENDPOINT_BASE + '/domain/permissions?domain=' + encodeURIComponent(origin), {
-                method: 'DELETE',
-                mode: 'cors',
-                credentials: 'omit'
-            }).then(function(r) { return r.ok; });
+            return window.__hodos_walletCall(
+                'disconnect',
+                '/domain/permissions?domain=' + encodeURIComponent(origin),
+                {},
+                'DELETE'
+            ).then(function() { return true; }, function() { return false; });
         }));
 
         // ----- connect(): open auth flow, return { identityKey, addresses } -----
@@ -498,24 +500,20 @@ R"JS(
         defineLegacyProp(legacy, 'getAddresses', makeLegacyMethod(function() {
             warnDeprecated('getAddresses');
             var nullSlots = { bsvAddress: null, ordAddress: null, identityAddress: null };
-            return fetch(ENDPOINT_BASE + '/wallet/yours-legacy-addresses', {
-                method: 'POST',
-                mode: 'cors',
-                credentials: 'omit',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ origin: window.location.host })
-            }).then(function(r) {
-                // Backend rejected (no wallet, bad origin, internal error). Gracefully
-                // degrade to null slots — matches Yours's tolerance for missing fields.
-                return r.ok ? r.json() : nullSlots;
-            }).then(function(j) {
+            return window.__hodos_walletCall(
+                'getAddresses',
+                '/wallet/yours-legacy-addresses',
+                { origin: window.location.host }
+            ).then(function(j) {
                 return {
                     bsvAddress: (j && j.bsvAddress) || null,
                     ordAddress: (j && j.ordAddress) || null,
                     identityAddress: (j && j.identityAddress) || null
                 };
-            }).catch(function() {
-                // Network/transport failure — never throw to a legacy caller.
+            }, function() {
+                // Backend rejected OR transport failure — degrade to null slots,
+                // matching Yours's tolerance for missing fields. Never throw to a
+                // legacy caller.
                 return nullSlots;
             });
         }));
@@ -551,11 +549,8 @@ R"JS(
             warnDeprecated('getBalance');
             return Promise.all([
                 canonical.listOutputs({ basket: 'default' }),
-                fetch(ENDPOINT_BASE + '/wallet/bsv-price', {
-                    method: 'GET',
-                    mode: 'cors',
-                    credentials: 'omit'
-                }).then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
+                window.__hodos_walletCall('getBalance.bsvPrice', '/wallet/bsv-price', {}, 'GET')
+                    .catch(function() { return null; })
             ]).then(function(results) {
                 var outputs = (results[0] && results[0].outputs) || [];
                 var sats = 0;
@@ -723,21 +718,16 @@ R"JS(
                 // wallet enforces mainnet checksum + version-byte validation here
                 // (Step 3b.0); the shim never builds locking scripts itself.
                 return Promise.all(normalized.map(function(p) {
-                    return fetch(ENDPOINT_BASE + '/wallet/address-to-script', {
-                        method: 'POST',
-                        mode: 'cors',
-                        credentials: 'omit',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ address: p.address })
-                    }).then(function(r) {
-                        return r.json().then(function(j) {
-                            if (!r.ok) {
-                                throw typedError(LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
-                                    'address-to-script failed for "' + p.address + '": ' +
-                                    ((j && j.error) || ('HTTP ' + r.status)));
-                            }
-                            return { satoshis: p.satoshis, lockingScript: j.lockingScript };
-                        });
+                    return window.__hodos_walletCall(
+                        'sendBsv.addressToScript',
+                        '/wallet/address-to-script',
+                        { address: p.address }
+                    ).then(function(j) {
+                        return { satoshis: p.satoshis, lockingScript: j.lockingScript };
+                    }, function(err) {
+                        throw typedError(LEGACY_ERR.INVALID_ENCODING, 'sendBsv',
+                            'address-to-script failed for "' + p.address + '": ' +
+                            ((err && err.body && err.body.error) || (err && err.message) || 'unknown error'));
                     });
                 })).then(function(outputs) {
                     return canonical.createAction({
@@ -767,20 +757,16 @@ R"JS(
                 }).then(function(r) {
                     return { txid: r && r.txid };
                 }, function() {
-                    return fetch(ENDPOINT_BASE + '/wallet/broadcast', {
-                        method: 'POST',
-                        mode: 'cors',
-                        credentials: 'omit',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ rawtx: opts.rawtx })
-                    }).then(function(r) {
-                        return r.json().then(function(j) {
-                            if (!r.ok) {
-                                throw typedError(LEGACY_ERR.NOT_IMPL, 'broadcast',
-                                    'fallback /wallet/broadcast failed: ' + (j && j.error));
-                            }
-                            return { txid: j && j.txid };
-                        });
+                    return window.__hodos_walletCall(
+                        'broadcast.fallback',
+                        '/wallet/broadcast',
+                        { rawtx: opts.rawtx }
+                    ).then(function(j) {
+                        return { txid: j && j.txid };
+                    }, function(err) {
+                        throw typedError(LEGACY_ERR.NOT_IMPL, 'broadcast',
+                            'fallback /wallet/broadcast failed: ' +
+                            ((err && err.body && err.body.error) || (err && err.message) || 'unknown error'));
                     });
                 });
             });
@@ -837,27 +823,23 @@ R"JS(
                     'recipient pubKey must be a non-empty hex string'));
             }
             return withMutex('encrypt', function() {
-                return fetch(ENDPOINT_BASE + '/wallet/encrypt-bie1', {
-                    method: 'POST',
-                    mode: 'cors',
-                    credentials: 'omit',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                return window.__hodos_walletCall(
+                    'encrypt',
+                    '/wallet/encrypt-bie1',
+                    {
                         message: opts.message,
                         encoding: opts.encoding || 'utf8',
                         recipientPublicKey: pubKeysArr[0]
-                    })
-                }).then(function(r) {
-                    return r.json().then(function(j) {
-                        if (!r.ok) {
-                            throw typedError(LEGACY_ERR.NOT_IMPL, 'encrypt',
-                                'BIE1 encrypt failed: ' + ((j && j.error) || ('HTTP ' + r.status)));
-                        }
-                        // Mirror the caller's shape: array in, array out (length 1); scalar
-                        // in, scalar out. Keeps Yours-era code paths that destructure
-                        // result[0] working unchanged.
-                        return Array.isArray(opts.pubKeys) ? [j.ciphertext] : j.ciphertext;
-                    });
+                    }
+                ).then(function(j) {
+                    // Mirror the caller's shape: array in, array out (length 1); scalar
+                    // in, scalar out. Keeps Yours-era code paths that destructure
+                    // result[0] working unchanged.
+                    return Array.isArray(opts.pubKeys) ? [j.ciphertext] : j.ciphertext;
+                }, function(err) {
+                    throw typedError(LEGACY_ERR.NOT_IMPL, 'encrypt',
+                        'BIE1 encrypt failed: ' +
+                        ((err && err.body && err.body.error) || (err && err.message) || 'unknown error'));
                 });
             });
         }));
@@ -885,24 +867,20 @@ R"JS(
                     'ciphertext must be a non-empty hex string'));
             }
             return withMutex('decrypt', function() {
-                return fetch(ENDPOINT_BASE + '/wallet/decrypt-bie1', {
-                    method: 'POST',
-                    mode: 'cors',
-                    credentials: 'omit',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                return window.__hodos_walletCall(
+                    'decrypt',
+                    '/wallet/decrypt-bie1',
+                    {
                         ciphertext: messagesArr[0],
                         outputEncoding: opts.outputEncoding || 'utf8'
-                    })
-                }).then(function(r) {
-                    return r.json().then(function(j) {
-                        if (!r.ok) {
-                            throw typedError(LEGACY_ERR.DECRYPT_FAILED, 'decrypt',
-                                'BIE1 decrypt failed: ' + ((j && j.error) || ('HTTP ' + r.status)));
-                        }
-                        // Mirror caller shape: array in, array out (length 1); scalar in, scalar out.
-                        return Array.isArray(opts.messages) ? [j.plaintext] : j.plaintext;
-                    });
+                    }
+                ).then(function(j) {
+                    // Mirror caller shape: array in, array out (length 1); scalar in, scalar out.
+                    return Array.isArray(opts.messages) ? [j.plaintext] : j.plaintext;
+                }, function(err) {
+                    throw typedError(LEGACY_ERR.DECRYPT_FAILED, 'decrypt',
+                        'BIE1 decrypt failed: ' +
+                        ((err && err.body && err.body.error) || (err && err.message) || 'unknown error'));
                 });
             });
         }));
@@ -922,17 +900,12 @@ R"JS(
         // match the same tolerance the legacy getBalance translator already applies.
         defineLegacyProp(legacy, 'getExchangeRate', makeLegacyMethod(function() {
             warnDeprecated('getExchangeRate');
-            return fetch(ENDPOINT_BASE + '/wallet/bsv-price', {
-                method: 'GET',
-                mode: 'cors',
-                credentials: 'omit'
-            }).then(function(r) {
-                if (!r.ok) {
-                    throw typedError(LEGACY_ERR.NOT_IMPL, 'getExchangeRate',
-                        'price fetch failed: HTTP ' + r.status);
-                }
-                return r.json();
-            }).then(function(price) {
+            return window.__hodos_walletCall(
+                'getExchangeRate',
+                '/wallet/bsv-price',
+                {},
+                'GET'
+            ).then(function(price) {
                 var rate = (price && typeof price.priceUsd === 'number') ? price.priceUsd :
                            (price && typeof price.usd === 'number') ? price.usd :
                            (price && typeof price.price === 'number') ? price.price : null;
@@ -941,6 +914,11 @@ R"JS(
                         'price endpoint returned unrecognized shape (no priceUsd/usd/price field)');
                 }
                 return { rate: rate, currency: 'USD' };
+            }, function(err) {
+                throw typedError(LEGACY_ERR.NOT_IMPL, 'getExchangeRate',
+                    'price fetch failed: ' +
+                    ((err && err.status) ? ('HTTP ' + err.status) :
+                     (err && err.message) || 'unknown error'));
             });
         }));
 

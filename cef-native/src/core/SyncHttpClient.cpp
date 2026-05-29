@@ -167,6 +167,13 @@ HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& bod
     return WinHttpRequest("POST", url, body, merged, timeoutMs);
 }
 
+HttpResponse SyncHttpClient::Request(const std::string& method, const std::string& url,
+                                     const std::string& body,
+                                     const std::map<std::string, std::string>& headers,
+                                     int timeoutMs) {
+    return WinHttpRequest(method, url, body, headers, timeoutMs);
+}
+
 // =============================================================================
 // macOS implementation: libcurl
 // =============================================================================
@@ -267,6 +274,57 @@ HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& bod
     return CurlRequest("POST", url, body, merged, timeoutMs);
 }
 
+HttpResponse SyncHttpClient::Request(const std::string& method, const std::string& url,
+                                     const std::string& body,
+                                     const std::map<std::string, std::string>& headers,
+                                     int timeoutMs) {
+    // libcurl's CurlRequest helper only honors a body when method == "POST". For
+    // DELETE / PUT / PATCH we need CURLOPT_CUSTOMREQUEST and CURLOPT_POSTFIELDS
+    // to be set explicitly. Open-coded here to keep CurlRequest unchanged for
+    // the typed Get/Post callers.
+    HttpResponse response;
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        LOG_WARNING_SYNC("SyncHttpClient: failed to init libcurl");
+        return response;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, SyncWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeoutMs));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(timeoutMs));
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+
+    struct curl_slist* curlHeaders = nullptr;
+    for (const auto& kv : headers) {
+        std::string headerLine = kv.first + ": " + kv.second;
+        curlHeaders = curl_slist_append(curlHeaders, headerLine.c_str());
+    }
+    if (curlHeaders) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curlHeaders);
+
+    if (!body.empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (curlHeaders) curl_slist_free_all(curlHeaders);
+
+    if (res != CURLE_OK) {
+        LOG_DEBUG_SYNC("SyncHttpClient::Request curl error: " + std::string(curl_easy_strerror(res)));
+        curl_easy_cleanup(curl);
+        return response;
+    }
+
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    response.statusCode = static_cast<int>(httpCode);
+    response.success = (httpCode >= 200 && httpCode < 300);
+    curl_easy_cleanup(curl);
+    return response;
+}
+
 #else
 // Fallback for other platforms
 HttpResponse SyncHttpClient::Get(const std::string& url, int timeoutMs) {
@@ -284,6 +342,12 @@ HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& bod
 HttpResponse SyncHttpClient::Post(const std::string& url, const std::string& body,
                                   const std::map<std::string, std::string>& headers,
                                   int timeoutMs) {
+    return HttpResponse{};
+}
+HttpResponse SyncHttpClient::Request(const std::string& method, const std::string& url,
+                                     const std::string& body,
+                                     const std::map<std::string, std::string>& headers,
+                                     int timeoutMs) {
     return HttpResponse{};
 }
 #endif
