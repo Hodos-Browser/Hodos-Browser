@@ -46,6 +46,110 @@
 //   - development-docs/Sigma-BRC121-Sprint/BRAVE_WALLET_REFERENCE.md (Proxy + descriptor patterns)
 
 static const char* CWI_SHIM_SCRIPT = R"JS(
+// ============================================================================
+// Phase 2.5 — wallet IPC bridge
+// ============================================================================
+//
+// Promise-correlated bridge between the shim's wallet calls and the C++
+// browser process. Replaces the renderer fetch path so CSP (github.com,
+// hardened sites) and CORS (treechat.io, every dApp origin not in the
+// actix-cors localhost allowlist) are no longer in the call chain.
+//
+// Design: see development-docs/Sigma-BRC121-Sprint/phase-2-window-cwi-shim/
+// PHASE_2_5_IPC_REFACTOR.md
+//
+// MUST be injected BEFORE the CWI shim IIFE below, so `window.__hodos_walletCall`
+// is available when makeMethod / legacy translators are constructed.
+(function() {
+    'use strict';
+    if (typeof window === 'undefined') return;
+    if (window.__hodos_walletCall) return;  // idempotent — survives re-injection
+
+    var nextId = 1;
+    var pending = Object.create(null);  // requestId -> {resolve, reject, method, startedAt}
+    var MAX_PAYLOAD_BYTES = 50 * 1024 * 1024;  // 50 MB ceiling — see plan doc
+
+    // Browser process invokes this via ExecuteJavaScript when a wallet_call returns.
+    // Signature: (requestId: string, ok: bool, payloadJson: string)
+    window.__hodos_walletResponse = function(requestId, ok, payloadJson) {
+        var p = pending[requestId];
+        if (!p) {
+            // Late / orphan — frame may have navigated, or response duplicated.
+            try { console.warn('[Hodos] orphan wallet_response id=' + requestId); } catch (e) {}
+            return;
+        }
+        delete pending[requestId];
+        try {
+            var payload = payloadJson ? JSON.parse(payloadJson) : null;
+            if (ok) {
+                p.resolve(payload);
+            } else {
+                // Wallet error envelope: { error, code?, status? }
+                var msg = (payload && payload.error) ? payload.error : 'unknown error';
+                var err = new Error('[Hodos] ' + p.method + ' failed: ' + msg);
+                if (payload && payload.code)   err.code = payload.code;
+                if (payload && payload.status) err.status = payload.status;
+                err.body = payload;
+                p.reject(err);
+            }
+        } catch (e) {
+            p.reject(new Error('[Hodos] ' + p.method + ' response parse failed: ' + e.message));
+        }
+    };
+
+    // Public bridge entry. Returns a Promise that resolves with the parsed JSON
+    // response (or null if response body was empty) or rejects with a structured
+    // Error carrying .code / .status / .body when the wallet returned non-2xx.
+    //
+    //   method     friendly diagnostic name ('createAction', 'getAddresses', etc.)
+    //   endpoint   wallet route, leading slash required ('/createAction')
+    //   body       JSON-serializable request payload (omit or pass {} for empty)
+    //   httpMethod 'POST' (default) or 'GET' — wallet endpoint convention
+    window.__hodos_walletCall = function(method, endpoint, body, httpMethod) {
+        if (typeof method !== 'string' || typeof endpoint !== 'string') {
+            return Promise.reject(new Error('[Hodos] wallet_call: method and endpoint must be strings'));
+        }
+        var bodyJson;
+        try {
+            bodyJson = JSON.stringify(body == null ? {} : body);
+        } catch (e) {
+            return Promise.reject(new Error(
+                '[Hodos] ' + method + ': args not JSON-serializable: ' + e.message
+            ));
+        }
+        if (bodyJson.length > MAX_PAYLOAD_BYTES) {
+            return Promise.reject(new Error(
+                '[Hodos] ' + method + ': payload (' + bodyJson.length +
+                ' bytes) exceeds 50MB IPC ceiling. Large payloads (e.g. ' +
+                'createAction with massive inputs.BEEF) are not supported via ' +
+                'this bridge — break the call into smaller chunks.'
+            ));
+        }
+        var requestId = String(nextId++);
+        var verb = (httpMethod === 'GET') ? 'GET' : 'POST';
+        return new Promise(function(resolve, reject) {
+            // CRITICAL: populate pending[requestId] SYNCHRONOUSLY before sending the
+            // IPC, so a (theoretically impossible) instant response can't race ahead.
+            pending[requestId] = {
+                resolve: resolve,
+                reject: reject,
+                method: method,
+                startedAt: Date.now()
+            };
+            try {
+                window.cefMessage.send('wallet_call',
+                    [requestId, method, endpoint, bodyJson, verb]);
+            } catch (e) {
+                delete pending[requestId];
+                reject(new Error('[Hodos] failed to dispatch wallet_call: ' + e.message));
+            }
+        });
+    };
+})();
+
+// ============================================================================
+// CWI / yours / panda shim (Phase 2 Steps 1-4 + 3b + 3c)
+// ============================================================================
 (function() {
     'use strict';
     if (typeof window === 'undefined') return;

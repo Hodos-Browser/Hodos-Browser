@@ -1067,6 +1067,35 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== WALLET IPC BRIDGE RESPONSE (Phase 2.5) ==========
+        // Pair to the `wallet_call` IPC dispatched by simple_handler.cpp.
+        // Args: [requestId, ok, payloadJson] — see PHASE_2_5_IPC_REFACTOR.md.
+        // Forwarded into window.__hodos_walletResponse so the shim's promise
+        // correlation table can resolve / reject the matching pending call.
+        if (message_name == "wallet_response") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            if (args->GetSize() < 3) {
+                LOG_WARNING_RENDER("wallet_response missing args (need 3)");
+                return true;
+            }
+            std::string requestId  = args->GetString(0).ToString();
+            bool ok                = args->GetBool(1);
+            std::string payloadJson = args->GetString(2).ToString();
+
+            // escapeJsonForJs is single-quote-safe; we wrap with single quotes
+            // on both args. requestId is a numeric string so escape is a no-op
+            // in the common case, but we run it for safety.
+            std::string escapedReqId   = escapeJsonForJs(requestId);
+            std::string escapedPayload = escapeJsonForJs(payloadJson);
+
+            std::string js = std::string("if (window.__hodos_walletResponse) { ") +
+                "window.__hodos_walletResponse('" + escapedReqId + "', " +
+                (ok ? "true" : "false") + ", '" + escapedPayload + "'); }";
+
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         // ========== DOWNLOAD FOLDER PICKER RESULT ==========
         if (message_name == "download_folder_selected") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
