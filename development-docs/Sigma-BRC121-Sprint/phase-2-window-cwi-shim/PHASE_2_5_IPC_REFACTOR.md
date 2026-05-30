@@ -1,10 +1,50 @@
 # Phase 2.5 — Wallet IPC Bridge Refactor
 
-> **Status:** Plan locked 2026-05-29. Discovered as a foundational issue during
-> Phase 2 Step 3b/3c smoke testing — github.com blocked via CSP, treechat.io
-> blocked via CORS. Both are symptoms of the shim using `fetch()` for wallet
-> calls when the codebase's documented architecture is `window.cefMessage.send`
+> **Status:** Plan locked 2026-05-29. Revised 2026-05-30 after discovering
+> a foundational scope miss on the C++ `PermissionEngine` integration —
+> see "Revised scope" below. Multi-session work; commits 1-4 landed,
+> commits 5-7 pending across 2-3 future sessions.
+>
+> Discovered as a foundational issue during Phase 2 Step 3b/3c smoke
+> testing — github.com blocked via CSP, treechat.io blocked via CORS.
+> Both are symptoms of the shim using `fetch()` for wallet calls when
+> the codebase's documented architecture is `window.cefMessage.send`
 > V8 IPC.
+
+## Revised scope (2026-05-30)
+
+The original plan estimated commits 5+6 at "1-2 days" for animation +
+smoke. After examining `AsyncWalletResourceHandler::Open()`, the
+realistic scope is:
+
+- **Commit 5 (extract gating helpers, no behavior change):** 4-8 hours.
+  Open() is 522 lines of cascading permission logic spanning 6 major
+  branches (internal/no-wallet/blocked/unknown-with-manifest-dispatch/
+  approved-with-engine-cascade). Extracting into a reusable free function
+  while preserving all behavior requires careful staging.
+- **Commit 6 (wire IPC bridge through extracted helpers):** 3-5 hours.
+  Includes extending `PendingAuthRequest` to carry an IPC continuation
+  type so modal resolution can resume either an HTTP or IPC request.
+- **Commit 7 (CEF rebuild + Treechat + github smoke):** 1-2 hours.
+
+**Total realistic effort: 10-18 hours across 2-3 focused sessions** with
+clean handoff between sessions. The work is security-critical (auto-approve
+engine), so each commit needs HTTP-path smoke regression before moving
+on, not just compile-clean.
+
+## Sub-phase structure (multi-session plan)
+
+| Sub-phase | Status | Deliverable |
+|---|---|---|
+| 2.5 plan doc | ✅ landed (`1be64b2`) | This document |
+| Commits 1-4 (IPC bridge plumbing) | ✅ landed | `d0a00c4`, `b7efa6f`, `b8e4753`, `56f7343` |
+| **2.5-A — Planning (next session)** | **pending** | Fill `WALLET_API_MAP.md`; finalize extraction interface design; lock acceptance criteria per commit |
+| 2.5-B — Commit 5 extraction | pending | Reusable gate helpers; HTTP-path behavior unchanged |
+| 2.5-C — Commit 6 IPC wiring | pending | `wallet_call` runs full engine cascade |
+| 2.5-D — Commit 7 smoke | pending | End-to-end on github + Treechat with engine in path |
+
+Each sub-phase is one focused session. Plan a clean handoff doc between
+sessions so context-clear ↔ context-load is lossless.
 
 ## Why this exists
 
@@ -399,17 +439,35 @@ treechat or a test page.
 
 ## Commit-level plan
 
+> **Revised 2026-05-30 after discovering a missed gap in commits 1-4 scope:**
+> the C++ `PermissionEngine` (per-tx limits, per-session caps, rate
+> limiting, auto-approve cascade, modal prompts, payment indicator)
+> lives inside `AsyncWalletResourceHandler::Open()` and only fires when
+> requests come in through CEF's resource interception. Commits 1-4
+> route `wallet_call` directly to `SyncHttpClient::Post`, which bypasses
+> CEF's interception and therefore bypasses the entire engine. The
+> wallet's `check_domain_approved` still fires (coarse-grained approve/
+> not-approve), but everything else — per-tx limits, payment modals,
+> identity-key prompts, rate limits, session spending tracking, and the
+> green-dot animation — silently does not run on the IPC path.
+>
+> Commits 5-7 (revised below) extract the gating cascade into a
+> reusable helper that both `AsyncWalletResourceHandler::Open()` and
+> the IPC bridge can call. Phase 2.5 is not done until those land.
+
 | # | Subject | Files | Smoke |
 |---|---|---|---|
-| 1 | `SyncHttpClient::Post(headers)` overload + `wallet_call` IPC handler | `SyncHttpClient.h/.cpp`, `simple_handler.cpp` | Compile only — handler dispatch unreachable until JS bridge lands |
-| 2 | JS bridge injection + `wallet_response` routing | `simple_render_process_handler.cpp` | Compile + DevTools test on test page: `await window.__hodos_walletCall('getNetwork', '/getNetwork', {})` returns `{network: 'mainnet'}` |
-| 3 | `makeMethod` refactor — all 28 canonical methods through bridge | `CWIShimScript.h` | DevTools test: `await window.CWI.getPublicKey({identityKey:true})` returns key (internal pages); external page returns 403 prompt |
-| 4 | Legacy fetch sites — getAddresses, sendBsv, getExchangeRate, getBalance, broadcast, encrypt, decrypt | `CWIShimScript.h` | Re-check literal sizes; may need another split |
-| 5 | Payment animation safeguard — extract indicator-fire helper, call from IPC path | `HttpRequestInterceptor.cpp`, `simple_handler.cpp` | Verify green dot fires on sendBsv |
-| 6 | CEF rebuild + Treechat + github smoke | None — just verification | The real end-to-end test |
+| 1 | ✅ landed (`d0a00c4`) — `SyncHttpClient::Post(headers)` overload + `wallet_call` IPC handler | `SyncHttpClient.h/.cpp`, `simple_handler.cpp` | Compile only |
+| 2 | ✅ landed (`b7efa6f`) — JS bridge injection + `wallet_response` routing | `simple_render_process_handler.cpp` | Compile + DevTools test |
+| 3 | ✅ landed (`b8e4753`) — `makeMethod` refactor (28 canonical methods) | `CWIShimScript.h` | Compile |
+| 4 | ✅ landed (`56f7343`) — Legacy fetch sites (8 sites; +DELETE verb support) | `CWIShimScript.h`, `SyncHttpClient`, `simple_handler.cpp` | Compile |
+| 5 | Extract gating helpers from `AsyncWalletResourceHandler` (NO behavior change) | `HttpRequestInterceptor.cpp` | HTTP path on `localhost:5137` still works identically |
+| 6 | Wire IPC bridge through `PermissionEngine` (silent/prompt/deny paths) | `simple_handler.cpp`, `PendingAuthRequest.h` | Engine + animation + modals all fire from IPC path |
+| 7 | CEF rebuild + Treechat + github smoke | None — just verification | The real end-to-end test |
 
-Commits 1–5 each compile and pass tests in isolation. Smoke verification
-is reserved for commit 6.
+Commits 1-4 already shipped the bridge plumbing. Commits 5-6 complete
+the security boundary so the IPC path matches the HTTP path 1:1.
+Commit 7 is the smoke pass.
 
 ## Risk surface
 

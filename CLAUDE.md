@@ -460,9 +460,21 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 | Folder | Purpose |
 |--------|---------|
+| `development-docs/architecture/` | Centralized cross-layer architecture reference — wallet API map, auto-approve engine, IPC bridge, permission gates. Layer-specific docs stay in CLAUDE.md files; cross-layer concerns live here. |
+| `development-docs/FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | Phase 4+ vision — "engine in Rust" design captured for back-of-mind / future quarter planning |
 | `development-docs/Final-MVP-Sprint/` | Active sprint: testing, optimization, security, macOS port |
 | `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
-| `development-docs/Sigma-BRC121-Sprint/` | Active sprint: BRC-100 surface completion (Phase 1.5 permission UX) |
+| `development-docs/Sigma-BRC121-Sprint/` | Active sprint: BRC-100 surface completion (Phase 1.5 permission UX, Phase 2 window-CWI shim, Phase 2.5 IPC bridge in progress) |
 | `archived-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) — completed sprint, archived |
 | `development-docs/Possible-MVP-Features/` | Roadmap items and feature research |
 | `build-instructions/` | Platform-specific build guides (Windows, macOS) |
+
+### Active sprint status (2026-05-30)
+
+| Phase | Status |
+|-------|--------|
+| Phase 1.5 (permission UX) | ✅ Landed |
+| Phase 1.6 (indexer resilience) | ✅ Landed |
+| Phase 2 (window.CWI shim) | ✅ Steps 1-4 + 3b + 3c landed; smoke surfaced CSP/CORS issue → Phase 2.5 |
+| Phase 2.5 (wallet IPC bridge) | 🚧 Commits 1-4 landed; commits 5-7 multi-session work pending. See `development-docs/Sigma-BRC121-Sprint/phase-2-window-cwi-shim/PHASE_2_5_IPC_REFACTOR.md` |
+| Phase 3 (ordinals) | Queued — blocked on Phase 2.5 + Step 3d (getSignatures research) |
