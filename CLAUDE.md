@@ -17,7 +17,7 @@ Sprint phases live in `development-docs/<sprint>/phase-*/` folders. Before writi
    - Permission gates — `check_domain_approved`, `SessionManager`, `domain_permissions` row already enforce per-tx / per-session / rate / max-tx-per-session limits
    - HTTP interception — `isWalletEndpoint` route table is the entry point for all new wallet endpoints; new endpoints go through the table, never around it
 4. **Risk assessment.** What existing functionality could this change touch or break? Especially audit the **load-bearing UX safeguards**:
-   - **Tab payment badge animation** (`payment_success_indicator` IPC chain: `HttpRequestInterceptor.cpp:1656-1681` → `simple_render_process_handler.cpp:1020` → `useTabManager.ts:141`) — green-dot fires on every auto-approved payment; the user's primary visual safeguard against silent payment abuse
+   - **Tab payment badge animation** (`payment_success_indicator` IPC chain: `HttpRequestInterceptor.cpp` — 2 fire sites: `AsyncHTTPClient::OnRequestComplete` (createAction silent-approve) + `firePaymentSuccessIpc()` (BRC-121 paid retry) → `simple_render_process_handler.cpp:1051` → `useTabManager.ts:141`) — green-dot fires on every auto-approved payment; the user's primary visual safeguard against silent payment abuse
    - **Right-click "Manage Site Permissions"** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) — quick revoke flow
    - **`DomainPermissionForm` "Always notify" toggle** — zeros all limits; the cautious-user opt-in path
    - **Privacy perimeter prompts** — identity-key reveal, key-linkage reveal, sensitive cert fields, large spends ALWAYS prompt regardless of any setting

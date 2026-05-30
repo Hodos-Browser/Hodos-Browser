@@ -155,9 +155,11 @@ Smaller than the original draft. **All additions are child tables of `domain_per
 │                                                                               │
 │  ★★★ PRESERVED: Tab payment badge animation pipeline ★★★                       │
 │   Every successful auto-approved payment fires:                               │
-│     HttpRequestInterceptor.cpp:1656-1681                                      │
-│       sends payment_success_indicator IPC                                     │
-│         → simple_render_process_handler.cpp:1020                              │
+│     HttpRequestInterceptor.cpp (2 fire sites):                                │
+│       • firePaymentSuccessIpc() — BRC-121 paid retry                          │
+│       • AsyncHTTPClient::OnRequestComplete — createAction silent-approve      │
+│       both send payment_success_indicator IPC                                 │
+│         → simple_render_process_handler.cpp:1051                              │
 │           → window.postMessage to header browser                              │
 │             → useTabManager.ts:141                                            │
 │               → green-dot animation on the tab                                │
@@ -363,7 +365,7 @@ Phase 2 acceptance criteria must include:
 | Auto-approve firing where prompts expected | shim path not gated correctly | `simple_handler.cpp` `yours_legacy` dispatch |
 | Win build works, Mac broken | overlay creation parity gap | `cef_browser_shell_mac.mm` |
 | BRC-100-conforming app sees auto-grants | per-protocol gate not wired in | Phase 1.5 `check_protocol_approved` calls |
-| **Auto-approved payments don't trigger green-dot animation** | `payment_success_indicator` IPC not firing through new engine | `HttpRequestInterceptor.cpp:1656-1681` (silent-approve path must keep sending it) |
+| **Auto-approved payments don't trigger green-dot animation** | `payment_success_indicator` IPC not firing through new engine | `HttpRequestInterceptor.cpp` `AsyncHTTPClient::OnRequestComplete` + `firePaymentSuccessIpc` (silent-approve path must keep sending it) |
 | **Shim payments (window.yours.sendBsv) don't trigger animation** | shim not routing through canonical IPC + indicator path | Phase 2 acceptance test should catch this |
 | Right-click "Manage Site Permissions" stops working after UI change | `DomainPermissionForm` route or IPC dispatch broken | `simple_handler.cpp:6989` + `MENU_ID_MANAGE_PERMISSIONS` |
 

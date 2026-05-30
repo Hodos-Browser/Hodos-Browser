@@ -92,7 +92,7 @@ Reference site list per provider lives in a subordinate doc once the phase start
 
 The four load-bearing UX safeguards in the root `CLAUDE.md` are independent of this work but should not regress as side-effects of any farbling/cookie/storage change made here:
 
-- Tab payment badge animation (green dot on auto-approved payments) — `HttpRequestInterceptor.cpp:1656-1681` → `simple_render_process_handler.cpp:1020` → `useTabManager.ts:141`
+- Tab payment badge animation (green dot on auto-approved payments) — `HttpRequestInterceptor.cpp` (`AsyncHTTPClient::OnRequestComplete` + `firePaymentSuccessIpc`) → `simple_render_process_handler.cpp:1051` → `useTabManager.ts:141`
 - Right-click "Manage Site Permissions" (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`)
 - `DomainPermissionForm` "Always notify me" toggle
 - Privacy perimeter prompts (identity-key reveal, key-linkage reveal, sensitive cert fields, large spends — always prompt regardless of settings)

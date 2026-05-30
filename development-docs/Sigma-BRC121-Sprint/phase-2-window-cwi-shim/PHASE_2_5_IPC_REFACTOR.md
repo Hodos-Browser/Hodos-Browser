@@ -404,8 +404,9 @@ handler uses the headers overload.
 ## ⚠️ Payment animation safeguard — load-bearing change
 
 Currently the green-dot tab animation fires from
-`HttpRequestInterceptor.cpp:1656-1681`'s `AsyncWalletResourceHandler` after
-every successfully-auto-approved payment. Under IPC dispatch, **the request
+`AsyncHTTPClient::OnRequestComplete` inside `AsyncWalletResourceHandler` in
+`HttpRequestInterceptor.cpp` after every successfully-auto-approved payment
+(and from `firePaymentSuccessIpc()` for the BRC-121 paid retry path). Under IPC dispatch, **the request
 never goes through `AsyncWalletResourceHandler`** because it's not an HTTP
 request from the renderer's perspective — it's an IPC message that the
 browser-process handler forwards directly to `SyncHttpClient::Post`.

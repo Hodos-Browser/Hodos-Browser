@@ -33,7 +33,7 @@ Status: research complete; phase structure revised 2026-05-05; ready to pick up 
 
 These existing features are non-negotiable and survive every refactor in this sprint:
 
-- **Tab payment badge animation** (green dot) fires on every auto-approved payment — `HttpRequestInterceptor.cpp:1656-1681` → `simple_render_process_handler.cpp:1020` → `useTabManager.ts:141`. The user's primary defense against a site spamming auto-approved payments under their nose. Phase 1.5 must keep it firing through the new permission engine; Phase 2 V8 shim payments must trigger it too.
+- **Tab payment badge animation** (green dot) fires on every auto-approved payment — `HttpRequestInterceptor.cpp` (`AsyncHTTPClient::OnRequestComplete` + `firePaymentSuccessIpc`) → `simple_render_process_handler.cpp:1051` → `useTabManager.ts:141`. The user's primary defense against a site spamming auto-approved payments under their nose. Phase 1.5 must keep it firing through the new permission engine; Phase 2 V8 shim payments must trigger it too.
 - **Right-click "Manage Site Permissions"** context menu (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) — quick revoke for any site at any time.
 - **`DomainPermissionForm` "Always notify me" toggle** — zeros all limits; the cautious-user opt-in path.
 - **Privacy perimeter** — identity-key reveal, key-linkage proofs, sensitive cert fields, large spends ALWAYS prompt regardless of any setting.
