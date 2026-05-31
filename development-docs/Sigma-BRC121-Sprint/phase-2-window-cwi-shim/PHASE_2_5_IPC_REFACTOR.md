@@ -589,6 +589,144 @@ Commits 1-4 already shipped the bridge plumbing. Commits 5-6 complete
 the security boundary so the IPC path matches the HTTP path 1:1.
 Commit 7 is the smoke pass.
 
+## Per-commit acceptance criteria
+
+Each commit lands only when every "done when" criterion is verifiable. No
+hand-waving — each line should map to a runnable command or an observable
+behavior.
+
+### Commit 5 — Extraction (no behavior change)
+
+**Files touched:** `cef-native/src/core/HttpRequestInterceptor.cpp`,
+new `cef-native/include/core/PermissionGate.h`, new
+`cef-native/src/core/PermissionGate.cpp`,
+`cef-native/include/core/PendingAuthRequest.h`,
+optional new `cef-native/tests/permission_gate_test.cpp`.
+
+**Done when:**
+
+1. **HTTP path on `localhost:5137` works identically** for all seven gates:
+   - Internal wallet UI loads (frontend dev server reachable from CEF)
+   - createAction triggers `payment_confirmation` modal when over per-tx cap
+   - createAction silent-approves when within caps (no modal, no log change)
+   - getPublicKey identity-key style triggers `identity_key_reveal` modal
+   - revealCounterpartyKeyLinkage triggers `key_linkage_reveal` modal
+   - proveCertificate non-granted field triggers `certificate_disclosure` modal
+   - listOutputs new-basket triggers `basket_permission_prompt` modal
+   - createSignature new-protocol triggers `protocol_permission_prompt` modal
+2. **All 28 canonical shim methods still function** through fetch path
+   on localhost:5137 (smoke same as Phase 2 Step 4 acceptance criteria)
+3. **All 11 legacy yours methods still function** (smoke same as Phase 2
+   Step 3b/3c acceptance criteria)
+4. **`PermissionEngine` unit tests still pass** (`cargo test` in
+   `cef-native/tests/`)
+5. **New `RunPermissionGate` helper has unit tests** covering at least:
+   - Silent decision forwards correctly via `forwardToWallet` callback
+   - Prompt decision invokes `openModal` callback with correct PromptType
+   - Deny decision invokes `forwardToWallet` with deny response
+   - All four callbacks can be mocked; helper is testable without CEF
+6. **No new lines of behavior logic** — every `if/else` branch in
+   `RunPermissionGate` traces 1:1 to a branch that previously existed in
+   `Open()`. Verified by a side-by-side review comment in the PR
+7. **Green-dot animation still fires** on auto-approved payment from
+   `localhost:5137` (visual smoke; tab-badge appears within 500ms of
+   silent-approve)
+8. **`Open()` line count drops** from ~522 to roughly ~250-300 (most of
+   the cascade now in `RunPermissionGate`). Hard metric — if Open() shrinks
+   less than ~30%, the extraction wasn't deep enough
+9. **`grep -n payment_success_indicator HttpRequestInterceptor.cpp` still
+   returns the two fire sites** — extraction MUST NOT remove the IPC fire
+   from the HTTP path. (Indicator helper is a separate Commit 6 deliverable;
+   Commit 5 leaves the inline fire in place.)
+10. **No regression in `PermissionEngine::Decide()`** — the engine itself
+    is not modified, only wrapped by `RunPermissionGate`
+
+### Commit 6 — IPC bridge wiring through PermissionEngine
+
+**Files touched:** `cef-native/src/handlers/simple_handler.cpp`
+(`wallet_call` handler body), `cef-native/include/core/PendingAuthRequest.h`
+(ResumeKind enum + IPC fields), `cef-native/src/core/HttpRequestInterceptor.cpp`
+(`handleAuthResponse` extension for ResumeKind dispatch), new
+`OnWalletCallSuccess` helper.
+
+**Done when:**
+
+1. **`wallet_call` IPC handler builds a `PermissionContext`** before
+   calling `RunPermissionGate` (vs. today's direct `SyncHttpClient::Post`)
+2. **`PermissionContext` carries `X-Requesting-Domain`** from the calling
+   frame's origin — same source as HTTP path
+3. **Silent decision on IPC path**:
+   - Forwards to wallet via `SyncHttpClient::Post`
+   - On success, calls `OnWalletCallSuccess(browserId, domain, cents, wasAutoApprovedPayment, endpoint)`
+   - `SessionManager::recordSpending` runs for payment kind
+   - `firePaymentSuccessIndicator` runs for payment kind — **green-dot
+     animation visible on the tab**
+   - `wallet_response` IPC fires back to renderer with payload
+4. **Prompt decision on IPC path**:
+   - Modal opens via `OpenPromptModal()` (same dispatcher as HTTP path)
+   - `PendingAuthRequest` enrolled with `resumeKind=kIpcResponse`,
+     `requestId`, `frame`, `browserId`, expected `headersOnApprove`
+   - User Approve → `handleAuthResponse` resumes:
+     - Injects `headersOnApprove` (e.g. `X-Identity-Key-Approved: true`)
+     - Forwards to wallet via `SyncHttpClient::Post`
+     - On success: `OnWalletCallSuccess` + `wallet_response` IPC
+   - User Deny → `wallet_response` IPC with error payload (no wallet call made)
+5. **Deny decision on IPC path** → `wallet_response` IPC with denial error;
+   no wallet call made
+6. **CSP-bypass and CORS-bypass verified**:
+   - On `https://github.com`: `await window.CWI.getNetwork({})` returns
+     `'mainnet'` without DevTools CSP violation
+   - On `https://treechat.io`: `await window.yours.getAddresses()` returns
+     `{bsvAddress, ordAddress, identityAddress}` without CORS preflight failure
+7. **HTTP path on `localhost:5137` unchanged** — re-run Commit 5's
+   acceptance criteria #1-10 to confirm no regression
+8. **`PendingAuthRequest` per-domain queuing still works** — multiple
+   in-flight IPC calls from same domain dedupe to one modal; on Approve,
+   all queued calls resume
+9. **Frame validity check**: if frame navigates or tab closes between
+   modal opening and Approve, `wallet_response` is dropped silently with
+   debug log (no SendProcessMessage to invalid frame)
+10. **No double-fire of green-dot animation**: a single auto-approved
+    payment fires the indicator IPC exactly once (whether via HTTP path
+    or IPC path — not both)
+
+### Commit 7 — CEF rebuild + Treechat + github smoke
+
+**Files touched:** None — verification-only.
+
+**Done when:** Every item in `## Verification — Phase 2.5 done when` section
+below passes. Specifically:
+
+1. **github.com smoke** — `await window.CWI.getNetwork({})` returns
+   `'mainnet'`. DevTools shows no CSP `connect-src` violation. Network tab
+   shows zero requests to `127.0.0.1:31301`.
+2. **treechat.io smoke** — `await window.yours.getAddresses()` returns
+   the three-address object. DevTools shows no CORS preflight failure.
+3. **treechat.io payment smoke** — `await window.yours.sendBsv([{address, satoshis: 1000}])`:
+   - First call from a new approved-but-no-payment-permission domain
+     fires `payment_confirmation` modal
+   - User clicks Approve
+   - Returned `{txid}` matches `await window.CWI.listActions({limit: 1})`
+   - **Green-dot tab badge animation visible**
+   - SessionManager recorded the spend (verify via `wallet_status` or wallet UI)
+4. **github.com encrypt/decrypt round-trip** —
+   `await window.yours.encrypt({message: 'hi', pubKey: selfPubKey})` then
+   `await window.yours.decrypt({ciphertext: ...})` returns `'hi'`
+5. **No regressions on `localhost:5137`** — wallet UI fully functional;
+   all wallet UI operations (create, backup, restore, send, settings)
+   work identically to before Phase 2.5
+6. **`actix-cors` config unchanged** in `main.rs` — defense-in-depth
+   localhost-only allowlist preserved; verified by `git diff main.rs`
+7. **No build warnings** introduced by commits 5-6 (clean `cmake --build
+   build --config Release` output)
+8. **Per-tab counter behavior preserved** — closing the github tab and
+   re-opening clears the session spend counter (per design)
+9. **Modal click-outside behavior preserved** — same overlay close
+   patterns as before commits 5-6 land
+10. **macOS parity check** — same smoke matrix runs on macOS build (or
+    explicit deferral note in the commit message if Mac smoke deferred to
+    next session)
+
 ## Risk surface
 
 | Risk | Mitigation |
