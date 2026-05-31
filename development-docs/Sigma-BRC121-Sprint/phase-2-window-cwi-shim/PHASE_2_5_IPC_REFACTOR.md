@@ -46,6 +46,125 @@ on, not just compile-clean.
 Each sub-phase is one focused session. Plan a clean handoff doc between
 sessions so context-clear ↔ context-load is lossless.
 
+## Decisions locked (Phase 2.5-A planning, 2026-05-30)
+
+Four architectural decisions sized to commits 5-7. All four were checked
+against the Phase 2.6 engine-to-Rust vision
+(`../../FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md`) and confirmed
+forward-compatible — no rework cost on the 2.5 work even if 2.6 starts the
+same day 2.5 closes.
+
+> **Phase 2.6 sequencing confirmed:** Phase 2.5 finishes first (delivers
+> the user-visible win — engine works on external dApps via IPC). Phase 2.6
+> opens immediately after 2.5-D closes as a separate plan doc, migrating
+> the engine to Rust. Estimated ~54-86 focused hours + 1 week soak. The
+> 2.5 extraction shape (below) is the literal prep for the 2.6 migration.
+
+### Decision 1 — Extraction interface shape
+
+**Locked:** Free function `RunPermissionGate(const PermissionContext& ctx, const GateCallbacks& cb) -> GateDecision`
+where `GateCallbacks` is a struct of `std::function` slots: `openModal`,
+`firePaymentIndicator`, `recordSpending`, `injectHeader`, `forwardToWallet`.
+
+Stateless, pure data in / decision out + side effects via callbacks. HTTP
+path and IPC path build different `GateCallbacks` structs. Mocks trivially.
+`PermissionEngine::Decide()` is wrapped, not modified.
+
+**Phase 2.6 fit:** `RunPermissionGate` body changes to "POST to Rust, handle
+200 / 202 PENDING / 403"; the signature is identical. Callbacks shrink (most
+move to Rust) but the seam shape is preserved.
+
+### Decision 2 — `PendingAuthRequest` IPC continuation
+
+**Locked:** Extend `PendingAuthRequest` struct with:
+
+```cpp
+enum class ResumeKind { kHttpCallback, kIpcResponse, kInternal };
+
+struct PendingAuthRequest {
+    // existing fields (requestId, domain, method, endpoint, body, type, handler)
+    ResumeKind resumeKind = ResumeKind::kHttpCallback;
+    CefRefPtr<CefFrame> frame;                            // IPC path only
+    int browserId = 0;                                    // IPC path only
+    std::map<std::string,std::string> headersOnApprove;   // X-Identity-Key-Approved, etc.
+};
+```
+
+Enum-tagged variants beat a bool `isIpcCall` for future extensibility (a
+third resume path will land — internal Rust-initiated requests under Phase
+2.6).
+
+**Phase 2.6 fit:** the pending state owner becomes Rust; C++ keeps a much
+thinner "which frame + requestId to wake on approve" record. The fields
+above are exactly what serializes across the future IPC. Rename + thin out,
+not redesign.
+
+### Decision 3 — Modal trigger routing
+
+**Locked:** Extract every `triggerXxxModal()` member function into free
+functions taking explicit context, and add a single dispatcher:
+
+```cpp
+void OpenPromptModal(
+    PermissionDecision::PromptType type,
+    const PromptContext& ctx,
+    const std::string& requestId
+);
+```
+
+The dispatcher maps `PromptType` → matching trigger fn. The engine's
+`Prompt` return value carries everything the dispatcher needs as payload;
+the engine no longer touches CEF.
+
+**Phase 2.6 fit:** the engine-to-Rust boundary lands cleanly at the engine /
+dispatcher seam. Engine emits `202 PENDING` with prompt context;
+`OpenPromptModal` is called from the C++ `202 PENDING` response handler
+instead of from `RunPermissionGate`'s callback. Same dispatcher code, same
+modal triggers.
+
+### Decision 4 — Payment indicator extraction granularity
+
+**Locked:** Extract the WHOLE post-response success branch as one helper:
+
+```cpp
+void OnWalletCallSuccess(
+    int browserId,
+    const std::string& domain,
+    int64_t cents,                     // -1 if not a payment
+    bool wasAutoApprovedPayment,
+    const std::string& endpoint
+);
+// Internally:
+//   if (wasAutoApprovedPayment && cents > 0) {
+//       SessionManager::GetInstance().recordSpending(browserId, cents);
+//       FirePaymentSuccessIndicator(browserId, domain, cents);
+//   }
+//   (future) PaidContentCache::Put(...) hook for BRC-121 path
+```
+
+`recordSpending`, indicator IPC, and (BRC-121-only) cache write are coupled
+by the same cents + browserId + success check. Always run together. One
+helper = one call site per path. Future caller can't forget to also call
+`recordSpending` — the cluster is atomic.
+
+**Phase 2.6 fit:** the helper splits cleanly at the migration boundary —
+`recordSpending` moves to Rust (session caps are engine state), indicator
+IPC stays C++ (UI concern). Today's bundling makes the future split visible
+and atomic.
+
+### Why these survive the Phase 2.6 migration
+
+All four decisions are about *seams*, not implementations:
+
+| Seam | 2.5 implementation | 2.6 implementation |
+|---|---|---|
+| Pure data in, decision out | `RunPermissionGate(ctx, cb)` calls `PermissionEngine::Decide()` locally | `RunPermissionGate(ctx, cb)` POSTs to Rust, awaits 200/202/403 |
+| Pending request continuation | `PendingAuthRequest` struct held in C++ map | `PendingAuthRequest` struct held in C++; Rust owns the matching record indexed by `approvalId` |
+| Modal dispatch | `OpenPromptModal()` called from gate runner | `OpenPromptModal()` called from `202 PENDING` response handler |
+| Post-success cluster | `OnWalletCallSuccess` bundles spend + indicator | `OnWalletCallSuccess` keeps indicator (UI); `recordSpending` moves to Rust |
+
+The 2.5 work is the literal prep work for 2.6. Zero rework cost.
+
 ## Why this exists
 
 Phase 2's shim (Steps 1–4, then 3b + 3c) implements `window.CWI` / `window.yours`
