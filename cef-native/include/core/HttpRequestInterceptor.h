@@ -146,3 +146,24 @@ void MarkKeyLinkageRevealApproved(const std::string& domain);
 // TriggerPendingBrc121Reloads instead). Implementation casts to the file-local
 // AsyncWalletResourceHandler class inside HttpRequestInterceptor.cpp.
 bool ForwardPendingWalletRequest(CefRefPtr<CefResourceHandler> handler);
+
+// Phase 2.5 Commit 6 (sub-step 6.b) — single source of truth for the
+// post-success "auto-approved payment" cluster: recordSpending +
+// payment_success_indicator IPC (green-dot tab animation). Bundles the
+// SessionManager update and the React-side indicator dispatch so callers
+// on every path (HTTP createAction, BRC-121 paid retry, IPC bridge) fire
+// the same code. Counter increments (rateCounter / paymentCount) stay
+// with each caller because they happen at different lifecycle stages
+// across paths (silent-approve time for createAction, success time for
+// BRC-121).
+//
+// Guarded internally: returns immediately when wasAutoApprovedPayment is
+// false or cents <= 0. The endpoint string is diagnostic only (passed to
+// the debug log). Safe to call from any thread that the SessionManager
+// + SimpleHandler::GetHeaderBrowser accessors permit (currently any
+// thread — both are mutex-protected / refcounted).
+void OnWalletCallSuccess(int browserId,
+                         const std::string& domain,
+                         int64_t cents,
+                         bool wasAutoApprovedPayment,
+                         const std::string& endpoint);

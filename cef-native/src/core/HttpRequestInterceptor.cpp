@@ -1302,6 +1302,40 @@ void MarkKeyLinkageRevealApproved(const std::string& domain) {
     KeyLinkageApprovalCache::GetInstance().approve(domain);
 }
 
+// Phase 2.5 Commit 6 (sub-step 6.b) — single source of truth for the
+// post-success auto-approved-payment cluster. See header for design intent.
+void OnWalletCallSuccess(int browserId,
+                         const std::string& domain,
+                         int64_t cents,
+                         bool wasAutoApprovedPayment,
+                         const std::string& endpoint) {
+    if (!wasAutoApprovedPayment || cents <= 0) return;
+
+    SessionManager::GetInstance().recordSpending(browserId, cents);
+
+    CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
+    if (!headerBrowser || !headerBrowser->GetMainFrame()) return;
+
+    // Phase 1.5 Step 0 — translate CEF browser identifier to TabManager's
+    // Tab::id before sending. React's tab list keys by Tab::id, NOT CEF
+    // browser identifier (they are different counters).
+    int tabId = TabManager::GetInstance().GetTabIdForBrowserIdentifier(browserId);
+    nlohmann::json payload;
+    payload["browserId"] = tabId;  // field kept as "browserId" for React compat
+    payload["domain"] = domain;
+    payload["cents"] = cents;
+
+    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
+    msg->GetArgumentList()->SetString(0, payload.dump());
+    headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
+
+    LOG_DEBUG_HTTP("💰 OnWalletCallSuccess fired (" + std::to_string(cents)
+                   + " cents from " + domain
+                   + ", cefBrowserId=" + std::to_string(browserId)
+                   + " → tabId=" + std::to_string(tabId)
+                   + ", endpoint=" + endpoint + ")");
+}
+
 // Forward declared in HttpRequestInterceptor.h; implementation here since
 // AsyncWalletResourceHandler and StartAsyncHTTPRequestTask are file-local
 // to this translation unit. See header docstring for usage and rationale.
@@ -3020,43 +3054,30 @@ public:
 
         LOG_DEBUG_HTTP("🌐 AsyncHTTPClient::OnRequestComplete called, response size: " + std::to_string(responseData_.length()));
 
-        // Record spending on successful auto-approve payment
+        // Phase 2.5 Commit 6 sub-step 6.b — record spending + fire green-dot
+        // animation via the shared OnWalletCallSuccess helper. The error-check
+        // stays at the caller because OnWalletCallSuccess doesn't have access
+        // to the response body; the wasAutoApprovedPayment flag is gated to
+        // false on an error response so the helper's internal guard does the
+        // rest.
         if (parent_) {
             CefURLRequest::Status status = request->GetRequestStatus();
             int64_t cents = parent_->getPreCalculatedCents();
-            if (status == UR_SUCCESS && parent_->getWasAutoApprovedPayment()) {
-                // Check response is not an error
+            const bool wasAutoApprovedPayment = parent_->getWasAutoApprovedPayment();
+            bool successAndNotError = false;
+            if (status == UR_SUCCESS && wasAutoApprovedPayment) {
                 bool isError = false;
                 try {
                     auto rj = nlohmann::json::parse(responseData_);
                     isError = rj.contains("error");
                 } catch (...) {}
-
-                if (!isError) {
-                    int browserId = parent_->getBrowserId();
-                    SessionManager::GetInstance().recordSpending(browserId, cents);
-                    LOG_DEBUG_HTTP("💰 Recorded spending: " + std::to_string(cents) + " cents for browser " + std::to_string(browserId));
-
-                    // Notify header browser for tab payment badge animation
-                    CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
-                    if (headerBrowser && headerBrowser->GetMainFrame()) {
-                        // Phase 1.5 Step 0 — translate CEF browser identifier to
-                        // TabManager's Tab::id before sending. React's tab list keys
-                        // by Tab::id, NOT CEF browser identifier (different counters).
-                        int tabId = TabManager::GetInstance().GetTabIdForBrowserIdentifier(browserId);
-                        nlohmann::json payload;
-                        payload["browserId"] = tabId;  // field kept as "browserId" for React compat
-                        payload["domain"] = parent_->getRequestDomain();
-                        payload["cents"] = cents;
-
-                        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
-                        msg->GetArgumentList()->SetString(0, payload.dump());
-                        headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
-                        LOG_DEBUG_HTTP("💰 Sent payment indicator to header: " + std::to_string(cents) + " cents from " + parent_->getRequestDomain()
-                                       + " (cefBrowserId=" + std::to_string(browserId) + " -> tabId=" + std::to_string(tabId) + ")");
-                    }
-                }
+                successAndNotError = !isError;
             }
+            OnWalletCallSuccess(parent_->getBrowserId(),
+                                parent_->getRequestDomain(),
+                                cents,
+                                /*wasAutoApprovedPayment=*/successAndNotError,
+                                /*endpoint=*/"createAction");
             parent_->onHTTPResponseReceived(responseData_);
         }
     }
@@ -4000,27 +4021,23 @@ private:
     }
 
     void firePaymentSuccessIpc() {
-        CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
-        if (!headerBrowser || !headerBrowser->GetMainFrame()) return;
-        // Phase 1.5 Step 0 — translate CEF browser identifier to TabManager's
-        // Tab::id before sending. React's tab list keys by Tab::id, NOT CEF
-        // browser identifier (they are different counters).
+        // Phase 2.5 Commit 6 sub-step 6.b — fire indicator + record spending
+        // via the shared OnWalletCallSuccess helper. BRC-121 ALSO needs to
+        // increment the per-session rate / payment counters here (NOT inside
+        // OnWalletCallSuccess) because BRC-121 has no Open()-stage
+        // silent-approve step — the createAction path increments at Open()
+        // time, BRC-121 increments at success time. The 2-line counter block
+        // below intentionally lives adjacent to the call so a future reader
+        // sees the timing-difference at a glance.
         int cefBrowserId = browser_ ? browser_->GetIdentifier() : 0;
-        int tabId = TabManager::GetInstance().GetTabIdForBrowserIdentifier(cefBrowserId);
-        nlohmann::json payload;
-        payload["browserId"] = tabId;  // field kept as "browserId" for React compat
-        payload["domain"] = ctx_.domain;
-        payload["cents"] = ctx_.cents;
-        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("payment_success_indicator");
-        msg->GetArgumentList()->SetString(0, payload.dump());
-        headerBrowser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
-        LOG_DEBUG_HTTP("💰 BRC-121: payment_success_indicator fired ("
-                       + std::to_string(ctx_.cents) + " cents from " + ctx_.domain
-                       + ", cefBrowserId=" + std::to_string(cefBrowserId)
-                       + " -> tabId=" + std::to_string(tabId) + ")");
+        OnWalletCallSuccess(cefBrowserId,
+                            ctx_.domain,
+                            ctx_.cents,
+                            /*wasAutoApprovedPayment=*/true,
+                            /*endpoint=*/"pay402");
 
-        // Auto-approve accounting — match the createAction success path.
-        SessionManager::GetInstance().recordSpending(cefBrowserId, ctx_.cents);
+        // BRC-121-specific counter increments (no Open()-stage silent-approve
+        // to do these at gate-decision time).
         SessionManager::GetInstance().incrementRateCounter(cefBrowserId);
         SessionManager::GetInstance().incrementPaymentCount(cefBrowserId);
     }
