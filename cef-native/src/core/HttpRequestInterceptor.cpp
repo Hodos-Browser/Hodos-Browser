@@ -2018,18 +2018,28 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 + " reason=" + shadowDecision.reason);
         }
 
-        // Phase 1.5 Step 6 (Commit C) — identity-key reveal gate is now driven
-        // by PermissionEngine::Decide(). The C++ side still owns:
-        //   1. The endpoint+body classification (the outer if-check already
-        //      narrowed us to identity-key-style /getPublicKey).
+        // Phase 2.5-B sub-step 5.c — identity-key reveal gate now flows
+        // through the shared RunPermissionGate helper. Behavior is identical
+        // to the prior Phase 1.5 Step 6 Commit C implementation; the
+        // reorganization is prep work for Commit 6 (IPC bridge consuming
+        // the same helper) per PHASE_2_5_IPC_REFACTOR.md.
+        //
+        // The C++ side still owns:
+        //   1. The endpoint+body classification (the outer if-check
+        //      narrows us to identity-key-style /getPublicKey).
         //   2. Modal dispatch via triggerIdentityKeyRevealModal +
-        //      postAuthTimeout.
-        //   3. Auto-approve fast path: identityKeyApproved_ + StartAsyncHTTPRequestTask.
-        // The engine owns whether to Silent / Deny / Prompt based on the
-        // persistent column (perm.identityKeyDisclosureAllowed) and the
-        // in-memory session opt-in cache (IdentityKeyApprovalCache).
-        // buildPermissionContext already populates both fields (lines 1044 +
-        // 1052), so the engine has exactly the inputs the inline cascade did.
+        //      postAuthTimeout (wired into the openModal callback).
+        //   3. Auto-approve fast path: identityKeyApproved_ +
+        //      StartAsyncHTTPRequestTask (wired into the forwardToWallet
+        //      callback). identityKeyApproved_ is the header-injection
+        //      flag StartAsyncHTTPRequestTask reads to add the
+        //      X-Identity-Key-Approved header on the wallet request,
+        //      which Rust's get_public_key handler requires (Phase 1.5
+        //      Step 1).
+        // The engine owns Silent / Deny / Prompt based on the persistent
+        // V17 column (perm.identityKeyDisclosureAllowed) and the in-memory
+        // session opt-in cache (IdentityKeyApprovalCache), both of which
+        // buildPermissionContext populates.
         if (isGetPublicKeyEndpoint(endpoint_) && isIdentityKeyStyleGetPublicKey(body_)) {
             // Payment fields unused for identity-key reveal; pass 0s. The
             // engine never reads them when callKind != Payment.
@@ -2038,41 +2048,43 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 /*requestedCents=*/0, /*sessionSpentCents=*/0,
                 /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
                 /*bsvPriceAvailable=*/true);
-            hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
 
-            LOG_DEBUG_HTTP(std::string("🛡️ Identity-key engine decision: ")
-                + decisionKindToString(decision.kind)
-                + " promptType=" + decision.promptType
-                + " | persistent_grant=" + (perm.identityKeyDisclosureAllowed ? "1" : "0")
-                + " session_optin=" + (IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
-                + " | reason=" + decision.reason);
-
-            if (decision.kind == hodos::PermissionDecision::Kind::Silent) {
+            hodos::GateCallbacks cb;
+            cb.forwardToWallet = [this, &handle_request]() {
                 LOG_DEBUG_HTTP("🛡️ identity-key reveal silently approved for " + requestDomain_);
                 identityKeyApproved_ = true;
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-                return true;
-            }
-
-            if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
-                // Defensive: DecidePrivacyPerimeter does not return Deny for
-                // IdentityKeyReveal today, but if a future engine version does
-                // (e.g. a blocked-identity-key list), surface the reason
-                // cleanly instead of falling through to a prompt.
-                LOG_DEBUG_HTTP("🛡️ identity-key reveal denied for " + requestDomain_
-                               + ": " + decision.reason);
-                onHTTPResponseReceived(
-                    "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+            };
+            // Defensive: DecidePrivacyPerimeter does not return Deny for
+            // IdentityKeyReveal today, but if a future engine version does
+            // (e.g. a blocked-identity-key list), surface the reason
+            // cleanly instead of falling through to a prompt.
+            cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
+                LOG_DEBUG_HTTP("🛡️ identity-key reveal denied for " + requestDomain_);
+                onHTTPResponseReceived(errorJson);
                 handle_request = true;
-                return true;
-            }
+            };
+            cb.openModal = [this, &handle_request](
+                const std::string& /*promptType*/,
+                const std::string& /*emptyExtraParams*/) {
+                LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
+                triggerIdentityKeyRevealModal(requestDomain_);
+                postAuthTimeout(kPromptAuthTimeoutMs,
+                    "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
+                handle_request = true;
+            };
 
-            // Prompt branch.
-            LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
-            triggerIdentityKeyRevealModal(requestDomain_);
-            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
-            handle_request = true;
+            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+
+            LOG_DEBUG_HTTP(std::string("🛡️ Identity-key engine decision: ")
+                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
+                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+                + " promptType=" + gateResult.promptType
+                + " | persistent_grant=" + (perm.identityKeyDisclosureAllowed ? "1" : "0")
+                + " session_optin=" + (IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
+                + " | reason=" + gateResult.reason);
+
             return true;
         }
 
