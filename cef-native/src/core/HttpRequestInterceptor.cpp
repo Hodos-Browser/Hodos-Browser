@@ -2088,58 +2088,70 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             return true;
         }
 
-        // Phase 1.5 Step 6 (Commit D) — key-linkage reveal gate is now
-        // engine-driven, mirroring Commit C's identity-key pattern.
+        // Phase 2.5-B sub-step 5.d — key-linkage reveal gate now flows
+        // through the shared RunPermissionGate helper. Behavior is identical
+        // to the prior Phase 1.5 Step 6 Commit D implementation; the
+        // reorganization mirrors 5.c's identity-key migration.
+        //
         // /revealCounterpartyKeyLinkage and /revealSpecificKeyLinkage are
         // always privacy-perimeter: never silent-pass without the cached
         // session opt-in (BRC-72 has no equivalent of identity-key's
         // persistent V17 column today — only the in-memory opt-in cache).
         // buildPermissionContext populates ctx.keyLinkageSessionOptIn from
         // KeyLinkageApprovalCache; the engine's DecidePrivacyPerimeter
-        // branch for CounterpartyKeyLinkage/SpecificKeyLinkage already
-        // covers Silent vs Prompt based on that single field.
+        // branch for CounterpartyKeyLinkage/SpecificKeyLinkage covers
+        // Silent vs Prompt based on that single field.
+        //
+        // keyLinkageApproved_ is the header-injection flag StartAsyncHTTPRequestTask
+        // reads to add X-Key-Linkage-Approved on the wallet request, which
+        // Rust's reveal_*_key_linkage handlers require (Phase 1.5 Step 1
+        // defense-in-depth).
         if (isKeyLinkageEndpoint(endpoint_)) {
             hodos::PermissionContext ctx = buildPermissionContext(
                 requestDomain_, endpoint_, body_, perm,
                 /*requestedCents=*/0, /*sessionSpentCents=*/0,
                 /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
                 /*bsvPriceAvailable=*/true);
-            hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
 
-            LOG_DEBUG_HTTP(std::string("🛡️ Key-linkage engine decision: ")
-                + decisionKindToString(decision.kind)
-                + " promptType=" + decision.promptType
-                + " | session_optin=" + (KeyLinkageApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
-                + " | reason=" + decision.reason);
-
-            if (decision.kind == hodos::PermissionDecision::Kind::Silent) {
+            hodos::GateCallbacks cb;
+            cb.forwardToWallet = [this, &handle_request]() {
                 LOG_DEBUG_HTTP("🛡️ key-linkage reveal silently approved for " + requestDomain_);
                 keyLinkageApproved_ = true;
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-                return true;
-            }
-
-            if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
-                // Defensive: DecidePrivacyPerimeter does not return Deny for
-                // key-linkage kinds today. Surfacing the reason here keeps
-                // future engine extensions (e.g. blocked-verifier list)
-                // self-consistent rather than collapsing to a prompt.
-                LOG_DEBUG_HTTP("🛡️ key-linkage reveal denied for " + requestDomain_
-                               + ": " + decision.reason);
-                onHTTPResponseReceived(
-                    "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+            };
+            // Defensive: DecidePrivacyPerimeter does not return Deny for
+            // key-linkage kinds today. Surfacing the reason here keeps
+            // future engine extensions (e.g. blocked-verifier list)
+            // self-consistent rather than collapsing to a prompt.
+            cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
+                LOG_DEBUG_HTTP("🛡️ key-linkage reveal denied for " + requestDomain_);
+                onHTTPResponseReceived(errorJson);
                 handle_request = true;
-                return true;
-            }
-
-            // Prompt branch — pass endpoint+body through so the modal can
+            };
+            // Prompt branch passes endpoint + body through so the modal can
             // surface which linkage kind (counterparty vs specific) and the
-            // verifier identity the page is asking about.
-            LOG_DEBUG_HTTP("🛡️ key-linkage reveal prompt required for " + requestDomain_);
-            triggerKeyLinkageRevealModal(requestDomain_, endpoint_, body_);
-            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
-            handle_request = true;
+            // verifier identity the page is asking about. The trigger fn
+            // captures requestDomain_, endpoint_, body_ via this closure.
+            cb.openModal = [this, &handle_request](
+                const std::string& /*promptType*/,
+                const std::string& /*emptyExtraParams*/) {
+                LOG_DEBUG_HTTP("🛡️ key-linkage reveal prompt required for " + requestDomain_);
+                triggerKeyLinkageRevealModal(requestDomain_, endpoint_, body_);
+                postAuthTimeout(kPromptAuthTimeoutMs,
+                    "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
+                handle_request = true;
+            };
+
+            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+
+            LOG_DEBUG_HTTP(std::string("🛡️ Key-linkage engine decision: ")
+                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
+                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+                + " promptType=" + gateResult.promptType
+                + " | session_optin=" + (KeyLinkageApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
+                + " | reason=" + gateResult.reason);
+
             return true;
         }
 
