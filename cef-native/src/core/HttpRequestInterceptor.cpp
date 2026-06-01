@@ -2,6 +2,7 @@
 #include "../../include/core/CookieBlockManager.h"
 #include "../../include/core/ManifestFetcher.h"
 #include "../../include/core/PermissionEngine.h"
+#include "../../include/core/PermissionGate.h"
 #include "../../include/core/SyncHttpClient.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
@@ -2243,14 +2244,21 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         }
 
         if (isPaymentEndpoint(endpoint_)) {
-            // Phase 1.5 Step 6 (Commit B) — payment gate is now driven by
-            // PermissionEngine::Decide(). The C++ side still owns:
-            //   1. The state collection (satoshis/cents/sessionSpent/etc.)
-            //   2. The extraParams string the React modal expects
-            //   3. The PendingRequestManager queue + CreateNotificationOverlayTask
+            // Phase 2.5-B sub-step 5.b — payment gate now flows through the
+            // shared RunPermissionGate helper. Behavior is identical to the
+            // Phase 1.5 Step 6 Commit B implementation; the reorganization
+            // is the prep work for Commit 6 (IPC bridge consuming the same
+            // helper) per development-docs/Sigma-BRC121-Sprint/
+            // phase-2-window-cwi-shim/PHASE_2_5_IPC_REFACTOR.md.
+            //
+            // The C++ side still owns the same four concerns:
+            //   1. State collection (satoshis/cents/sessionSpent/etc.)
+            //   2. extraParams string the React modal expects
+            //   3. PendingRequestManager queue + CreateNotificationOverlayTask
             //   4. Session-counter increments on auto-approve
-            // The engine owns the decision (Silent/Prompt/Deny) and the
-            // promptType. Inline gate cascade is gone.
+            // Those concerns are wired into the GateCallbacks below; the gate
+            // helper picks the matching callback based on the engine's
+            // decision.
             int browserId = browser_ ? browser_->GetIdentifier() : 0;
             SessionManager::GetInstance().getSession(browserId, requestDomain_);
 
@@ -2269,20 +2277,14 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 requestDomain_, endpoint_, body_, perm,
                 cents, sessionSpent, rateCount, txCount,
                 priceAvailable);
-            hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
 
-            LOG_DEBUG_HTTP(std::string("💰 Payment engine decision: ")
-                + decisionKindToString(decision.kind)
-                + " promptType=" + decision.promptType
-                + " | " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
-                + " tx_limit=" + std::to_string(perm.perTxLimitCents)
-                + " session_spent=" + std::to_string(sessionSpent)
-                + " session_limit=" + std::to_string(perm.perSessionLimitCents)
-                + " tx_count=" + std::to_string(txCount)
-                + " max_tx=" + std::to_string(perm.maxTxPerSession)
-                + " | reason=" + decision.reason);
-
-            if (decision.kind == hodos::PermissionDecision::Kind::Silent) {
+            // Silent path — bypass any modal, mark this as an auto-approved
+            // payment so AsyncHTTPClient::OnRequestComplete fires the
+            // payment_success_indicator IPC (green-dot animation) on the
+            // wallet's response, then forward to the wallet.
+            hodos::GateCallbacks cb;
+            cb.forwardToWallet =
+                [this, cents, browserId, &handle_request]() {
                 LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
                 preCalculatedCents_ = cents;
                 wasAutoApprovedPayment_ = true;
@@ -2290,97 +2292,120 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 SessionManager::GetInstance().incrementPaymentCount(browserId);
                 handle_request = true;
                 CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-                return true;
-            }
+            };
 
-            if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
-                LOG_DEBUG_HTTP("💰 Engine denied payment for " + requestDomain_ + ": " + decision.reason);
-                onHTTPResponseReceived(
-                    "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+            // Deny path — surface the engine-formatted error envelope.
+            cb.denyWithError =
+                [this, &handle_request](const std::string& errorJson) {
+                LOG_DEBUG_HTTP("💰 Engine denied payment for " + requestDomain_);
+                onHTTPResponseReceived(errorJson);
                 handle_request = true;
-                return true;
-            }
+            };
 
-            // Commit E — engine may return a scope-permission prompt
-            // (protocol/basket/counterparty) for a Payment kind when the
-            // createAction body references an ungranted scope. Build the
-            // scope-specific extraParams instead of payment-cap params.
-            // After the user approves the scope, the request re-issues and
-            // the cap gate runs separately (true independent gates per
-            // user requirement).
-            if (decision.promptType == "protocol_permission_prompt"
-                || decision.promptType == "basket_permission_prompt"
-                || decision.promptType == "counterparty_permission_prompt") {
+            // Prompt path — build branch-specific extraParams from the
+            // promptType, register with PendingRequestManager, fire the
+            // notification overlay task, arm the auth timeout. The two
+            // sub-cases:
+            //   (a) Scope-permission prompt (Commit E v1 path, dormant in
+            //       production today because buildPermissionContext does
+            //       NOT populate paymentScopeKindMissing for Payment kind —
+            //       see PermissionEngine context builder comment).
+            //   (b) Standard payment / rate-limit prompt with the
+            //       exceededLimit string the React modal renders.
+            cb.openModal =
+                [this, satoshis, cents, bsvPrice, priceAvailable, rateCount,
+                 txCount, sessionSpent, &perm, &handle_request](
+                    const std::string& promptType,
+                    const std::string& /*emptyExtraParams*/) {
                 preCalculatedCents_ = cents;
-                ProtocolScope proto_scope_pay = extractProtocolScope(endpoint_, body_);
-                BasketScope basket_scope_pay = extractBasketScope(endpoint_, body_);
+
                 std::string extraParams;
-                if (decision.promptType == "protocol_permission_prompt") {
-                    extraParams = "&protocolLevel=" + std::to_string(proto_scope_pay.level)
-                                + "&protocolName=" + proto_scope_pay.name
-                                + "&protocolKeyId=" + proto_scope_pay.keyId
-                                + "&protocolCounterparty=" + proto_scope_pay.counterparty
-                                + "&satoshis=" + std::to_string(satoshis)
-                                + "&cents=" + std::to_string(cents);
-                } else if (decision.promptType == "basket_permission_prompt") {
-                    extraParams = "&basket=" + basket_scope_pay.basket
-                                + "&basketAccess=" + basket_scope_pay.requiredAccess
-                                + "&satoshis=" + std::to_string(satoshis)
-                                + "&cents=" + std::to_string(cents);
-                } else {
-                    extraParams = "&counterparty=" + proto_scope_pay.counterparty
-                                + "&satoshis=" + std::to_string(satoshis)
-                                + "&cents=" + std::to_string(cents);
+                if (promptType == "protocol_permission_prompt"
+                    || promptType == "basket_permission_prompt"
+                    || promptType == "counterparty_permission_prompt") {
+                    ProtocolScope proto_scope_pay = extractProtocolScope(endpoint_, body_);
+                    BasketScope basket_scope_pay = extractBasketScope(endpoint_, body_);
+                    if (promptType == "protocol_permission_prompt") {
+                        extraParams = "&protocolLevel=" + std::to_string(proto_scope_pay.level)
+                                    + "&protocolName=" + proto_scope_pay.name
+                                    + "&protocolKeyId=" + proto_scope_pay.keyId
+                                    + "&protocolCounterparty=" + proto_scope_pay.counterparty
+                                    + "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents);
+                    } else if (promptType == "basket_permission_prompt") {
+                        extraParams = "&basket=" + basket_scope_pay.basket
+                                    + "&basketAccess=" + basket_scope_pay.requiredAccess
+                                    + "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents);
+                    } else {
+                        extraParams = "&counterparty=" + proto_scope_pay.counterparty
+                                    + "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents);
+                    }
+                    LOG_DEBUG_HTTP("🛡️ Payment scope prompt required for " + requestDomain_
+                                   + " (" + promptType + ")");
+                    PendingRequestManager::GetInstance().addRequest(
+                        requestDomain_, method_, endpoint_, body_, this, promptType);
+                    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+                        promptType, requestDomain_, extraParams));
+                    postAuthTimeout(kPromptAuthTimeoutMs,
+                        "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
+                    handle_request = true;
+                    return;
                 }
-                LOG_DEBUG_HTTP("🛡️ Payment scope prompt required for " + requestDomain_
-                               + " (" + decision.promptType + ")");
+
+                // Standard payment / rate-limit prompt path.
+                std::string exceeded;
+                if (!priceAvailable) {
+                    exceeded = "price_unavailable";
+                } else if (rateCount >= perm.rateLimitPerMin && perm.rateLimitPerMin > 0) {
+                    exceeded = "rate_limit";
+                } else if (txCount >= perm.maxTxPerSession && perm.maxTxPerSession > 0) {
+                    exceeded = "session_tx_count";
+                } else {
+                    const bool overTx = cents > perm.perTxLimitCents;
+                    const bool overSession = (sessionSpent + cents) > perm.perSessionLimitCents;
+                    if (overTx && overSession) exceeded = "both";
+                    else if (overTx) exceeded = "per_tx";
+                    else exceeded = "per_session";
+                }
+
+                extraParams = "&satoshis=" + std::to_string(satoshis)
+                            + "&cents=" + std::to_string(cents)
+                            + "&bsvPrice=" + (priceAvailable ? std::to_string(bsvPrice) : std::string("0"))
+                            + "&exceededLimit=" + exceeded
+                            + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                            + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                            + "&sessionSpent=" + std::to_string(sessionSpent);
+                if (promptType == "rate_limit_exceeded") {
+                    extraParams += "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                                 + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
+                                 + "&txCount=" + std::to_string(txCount);
+                }
+
                 PendingRequestManager::GetInstance().addRequest(
-                    requestDomain_, method_, endpoint_, body_, this, decision.promptType);
+                    requestDomain_, method_, endpoint_, body_, this, promptType);
                 CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-                    decision.promptType, requestDomain_, extraParams));
+                    promptType, requestDomain_, extraParams));
                 postAuthTimeout(kPromptAuthTimeoutMs,
-                    "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
+                    "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
                 handle_request = true;
-                return true;
-            }
+            };
 
-            // Standard payment Prompt — derive the exceededLimit string from
-            // the same context the engine used. This matches what the inline
-            // cascade fed the React modals so the UX banner copy is unchanged.
-            preCalculatedCents_ = cents;
-            std::string exceeded;
-            if (!priceAvailable) {
-                exceeded = "price_unavailable";
-            } else if (rateCount >= perm.rateLimitPerMin && perm.rateLimitPerMin > 0) {
-                exceeded = "rate_limit";
-            } else if (txCount >= perm.maxTxPerSession && perm.maxTxPerSession > 0) {
-                exceeded = "session_tx_count";
-            } else {
-                const bool overTx = cents > perm.perTxLimitCents;
-                const bool overSession = (sessionSpent + cents) > perm.perSessionLimitCents;
-                if (overTx && overSession) exceeded = "both";
-                else if (overTx) exceeded = "per_tx";
-                else exceeded = "per_session";
-            }
+            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
 
-            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents)
-                                    + "&bsvPrice=" + (priceAvailable ? std::to_string(bsvPrice) : std::string("0"))
-                                    + "&exceededLimit=" + exceeded
-                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                    + "&sessionSpent=" + std::to_string(sessionSpent);
-            if (decision.promptType == "rate_limit_exceeded") {
-                extraParams += "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                             + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
-                             + "&txCount=" + std::to_string(txCount);
-            }
+            LOG_DEBUG_HTTP(std::string("💰 Payment engine decision: ")
+                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
+                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+                + " promptType=" + gateResult.promptType
+                + " | " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
+                + " tx_limit=" + std::to_string(perm.perTxLimitCents)
+                + " session_spent=" + std::to_string(sessionSpent)
+                + " session_limit=" + std::to_string(perm.perSessionLimitCents)
+                + " tx_count=" + std::to_string(txCount)
+                + " max_tx=" + std::to_string(perm.maxTxPerSession)
+                + " | reason=" + gateResult.reason);
 
-            PendingRequestManager::GetInstance().addRequest(
-                requestDomain_, method_, endpoint_, body_, this, decision.promptType);
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask(decision.promptType, requestDomain_, extraParams));
-            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
-            handle_request = true;
             return true;
         }
 
