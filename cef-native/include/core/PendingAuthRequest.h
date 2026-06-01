@@ -1,11 +1,30 @@
 #pragma once
 
 #include "include/cef_resource_handler.h"
+#include "include/cef_frame.h"
 #include <string>
 #include <vector>
 #include <map>
 #include <mutex>
 #include <chrono>
+
+// Phase 2.5 Commit 6 (sub-step 6.a) — discriminator for how a resolved
+// pending request resumes work. The HTTP path keeps its existing behavior
+// (kHttpCallback); the IPC bridge introduces kIpcResponse so modal
+// resolution can re-issue the wallet call on a worker thread and send
+// wallet_response back to the original frame. kInternal is reserved for
+// the Phase 2.6 engine-to-Rust migration where Rust-initiated pending
+// state will live in C++ for modal dispatch only.
+//
+// Default value (kHttpCallback) makes the existing parameter-list
+// addRequest overload preserve today's HTTP-path semantics with zero
+// caller changes — only the new addRequest(PendingAuthRequest) overload
+// constructs IPC-flavored entries.
+enum class ResumeKind {
+    kHttpCallback,   // Resume via handler->onAuthResponseReceived
+    kIpcResponse,    // Resume via frame->SendProcessMessage(wallet_response)
+    kInternal,       // Reserved for Phase 2.6 Rust-initiated requests
+};
 
 struct PendingAuthRequest {
     std::string requestId;
@@ -13,8 +32,18 @@ struct PendingAuthRequest {
     std::string method;
     std::string endpoint;
     std::string body;
-    std::string type;  // "domain_approval", "brc100_auth", "no_wallet", "payment_confirmation", "rate_limit_exceeded", "certificate_disclosure"
-    CefRefPtr<CefResourceHandler> handler;
+    std::string type;  // "domain_approval", "brc100_auth", "no_wallet", "payment_confirmation", "rate_limit_exceeded", "certificate_disclosure", scoped-grant types
+    CefRefPtr<CefResourceHandler> handler;  // valid iff resumeKind == kHttpCallback
+
+    // Phase 2.5 Commit 6 — IPC path resume state.
+    // Defaults preserve HTTP-path semantics: existing addRequest call sites
+    // leave these zero/empty/null, and handleAuthResponse's switch on
+    // resumeKind treats them as kHttpCallback (today's behavior unchanged).
+    ResumeKind resumeKind = ResumeKind::kHttpCallback;
+    CefRefPtr<CefFrame> frame;                            // valid iff resumeKind == kIpcResponse
+    int browserId = 0;                                    // valid iff resumeKind == kIpcResponse
+    std::map<std::string, std::string> headersOnApprove;  // injected by handleAuthResponse on Approve
+    std::string httpMethod = "POST";                      // for IPC re-issue ("GET"/"POST"/"DELETE"/"PUT"/"PATCH")
 };
 
 class PendingRequestManager {
@@ -24,7 +53,10 @@ public:
         return instance;
     }
 
-    // Store a request, returns the generated requestId
+    // Store a request, returns the generated requestId. HTTP-path overload —
+    // unchanged from Phase 1.5; new IPC-resume fields default to kHttpCallback
+    // semantics so existing call sites in Open()'s lambdas continue to work
+    // without any modification.
     std::string addRequest(const std::string& domain,
                            const std::string& method,
                            const std::string& endpoint,
@@ -41,7 +73,21 @@ public:
         req.body = body;
         req.type = type;
         req.handler = handler;
+        // resumeKind defaults to kHttpCallback; other Commit-6 fields stay default.
         requests_[id] = req;
+        return id;
+    }
+
+    // Phase 2.5 Commit 6 (sub-step 6.a) — fully-constructed-request overload.
+    // The IPC path builds its own PendingAuthRequest (with resumeKind ==
+    // kIpcResponse + frame + browserId + headersOnApprove + httpMethod set)
+    // and hands it over by value. requestId is generated here and written
+    // back into the moved struct before storage. Returns the new requestId.
+    std::string addRequest(PendingAuthRequest req) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string id = generateId();
+        req.requestId = id;
+        requests_[id] = std::move(req);
         return id;
     }
 

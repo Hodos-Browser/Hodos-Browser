@@ -667,7 +667,23 @@ Total commit count for Commit 6: **6 sub-commits**, mirroring 5.a-5.f's discipli
 Estimated time: 4-6 hours of focused work across the six sub-commits, with the
 cumulative smoke at 6.e being the load-bearing verification.
 
-## 11. Open questions (need answers before code)
+## 11. Open questions — RESOLVED 2026-06-01
+
+All 8 questions answered. Decisions locked. Code work for sub-commits 6.a-6.f
+proceeds against these answers.
+
+| Q | Answer | Note |
+|---|---|---|
+| Q1 — Internal-origin bypass on IPC | **Yes** | Match Open() L1886 behavior — internal frontend stays trusted, no engine gate |
+| Q2 — Consolidate `firePaymentSuccessIpc` into `OnWalletCallSuccess` | **Yes, in 6.b** | Single source of truth for the green-dot fire. BRC-121's counter increments stay adjacent to the call (2-line block) since BRC-121 doesn't have a silent-approve step |
+| Q3 — Manifest-aware bundle dispatch on IPC unknown-trust | **Yes** | Mirror HTTP path — same UX whether dApp arrives via shim or fetch |
+| Q4 — Re-extract cents at re-issue time | **Yes** | Matches HTTP path freshness behavior; `preCalculatedCents_` equivalent |
+| Q5 — Active cancel on tab close | **No** | Timeout handles dead frames; active cancellation deferred unless we see a real problem |
+| Q6 — Safety-net re-check on IPC worker | **No** | HTTP safety net solves sibling-bypass (which IPC doesn't have); TOCTOU window exists in both paths and is bounded |
+| Q7 — Worker-pool throttle | **No** | Premature optimization without metrics; revisit if production shows saturation |
+| Q8 — Logging macros | **File-owns-macro** | `LOG_DEBUG_HTTP` for code in `HttpRequestInterceptor.cpp`; `LOG_DEBUG_BROWSER` for code in `simple_handler.cpp` |
+
+### Original open-question text (kept for archaeology)
 
 ### Q1 — Where does the existing wallet_call IPC handler's "internal origin" assumption come from?
 
