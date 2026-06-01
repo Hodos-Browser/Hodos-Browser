@@ -32,16 +32,20 @@ FetchContent_MakeAvailable(googletest)
 # and forces an explicit choice when a new test file is added.
 add_executable(hodos_tests
     permission_engine_test.cpp
+    permission_gate_test.cpp
     manifest_fetcher_test.cpp
 
     # Production sources under test (built into the test exe directly).
     # PermissionEngine is pure logic with no CEF deps, so it links cleanly.
+    # PermissionGate is the same — wraps PermissionEngine with callback-based
+    # side effects; pulls in PermissionEngine.cpp (already listed below).
     # ManifestFetcher's parse path is pure, but it lives in the same TU as
     # Fetch (which references SyncHttpClient::Get + Logger::Log). To keep
     # the linker happy without inflating the test binary, we pull in the
     # SyncHttpClient + Logger implementations too — both are small and
     # have no external deps beyond stdlib + platform HTTP libs.
     ../src/core/PermissionEngine.cpp
+    ../src/core/PermissionGate.cpp
     ../src/core/ManifestFetcher.cpp
     ../src/core/SyncHttpClient.cpp
     ../src/core/Logger.cpp

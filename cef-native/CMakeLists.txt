@@ -211,6 +211,7 @@ if(APPLE)
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
         src/core/PermissionEngine.cpp
+        src/core/PermissionGate.cpp
         src/core/ManifestFetcher.cpp
         src/core/AutoUpdater_mac.mm
     )
@@ -254,6 +255,8 @@ elseif(WIN32)
         src/core/HttpRequestInterceptor.cpp
         include/core/PermissionEngine.h
         src/core/PermissionEngine.cpp
+        include/core/PermissionGate.h
+        src/core/PermissionGate.cpp
         include/core/ManifestFetcher.h
         src/core/ManifestFetcher.cpp
         include/core/SessionManager.h
