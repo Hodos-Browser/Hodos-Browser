@@ -167,3 +167,80 @@ void OnWalletCallSuccess(int browserId,
                          int64_t cents,
                          bool wasAutoApprovedPayment,
                          const std::string& endpoint);
+
+// ============================================================================
+// Phase 2.5 Commit 6 (sub-step 6.c) — Decision 3: free-function modal openers
+// ============================================================================
+//
+// Each opener fully handles the modal dispatch sequence:
+//   1. Builds a PendingAuthRequest from ModalContext + ResumeContext.
+//   2. Enrolls it via PendingRequestManager::addRequest (the new
+//      PendingAuthRequest-by-value overload landed in 6.a).
+//   3. Posts CreateNotificationOverlayTask to TID_UI.
+//
+// ResumeContext discriminates resume semantics:
+//   - HTTP path: pass {handler = self, frame = null, ...} → request gets
+//     resumeKind = kHttpCallback (handler-driven resume).
+//   - IPC path: pass {handler = null, frame = capturedFrame, browserId,
+//     headersOnApprove, httpMethod} → request gets resumeKind = kIpcResponse
+//     (frame-driven wallet_response resume).
+//
+// The existing AsyncWalletResourceHandler::triggerXxxModal member functions
+// are now thin wrappers that delegate to these free functions. New
+// 6.d/6.e IPC-side code calls the free functions directly with kIpcResponse
+// ResumeContext values.
+//
+// No call site behavior change is intended in 6.c — the member-trigger
+// callers (Open()'s lambdas, unknown-trust branch, safety-net, fallback,
+// drain path) all see the same external semantics.
+
+#include "include/cef_browser.h"   // CefRefPtr<CefFrame> for ResumeContext
+
+namespace hodos { struct Manifest; }
+struct CertDisclosureInfo;          // forward decl; lives in HttpRequestInterceptor.cpp
+
+// Context shared by every modal opener. Carries the request's identity for
+// PendingAuthRequest enrollment + React-side rendering.
+struct ModalContext {
+    std::string domain;     // host[:port], used as the per-domain queue key
+    std::string method;     // HTTP method on the calling request (e.g. "POST")
+    std::string endpoint;   // wallet route ("/createAction", etc.)
+    std::string body;       // JSON body — modal may parse for display data
+};
+
+// Discriminator for how a resolved request resumes.
+// Populated by the caller before calling an opener; the opener writes the
+// fields straight into the new PendingAuthRequest.
+struct ResumeContext {
+    CefRefPtr<CefResourceHandler> handler;       // non-null iff HTTP path
+    CefRefPtr<CefFrame> frame;                   // non-null iff IPC path
+    int browserId = 0;
+    std::map<std::string, std::string> headersOnApprove;
+    std::string httpMethod = "POST";
+};
+
+// Modal openers, one per gate type. Each enrolls the PendingAuthRequest and
+// fires the matching CreateNotificationOverlayTask. Modals with typed
+// payloads (manifest, cert) take an additional argument; simple modals share
+// the (ctx, resume, extraParams) shape.
+void openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
+void openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
+void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume, const hodos::Manifest& manifest);
+void openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume);
+void openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume);
+void openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+void openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+void openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+void openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+void openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+void openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume, const CertDisclosureInfo& info);
+
+// String-keyed dispatcher used by the IPC path's openModal callback (where
+// the engine's PermissionDecision::promptType is the input). For modals that
+// require typed payloads (manifest, cert), callers must invoke the matching
+// opener directly — those are unreachable via this dispatcher because their
+// payloads cannot be expressed as a URL-style extraParams string.
+void OpenPromptModal(const std::string& promptType,
+                     const ModalContext& ctx,
+                     const ResumeContext& resume,
+                     const std::string& extraParams = "");

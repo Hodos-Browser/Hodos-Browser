@@ -1336,6 +1336,341 @@ void OnWalletCallSuccess(int browserId,
                    + ", endpoint=" + endpoint + ")");
 }
 
+// ============================================================================
+// Phase 2.5 Commit 6 sub-step 6.c — Decision 3: free-function modal openers
+// ============================================================================
+//
+// Each opener enrolls a PendingAuthRequest from (ModalContext, ResumeContext)
+// and posts the matching CreateNotificationOverlayTask. ResumeContext
+// discriminates: HTTP path passes handler-only (resumeKind = kHttpCallback),
+// IPC path passes frame+browserId+headersOnApprove (resumeKind = kIpcResponse).
+//
+// Member trigger functions on AsyncWalletResourceHandler now delegate to
+// these openers (declared at file scope) by building a HTTP-path
+// ResumeContext from `this`. The IPC bridge wiring in 6.d will call these
+// openers directly with kIpcResponse ResumeContext.
+//
+// urlEncode is defined at file scope earlier in this TU (line ~539);
+// CreateNotificationOverlayTask is visible from earlier in the file.
+
+// Parsed certificate disclosure info from proveCertificate request body.
+// Phase 2.5 Commit 6 sub-step 6.c — moved from inside AsyncWalletResourceHandler
+// to file scope so the free-function modal opener openCertificateDisclosureModal
+// can reference it. The static extractCertDisclosureInfo method on the handler
+// continues to use this type unchanged via name lookup.
+struct CertDisclosureInfo {
+    std::string certType;
+    std::string certifier;
+    std::vector<std::string> fieldsToReveal;
+    bool valid = false;
+};
+
+// Internal helper: build a PendingAuthRequest by stitching ModalContext +
+// ResumeContext + a type string. The resume discriminator chooses kHttpCallback
+// when a handler is set, kIpcResponse when a frame is set (and no handler).
+// Defaults to kHttpCallback for safety if both are unset (caller error).
+static PendingAuthRequest buildPendingAuthRequest(
+    const std::string& type,
+    const ModalContext& ctx,
+    const ResumeContext& resume
+) {
+    PendingAuthRequest req;
+    req.domain = ctx.domain;
+    req.method = ctx.method;
+    req.endpoint = ctx.endpoint;
+    req.body = ctx.body;
+    req.type = type;
+    req.handler = resume.handler;
+    if (resume.handler) {
+        req.resumeKind = ResumeKind::kHttpCallback;
+    } else if (resume.frame) {
+        req.resumeKind = ResumeKind::kIpcResponse;
+    } else {
+        // No handler and no frame — should not happen in practice but default
+        // to HTTP semantics so handleAuthResponse's default switch case is hit.
+        req.resumeKind = ResumeKind::kHttpCallback;
+    }
+    req.frame = resume.frame;
+    req.browserId = resume.browserId;
+    req.headersOnApprove = resume.headersOnApprove;
+    req.httpMethod = resume.httpMethod;
+    return req;
+}
+
+void openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
+    LOG_DEBUG_HTTP("🔒 Triggering domain approval for " + ctx.domain);
+
+    // Per-domain dedup — multiple in-flight requests from the same fresh origin
+    // share a single modal; all queued requests resolve on Approve.
+    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
+
+    // domain_approval historically used an empty body in the queued entry.
+    // Preserve that by overriding ctx.body to "" before enrollment.
+    PendingAuthRequest req = buildPendingAuthRequest("domain_approval", ctx, resume);
+    req.body = "";  // historical: body cleared for domain_approval entries
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(std::move(req));
+
+    if (modalAlreadyShowing) {
+        LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + ctx.domain
+                       + ", request queued (requestId: " + requestId + ")");
+        return;
+    }
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
+    LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + ctx.domain
+                   + " requesting " + ctx.method + " " + ctx.endpoint);
+}
+
+void openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
+    LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval for " + ctx.domain);
+
+    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
+
+    // BRC-100 auth historically stored body verbatim and used the default
+    // "domain_approval" type (no explicit type override). The modal type
+    // string used by React is also "domain_approval" — BRC-100 auth shares
+    // the React modal page.
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("domain_approval", ctx, resume));
+
+    if (modalAlreadyShowing) {
+        LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + ctx.domain
+                       + ", request queued (requestId: " + requestId + ")");
+        return;
+    }
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
+    LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + ctx.domain
+                   + " requesting " + ctx.method + " " + ctx.endpoint);
+}
+
+void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume,
+                                     const hodos::Manifest& m) {
+    LOG_DEBUG_HTTP("📦 Triggering manifest_connect_bundle for " + ctx.domain
+                    + " (app=" + m.name + ", " + std::to_string(m.protocols.size())
+                    + " protocols, " + std::to_string(m.baskets.size())
+                    + " baskets, " + std::to_string(m.certificates.size())
+                    + " certs, " + std::to_string(m.counterparties.size())
+                    + " counterparties)");
+
+    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("manifest_connect_bundle", ctx, resume));
+
+    if (modalAlreadyShowing) {
+        LOG_DEBUG_HTTP("📦 Modal already pending for domain " + ctx.domain
+                        + ", request queued (requestId: " + requestId + ")");
+        return;
+    }
+
+    // Serialize manifest to JSON, URL-encode, pass as extraParams.
+    // 64 KB cap from fetcher + ~33% base64-style inflation → ~85 KB URL-safe
+    // string, well under CEF/Chromium's multi-MB URL handling capacity.
+    nlohmann::json j;
+    j["name"] = m.name;
+    j["description"] = m.description;
+    j["iconUrl"] = m.iconUrl;
+    j["expiresAt"] = m.expiresAt;
+    j["version"] = m.version;
+
+    nlohmann::json protocols = nlohmann::json::array();
+    for (const auto& p : m.protocols) {
+        protocols.push_back({
+            {"securityLevel", p.securityLevel},
+            {"name", p.name},
+            {"keyId", p.keyId},
+            {"purpose", p.purpose},
+        });
+    }
+    j["protocols"] = protocols;
+
+    nlohmann::json baskets = nlohmann::json::array();
+    for (const auto& b : m.baskets) {
+        baskets.push_back({
+            {"name", b.name},
+            {"access", b.access},
+            {"purpose", b.purpose},
+        });
+    }
+    j["baskets"] = baskets;
+
+    nlohmann::json certs = nlohmann::json::array();
+    for (const auto& c : m.certificates) {
+        certs.push_back({
+            {"type", c.type},
+            {"fields", c.fields},
+            {"purpose", c.purpose},
+        });
+    }
+    j["certificates"] = certs;
+
+    j["spending"] = {
+        {"perTransactionUsd", m.spending.perTransactionUsd},
+        {"perSessionUsd", m.spending.perSessionUsd},
+        {"purpose", m.spending.purpose},
+    };
+
+    nlohmann::json counterparties = nlohmann::json::array();
+    for (const auto& cp : m.counterparties) {
+        counterparties.push_back({
+            {"type", cp.type},
+            {"counterparty", cp.counterparty},
+            {"purpose", cp.purpose},
+        });
+    }
+    j["counterparties"] = counterparties;
+
+    std::string extraParams = "&manifest=" + urlEncode(j.dump());
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+        "manifest_connect_bundle", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
+}
+
+void openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
+    LOG_DEBUG_HTTP("🛡️ Triggering identity_key_reveal for " + ctx.domain);
+
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("identity_key_reveal", ctx, resume));
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("identity_key_reveal", ctx.domain));
+    LOG_DEBUG_HTTP("🛡️ identity_key_reveal notification queued (requestId: " + requestId + ")");
+}
+
+void openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
+    LOG_DEBUG_HTTP("🛡️ Triggering key_linkage_reveal for " + ctx.domain + " endpoint=" + ctx.endpoint);
+
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("key_linkage_reveal", ctx, resume));
+
+    // Verifier + linkage kind + (specific) protocol/keyID — best-effort body parse.
+    std::string verifier;
+    std::string linkageKind = (ctx.endpoint.find("/revealSpecificKeyLinkage") != std::string::npos)
+        ? "specific" : "counterparty";
+    std::string protocolName;
+    std::string keyId;
+    if (!ctx.body.empty()) {
+        try {
+            auto json = nlohmann::json::parse(ctx.body);
+            if (json.contains("verifier") && json["verifier"].is_string()) {
+                verifier = json["verifier"].get<std::string>();
+            }
+            if (json.contains("keyID") && json["keyID"].is_string()) {
+                keyId = json["keyID"].get<std::string>();
+            }
+            if (json.contains("protocolID")) {
+                auto& pid = json["protocolID"];
+                if (pid.is_array() && pid.size() >= 2 && pid[1].is_string()) {
+                    protocolName = pid[1].get<std::string>();
+                } else if (pid.is_string()) {
+                    protocolName = pid.get<std::string>();
+                }
+            }
+        } catch (...) {
+            // Body unparseable — React copy degrades gracefully.
+        }
+    }
+
+    std::string extraParams = "&kind=" + linkageKind;
+    if (!verifier.empty())     extraParams += "&verifier=" + urlEncode(verifier);
+    if (!protocolName.empty()) extraParams += "&protocol=" + urlEncode(protocolName);
+    if (!keyId.empty())        extraParams += "&keyID=" + urlEncode(keyId);
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("key_linkage_reveal", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("🛡️ key_linkage_reveal notification queued (requestId: " + requestId + ", kind=" + linkageKind + ")");
+}
+
+void openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume,
+                                   const std::string& extraParams) {
+    LOG_DEBUG_HTTP("💰 Triggering payment_confirmation for " + ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("payment_confirmation", ctx, resume));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("💰 payment_confirmation notification queued (requestId: " + requestId + ")");
+}
+
+void openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume,
+                                 const std::string& extraParams) {
+    LOG_DEBUG_HTTP("⏱️ Triggering rate_limit_exceeded for " + ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("rate_limit_exceeded", ctx, resume));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("⏱️ rate_limit_exceeded notification queued (requestId: " + requestId + ")");
+}
+
+void openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+                                        const std::string& extraParams) {
+    LOG_DEBUG_HTTP("🔒 Triggering protocol_permission_prompt for " + ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("protocol_permission_prompt", ctx, resume));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("protocol_permission_prompt", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("🔒 protocol_permission_prompt notification queued (requestId: " + requestId + ")");
+}
+
+void openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+                                      const std::string& extraParams) {
+    LOG_DEBUG_HTTP("🧺 Triggering basket_permission_prompt for " + ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("basket_permission_prompt", ctx, resume));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("basket_permission_prompt", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("🧺 basket_permission_prompt notification queued (requestId: " + requestId + ")");
+}
+
+void openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+                                            const std::string& extraParams) {
+    LOG_DEBUG_HTTP("🤝 Triggering counterparty_permission_prompt for " + ctx.domain);
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("counterparty_permission_prompt", ctx, resume));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("counterparty_permission_prompt", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("🤝 counterparty_permission_prompt notification queued (requestId: " + requestId + ")");
+}
+
+void openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume,
+                                     const CertDisclosureInfo& info) {
+    LOG_DEBUG_HTTP("📋 Triggering certificate_disclosure for " + ctx.domain
+                   + " (" + std::to_string(info.fieldsToReveal.size()) + " fields)");
+
+    std::string requestId = PendingRequestManager::GetInstance().addRequest(
+        buildPendingAuthRequest("certificate_disclosure", ctx, resume));
+
+    std::string fieldsList;
+    for (size_t i = 0; i < info.fieldsToReveal.size(); ++i) {
+        if (i > 0) fieldsList += ",";
+        fieldsList += info.fieldsToReveal[i];
+    }
+
+    std::string extraParams = "&fields=" + fieldsList;
+    if (!info.certType.empty()) {
+        extraParams += "&certType=" + urlEncode(info.certType);
+    }
+    if (!info.certifier.empty()) {
+        extraParams += "&certifier=" + urlEncode(info.certifier);
+    }
+
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("certificate_disclosure", ctx.domain, extraParams));
+    LOG_DEBUG_HTTP("📋 certificate_disclosure notification queued (requestId: " + requestId
+                   + ", fields: " + fieldsList + ")");
+}
+
+void OpenPromptModal(const std::string& promptType,
+                     const ModalContext& ctx,
+                     const ResumeContext& resume,
+                     const std::string& extraParams) {
+    if      (promptType == "domain_approval")               openDomainApprovalModal(ctx, resume);
+    else if (promptType == "brc100_auth")                   openBRC100AuthApprovalModal(ctx, resume);
+    else if (promptType == "identity_key_reveal")           openIdentityKeyRevealModal(ctx, resume);
+    else if (promptType == "key_linkage_reveal")            openKeyLinkageRevealModal(ctx, resume);
+    else if (promptType == "payment_confirmation")          openPaymentConfirmationModal(ctx, resume, extraParams);
+    else if (promptType == "rate_limit_exceeded")           openRateLimitExceededModal(ctx, resume, extraParams);
+    else if (promptType == "protocol_permission_prompt")    openProtocolPermissionPromptModal(ctx, resume, extraParams);
+    else if (promptType == "basket_permission_prompt")      openBasketPermissionPromptModal(ctx, resume, extraParams);
+    else if (promptType == "counterparty_permission_prompt") openCounterpartyPermissionPromptModal(ctx, resume, extraParams);
+    else LOG_WARNING_HTTP("OpenPromptModal: unknown promptType '" + promptType + "' for " + ctx.domain);
+    // Note: manifest_connect_bundle and certificate_disclosure are NOT in this
+    // dispatcher — they require typed payloads (Manifest / CertDisclosureInfo).
+    // Callers invoke their openers directly.
+}
+
 // Forward declared in HttpRequestInterceptor.h; implementation here since
 // AsyncWalletResourceHandler and StartAsyncHTTPRequestTask are file-local
 // to this translation unit. See header docstring for usage and rationale.
@@ -1489,46 +1824,22 @@ public:
         onAuthResponseReceived(errorJson);
     }
 
-    // Trigger domain approval notification overlay
+    // Trigger domain approval notification overlay.
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to free-function opener
+    // openDomainApprovalModal (Decision 3). Existing call sites unchanged.
     void triggerDomainApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint) {
-        LOG_DEBUG_HTTP("🔒 Triggering domain approval for " + domain);
-
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-
-        // Always add the request — even if modal is already showing, we queue it
-        // so ALL pending requests for this domain get resolved when user approves.
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method, endpoint, "", this);
-
-        if (modalAlreadyShowing) {
-            LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + domain + ", request queued (requestId: " + requestId + ")");
-            return;
-        }
-
-        // Post to UI thread — CreateWindowEx requires UI thread
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
-        LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + domain + " requesting " + method + " " + endpoint);
+        ResumeContext resume;
+        resume.handler = this;
+        openDomainApprovalModal(ModalContext{domain, method, endpoint, /*body=*/""}, resume);
     }
 
 
-    // Trigger BRC-100 authentication approval notification overlay
+    // Trigger BRC-100 authentication approval notification overlay.
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to openBRC100AuthApprovalModal.
     void triggerBRC100AuthApprovalModal(const std::string& domain, const std::string& method, const std::string& endpoint, const std::string& body, CefRefPtr<AsyncWalletResourceHandler> handler) {
-        LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval for " + domain);
-
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-
-        // Always add — duplicate requests are queued and resolved together
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method, endpoint, body, handler);
-
-        if (modalAlreadyShowing) {
-            LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + domain + ", request queued (requestId: " + requestId + ")");
-            return;
-        }
-
-        // Post to UI thread — CreateWindowEx requires UI thread
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
-        LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + domain + " requesting " + method + " " + endpoint);
+        ResumeContext resume;
+        resume.handler = handler;  // explicit handler arg, may differ from `this`
+        openBRC100AuthApprovalModal(ModalContext{domain, method, endpoint, body}, resume);
     }
 
     // Phase 1.5 Step 5 — manifest-aware bundled connect prompt.
@@ -1539,86 +1850,12 @@ public:
     //
     // Subsequent BRC-100 calls from the same fresh origin queue under the
     // same modal via PendingRequestManager — UNCHANGED from existing pattern.
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to openManifestConnectBundleModal.
     void triggerManifestConnectBundleModal(const std::string& domain,
                                             const hodos::Manifest& m) {
-        LOG_DEBUG_HTTP("📦 Triggering manifest_connect_bundle for " + domain
-                        + " (app=" + m.name + ", " + std::to_string(m.protocols.size())
-                        + " protocols, " + std::to_string(m.baskets.size())
-                        + " baskets, " + std::to_string(m.certificates.size())
-                        + " certs, " + std::to_string(m.counterparties.size())
-                        + " counterparties)");
-
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method_, endpoint_, body_, this, "manifest_connect_bundle");
-
-        if (modalAlreadyShowing) {
-            LOG_DEBUG_HTTP("📦 Modal already pending for domain " + domain
-                            + ", request queued (requestId: " + requestId + ")");
-            return;
-        }
-
-        // Serialize manifest to JSON, URL-encode, pass as extraParams.
-        // 64 KB cap from fetcher + ~33% base64-style inflation → ~85 KB URL-safe
-        // string, well under CEF/Chromium's multi-MB URL handling capacity.
-        nlohmann::json j;
-        j["name"] = m.name;
-        j["description"] = m.description;
-        j["iconUrl"] = m.iconUrl;
-        j["expiresAt"] = m.expiresAt;
-        j["version"] = m.version;
-
-        nlohmann::json protocols = nlohmann::json::array();
-        for (const auto& p : m.protocols) {
-            protocols.push_back({
-                {"securityLevel", p.securityLevel},
-                {"name", p.name},
-                {"keyId", p.keyId},
-                {"purpose", p.purpose},
-            });
-        }
-        j["protocols"] = protocols;
-
-        nlohmann::json baskets = nlohmann::json::array();
-        for (const auto& b : m.baskets) {
-            baskets.push_back({
-                {"name", b.name},
-                {"access", b.access},
-                {"purpose", b.purpose},
-            });
-        }
-        j["baskets"] = baskets;
-
-        nlohmann::json certs = nlohmann::json::array();
-        for (const auto& c : m.certificates) {
-            certs.push_back({
-                {"type", c.type},
-                {"fields", c.fields},
-                {"purpose", c.purpose},
-            });
-        }
-        j["certificates"] = certs;
-
-        j["spending"] = {
-            {"perTransactionUsd", m.spending.perTransactionUsd},
-            {"perSessionUsd", m.spending.perSessionUsd},
-            {"purpose", m.spending.purpose},
-        };
-
-        nlohmann::json counterparties = nlohmann::json::array();
-        for (const auto& cp : m.counterparties) {
-            counterparties.push_back({
-                {"type", cp.type},
-                {"counterparty", cp.counterparty},
-                {"purpose", cp.purpose},
-            });
-        }
-        j["counterparties"] = counterparties;
-
-        std::string extraParams = "&manifest=" + urlEncode(j.dump());
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-            "manifest_connect_bundle", domain, extraParams));
-        LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
+        ResumeContext resume;
+        resume.handler = this;
+        openManifestConnectBundleModal(ModalContext{domain, method_, endpoint_, body_}, resume, m);
     }
 
 
@@ -1628,57 +1865,21 @@ public:
     // shared notification_browser_ overlay multiplexes on `type` query param so no
     // new HWND / NSPanel creation paths are needed Win-side or Mac-side.
 
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to openIdentityKeyRevealModal.
     void triggerIdentityKeyRevealModal(const std::string& domain) {
-        LOG_DEBUG_HTTP("🛡️ Triggering identity_key_reveal for " + domain);
-
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method_, endpoint_, body_, this, "identity_key_reveal");
-
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("identity_key_reveal", domain));
-        LOG_DEBUG_HTTP("🛡️ identity_key_reveal notification queued (requestId: " + requestId + ")");
+        ResumeContext resume;
+        resume.handler = this;
+        openIdentityKeyRevealModal(ModalContext{domain, method_, endpoint_, body_}, resume);
     }
 
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to openKeyLinkageRevealModal.
+    // Existing callers pass endpoint/body which equal this->endpoint_/this->body_
+    // at every call site; threading the args through ModalContext preserves
+    // that mapping verbatim.
     void triggerKeyLinkageRevealModal(const std::string& domain, const std::string& endpoint, const std::string& body) {
-        LOG_DEBUG_HTTP("🛡️ Triggering key_linkage_reveal for " + domain + " endpoint=" + endpoint);
-
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method_, endpoint_, body_, this, "key_linkage_reveal");
-
-        // Verifier + linkage kind + (specific) protocol/keyID — best-effort body parse.
-        std::string verifier;
-        std::string linkageKind = (endpoint.find("/revealSpecificKeyLinkage") != std::string::npos)
-            ? "specific" : "counterparty";
-        std::string protocolName;
-        std::string keyId;
-        if (!body.empty()) {
-            try {
-                auto json = nlohmann::json::parse(body);
-                if (json.contains("verifier") && json["verifier"].is_string()) {
-                    verifier = json["verifier"].get<std::string>();
-                }
-                if (json.contains("keyID") && json["keyID"].is_string()) {
-                    keyId = json["keyID"].get<std::string>();
-                }
-                if (json.contains("protocolID")) {
-                    auto& pid = json["protocolID"];
-                    if (pid.is_array() && pid.size() >= 2 && pid[1].is_string()) {
-                        protocolName = pid[1].get<std::string>();
-                    } else if (pid.is_string()) {
-                        protocolName = pid.get<std::string>();
-                    }
-                }
-            } catch (...) {
-                // Body unparseable — that's fine; React copy degrades gracefully.
-            }
-        }
-
-        std::string extraParams = "&kind=" + linkageKind;
-        if (!verifier.empty())     extraParams += "&verifier=" + urlEncode(verifier);
-        if (!protocolName.empty()) extraParams += "&protocol=" + urlEncode(protocolName);
-        if (!keyId.empty())        extraParams += "&keyID=" + urlEncode(keyId);
-
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("key_linkage_reveal", domain, extraParams));
-        LOG_DEBUG_HTTP("🛡️ key_linkage_reveal notification queued (requestId: " + requestId + ", kind=" + linkageKind + ")");
+        ResumeContext resume;
+        resume.handler = this;
+        openKeyLinkageRevealModal(ModalContext{domain, method_, endpoint, body}, resume);
     }
 
     // Trigger payment confirmation notification overlay with limit context
@@ -1767,16 +1968,13 @@ public:
         }
     }
 
-    // Parsed certificate disclosure info from proveCertificate request body
-    struct CertDisclosureInfo {
-        std::string certType;
-        std::string certifier;
-        std::vector<std::string> fieldsToReveal;
-        bool valid = false;
-    };
+    // CertDisclosureInfo moved to file scope (above) in Phase 2.5 Commit 6
+    // sub-step 6.c so the free-function modal opener can reference the type.
+    // The static extractCertDisclosureInfo below continues to use the type
+    // via the same name (now resolved at file scope).
 
     // Extract certificate disclosure info from proveCertificate request body
-    static CertDisclosureInfo extractCertDisclosureInfo(const std::string& body) {
+    static ::CertDisclosureInfo extractCertDisclosureInfo(const std::string& body) {
         CertDisclosureInfo info;
         if (body.empty()) return info;
         try {
@@ -1818,32 +2016,11 @@ public:
     }
 
     // Trigger certificate disclosure notification overlay
+    // Phase 2.5 Commit 6 sub-step 6.c — delegates to openCertificateDisclosureModal.
     void triggerCertificateDisclosureModal(const std::string& domain, const CertDisclosureInfo& info) {
-        LOG_DEBUG_HTTP("📋 Triggering certificate disclosure for " + domain + " (" + std::to_string(info.fieldsToReveal.size()) + " fields)");
-
-        // Store request in PendingRequestManager with type "certificate_disclosure"
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method_, endpoint_, body_, this, "certificate_disclosure");
-
-        // Build fields comma-separated list
-        std::string fieldsList;
-        for (size_t i = 0; i < info.fieldsToReveal.size(); ++i) {
-            if (i > 0) fieldsList += ",";
-            fieldsList += info.fieldsToReveal[i];
-        }
-
-        // Build extra params for overlay URL (URL-encode base64 values to preserve + chars)
-        std::string extraParams = "&fields=" + fieldsList;
-        if (!info.certType.empty()) {
-            extraParams += "&certType=" + urlEncode(info.certType);
-        }
-        if (!info.certifier.empty()) {
-            extraParams += "&certifier=" + urlEncode(info.certifier);
-        }
-
-        // Post to UI thread
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("certificate_disclosure", domain, extraParams));
-        LOG_DEBUG_HTTP("📋 Certificate disclosure notification queued (requestId: " + requestId + ", fields: " + fieldsList + ")");
+        ResumeContext resume;
+        resume.handler = this;
+        openCertificateDisclosureModal(ModalContext{domain, method_, endpoint_, body_}, resume, info);
     }
 
     // Public so handleAuthResponse() can forward queued sibling requests
