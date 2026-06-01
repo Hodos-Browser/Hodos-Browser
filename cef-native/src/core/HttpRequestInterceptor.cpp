@@ -2155,7 +2155,28 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             return true;
         }
 
-        // Certificate disclosure check — intercept proveCertificate BEFORE the payment check
+        // Phase 2.5-B sub-step 5.f — cert-disclosure gate now flows through
+        // the shared RunPermissionGate helper. This sub-step ALSO wires the
+        // gate into PermissionEngine::Decide() for the first time: prior to
+        // 5.f the inline cascade did its own DB lookup + dispatch and never
+        // called the engine, even though the engine's CertificateDisclosure
+        // branch (PermissionEngine.cpp:247-263) has been ready to consume
+        // ctx.scopedGrantExists as "all requested fields pre-approved" since
+        // Phase 1.5 Step 3. Net behavior unchanged — just routed properly.
+        //
+        // classifyCallKind sets ctx.callKind to CertificateDisclosure for
+        // /proveCertificate. buildPermissionContext leaves scopedGrantExists
+        // default-false for cert kind (no SubPermissionCache lookup applies),
+        // so we compute it here from fetchCertFieldsFromBackend + the
+        // requested-vs-approved field set check and override the field
+        // BEFORE calling RunPermissionGate.
+        //
+        // Known gap not addressed in 5.f: classifyCallKind does NOT detect
+        // sensitive fields (email, dob, etc.) and route them to
+        // SensitiveCertField. The engine's DecidePrivacyPerimeter branch
+        // for SensitiveCertField is wired but unreachable today via the
+        // classifier. Flagged as a separate follow-up gap; tracked in
+        // memory project_sensitive_cert_field_classifier_gap.
         if (isProveCertificateEndpoint(endpoint_)) {
             auto certInfo = extractCertDisclosureInfo(body_);
             if (certInfo.valid && !certInfo.certType.empty()) {
@@ -2173,18 +2194,51 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                     }
                 }
 
-                if (allApproved) {
+                hodos::PermissionContext ctx = buildPermissionContext(
+                    requestDomain_, endpoint_, body_, perm,
+                    /*requestedCents=*/0, /*sessionSpentCents=*/0,
+                    /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
+                    /*bsvPriceAvailable=*/true);
+                // Engine's CertificateDisclosure branch reads scopedGrantExists
+                // as "all requested fields pre-approved" → Silent; else
+                // Prompt(certificate_disclosure). Caller-overridden because
+                // buildPermissionContext doesn't query the cert table.
+                ctx.scopedGrantExists = allApproved;
+
+                hodos::GateCallbacks cb;
+                cb.forwardToWallet = [this, &handle_request]() {
                     LOG_DEBUG_HTTP("📋 All cert fields already approved for " + requestDomain_ + ", auto-forwarding");
                     handle_request = true;
                     CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-                    return true;
-                } else {
+                };
+                // Defensive: DecideCertificateDisclosure does not return Deny
+                // today, but kept for future engine extensions (e.g.
+                // blocked-certifier list, revoked-cert detection).
+                cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
+                    LOG_DEBUG_HTTP("📋 cert disclosure denied for " + requestDomain_);
+                    onHTTPResponseReceived(errorJson);
+                    handle_request = true;
+                };
+                cb.openModal = [this, certInfo, &handle_request](
+                    const std::string& /*promptType*/,
+                    const std::string& /*emptyExtraParams*/) {
                     LOG_DEBUG_HTTP("📋 Unapproved cert fields — showing disclosure notification for " + requestDomain_);
                     triggerCertificateDisclosureModal(requestDomain_, certInfo);
-                    postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}");
+                    postAuthTimeout(kPromptAuthTimeoutMs,
+                        "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}");
                     handle_request = true;
-                    return true;
-                }
+                };
+
+                hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+
+                LOG_DEBUG_HTTP(std::string("📋 Cert-disclosure engine decision: ")
+                    + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
+                       : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+                    + " | all_approved=" + (allApproved ? "1" : "0")
+                    + " | requested_fields=" + std::to_string(certInfo.fieldsToReveal.size())
+                    + " | reason=" + gateResult.reason);
+
+                return true;
             }
             // Invalid or empty fields — fall through to normal forwarding
             LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
