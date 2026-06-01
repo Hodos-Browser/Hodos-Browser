@@ -1616,15 +1616,21 @@ bool SimpleHandler::OnProcessMessageReceived(
     // ========== WALLET IPC BRIDGE (Phase 2.5) ==========
     // Promise-correlated wallet calls from the shim's window.__hodos_walletCall.
     // Replaces the renderer-fetch path so CSP and CORS no longer block external
-    // dApps from reaching the wallet. See development-docs/Sigma-BRC121-Sprint/
-    // phase-2-window-cwi-shim/PHASE_2_5_IPC_REFACTOR.md for the full design.
+    // dApps from reaching the wallet. See PHASE_2_5_IPC_REFACTOR.md.
+    //
+    // Phase 2.5 Commit 6 sub-step 6.d.BE — this handler is now a thin shim
+    // that extracts the IPC args + frame origin + browserId and delegates
+    // to HandleIpcWalletCall (HttpRequestInterceptor.h). HandleIpcWalletCall
+    // runs the full engine cascade (gate decision → silent forward / modal
+    // prompt / deny) on external-origin requests and falls back to direct
+    // HTTP dispatch for internal origins (localhost/127.0.0.1).
     //
     // Message args: [requestId, methodName, endpoint, bodyJson, httpMethod]
     //   - requestId  — caller-assigned per-frame correlation ID
     //   - methodName — friendly name for diagnostics ('createAction', etc.)
     //   - endpoint   — wallet route ('/createAction' or '/wallet/encrypt-bie1')
     //   - bodyJson   — JSON-serialized request body (empty object for GET)
-    //   - httpMethod — 'POST' (default) or 'GET'
+    //   - httpMethod — 'POST' (default) or 'GET' / 'DELETE' / etc.
     if (message_name == "wallet_call") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         if (args->GetSize() < 4) {
@@ -1640,9 +1646,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             : std::string("POST");
 
         // Extract calling frame's origin (host[:port]) for X-Requesting-Domain.
-        // Frame methods must be called from the UI thread, which is where we
-        // currently are — so we read the URL now and pass the string to the
-        // worker thread.
+        // Frame methods must be called from the UI thread (which is where we
+        // are right now).
         std::string origin;
         if (frame) {
             std::string frameUrl = frame->GetURL().ToString();
@@ -1656,81 +1661,26 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
         }
 
-        // Capture the frame ref so we can route the response back to the same
-        // frame after the worker thread finishes. CefRefPtr is reference-counted
-        // and safe to capture into the lambda.
         CefRefPtr<CefFrame> capturedFrame = frame;
         int browserId = browser ? browser->GetIdentifier() : -1;
 
-        // Run the blocking HTTP call on CEF's worker thread pool so the UI
-        // thread stays responsive even on long-running createAction signs.
-        CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
-            std::string requestId, std::string methodName, std::string endpoint,
-            std::string bodyJson, std::string httpMethod, std::string origin,
-            CefRefPtr<CefFrame> capturedFrame, int browserId
-        ) {
-            std::string url = "http://127.0.0.1:31301" + endpoint;
-            std::map<std::string, std::string> headers;
-            headers["Content-Type"] = "application/json";
-            if (!origin.empty()) {
-                headers["X-Requesting-Domain"] = origin;
-            }
-
-            HttpResponse resp;
-            if (httpMethod == "GET") {
-                resp = SyncHttpClient::Get(url, headers, /*timeoutMs=*/30000);
-            } else if (httpMethod == "POST") {
-                resp = SyncHttpClient::Post(url, bodyJson, headers, /*timeoutMs=*/30000);
-            } else {
-                // DELETE / PUT / PATCH path — pass through to Request.
-                resp = SyncHttpClient::Request(httpMethod, url, bodyJson, headers,
-                                               /*timeoutMs=*/30000);
-            }
-
-            // Build payload to send back. Successful path: pass response body
-            // through verbatim (it's already JSON from the wallet). Error path:
-            // wrap the body in a minimal envelope so the renderer's reject can
-            // surface `.status` and `.error` cleanly.
-            bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
-            std::string payload;
-            if (ok) {
-                payload = resp.body.empty() ? std::string("null") : resp.body;
-            } else {
-                // Wallet error responses are typically already JSON {"error":...};
-                // pass them through if so. If the body isn't parseable JSON, the
-                // renderer will fail to JSON.parse and surface a generic error,
-                // which is acceptable because at that point something is very wrong.
-                if (resp.body.empty()) {
-                    payload = std::string("{\"error\":\"HTTP ") +
-                              std::to_string(resp.statusCode) + "\",\"status\":" +
-                              std::to_string(resp.statusCode) + "}";
-                } else {
-                    payload = resp.body;
-                }
-            }
-
-            // Hop back to the UI thread to send the response IPC; CefFrame
-            // methods are not thread-safe.
-            CefPostTask(TID_UI, base::BindOnce([](
-                std::string requestId, bool ok, std::string payload,
-                CefRefPtr<CefFrame> capturedFrame, int browserId,
-                std::string methodName
-            ) {
-                if (!capturedFrame || !capturedFrame->IsValid()) {
-                    LOG_DEBUG_BROWSER("wallet_call response dropped — frame invalid for browserId=" +
-                                      std::to_string(browserId) + " method=" + methodName);
-                    return;
-                }
-                CefRefPtr<CefProcessMessage> response =
-                    CefProcessMessage::Create("wallet_response");
-                CefRefPtr<CefListValue> respArgs = response->GetArgumentList();
-                respArgs->SetString(0, requestId);
-                respArgs->SetBool(1, ok);
-                respArgs->SetString(2, payload);
-                capturedFrame->SendProcessMessage(PID_RENDERER, response);
-            }, requestId, ok, payload, capturedFrame, browserId, methodName));
-        }, requestId, methodName, endpoint, bodyJson, httpMethod, origin,
-           capturedFrame, browserId));
+        // Delegate to HandleIpcWalletCall which:
+        //   - Bypasses the engine for IsInternalOrigin (matches HTTP path)
+        //   - Returns NO_WALLET error if no wallet exists
+        //   - Returns blocked error for blocked-trust domains
+        //   - Runs ManifestFetcher + domain_approval/manifest_connect_bundle
+        //     modal for unknown-trust domains
+        //   - Runs full RunPermissionGate cascade for approved-trust domains:
+        //     Silent → worker post → SyncHttpClient → OnWalletCallSuccess + wallet_response IPC
+        //     Prompt → enrolls PendingAuthRequest (kIpcResponse) + fires modal + arms postIpcAuthTimeout
+        //     Deny   → wallet_response IPC with engine error
+        //
+        // Approve/Deny resolution from React goes through approve_xxx /
+        // deny_xxx IPC messages, which call handleAuthResponse — its new
+        // kIpcResponse branch (added in 6.d.BE) re-issues via worker thread
+        // and sends wallet_response IPC back to this frame.
+        HandleIpcWalletCall(requestId, methodName, endpoint, bodyJson,
+                            httpMethod, origin, capturedFrame, browserId);
 
         return true;
     }

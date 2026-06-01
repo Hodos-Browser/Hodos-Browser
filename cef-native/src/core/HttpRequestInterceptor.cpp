@@ -3605,6 +3605,109 @@ void warmDomainPermissionCache(const std::string& domain) {
 }
 
 // Function to handle auth response and send it back to the original request
+// Phase 2.5 Commit 6 sub-step 6.d.BE — IPC-path resume after modal resolution.
+// Mirror of the HTTP-path resume but ending in wallet_response IPC instead
+// of walletHandler->onAuthResponseReceived / StartAsyncHTTPRequestTask.
+//
+// On user Deny (responseData contains "error"): send wallet_response with
+// the error payload; no wallet call is made.
+// On user Approve: post to TID_FILE_USER_BLOCKING worker; inject
+// headersOnApprove + standard headers; SyncHttpClient::Post; hop back to
+// TID_UI for OnWalletCallSuccess (if payment) + sendWalletResponseIpc.
+//
+// Cents re-extracted from body at re-issue time per design Q4 (matches
+// HTTP path's preCalculatedCents freshness behavior).
+static void resumeIpcResponse(const PendingAuthRequest& req,
+                              const std::string& responseData) {
+    if (!req.frame) {
+        LOG_DEBUG_HTTP("resumeIpcResponse: no frame for requestId " + req.requestId);
+        return;
+    }
+
+    bool isRejection = false;
+    try {
+        auto parsed = nlohmann::json::parse(responseData);
+        isRejection = parsed.contains("error");
+    } catch (...) {}
+
+    if (isRejection) {
+        // User Denied — surface the error envelope directly. No wallet call.
+        LOG_DEBUG_HTTP("🔐 IPC resume: deny for " + req.requestId
+                       + " endpoint=" + req.endpoint);
+        sendWalletResponseIpc(req.frame, req.requestId, false, responseData);
+        return;
+    }
+
+    // User Approved — re-issue the wallet call with headersOnApprove injected.
+    LOG_DEBUG_HTTP("🔐 IPC resume: approve for " + req.requestId
+                   + " endpoint=" + req.endpoint
+                   + " injectedHeaders=" + std::to_string(req.headersOnApprove.size()));
+
+    // Capture all needed state by-value into the worker lambda. req is by
+    // const ref here so we copy the fields we need.
+    std::string requestId = req.requestId;
+    std::string domain = req.domain;
+    std::string endpoint = req.endpoint;
+    std::string body = req.body;
+    std::string httpMethod = req.httpMethod.empty() ? "POST" : req.httpMethod;
+    std::map<std::string, std::string> headersOnApprove = req.headersOnApprove;
+    CefRefPtr<CefFrame> frame = req.frame;
+    int browserId = req.browserId;
+
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string requestId, std::string domain, std::string endpoint,
+        std::string body, std::string httpMethod,
+        std::map<std::string, std::string> headersOnApprove,
+        CefRefPtr<CefFrame> frame, int browserId
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
+        for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
+
+        std::string url = "http://127.0.0.1:31301" + endpoint;
+        HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
+        bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+        std::string payload = buildIpcResponsePayload(resp, ok);
+
+        // Q4: re-extract cents at re-issue time so any BSV-price movement between
+        // modal-open and modal-approve is reflected in the recorded spend.
+        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
+        int64_t cents = 0;
+        if (isPaymentKind) {
+            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
+            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+            if (bsvPrice > 0 && satoshis > 0) {
+                cents = static_cast<int64_t>(
+                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+            }
+        }
+        bool isErrorInResponse = false;
+        if (ok && isPaymentKind) {
+            try {
+                auto rj = nlohmann::json::parse(payload);
+                isErrorInResponse = rj.contains("error");
+            } catch (...) {}
+        }
+        const bool wasAutoApprovedPayment =
+            ok && isPaymentKind && !isErrorInResponse && cents > 0;
+
+        CefPostTask(TID_UI, base::BindOnce([](
+            std::string requestId, bool ok, std::string payload,
+            CefRefPtr<CefFrame> frame, int browserId,
+            std::string domain, std::string endpoint, int64_t cents,
+            bool wasAutoApprovedPayment
+        ) {
+            if (wasAutoApprovedPayment) {
+                OnWalletCallSuccess(browserId, domain, cents, true, endpoint);
+            }
+            sendWalletResponseIpc(frame, requestId, ok, payload);
+        }, requestId, ok, payload, frame, browserId,
+           domain, endpoint, cents, wasAutoApprovedPayment));
+    }, requestId, domain, endpoint, body, httpMethod, headersOnApprove,
+       frame, browserId));
+}
+
 void handleAuthResponse(const std::string& requestId, const std::string& responseData) {
     LOG_DEBUG_HTTP("🔐 handleAuthResponse called for requestId: " + requestId);
 
@@ -3635,6 +3738,13 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
                 walletHandler->onAuthResponseReceived(responseData);
                 LOG_DEBUG_HTTP("🔐 Auth response sent to original HTTP request");
             }
+        } else if (req.resumeKind == ResumeKind::kIpcResponse) {
+            // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC resume branch.
+            // HTTP path's branch above is unchanged; IPC requests (no
+            // handler, resumeKind=kIpcResponse) flow here.
+            LOG_DEBUG_HTTP("🔐 IPC resume for primary requestId " + requestId
+                           + " domain=" + req.domain);
+            resumeIpcResponse(req, responseData);
         } else {
             LOG_DEBUG_HTTP("🔐 Pending request had no handler (overlay-initiated flow)");
         }
@@ -3683,6 +3793,13 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
                         LOG_DEBUG_HTTP("🔐 Forwarded queued request " + sibling.requestId + " for " + sibling.endpoint);
                     }
                 }
+            } else if (sibling.resumeKind == ResumeKind::kIpcResponse) {
+                // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC sibling resume.
+                // For approve, resumeIpcResponse re-issues via worker; for
+                // reject, it sends wallet_response with the error envelope.
+                LOG_DEBUG_HTTP("🔐 IPC resume for queued sibling " + sibling.requestId
+                               + " endpoint=" + sibling.endpoint);
+                resumeIpcResponse(sibling, responseData);
             }
         }
     }
