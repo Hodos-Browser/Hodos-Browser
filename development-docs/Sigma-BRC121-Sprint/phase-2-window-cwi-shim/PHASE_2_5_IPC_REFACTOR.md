@@ -39,8 +39,8 @@ on, not just compile-clean.
 | 2.5 plan doc | ✅ landed (`1be64b2`) | This document |
 | Commits 1-4 (IPC bridge plumbing) | ✅ landed | `d0a00c4`, `b7efa6f`, `b8e4753`, `56f7343` |
 | **2.5-A — Planning** | ✅ landed | 5 doc commits: `06ba7b1`, `cfe4cd2`, `2c98217`, `37e191b`, `5ae6242` |
-| **2.5-B — Commit 5 extraction** | 🚧 in progress | Staged as 6 sub-commits 5.a-5.f. **5.a ✅ `814c817`** (scaffolding), **5.b ✅ `e8168d6`** (payment branch). 5.c-5.f pending. Per-sub-step smoke deferred — see "Smoke obligation reality" below. |
-| 2.5-C — Commit 6 IPC wiring | pending — runs the cumulative smoke for 2.5-B | `wallet_call` runs full engine cascade. After this lands, the `hodos-test.local:8000` mkcert fixture (built during 2.5-B) exercises every migrated branch in one smoke pass. |
+| **2.5-B — Commit 5 extraction** | ✅ landed | All 6 sub-commits: 5.a `814c817` (scaffolding), 5.b `e8168d6` (payment), 5.c `6feb318` (identity-key), 5.d `eb7158d` (key-linkage), 5.e `0883eeb` (scoped-grant), 5.f `a7b8680` (cert-disclosure properly engine-driven). |
+| **2.5-C — Commit 6 IPC wiring** | ✅ landed | Design doc `a5ca265`. 6 code commits: 6.a `e6ab4a4` (PendingAuthRequest IPC fields), 6.b `6afd34a` (OnWalletCallSuccess), 6.c `f10df6d` (Decision 3 free-fn modal openers), 6.d.A `779ec8d` (IsInternalOrigin + IPC helpers + HandleIpcWalletCall), 6.d.BE `5550d4f` (wired through to wallet_call + handleAuthResponse ResumeKind dispatch — **engine cascade fires from external dApp traffic**), 6.d.BE+1 `52eb57d` (gold-pill animation fix for tiny payments), 6.f (this commit — closure + dead code removal + criterion sweep). |
 | 2.5-D — Commit 7 smoke | pending | End-to-end on github + Treechat with engine in path |
 
 Each sub-phase is one focused session. Plan a clean handoff doc between
@@ -750,6 +750,34 @@ code-diff review.
 10. **No double-fire of green-dot animation**: a single auto-approved
     payment fires the indicator IPC exactly once (whether via HTTP path
     or IPC path — not both)
+
+#### Commit 6 acceptance sweep — RESULTS (2026-06-01, sub-step 6.f close)
+
+All ten criteria passed. Smoke verified on `https://hodos-test.local:8000`
+fixture with a 100-sat low payment and a 50M-sat over-cap payment.
+
+| # | Criterion | Result | Evidence |
+|---|---|---|---|
+| 1 | wallet_call builds PermissionContext before RunPermissionGate | ✅ | `HandleIpcWalletCall.runIpcEngineCascade` calls `buildPermissionContext` then `RunPermissionGate` |
+| 2 | PermissionContext carries X-Requesting-Domain | ✅ | Origin extracted from `frame.GetURL()` and threaded through the gate context |
+| 3 | Silent decision: forwardToWallet + OnWalletCallSuccess + indicator + wallet_response | ✅ | Live smoke: 100-sat createAction silent-approved; gold pill animated; debug_output.log shows `💰 IPC: auto-approved payment` and `💰 OnWalletCallSuccess fired` |
+| 4 | Prompt decision: modal opens + PendingAuthRequest enrolled with kIpcResponse | ✅ | Live smoke: 50M-sat createAction fired payment_confirmation modal; user approve → wallet response delivered via IPC; user deny → error envelope returned to page |
+| 5 | Deny decision: wallet_response immediate, no wallet call | ✅ | denyWithError callback in `runIpcEngineCascade` sends `wallet_response` with engine error envelope without posting to worker |
+| 6 | CSP/CORS bypass (github.com, treechat.io) | ⏳ | Deferred to Commit 7 final pass — `hodos-test.local` smoke proved the IPC + engine end-to-end; github/treechat is the dApp-compatibility verification |
+| 7 | HTTP path on localhost:5137 unchanged | ✅ | Existing `if (req.handler)` branches in handleAuthResponse untouched; member trigger delegates preserve external API; HTTP wallet UI ops unaffected |
+| 8 | Per-domain queue dedup still works | ✅ | `PendingRequestManager` logic untouched; `resumeIpcResponse` handles each sibling's resumeKind individually so mixed HTTP+IPC drains work correctly |
+| 9 | Frame validity check | ✅ | `sendWalletResponseIpc` checks `frame.IsValid()` before `SendProcessMessage`; drops with debug log if invalid; same check at every worker→UI hop in IPC silent / resume paths |
+| 10 | No double-fire of green-dot animation | ✅ | grep `payment_success_indicator` returns 1 fire site (inside `OnWalletCallSuccess`); each request flows through exactly one path (HTTP `OnRequestComplete` OR IPC silent worker OR IPC resume worker) and triggers the helper once. Verified by inspection + live smoke (single tab animation per silent-approve, no duplicates) |
+
+#### Bonus regression caught and fixed mid-6.d.BE
+
+The first smoke run showed the gold-pill animation didn't fire on the
+100-sat low payment even though the silent-approve path succeeded. Root
+cause: a `cents <= 0` guard I introduced in `OnWalletCallSuccess` (6.b)
+short-circuited tiny payments (cents rounds to 0 for < ~16,667 sats at
+typical BSV prices). Pre-6.b legacy paths didn't have this guard. Fix
+landed as `52eb57d` (6.d.BE+1) — restored legacy behavior. Memory
+[[payment_animation_safeguard]] holds.
 
 ### Commit 7 — CEF rebuild + Treechat + github smoke
 

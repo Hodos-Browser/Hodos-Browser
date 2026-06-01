@@ -1932,28 +1932,10 @@ public:
         openKeyLinkageRevealModal(ModalContext{domain, method_, endpoint, body}, resume);
     }
 
-    // Trigger payment confirmation notification overlay with limit context
-    void triggerPaymentConfirmationModal(const std::string& domain, int64_t satoshis, int64_t cents, double bsvPrice,
-                                          const std::string& exceededLimit, int64_t perTxLimit, int64_t perSessionLimit, int64_t sessionSpent) {
-        LOG_DEBUG_HTTP("💰 Triggering payment confirmation for " + domain + " (" + std::to_string(satoshis) + " sats, " + std::to_string(cents) + " cents, exceeded: " + exceededLimit + ")");
-
-        // Store request in PendingRequestManager with type "payment_confirmation"
-        std::string requestId = PendingRequestManager::GetInstance().addRequest(
-            domain, method_, endpoint_, body_, this, "payment_confirmation");
-
-        // Build extra params for overlay URL (includes limit context for frontend)
-        std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                + "&cents=" + std::to_string(cents)
-                                + "&bsvPrice=" + std::to_string(bsvPrice)
-                                + "&exceededLimit=" + exceededLimit
-                                + "&perTxLimit=" + std::to_string(perTxLimit)
-                                + "&perSessionLimit=" + std::to_string(perSessionLimit)
-                                + "&sessionSpent=" + std::to_string(sessionSpent);
-
-        // Post to UI thread — CreateWindowEx requires UI thread
-        CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
-        LOG_DEBUG_HTTP("💰 Payment confirmation notification queued (requestId: " + requestId + ")");
-    }
+    // (Removed in Phase 2.5-C sub-step 6.f: triggerPaymentConfirmationModal —
+    // DEAD since 5.b inlined the payment-modal dispatch into the openModal
+    // lambda. No callers since 5.b commit `e8168d6`. Use
+    // openPaymentConfirmationModal at file scope for the modern entry point.)
 
     // Check if endpoint is a payment-relevant BRC-100 endpoint
     static bool isPaymentEndpoint(const std::string& endpoint) {
