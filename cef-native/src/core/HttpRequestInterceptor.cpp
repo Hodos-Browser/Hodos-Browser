@@ -12,6 +12,12 @@
 #include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include "include/cef_frame.h"
+// Phase 2.5 Commit 6 sub-step 6.d.A — base::BindOnce + CefPostTask overload
+// for the IPC bridge's worker-thread dispatch. simple_handler.cpp includes
+// the same headers for its wallet_call worker dispatch (commits 1-4).
+#include "include/base/cef_bind.h"
+#include "include/base/cef_callback.h"
+#include "include/wrapper/cef_closure_task.h"  // base::OnceClosure → CefTask adapter
 #include "../handlers/simple_handler.h"
 #include "../handlers/simple_app.h"
 #include <iostream>
@@ -1336,6 +1342,30 @@ void OnWalletCallSuccess(int browserId,
                    + ", endpoint=" + endpoint + ")");
 }
 
+// Phase 2.5 Commit 6 sub-step 6.d — exact-or-port-suffix check for internal
+// origins. Replaces the prior `requestDomain_.find("127.0.0.1") == 0` prefix
+// match which had a defense-in-depth weakness: any hostname starting with
+// "127.0.0.1" (e.g. attacker-registered "127.0.0.1.evil.com") would bypass
+// the engine. Rust's check_domain_approved still caught it as a backstop,
+// but defense-in-depth degraded. This tightened check matches exactly the
+// two trusted prefixes and only when followed by ':' or end-of-string.
+//
+// Matches:  "127.0.0.1"  "127.0.0.1:31301"  "localhost"  "localhost:5137"  ""
+// Rejects:  "127.0.0.1.evil.com"  "localhost.evil.com"  "localhostevil.com"
+//
+// Empty origin is treated as internal (matches existing behavior — empty
+// request domain falls back to wallet-internal trust).
+bool IsInternalOrigin(const std::string& origin) {
+    if (origin.empty()) return true;
+    auto matchesHostOrHostColon = [&origin](const std::string& host) -> bool {
+        if (origin.size() < host.size()) return false;
+        if (origin.compare(0, host.size(), host) != 0) return false;
+        // Exact match OR followed by ':' (for port suffix).
+        return origin.size() == host.size() || origin[host.size()] == ':';
+    };
+    return matchesHostOrHostColon("127.0.0.1") || matchesHostOrHostColon("localhost");
+}
+
 // ============================================================================
 // Phase 2.5 Commit 6 sub-step 6.c — Decision 3: free-function modal openers
 // ============================================================================
@@ -1397,7 +1427,7 @@ static PendingAuthRequest buildPendingAuthRequest(
     return req;
 }
 
-void openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
+std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🔒 Triggering domain approval for " + ctx.domain);
 
     // Per-domain dedup — multiple in-flight requests from the same fresh origin
@@ -1413,15 +1443,16 @@ void openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resum
     if (modalAlreadyShowing) {
         LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
-        return;
+        return requestId;
     }
 
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
     LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
+    return requestId;
 }
 
-void openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
+std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval for " + ctx.domain);
 
     bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
@@ -1436,15 +1467,16 @@ void openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& r
     if (modalAlreadyShowing) {
         LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
-        return;
+        return requestId;
     }
 
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
     LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
+    return requestId;
 }
 
-void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume,
                                      const hodos::Manifest& m) {
     LOG_DEBUG_HTTP("📦 Triggering manifest_connect_bundle for " + ctx.domain
                     + " (app=" + m.name + ", " + std::to_string(m.protocols.size())
@@ -1460,7 +1492,7 @@ void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext
     if (modalAlreadyShowing) {
         LOG_DEBUG_HTTP("📦 Modal already pending for domain " + ctx.domain
                         + ", request queued (requestId: " + requestId + ")");
-        return;
+        return requestId;
     }
 
     // Serialize manifest to JSON, URL-encode, pass as extraParams.
@@ -1525,9 +1557,10 @@ void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext
     CefPostTask(TID_UI, new CreateNotificationOverlayTask(
         "manifest_connect_bundle", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
+std::string openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🛡️ Triggering identity_key_reveal for " + ctx.domain);
 
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
@@ -1535,9 +1568,10 @@ void openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& re
 
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("identity_key_reveal", ctx.domain));
     LOG_DEBUG_HTTP("🛡️ identity_key_reveal notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
+std::string openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🛡️ Triggering key_linkage_reveal for " + ctx.domain + " endpoint=" + ctx.endpoint);
 
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
@@ -1578,54 +1612,60 @@ void openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& res
 
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("key_linkage_reveal", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("🛡️ key_linkage_reveal notification queued (requestId: " + requestId + ", kind=" + linkageKind + ")");
+    return requestId;
 }
 
-void openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume,
                                    const std::string& extraParams) {
     LOG_DEBUG_HTTP("💰 Triggering payment_confirmation for " + ctx.domain);
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("payment_confirmation", ctx, resume));
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("💰 payment_confirmation notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume,
                                  const std::string& extraParams) {
     LOG_DEBUG_HTTP("⏱️ Triggering rate_limit_exceeded for " + ctx.domain);
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("rate_limit_exceeded", ctx, resume));
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("⏱️ rate_limit_exceeded notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                         const std::string& extraParams) {
     LOG_DEBUG_HTTP("🔒 Triggering protocol_permission_prompt for " + ctx.domain);
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("protocol_permission_prompt", ctx, resume));
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("protocol_permission_prompt", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("🔒 protocol_permission_prompt notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                       const std::string& extraParams) {
     LOG_DEBUG_HTTP("🧺 Triggering basket_permission_prompt for " + ctx.domain);
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("basket_permission_prompt", ctx, resume));
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("basket_permission_prompt", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("🧺 basket_permission_prompt notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                             const std::string& extraParams) {
     LOG_DEBUG_HTTP("🤝 Triggering counterparty_permission_prompt for " + ctx.domain);
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("counterparty_permission_prompt", ctx, resume));
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("counterparty_permission_prompt", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("🤝 counterparty_permission_prompt notification queued (requestId: " + requestId + ")");
+    return requestId;
 }
 
-void openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume,
+std::string openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume,
                                      const CertDisclosureInfo& info) {
     LOG_DEBUG_HTTP("📋 Triggering certificate_disclosure for " + ctx.domain
                    + " (" + std::to_string(info.fieldsToReveal.size()) + " fields)");
@@ -1650,25 +1690,28 @@ void openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext
     CefPostTask(TID_UI, new CreateNotificationOverlayTask("certificate_disclosure", ctx.domain, extraParams));
     LOG_DEBUG_HTTP("📋 certificate_disclosure notification queued (requestId: " + requestId
                    + ", fields: " + fieldsList + ")");
+    return requestId;
 }
 
-void OpenPromptModal(const std::string& promptType,
-                     const ModalContext& ctx,
-                     const ResumeContext& resume,
-                     const std::string& extraParams) {
-    if      (promptType == "domain_approval")               openDomainApprovalModal(ctx, resume);
-    else if (promptType == "brc100_auth")                   openBRC100AuthApprovalModal(ctx, resume);
-    else if (promptType == "identity_key_reveal")           openIdentityKeyRevealModal(ctx, resume);
-    else if (promptType == "key_linkage_reveal")            openKeyLinkageRevealModal(ctx, resume);
-    else if (promptType == "payment_confirmation")          openPaymentConfirmationModal(ctx, resume, extraParams);
-    else if (promptType == "rate_limit_exceeded")           openRateLimitExceededModal(ctx, resume, extraParams);
-    else if (promptType == "protocol_permission_prompt")    openProtocolPermissionPromptModal(ctx, resume, extraParams);
-    else if (promptType == "basket_permission_prompt")      openBasketPermissionPromptModal(ctx, resume, extraParams);
-    else if (promptType == "counterparty_permission_prompt") openCounterpartyPermissionPromptModal(ctx, resume, extraParams);
-    else LOG_WARNING_HTTP("OpenPromptModal: unknown promptType '" + promptType + "' for " + ctx.domain);
+std::string OpenPromptModal(const std::string& promptType,
+                            const ModalContext& ctx,
+                            const ResumeContext& resume,
+                            const std::string& extraParams) {
+    if      (promptType == "domain_approval")                return openDomainApprovalModal(ctx, resume);
+    else if (promptType == "brc100_auth")                    return openBRC100AuthApprovalModal(ctx, resume);
+    else if (promptType == "identity_key_reveal")            return openIdentityKeyRevealModal(ctx, resume);
+    else if (promptType == "key_linkage_reveal")             return openKeyLinkageRevealModal(ctx, resume);
+    else if (promptType == "payment_confirmation")           return openPaymentConfirmationModal(ctx, resume, extraParams);
+    else if (promptType == "rate_limit_exceeded")            return openRateLimitExceededModal(ctx, resume, extraParams);
+    else if (promptType == "protocol_permission_prompt")     return openProtocolPermissionPromptModal(ctx, resume, extraParams);
+    else if (promptType == "basket_permission_prompt")       return openBasketPermissionPromptModal(ctx, resume, extraParams);
+    else if (promptType == "counterparty_permission_prompt") return openCounterpartyPermissionPromptModal(ctx, resume, extraParams);
+
+    LOG_WARNING_HTTP("OpenPromptModal: unknown promptType '" + promptType + "' for " + ctx.domain);
     // Note: manifest_connect_bundle and certificate_disclosure are NOT in this
     // dispatcher — they require typed payloads (Manifest / CertDisclosureInfo).
     // Callers invoke their openers directly.
+    return "";
 }
 
 // Forward declared in HttpRequestInterceptor.h; implementation here since
@@ -2070,6 +2113,479 @@ private:
     DISALLOW_COPY_AND_ASSIGN(AsyncWalletResourceHandler);
 };
 
+// ============================================================================
+// Phase 2.5 Commit 6 sub-step 6.d.A — IPC bridge engine cascade helpers
+// ============================================================================
+//
+// HandleIpcWalletCall (declared in HttpRequestInterceptor.h) runs the full
+// engine cascade on the IPC path. Internal-origin requests take a fast-path
+// bypass mirroring AsyncWalletResourceHandler::Open()'s IsInternalOrigin
+// shortcut.
+//
+// Threading recap (from COMMIT_6_DESIGN.md §2):
+//   - HandleIpcWalletCall runs on TID_UI (where IPC arrives)
+//   - SyncHttpClient calls happen on TID_FILE_USER_BLOCKING workers
+//   - All CefFrame methods (SendProcessMessage) must run on TID_UI
+//   - Modal dispatch (CreateNotificationOverlayTask) posts to TID_UI
+//
+// All file-scope free functions in this block are static (internal linkage).
+
+namespace {
+
+// Send wallet_response IPC back to the calling frame. UI thread only.
+// Drops silently if frame is no longer valid (frame navigated, tab closed).
+void sendWalletResponseIpc(CefRefPtr<CefFrame> frame,
+                            const std::string& requestId,
+                            bool ok,
+                            const std::string& payload) {
+    if (!frame || !frame->IsValid()) {
+        LOG_DEBUG_HTTP("wallet_response dropped — frame invalid for " + requestId);
+        return;
+    }
+    CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("wallet_response");
+    auto args = response->GetArgumentList();
+    args->SetString(0, requestId);
+    args->SetBool(1, ok);
+    args->SetString(2, payload);
+    frame->SendProcessMessage(PID_RENDERER, response);
+}
+
+// Dispatch wallet HTTP call by method string. Worker thread only.
+HttpResponse dispatchWalletHttpByMethod(const std::string& httpMethod,
+                                         const std::string& url,
+                                         const std::string& bodyJson,
+                                         const std::map<std::string, std::string>& headers) {
+    if (httpMethod == "GET") {
+        return SyncHttpClient::Get(url, headers, /*timeoutMs=*/30000);
+    } else if (httpMethod == "POST") {
+        return SyncHttpClient::Post(url, bodyJson, headers, /*timeoutMs=*/30000);
+    } else {
+        return SyncHttpClient::Request(httpMethod, url, bodyJson, headers, /*timeoutMs=*/30000);
+    }
+}
+
+// Build the wallet_response payload string from an HttpResponse. Successful
+// response: pass body verbatim (already JSON). Error: wrap in a minimal
+// envelope if body is empty, else pass body (typically already JSON error).
+std::string buildIpcResponsePayload(const HttpResponse& resp, bool ok) {
+    if (ok) return resp.body.empty() ? std::string("null") : resp.body;
+    if (resp.body.empty()) {
+        return std::string("{\"error\":\"HTTP ") + std::to_string(resp.statusCode) +
+               "\",\"status\":" + std::to_string(resp.statusCode) + "}";
+    }
+    return resp.body;
+}
+
+// Internal-origin bypass path — direct HTTP call, no engine. Matches today's
+// pre-Commit-6 IPC handler behavior for localhost/127.0.0.1 origins.
+void runIpcCallDirect(const std::string& requestId,
+                      const std::string& /*methodName*/,
+                      const std::string& endpoint,
+                      const std::string& bodyJson,
+                      const std::string& httpMethod,
+                      const std::string& origin,
+                      CefRefPtr<CefFrame> capturedFrame,
+                      int browserId) {
+    (void)browserId;  // unused on the direct path
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string requestId, std::string endpoint,
+        std::string bodyJson, std::string httpMethod, std::string origin,
+        CefRefPtr<CefFrame> capturedFrame
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
+
+        std::string url = "http://127.0.0.1:31301" + endpoint;
+        HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
+        bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+        std::string payload = buildIpcResponsePayload(resp, ok);
+
+        CefPostTask(TID_UI, base::BindOnce([](
+            std::string requestId, bool ok, std::string payload,
+            CefRefPtr<CefFrame> capturedFrame
+        ) {
+            sendWalletResponseIpc(capturedFrame, requestId, ok, payload);
+        }, requestId, ok, payload, capturedFrame));
+    }, requestId, endpoint, bodyJson, httpMethod, origin, capturedFrame));
+}
+
+// Unknown-trust path — fetch manifest on a worker thread, then dispatch the
+// appropriate modal on the UI thread (manifest_connect_bundle if declared
+// permissions exist; domain_approval fallback). Mirrors Open()'s L1923-1971.
+void handleIpcUnknownTrust(const std::string& /*requestId*/,
+                            const std::string& methodName,
+                            const std::string& endpoint,
+                            const std::string& bodyJson,
+                            const std::string& httpMethod,
+                            const std::string& origin,
+                            CefRefPtr<CefFrame> capturedFrame,
+                            int browserId) {
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string methodName, std::string endpoint,
+        std::string bodyJson, std::string httpMethod, std::string origin,
+        CefRefPtr<CefFrame> capturedFrame, int browserId
+    ) {
+        hodos::Manifest manifest = hodos::ManifestFetcher::Fetch(origin);
+        const bool hasDeclaredPerms = manifest.valid
+            && (!manifest.protocols.empty()
+                || !manifest.baskets.empty()
+                || !manifest.certificates.empty()
+                || !manifest.counterparties.empty()
+                || manifest.spending.perTransactionUsd > 0);
+
+        CefPostTask(TID_UI, base::BindOnce([](
+            std::string methodName, std::string endpoint, std::string bodyJson,
+            std::string httpMethod, std::string origin,
+            CefRefPtr<CefFrame> capturedFrame, int browserId,
+            hodos::Manifest manifest, bool hasDeclaredPerms
+        ) {
+            ModalContext mctx{origin, methodName, endpoint, bodyJson};
+            ResumeContext resume;
+            resume.frame = capturedFrame;
+            resume.browserId = browserId;
+            resume.httpMethod = httpMethod;
+
+            std::string newRequestId;
+            if (hasDeclaredPerms) {
+                LOG_DEBUG_HTTP("📦 IPC: Manifest found for " + origin
+                                + " — firing manifest_connect_bundle prompt");
+                newRequestId = openManifestConnectBundleModal(mctx, resume, manifest);
+            } else {
+                LOG_DEBUG_HTTP("🔒 IPC: No usable manifest for " + origin
+                                + " — firing domain_approval prompt");
+                newRequestId = openDomainApprovalModal(mctx, resume);
+            }
+            if (!newRequestId.empty()) {
+                postIpcAuthTimeout(newRequestId, capturedFrame,
+                    "{\"error\":\"Approval timeout\",\"status\":\"error\"}",
+                    kPromptAuthTimeoutMs);
+            }
+        }, methodName, endpoint, bodyJson, httpMethod, origin,
+           capturedFrame, browserId, manifest, hasDeclaredPerms));
+    }, methodName, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId));
+}
+
+// Approved-trust path — build PermissionContext + run RunPermissionGate
+// with IPC-flavored callbacks. Mirrors the cumulative behavior of
+// Open()'s approved-trust branches in 5.b-5.f for the IPC path.
+void runIpcEngineCascade(const std::string& requestId,
+                          const std::string& methodName,
+                          const std::string& endpoint,
+                          const std::string& bodyJson,
+                          const std::string& httpMethod,
+                          const std::string& origin,
+                          CefRefPtr<CefFrame> capturedFrame,
+                          int browserId,
+                          const DomainPermissionCache::Permission& perm) {
+    using AWRH = AsyncWalletResourceHandler;
+
+    // Compute payment context if this is a payment endpoint (matches 5.b).
+    const bool isPaymentKind = AWRH::isPaymentEndpoint(endpoint);
+    int64_t satoshis = 0;
+    double bsvPrice = 0;
+    bool priceAvailable = false;
+    int64_t cents = 0;
+    if (isPaymentKind) {
+        satoshis = AWRH::extractOutputSatoshis(bodyJson);
+        bsvPrice = BSVPriceCache::GetInstance().getPrice();
+        priceAvailable = (bsvPrice > 0);
+        if (priceAvailable && satoshis > 0) {
+            cents = static_cast<int64_t>(
+                (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+        }
+    }
+
+    SessionManager::GetInstance().getSession(browserId, origin);
+    const int64_t sessionSpent = SessionManager::GetInstance().getSpentCents(browserId, origin);
+    const int rateCount = SessionManager::GetInstance().getRateCounter(browserId, origin);
+    const int txCount = SessionManager::GetInstance().getPaymentCount(browserId, origin);
+
+    // For cert disclosure, pre-compute allApproved (mirrors 5.f).
+    bool certValid = false;
+    ::CertDisclosureInfo certInfo;
+    bool certAllApproved = true;
+    if (AWRH::isProveCertificateEndpoint(endpoint)) {
+        certInfo = AWRH::extractCertDisclosureInfo(bodyJson);
+        certValid = certInfo.valid && !certInfo.certType.empty();
+        if (certValid) {
+            auto approvedFields = fetchCertFieldsFromBackend(origin, certInfo.certType);
+            for (const auto& field : certInfo.fieldsToReveal) {
+                if (approvedFields.find(field) == approvedFields.end()) {
+                    certAllApproved = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    hodos::PermissionContext ctx = buildPermissionContext(
+        origin, endpoint, bodyJson, perm,
+        cents, sessionSpent, rateCount, txCount, priceAvailable);
+    if (certValid) {
+        ctx.scopedGrantExists = certAllApproved;
+    }
+
+    // Capture engine-decision-time state for callbacks.
+    const hodos::PermissionCallKind callKind = ctx.callKind;
+
+    hodos::GateCallbacks cb;
+
+    // Silent path — post to worker, run HTTP, fire indicator + wallet_response.
+    cb.forwardToWallet =
+        [requestId, endpoint, bodyJson, httpMethod, origin,
+         capturedFrame, browserId, cents, isPaymentKind, callKind]() {
+        // Silent-approve header injection mirrors HTTP path (L3152-3157):
+        // X-Identity-Key-Approved for IdentityKeyReveal Silent, X-Key-Linkage-Approved
+        // for key-linkage Silent. Rust's defense-in-depth check consumes these.
+        const bool injectIdentityKeyApproved =
+            (callKind == hodos::PermissionCallKind::IdentityKeyReveal);
+        const bool injectKeyLinkageApproved =
+            (callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage ||
+             callKind == hodos::PermissionCallKind::SpecificKeyLinkage);
+
+        // Silent-approve payment: increment counters at gate-decision time
+        // (matches HTTP path's 5.b lambda).
+        if (isPaymentKind && cents > 0) {
+            SessionManager::GetInstance().incrementRateCounter(browserId);
+            SessionManager::GetInstance().incrementPaymentCount(browserId);
+        }
+
+        CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+            std::string requestId, std::string endpoint, std::string bodyJson,
+            std::string httpMethod, std::string origin,
+            CefRefPtr<CefFrame> capturedFrame, int browserId,
+            int64_t cents, bool isPaymentKind,
+            bool injectIdentityKeyApproved, bool injectKeyLinkageApproved
+        ) {
+            std::map<std::string, std::string> headers;
+            headers["Content-Type"] = "application/json";
+            if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
+            if (injectIdentityKeyApproved) headers["X-Identity-Key-Approved"] = "true";
+            if (injectKeyLinkageApproved)  headers["X-Key-Linkage-Approved"]  = "true";
+
+            std::string url = "http://127.0.0.1:31301" + endpoint;
+            HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
+            bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+            std::string payload = buildIpcResponsePayload(resp, ok);
+
+            // Don't fire indicator on logical errors in successful response
+            bool isErrorInResponse = false;
+            if (ok && isPaymentKind) {
+                try {
+                    auto rj = nlohmann::json::parse(payload);
+                    isErrorInResponse = rj.contains("error");
+                } catch (...) {}
+            }
+            const bool wasAutoApprovedPayment =
+                ok && isPaymentKind && !isErrorInResponse && cents > 0;
+
+            CefPostTask(TID_UI, base::BindOnce([](
+                std::string requestId, bool ok, std::string payload,
+                CefRefPtr<CefFrame> capturedFrame, int browserId,
+                std::string origin, std::string endpoint, int64_t cents,
+                bool wasAutoApprovedPayment
+            ) {
+                if (wasAutoApprovedPayment) {
+                    OnWalletCallSuccess(browserId, origin, cents, true, endpoint);
+                }
+                sendWalletResponseIpc(capturedFrame, requestId, ok, payload);
+            }, requestId, ok, payload, capturedFrame, browserId,
+               origin, endpoint, cents, wasAutoApprovedPayment));
+        }, requestId, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId,
+           cents, isPaymentKind, injectIdentityKeyApproved, injectKeyLinkageApproved));
+    };
+
+    // Deny path — send wallet_response with engine-formatted error JSON.
+    cb.denyWithError =
+        [requestId, capturedFrame](const std::string& errorJson) {
+        sendWalletResponseIpc(capturedFrame, requestId, false, errorJson);
+    };
+
+    // Prompt path — enroll IPC-flavored PendingAuthRequest (via the matching
+    // opener), arm IPC-side timeout.
+    cb.openModal =
+        [methodName, endpoint, bodyJson, httpMethod, origin,
+         capturedFrame, browserId, perm, isPaymentKind, satoshis, cents, bsvPrice,
+         priceAvailable, sessionSpent, rateCount, txCount, certInfo, certValid](
+            const std::string& promptType, const std::string& /*engineExtraParams*/) {
+
+        ModalContext mctx{origin, methodName, endpoint, bodyJson};
+        ResumeContext modalResume;
+        modalResume.frame = capturedFrame;
+        modalResume.browserId = browserId;
+        modalResume.httpMethod = httpMethod;
+        if (promptType == "identity_key_reveal") {
+            modalResume.headersOnApprove["X-Identity-Key-Approved"] = "true";
+        } else if (promptType == "key_linkage_reveal") {
+            modalResume.headersOnApprove["X-Key-Linkage-Approved"] = "true";
+        }
+
+        std::string newRequestId;
+        std::string timeoutMsg = "{\"error\":\"Approval timeout\",\"status\":\"error\"}";
+
+        if (promptType == "certificate_disclosure" && certValid) {
+            // Typed payload — direct opener call (OpenPromptModal dispatcher
+            // doesn't handle cert disclosure).
+            newRequestId = openCertificateDisclosureModal(mctx, modalResume, certInfo);
+            timeoutMsg = "{\"error\":\"Certificate disclosure timeout\",\"status\":\"error\"}";
+        } else if (promptType == "payment_confirmation" || promptType == "rate_limit_exceeded") {
+            // Build payment extraParams (mirrors 5.b's lambda exactly).
+            std::string exceeded;
+            if (!priceAvailable) {
+                exceeded = "price_unavailable";
+            } else if (rateCount >= perm.rateLimitPerMin && perm.rateLimitPerMin > 0) {
+                exceeded = "rate_limit";
+            } else if (txCount >= perm.maxTxPerSession && perm.maxTxPerSession > 0) {
+                exceeded = "session_tx_count";
+            } else {
+                const bool overTx = cents > perm.perTxLimitCents;
+                const bool overSession = (sessionSpent + cents) > perm.perSessionLimitCents;
+                if (overTx && overSession) exceeded = "both";
+                else if (overTx) exceeded = "per_tx";
+                else exceeded = "per_session";
+            }
+            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
+                                    + "&cents=" + std::to_string(cents)
+                                    + "&bsvPrice=" + (priceAvailable ? std::to_string(bsvPrice) : std::string("0"))
+                                    + "&exceededLimit=" + exceeded
+                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
+                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
+                                    + "&sessionSpent=" + std::to_string(sessionSpent);
+            if (promptType == "rate_limit_exceeded") {
+                extraParams += "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
+                            + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
+                            + "&txCount=" + std::to_string(txCount);
+            }
+            newRequestId = OpenPromptModal(promptType, mctx, modalResume, extraParams);
+            timeoutMsg = "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}";
+        } else if (promptType == "protocol_permission_prompt" ||
+                   promptType == "basket_permission_prompt" ||
+                   promptType == "counterparty_permission_prompt") {
+            // Scope-prompt extraParams (mirrors 5.e's lambda).
+            ProtocolScope proto_scope = extractProtocolScope(endpoint, bodyJson);
+            BasketScope basket_scope = extractBasketScope(endpoint, bodyJson);
+            std::string extraParams;
+            if (promptType == "protocol_permission_prompt") {
+                extraParams = "&protocolLevel=" + std::to_string(proto_scope.level)
+                            + "&protocolName=" + proto_scope.name
+                            + "&protocolKeyId=" + proto_scope.keyId
+                            + "&protocolCounterparty=" + proto_scope.counterparty;
+            } else if (promptType == "basket_permission_prompt") {
+                extraParams = "&basket=" + basket_scope.basket
+                            + "&basketAccess=" + basket_scope.requiredAccess;
+            } else { // counterparty_permission_prompt
+                extraParams = "&counterparty=" + proto_scope.counterparty;
+            }
+            if (isPaymentKind) {
+                extraParams += "&satoshis=" + std::to_string(satoshis)
+                            + "&cents=" + std::to_string(cents);
+            }
+            newRequestId = OpenPromptModal(promptType, mctx, modalResume, extraParams);
+            timeoutMsg = "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}";
+        } else if (promptType == "identity_key_reveal") {
+            newRequestId = OpenPromptModal(promptType, mctx, modalResume, "");
+            timeoutMsg = "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}";
+        } else if (promptType == "key_linkage_reveal") {
+            newRequestId = OpenPromptModal(promptType, mctx, modalResume, "");
+            timeoutMsg = "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}";
+        } else {
+            // domain_approval, brc100_auth, anything else: pass through
+            newRequestId = OpenPromptModal(promptType, mctx, modalResume, "");
+        }
+
+        if (!newRequestId.empty()) {
+            postIpcAuthTimeout(newRequestId, capturedFrame, timeoutMsg, kPromptAuthTimeoutMs);
+        }
+    };
+
+    hodos::GateDecision result = hodos::RunPermissionGate(ctx, cb);
+
+    LOG_DEBUG_HTTP(std::string("🛡️ IPC engine decision for ") + origin
+        + " endpoint=" + endpoint
+        + " action=" + (result.action == hodos::GateDecision::Action::Silent ? "Silent"
+                       : result.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+        + " promptType=" + result.promptType
+        + " | requestId=" + requestId
+        + " | reason=" + result.reason);
+}
+
+} // anonymous namespace — IPC bridge helpers
+
+// Phase 2.5 Commit 6 sub-step 6.d.A — IPC-side auth timeout helper.
+// See header for design intent. Mirrors AsyncWalletResourceHandler::postAuthTimeout
+// for the IPC path (no handler instance to call back).
+void postIpcAuthTimeout(const std::string& requestId,
+                        CefRefPtr<CefFrame> frame,
+                        const std::string& errorJson,
+                        int delayMs) {
+    CefPostDelayedTask(TID_UI, base::BindOnce([](
+        std::string requestId, CefRefPtr<CefFrame> frame, std::string errorJson
+    ) {
+        // Only fire if the request is still pending (user hasn't resolved yet).
+        // popRequest is atomic — only one of (approve, deny, timeout) wins.
+        PendingAuthRequest req;
+        if (!PendingRequestManager::GetInstance().popRequest(requestId, req)) return;
+        sendWalletResponseIpc(frame, requestId, false, errorJson);
+        LOG_DEBUG_HTTP("⏰ IPC auth timeout fired for " + requestId);
+    }, requestId, frame, errorJson), delayMs);
+}
+
+// Phase 2.5 Commit 6 sub-step 6.d.A — top-level wallet_call IPC dispatch.
+// See header for design intent. Called from simple_handler.cpp's wallet_call
+// IPC handler in sub-step 6.d.B (which is when external dApp traffic first
+// flows through the engine).
+void HandleIpcWalletCall(
+    const std::string& requestId,
+    const std::string& methodName,
+    const std::string& endpoint,
+    const std::string& bodyJson,
+    const std::string& httpMethod,
+    const std::string& origin,
+    CefRefPtr<CefFrame> capturedFrame,
+    int browserId) {
+
+    // 1. Internal origin — bypass the engine entirely. Matches Open()'s L2112
+    //    behavior (tightened to exact-or-port-suffix match in 6.d.A).
+    if (IsInternalOrigin(origin)) {
+        LOG_DEBUG_HTTP("🔒 IPC internal origin " + origin + " — direct dispatch");
+        runIpcCallDirect(requestId, methodName, endpoint, bodyJson, httpMethod,
+                         origin, capturedFrame, browserId);
+        return;
+    }
+
+    // 2. No wallet — send NO_WALLET error. Matches Open()'s L2121.
+    if (!WalletStatusCache::GetInstance().walletExists()) {
+        LOG_DEBUG_HTTP("🔒 IPC: no wallet exists, rejecting request from " + origin);
+        sendWalletResponseIpc(capturedFrame, requestId, false,
+            "{\"error\":\"No wallet exists. Please create or recover a wallet first.\","
+            "\"code\":\"NO_WALLET\",\"status\":\"error\"}");
+        return;
+    }
+
+    // 3. Domain trust lookup.
+    auto perm = DomainPermissionCache::GetInstance().getPermission(origin);
+    LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " trust_level: " + perm.trustLevel);
+
+    if (perm.trustLevel == "blocked") {
+        LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " is blocked, rejecting");
+        sendWalletResponseIpc(capturedFrame, requestId, false,
+            "{\"error\":\"Domain blocked\",\"status\":\"error\"}");
+        return;
+    }
+
+    if (perm.trustLevel == "unknown") {
+        LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " unknown — attempting manifest fetch");
+        handleIpcUnknownTrust(requestId, methodName, endpoint, bodyJson, httpMethod,
+                              origin, capturedFrame, browserId);
+        return;
+    }
+
+    // 4. Approved trust → engine cascade.
+    runIpcEngineCascade(requestId, methodName, endpoint, bodyJson, httpMethod,
+                        origin, capturedFrame, browserId, perm);
+}
+
 // Task to defer CefURLRequest::Create to the next IO event loop iteration.
 // CefURLRequest::Create blocks when called from within a CefResourceHandler::Open()
 // callback on the IO thread (reentrancy issue). Deferring avoids the deadlock.
@@ -2095,10 +2611,11 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
 
     LOG_DEBUG_HTTP("🌐 AsyncWalletResourceHandler::Open called");
 
-    // Internal overlays (wallet panel, settings, etc.) are trusted — skip domain check
-    if (requestDomain_.find("127.0.0.1") == 0 ||
-        requestDomain_.find("localhost") == 0 ||
-        requestDomain_.empty()) {
+    // Internal overlays (wallet panel, settings, etc.) are trusted — skip domain check.
+    // Phase 2.5 Commit 6 sub-step 6.d — uses IsInternalOrigin (exact-or-port-suffix
+    // match) instead of the prior prefix match that let "127.0.0.1.evil.com"
+    // through. Same helper is called by the IPC bridge in HandleIpcWalletCall.
+    if (IsInternalOrigin(requestDomain_)) {
         LOG_DEBUG_HTTP("🔒 Internal origin " + requestDomain_ + " — bypassing domain check");
         handle_request = true;
         CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));

@@ -223,24 +223,76 @@ struct ResumeContext {
 // fires the matching CreateNotificationOverlayTask. Modals with typed
 // payloads (manifest, cert) take an additional argument; simple modals share
 // the (ctx, resume, extraParams) shape.
-void openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
-void openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
-void openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume, const hodos::Manifest& manifest);
-void openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume);
-void openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume);
-void openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
-void openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
-void openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
-void openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
-void openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
-void openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume, const CertDisclosureInfo& info);
+//
+// Returns the newly-created PendingAuthRequest requestId. The IPC path uses
+// this to arm postIpcAuthTimeout on the same request. HTTP-path callers
+// (member trigger delegates) currently ignore the return value.
+std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
+std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume);
+std::string openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume, const hodos::Manifest& manifest);
+std::string openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume);
+std::string openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume);
+std::string openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+std::string openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+std::string openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+std::string openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+std::string openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume, const std::string& extraParams);
+std::string openCertificateDisclosureModal(const ModalContext& ctx, const ResumeContext& resume, const CertDisclosureInfo& info);
 
 // String-keyed dispatcher used by the IPC path's openModal callback (where
 // the engine's PermissionDecision::promptType is the input). For modals that
 // require typed payloads (manifest, cert), callers must invoke the matching
 // opener directly — those are unreachable via this dispatcher because their
 // payloads cannot be expressed as a URL-style extraParams string.
-void OpenPromptModal(const std::string& promptType,
-                     const ModalContext& ctx,
-                     const ResumeContext& resume,
-                     const std::string& extraParams = "");
+//
+// Returns the requestId of the enrolled PendingAuthRequest, or empty string
+// if no opener matched the promptType.
+std::string OpenPromptModal(const std::string& promptType,
+                            const ModalContext& ctx,
+                            const ResumeContext& resume,
+                            const std::string& extraParams = "");
+
+// ============================================================================
+// Phase 2.5 Commit 6 sub-step 6.d — IPC path support helpers
+// ============================================================================
+
+// Exact-or-port-suffix check for internal origins (Hodos's own UI). Matches:
+//   "127.0.0.1"      "127.0.0.1:31301"     "localhost"     "localhost:5137"     ""
+// Does NOT match:
+//   "127.0.0.1.evil.com"  "localhost.evil.com"  "localhostevil.com"
+// Replaces the pre-existing prefix-match check at the top of Open() (which
+// had this defense-in-depth weakness). Used by both HTTP path's Open() and
+// the new IPC path's HandleIpcWalletCall.
+bool IsInternalOrigin(const std::string& origin);
+
+// IPC-side auth timeout. Mirrors AsyncWalletResourceHandler::postAuthTimeout
+// but for requests with resumeKind == kIpcResponse (no handler instance to
+// call back). After delayMs, if the request is still pending (not yet
+// resolved by user Approve/Deny), pops it from PendingRequestManager and
+// sends wallet_response IPC with errorJson. Frame validity is checked
+// before SendProcessMessage.
+void postIpcAuthTimeout(const std::string& requestId,
+                        CefRefPtr<CefFrame> frame,
+                        const std::string& errorJson,
+                        int delayMs);
+
+// Top-level entry point for wallet_call IPC dispatch. Encapsulates the
+// internal-origin bypass, wallet-existence check, blocked/unknown/approved
+// trust dispatch, modal opening, and response routing.
+//
+// Threading: invoked from simple_handler.cpp's wallet_call IPC handler on
+// the UI thread. May post tasks to TID_FILE_USER_BLOCKING internally for
+// SyncHttpClient calls and to TID_UI for response IPC.
+//
+// Phase 2.5 Commit 6 sub-step 6.d. After this lands AND 6.e closes the
+// approve/deny resume loop, the engine cascade fires from external dApp
+// traffic for the first time.
+void HandleIpcWalletCall(
+    const std::string& requestId,
+    const std::string& methodName,
+    const std::string& endpoint,
+    const std::string& bodyJson,
+    const std::string& httpMethod,
+    const std::string& origin,
+    CefRefPtr<CefFrame> capturedFrame,
+    int browserId);
