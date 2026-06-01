@@ -2190,19 +2190,31 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
         }
 
-        // Phase 1.5 Step 6 (Commit E) — scoped-grant gate for non-payment,
-        // non-perimeter, non-cert endpoints that reference a protocol /
-        // basket / counterparty tuple. Targets endpoints like
-        // /createSignature, /createHmac, /encrypt, /decrypt, /listOutputs.
-        // The engine's DecideScopedGrant returns Silent when a matching V18
-        // grant or one-shot approval exists, else Prompt with the
-        // appropriate promptType (protocol_permission_prompt /
-        // basket_permission_prompt / counterparty_permission_prompt).
+        // Phase 2.5-B sub-step 5.e — scoped-grant gate for non-payment,
+        // non-perimeter, non-cert endpoints now flows through the shared
+        // RunPermissionGate helper. Behavior is identical to the prior
+        // Phase 1.5 Step 6 Commit E implementation; the reorganization
+        // mirrors 5.b-5.d.
+        //
+        // Targets endpoints like /createSignature, /createHmac, /encrypt,
+        // /decrypt, /listOutputs that carry a protocolID / basket /
+        // counterparty body field. The engine's DecideScopedGrant returns
+        // Silent when a matching V18 grant or one-shot approval exists,
+        // else Prompt with the appropriate promptType
+        // (protocol_permission_prompt / basket_permission_prompt /
+        // counterparty_permission_prompt).
+        //
+        // Important behavior preserved: Silent falls THROUGH to the
+        // catch-all "Non-payment endpoint from approved domain — forward
+        // immediately" forwarding below, NOT through forwardToWallet here.
+        // The callback is intentionally left unset for Silent; that path
+        // takes no action so the outer code's catch-all forward runs.
+        // Prompt and Deny return true after the matching callback fires.
         //
         // Payment endpoints (createAction etc.) are handled below by the
-        // existing payment branch, which now also surfaces missing-scope
+        // existing payment branch, which also surfaces missing-scope
         // prompts via PermissionContext.paymentScopeKindMissing before the
-        // cap check fires.
+        // cap check fires (Commit E v1 deferred Payment-scope sequencing).
         if (!isPaymentEndpoint(endpoint_)
             && !isGetPublicKeyEndpoint(endpoint_)
             && !isKeyLinkageEndpoint(endpoint_)
@@ -2216,53 +2228,64 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                     /*requestedCents=*/0, /*sessionSpentCents=*/0,
                     /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
                     /*bsvPriceAvailable=*/true);
-                hodos::PermissionDecision decision = hodos::PermissionEngine::Decide(ctx);
 
-                LOG_DEBUG_HTTP(std::string("🛡️ Scoped-grant engine decision: ")
-                    + decisionKindToString(decision.kind)
-                    + " promptType=" + decision.promptType
-                    + " callKind=" + callKindToString(ctx.callKind)
-                    + " | reason=" + decision.reason);
-
-                if (decision.kind == hodos::PermissionDecision::Kind::Deny) {
-                    LOG_DEBUG_HTTP("🛡️ Scoped grant denied for " + requestDomain_
-                                   + ": " + decision.reason);
-                    onHTTPResponseReceived(
-                        "{\"error\":\"" + decision.reason + "\",\"status\":\"error\"}");
+                hodos::GateCallbacks cb;
+                // Silent case: forwardToWallet intentionally LEFT UNSET so
+                // RunPermissionGate's Silent branch is a no-op; the outer
+                // code's catch-all forwarding below handles the request.
+                // This preserves the prior "Silent — fall through to normal
+                // forwarding below" comment's semantics exactly.
+                cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
+                    LOG_DEBUG_HTTP("🛡️ Scoped grant denied for " + requestDomain_);
+                    onHTTPResponseReceived(errorJson);
                     handle_request = true;
-                    return true;
-                }
-
-                if (decision.kind == hodos::PermissionDecision::Kind::Prompt) {
+                };
+                cb.openModal = [this, &proto_scope, &basket_scope, &handle_request](
+                    const std::string& promptType,
+                    const std::string& /*emptyExtraParams*/) {
                     // Build extraParams so the React modal can render the
                     // specific scope being requested. The scope fields are
                     // distinct per kind; React reads only the ones it needs
                     // for the current promptType.
                     std::string extraParams;
-                    if (decision.promptType == "protocol_permission_prompt") {
+                    if (promptType == "protocol_permission_prompt") {
                         // Level/keyId/counterparty default-safe if unset.
                         extraParams = "&protocolLevel=" + std::to_string(proto_scope.level)
                                     + "&protocolName=" + proto_scope.name
                                     + "&protocolKeyId=" + proto_scope.keyId
                                     + "&protocolCounterparty=" + proto_scope.counterparty;
-                    } else if (decision.promptType == "basket_permission_prompt") {
+                    } else if (promptType == "basket_permission_prompt") {
                         extraParams = "&basket=" + basket_scope.basket
                                     + "&basketAccess=" + basket_scope.requiredAccess;
-                    } else if (decision.promptType == "counterparty_permission_prompt") {
+                    } else if (promptType == "counterparty_permission_prompt") {
                         extraParams = "&counterparty=" + proto_scope.counterparty;
                     }
                     LOG_DEBUG_HTTP("🛡️ Scoped grant prompt required for " + requestDomain_
-                                   + " (" + decision.promptType + ")");
+                                   + " (" + promptType + ")");
                     PendingRequestManager::GetInstance().addRequest(
-                        requestDomain_, method_, endpoint_, body_, this, decision.promptType);
+                        requestDomain_, method_, endpoint_, body_, this, promptType);
                     CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-                        decision.promptType, requestDomain_, extraParams));
+                        promptType, requestDomain_, extraParams));
                     postAuthTimeout(kPromptAuthTimeoutMs,
                         "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
                     handle_request = true;
+                };
+
+                hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+
+                LOG_DEBUG_HTTP(std::string("🛡️ Scoped-grant engine decision: ")
+                    + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
+                       : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
+                    + " promptType=" + gateResult.promptType
+                    + " callKind=" + callKindToString(ctx.callKind)
+                    + " | reason=" + gateResult.reason);
+
+                // Prompt and Deny set handle_request inside their callbacks
+                // and require return-true so the catch-all forward below
+                // doesn't fire. Silent intentionally falls through.
+                if (gateResult.action != hodos::GateDecision::Action::Silent) {
                     return true;
                 }
-
                 // Silent — fall through to normal forwarding below.
             }
         }
