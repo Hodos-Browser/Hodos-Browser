@@ -1310,12 +1310,19 @@ void MarkKeyLinkageRevealApproved(const std::string& domain) {
 
 // Phase 2.5 Commit 6 (sub-step 6.b) — single source of truth for the
 // post-success auto-approved-payment cluster. See header for design intent.
+//
+// 6.d.BE+1: removed `cents <= 0` guard. The legacy AsyncHTTPClient::OnRequestComplete
+// block fired the indicator on any auto-approved success regardless of cents
+// (matches BRC-121 firePaymentSuccessIpc). For payments under ~16,667 sats at
+// current BSV price, cents rounds to 0 — but the user still expects the gold-pill
+// tab animation as their visual safeguard against silent payment abuse. The React
+// renderer handles 0-cent display ("< $0.01"). Guard now is just wasAutoApprovedPayment.
 void OnWalletCallSuccess(int browserId,
                          const std::string& domain,
                          int64_t cents,
                          bool wasAutoApprovedPayment,
                          const std::string& endpoint) {
-    if (!wasAutoApprovedPayment || cents <= 0) return;
+    if (!wasAutoApprovedPayment) return;
 
     SessionManager::GetInstance().recordSpending(browserId, cents);
 
@@ -2345,8 +2352,14 @@ void runIpcEngineCascade(const std::string& requestId,
              callKind == hodos::PermissionCallKind::SpecificKeyLinkage);
 
         // Silent-approve payment: increment counters at gate-decision time
-        // (matches HTTP path's 5.b lambda).
-        if (isPaymentKind && cents > 0) {
+        // (matches HTTP path's 5.b lambda). 6.d.BE+1: drop the `cents > 0`
+        // guard — HTTP path's 5.b lambda increments unconditionally for
+        // payment kind; tiny payments (cents rounds to 0) still need to
+        // tick the rate/session counters so users can't bypass caps via
+        // micro-payment dust.
+        if (isPaymentKind) {
+            LOG_DEBUG_HTTP("💰 IPC: auto-approved payment for " + origin
+                           + " (" + std::to_string(cents) + " cents)");
             SessionManager::GetInstance().incrementRateCounter(browserId);
             SessionManager::GetInstance().incrementPaymentCount(browserId);
         }
@@ -2369,7 +2382,10 @@ void runIpcEngineCascade(const std::string& requestId,
             bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
             std::string payload = buildIpcResponsePayload(resp, ok);
 
-            // Don't fire indicator on logical errors in successful response
+            // Don't fire indicator on logical errors in successful response.
+            // 6.d.BE+1: drop `cents > 0` — tiny payments at typical BSV prices
+            // round cents to 0 but are still auto-approved payments deserving
+            // the gold-pill animation as a user-visible safeguard.
             bool isErrorInResponse = false;
             if (ok && isPaymentKind) {
                 try {
@@ -2378,7 +2394,7 @@ void runIpcEngineCascade(const std::string& requestId,
                 } catch (...) {}
             }
             const bool wasAutoApprovedPayment =
-                ok && isPaymentKind && !isErrorInResponse && cents > 0;
+                ok && isPaymentKind && !isErrorInResponse;
 
             CefPostTask(TID_UI, base::BindOnce([](
                 std::string requestId, bool ok, std::string payload,
@@ -3689,8 +3705,11 @@ static void resumeIpcResponse(const PendingAuthRequest& req,
                 isErrorInResponse = rj.contains("error");
             } catch (...) {}
         }
+        // 6.d.BE+1: dropped `cents > 0` — tiny payments still deserve the
+        // gold-pill animation as the user-visible safeguard (matches
+        // legacy AsyncHTTPClient::OnRequestComplete behavior).
         const bool wasAutoApprovedPayment =
-            ok && isPaymentKind && !isErrorInResponse && cents > 0;
+            ok && isPaymentKind && !isErrorInResponse;
 
         CefPostTask(TID_UI, base::BindOnce([](
             std::string requestId, bool ok, std::string payload,
