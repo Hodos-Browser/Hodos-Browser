@@ -38,13 +38,43 @@ on, not just compile-clean.
 |---|---|---|
 | 2.5 plan doc | ✅ landed (`1be64b2`) | This document |
 | Commits 1-4 (IPC bridge plumbing) | ✅ landed | `d0a00c4`, `b7efa6f`, `b8e4753`, `56f7343` |
-| **2.5-A — Planning (next session)** | **pending** | Fill `WALLET_API_MAP.md`; finalize extraction interface design; lock acceptance criteria per commit |
-| 2.5-B — Commit 5 extraction | pending | Reusable gate helpers; HTTP-path behavior unchanged |
-| 2.5-C — Commit 6 IPC wiring | pending | `wallet_call` runs full engine cascade |
+| **2.5-A — Planning** | ✅ landed | 5 doc commits: `06ba7b1`, `cfe4cd2`, `2c98217`, `37e191b`, `5ae6242` |
+| **2.5-B — Commit 5 extraction** | 🚧 in progress | Staged as 6 sub-commits 5.a-5.f. **5.a ✅ `814c817`** (scaffolding), **5.b ✅ `e8168d6`** (payment branch). 5.c-5.f pending. Per-sub-step smoke deferred — see "Smoke obligation reality" below. |
+| 2.5-C — Commit 6 IPC wiring | pending — runs the cumulative smoke for 2.5-B | `wallet_call` runs full engine cascade. After this lands, the `hodos-test.local:8000` mkcert fixture (built during 2.5-B) exercises every migrated branch in one smoke pass. |
 | 2.5-D — Commit 7 smoke | pending | End-to-end on github + Treechat with engine in path |
 
 Each sub-phase is one focused session. Plan a clean handoff doc between
 sessions so context-clear ↔ context-load is lossless.
+
+### Smoke obligation reality (added 2026-06-01 mid-2.5-B)
+
+The original plan implied per-sub-step smoke verification. That turns out
+to be **architecturally impossible for 5.a-5.f** because commits 1-4
+routed the V8 shim through `wallet_call` IPC → `SyncHttpClient::Post` (raw
+WinHTTP), **bypassing `AsyncWalletResourceHandler::Open()` entirely**.
+5.a-5.f migrate branches inside `Open()` — but external dApp traffic
+doesn't reach `Open()` until Commit 6 wires the IPC bridge through the
+engine. The engine cascade is effectively dormant in production between
+commits 1-4 and Commit 6.
+
+Discovery point: 5.b smoke attempt on `https://hodos-test.local:8000`
+returned `ERR_DOMAIN_NOT_APPROVED` straight from Rust's
+`check_domain_approved` — the C++ engine never ran. Confirmed expected
+behavior given the IPC bypass; not a 5.b bug.
+
+**Implications:**
+
+1. **5.c, 5.d, 5.e, 5.f land "blind"** — verification is unit tests
+   (`hodos_tests.exe`) + code-diff review only. Each sub-step is a 1:1
+   reorganization of an existing engine-driven branch, so risk is bounded.
+2. **Cumulative smoke happens at Commit 6 close** — the `hodos-test.local`
+   fixture exercises payment / identity-key / key-linkage / scoped-grant /
+   cert-disclosure modals in one pass.
+3. **No reorder of Commit 6 in front of 5.c-5.f** — was briefly considered
+   but rejected: Commit 6 needs a fully-extracted `Open()` (i.e. all
+   branches running through `RunPermissionGate`) to avoid duplicating
+   inline branch dispatch on the IPC path. Half-extracted `Open()` makes
+   Commit 6's design strictly worse.
 
 ## Decisions locked (Phase 2.5-A planning, 2026-05-30)
 
@@ -603,10 +633,37 @@ new `cef-native/include/core/PermissionGate.h`, new
 `cef-native/include/core/PendingAuthRequest.h`,
 optional new `cef-native/tests/permission_gate_test.cpp`.
 
-**Done when:**
+#### Sub-step breakdown (5.a-5.f) — Phase 2.5-B staging
 
-1. **HTTP path on `localhost:5137` works identically** for all seven gates:
-   - Internal wallet UI loads (frontend dev server reachable from CEF)
+Commit 5 is staged as 6 incremental sub-commits, each migrating one branch
+of `AsyncWalletResourceHandler::Open()` to the shared `RunPermissionGate`
+helper. Each sub-step preserves existing behavior (1:1 reorganization of
+the engine-driven branches that already landed in Phase 1.5 Step 6
+Commits A-E).
+
+| Sub-step | Target | Status |
+|---|---|---|
+| 5.a | Scaffolding — `PermissionGate.h`/.cpp + `permission_gate_test.cpp` + CMake wiring; nothing consumes yet | ✅ `814c817` |
+| 5.b | Migrate the approved-trust **payment** branch (was L2245-2385 inline) | ✅ `e8168d6` |
+| 5.c | Migrate the **identity-key reveal** branch | pending |
+| 5.d | Migrate the **key-linkage reveal** branch | pending |
+| 5.e | Migrate the **scoped-grant** branch (Protocol / Basket / Counterparty) for non-payment endpoints | pending |
+| 5.f | Migrate the **cert-disclosure** branch + final cleanup (move shadow-mode log, verify line-count target) | pending |
+
+**Smoke deferred to Commit 6 cumulative pass** — see "Smoke obligation
+reality" above. Per-sub-step verification for 5.a-5.f is unit tests +
+code-diff review.
+
+#### Done when
+
+> **Smoke criteria (#1, #7) deferred to Commit 6 cumulative smoke** per
+> "Smoke obligation reality" above — the engine cascade is dormant on
+> external dApps until Commit 6 wires the IPC bridge. Architecturally
+> impossible to smoke each sub-step independently.
+
+1. **HTTP path works identically for all seven gates** (verified at
+   Commit 6 close on the `hodos-test.local:8000` fixture; cannot be
+   verified mid-Commit-5):
    - createAction triggers `payment_confirmation` modal when over per-tx cap
    - createAction silent-approves when within caps (no modal, no log change)
    - getPublicKey identity-key style triggers `identity_key_reveal` modal
@@ -614,32 +671,36 @@ optional new `cef-native/tests/permission_gate_test.cpp`.
    - proveCertificate non-granted field triggers `certificate_disclosure` modal
    - listOutputs new-basket triggers `basket_permission_prompt` modal
    - createSignature new-protocol triggers `protocol_permission_prompt` modal
-2. **All 28 canonical shim methods still function** through fetch path
-   on localhost:5137 (smoke same as Phase 2 Step 4 acceptance criteria)
-3. **All 11 legacy yours methods still function** (smoke same as Phase 2
-   Step 3b/3c acceptance criteria)
-4. **`PermissionEngine` unit tests still pass** (`cargo test` in
-   `cef-native/tests/`)
+2. **All 28 canonical shim methods still function** through the IPC bridge
+   path (verified at Commit 6 close — same fixture)
+3. **All 11 legacy yours methods still function** (same — Commit 6 close)
+4. **`PermissionEngine` unit tests still pass** (`hodos_tests.exe`).
+   Verified per sub-step.
 5. **New `RunPermissionGate` helper has unit tests** covering at least:
    - Silent decision forwards correctly via `forwardToWallet` callback
    - Prompt decision invokes `openModal` callback with correct PromptType
-   - Deny decision invokes `forwardToWallet` with deny response
-   - All four callbacks can be mocked; helper is testable without CEF
-6. **No new lines of behavior logic** — every `if/else` branch in
-   `RunPermissionGate` traces 1:1 to a branch that previously existed in
-   `Open()`. Verified by a side-by-side review comment in the PR
-7. **Green-dot animation still fires** on auto-approved payment from
-   `localhost:5137` (visual smoke; tab-badge appears within 500ms of
-   silent-approve)
-8. **`Open()` line count drops** from ~522 to roughly ~250-300 (most of
-   the cascade now in `RunPermissionGate`). Hard metric — if Open() shrinks
-   less than ~30%, the extraction wasn't deep enough
+   - Deny decision invokes `denyWithError` callback with reason JSON
+   - All callbacks can be mocked; helper is testable without CEF
+   Verified in 5.a (7 tests landed).
+6. **No new lines of behavior logic** — every `if/else` branch in the
+   migrated lambdas traces 1:1 to a branch that previously existed in
+   `Open()`. Verified by side-by-side review per sub-step.
+7. **Green-dot animation still fires** on auto-approved payment (visual
+   smoke at Commit 6 close — deferred).
+8. **`Open()` line count trend** — net direction depends on Commit 6's
+   helper extractions per Decision 3 (`OpenPromptModal`). Through 5.a-5.f
+   Open() TRENDS UP because C++ lambda boilerplate is more verbose than
+   inline if-blocks; the shrinkage happens at Commit 6 when the lambdas
+   are deduplicated across HTTP + IPC paths and modal triggers move to
+   named free functions. Original ~30% drop expectation is a Commit-5 +
+   Commit-6 combined metric, not per-sub-step.
 9. **`grep -n payment_success_indicator HttpRequestInterceptor.cpp` still
    returns the two fire sites** — extraction MUST NOT remove the IPC fire
    from the HTTP path. (Indicator helper is a separate Commit 6 deliverable;
-   Commit 5 leaves the inline fire in place.)
+   Commit 5 leaves the inline fire in place.) Verified per sub-step.
 10. **No regression in `PermissionEngine::Decide()`** — the engine itself
-    is not modified, only wrapped by `RunPermissionGate`
+    is not modified, only wrapped by `RunPermissionGate`. Verified per
+    sub-step (engine source untouched + 33 engine tests pass).
 
 ### Commit 6 — IPC bridge wiring through PermissionEngine
 
