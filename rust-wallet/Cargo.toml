@@ -87,6 +87,12 @@ tokio-util = "0.7"
 # Async trait support for IndexerProvider (Phase 1.6d.B Services facade)
 async-trait = "0.1"
 
+# Phase 2.6 — pure decision logic for the wallet permission engine.
+# Workspace member; the path dep keeps Cargo aware of the crate so any change
+# to its source triggers a rebuild of hodos-wallet. NO actix or sqlite — those
+# stay in the permission_service module that wraps it.
+hodos_permission_engine = { path = "crates/hodos_permission_engine" }
+
 
 # Windows DPAPI for mnemonic auto-unlock (tied to Windows user account)
 [target.'cfg(windows)'.dependencies]

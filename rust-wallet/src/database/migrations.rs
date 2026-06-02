@@ -1078,3 +1078,73 @@ pub fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
     info!("   ✅ V19 migration applied (default_identity_key_disclosure_allowed)");
     Ok(())
 }
+
+/// V19 → V20 — Phase 2.6-A.5.
+///
+/// Creates two new tables for the engine-to-Rust migration:
+///
+/// 1. `permission_audit_log` — long-lived audit surface for engine decisions.
+///    Retention: 90 days (OQ1 resolved 2026-06-02). Background purge task
+///    drops rows older than 90 days; index on `created_at` supports efficient
+///    pruning. Per OQ2, the request body is stored as a sha256 hex hash
+///    (`VARCHAR(64)`), NOT the raw body — captures call identity for forensic
+///    provenance without storing raw payload bytes.
+///
+/// 2. `engine_shadow_log` — short-lived shadow comparison surface used during
+///    the Phase 2.6 migration window. Records every C++ vs Rust engine
+///    disagreement so we can verify the port is correct before flipping flags
+///    in 2.6-C through 2.6-G. Dropped entirely in the V21 cleanup migration
+///    that lands as part of sub-phase 2.6-H alongside C++ engine deletion.
+///
+/// Idempotent: uses `CREATE TABLE IF NOT EXISTS` so re-running on a
+/// partially-migrated DB is safe.
+///
+/// See: `development-docs/Sigma-BRC121-Sprint/phase-2.6-engine-to-rust/SUBPHASE_2_6_A_DESIGN.md` §5.
+pub fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
+    info!("   Creating permission_audit_log + engine_shadow_log tables (V20)...");
+
+    // permission_audit_log — long-lived audit surface (90-day retention via
+    // background purge task added in 2.6-A.6 or later).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS permission_audit_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            approval_id     VARCHAR(32),
+            domain          TEXT    NOT NULL,
+            endpoint        TEXT    NOT NULL,
+            call_kind       TEXT    NOT NULL,
+            engine_reason   TEXT    NOT NULL,
+            decision        TEXT    NOT NULL,
+            user_decision   TEXT,
+            body_hash       VARCHAR(64) NOT NULL,
+            created_at      INTEGER NOT NULL,
+            resolved_at     INTEGER,
+            resolved_via    TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_created_at ON permission_audit_log(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_domain     ON permission_audit_log(domain);
+        CREATE INDEX IF NOT EXISTS idx_audit_approval   ON permission_audit_log(approval_id);"
+    )?;
+
+    // engine_shadow_log — dropped in 2.6-H cleanup (V21).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS engine_shadow_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_kind_class TEXT    NOT NULL,
+            endpoint        TEXT    NOT NULL,
+            domain          TEXT    NOT NULL,
+            cpp_decision    TEXT    NOT NULL,
+            rust_decision   TEXT    NOT NULL,
+            cpp_reason      TEXT,
+            rust_reason     TEXT,
+            agreement       INTEGER NOT NULL,
+            context_hash    VARCHAR(64) NOT NULL,
+            observed_at     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_shadow_observed_at ON engine_shadow_log(observed_at);
+        CREATE INDEX IF NOT EXISTS idx_shadow_agreement   ON engine_shadow_log(agreement);
+        CREATE INDEX IF NOT EXISTS idx_shadow_class       ON engine_shadow_log(call_kind_class);"
+    )?;
+
+    info!("   ✅ V20 migration applied (permission_audit_log + engine_shadow_log)");
+    Ok(())
+}

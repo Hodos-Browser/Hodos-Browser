@@ -1067,6 +1067,7 @@ dependencies = [
  "flate2",
  "hex",
  "hmac",
+ "hodos_permission_engine",
  "log",
  "once_cell",
  "pbkdf2",

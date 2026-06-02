@@ -914,6 +914,17 @@ impl WalletDatabase {
             info!("   ✅ Schema V19 applied");
         }
 
+        if current_version < 20 {
+            // Phase 2.6-A.5: permission_audit_log + engine_shadow_log tables.
+            // Engine port is dormant until at least 2.6-C (no flag flips yet),
+            // but the audit/shadow tables exist so the writes from 2.6-B
+            // shadow infrastructure have somewhere to land.
+            info!("   Applying migration V20 (permission_audit_log + engine_shadow_log)...");
+            migrations::migrate_v19_to_v20(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (20)", [])?;
+            info!("   ✅ Schema V20 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

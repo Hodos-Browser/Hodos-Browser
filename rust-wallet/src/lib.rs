@@ -19,6 +19,8 @@ pub mod balance_cache;
 pub mod price_cache;
 pub mod overlay;
 pub mod services;
+// Phase 2.6-A.5 — engine-to-Rust scaffolding module (dormant; wired into AppState in A.6).
+pub mod permission_service;
 
 // Re-export commonly used modules for convenience
 pub use crypto::brc2;
