@@ -6,6 +6,12 @@ description = "Pure decision logic for the Hodos wallet permission engine. No ac
 
 # Intentionally minimal. NO actix, NO sqlite, NO reqwest, NO AppState.
 # The workspace boundary enforces this at compile time per Phase 2.6 LD1.
-# Real dependencies (serde, thiserror) land in sub-phase 2.6-A.2 when the
-# PermissionContext/PermissionDecision types are introduced.
 [dependencies]
+# Serialization for the PermissionContext / PermissionDecision wire types.
+# These get consumed by permission_service to build the 202 PENDING JSON
+# envelope per LD2; engine itself doesn't deal with HTTP.
+serde = { version = "1.0", features = ["derive"] }
+
+# Tests only — round-trip checks for the serde impls.
+[dev-dependencies]
+serde_json = "1.0"
