@@ -96,6 +96,7 @@ pub struct AppState {
     pub backup_check_needed: Arc<Mutex<Option<(i64, i64)>>>,  // (first_event_ts, latest_event_ts) — backup runs 3 min after latest, hard cap 10 min from first
     pub recovery_just_completed: Arc<std::sync::atomic::AtomicBool>,  // Set after on-chain recovery — triggers immediate TaskCheckForProofs + TaskValidateUtxos
     pub pay402_reuse: Arc<Mutex<HashMap<(String, i64), handlers::Pay402ReuseEntry>>>,  // (URL, sats) → unbroadcast retry context, ~25s TTL — see pay_402
+    pub permission: Arc<permission_service::PermissionService>,  // Phase 2.6-A.6: actix wrapper around hodos_permission_engine pure crate (dormant — all 5 flags default OFF)
 }
 
 impl AppState {
@@ -524,6 +525,24 @@ async fn main() -> std::io::Result<()> {
     let ship_cache = overlay::ship_cache::ShipDiscoveryCache::new();
     println!("✅ SHIP discovery cache initialized (SWR: 5-min fresh, 30-min stale)");
 
+    // Phase 2.6-A.6: build permission_service from env-derived flags.
+    // All 5 flags default OFF (production safe); enabled per class only when
+    // HODOS_ENGINE_RUST_<CLASS>=1 is exported. Service stays DORMANT until
+    // sub-phase 2.6-B wires shadow infrastructure and 2.6-C+ flips flags
+    // during developer testing. Memory `phase26_plan_drafted_2026_06_02`.
+    let engine_flags = permission_service::EngineFlags::from_env();
+    let permission = Arc::new(permission_service::PermissionService::new(engine_flags));
+    if engine_flags.any_enabled() {
+        println!("⚠️  Phase 2.6 Rust engine flags ENABLED (dev mode):");
+        if engine_flags.privacy_perimeter { println!("   - HODOS_ENGINE_RUST_PRIVACY_PERIMETER"); }
+        if engine_flags.scoped_grant      { println!("   - HODOS_ENGINE_RUST_SCOPED_GRANT");      }
+        if engine_flags.payment           { println!("   - HODOS_ENGINE_RUST_PAYMENT");           }
+        if engine_flags.cert_disclosure   { println!("   - HODOS_ENGINE_RUST_CERT_DISCLOSURE");   }
+        if engine_flags.domain_trust      { println!("   - HODOS_ENGINE_RUST_DOMAIN_TRUST");      }
+    } else {
+        println!("✅ Permission engine: C++ authoritative (all Rust engine flags OFF)");
+    }
+
     // Create app state
     let app_state = web::Data::new(AppState {
         database,  // Database is the only storage now
@@ -542,6 +561,7 @@ async fn main() -> std::io::Result<()> {
         backup_check_needed: Arc::new(Mutex::new(None)),
         recovery_just_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pay402_reuse: Arc::new(Mutex::new(HashMap::new())),
+        permission,  // Phase 2.6-A.6: hodos_permission_engine actix wrapper (dormant)
     });
     println!("✅ UTXO selection lock initialized");
     println!("✅ createAction serialization lock initialized");
