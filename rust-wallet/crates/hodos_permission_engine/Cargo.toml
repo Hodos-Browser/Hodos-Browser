@@ -1,0 +1,11 @@
+[package]
+name = "hodos_permission_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Pure decision logic for the Hodos wallet permission engine. No actix, no sqlite, no http — testable in isolation."
+
+# Intentionally minimal. NO actix, NO sqlite, NO reqwest, NO AppState.
+# The workspace boundary enforces this at compile time per Phase 2.6 LD1.
+# Real dependencies (serde, thiserror) land in sub-phase 2.6-A.2 when the
+# PermissionContext/PermissionDecision types are introduced.
+[dependencies]

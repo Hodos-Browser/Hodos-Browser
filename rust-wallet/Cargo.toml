@@ -1,3 +1,19 @@
+# Workspace + root package hybrid (Phase 2.6-A.1).
+# rust-wallet/Cargo.toml is BOTH a workspace root AND the hodos-wallet package.
+# The hodos_permission_engine crate (added in Phase 2.6) is a workspace member.
+# Cargo natively supports this pattern.
+#
+# `resolver = "2"` preserves the dependency resolution semantics that hodos-wallet
+# had as a standalone edition-2021 package (which implies resolver 2 by default).
+# Without this explicit declaration, workspace roots default to resolver 1, which
+# would silently change feature unification for the wallet binary.
+[workspace]
+members = [
+    ".",
+    "crates/hodos_permission_engine",
+]
+resolver = "2"
+
 [package]
 name = "hodos-wallet"
 version = "0.3.0"
