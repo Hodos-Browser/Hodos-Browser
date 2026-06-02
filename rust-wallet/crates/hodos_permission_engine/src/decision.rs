@@ -123,6 +123,10 @@ pub enum EngineReason {
     SilentScopedGrantExists,
     /// Cert disclosure: every requested field has a matching permission row.
     SilentAllCertFieldsApproved,
+    /// Generic approved-domain call with no extra gate. The catch-all silent
+    /// case at the end of the Matrix C cascade. Used when call_kind is
+    /// DomainTrust or GenericApproved on an approved-trust domain.
+    SilentGenericApproved,
 
     // ── Prompt reasons ──
     /// Payment exceeds per_tx_limit_cents.
