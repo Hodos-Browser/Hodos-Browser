@@ -2388,6 +2388,63 @@ void runIpcEngineCascade(const std::string& requestId,
     // Capture engine-decision-time state for callbacks.
     const hodos::PermissionCallKind callKind = ctx.callKind;
 
+    // Phase 2.6-C.4 — Privacy-perimeter CallKinds are now Rust-authoritative
+    // (kickoff Q1). Skip the inline cascade AND the shadow comparison: the
+    // C++ engine no longer produces ground truth for these kinds. Forward
+    // directly to Rust; the worker hops to TID_UI on 202 to open the matching
+    // modal via tryHandlePendingResponse → resumeInternalResponse on user
+    // resolution (C.3 path, same as the HTTP-path silent-forward worker
+    // below for non-privacy-perimeter kinds).
+    if (callKind == hodos::PermissionCallKind::IdentityKeyReveal
+        || callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage
+        || callKind == hodos::PermissionCallKind::SpecificKeyLinkage
+        || callKind == hodos::PermissionCallKind::SensitiveCertField) {
+        LOG_DEBUG_HTTP("🚪 IPC: privacy-perimeter forward to Rust (no inline gate, no shadow) for "
+                       + origin + " endpoint=" + endpoint);
+        CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+            std::string requestId, std::string endpoint, std::string bodyJson,
+            std::string httpMethod, std::string origin,
+            CefRefPtr<CefFrame> capturedFrame, int browserId
+        ) {
+            std::map<std::string, std::string> headers;
+            headers["Content-Type"] = "application/json";
+            if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
+            std::string url = "http://127.0.0.1:31301" + endpoint;
+            HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
+
+            if (resp.statusCode == 202) {
+                std::string responseBody = resp.body;
+                CefPostTask(TID_UI, base::BindOnce([](
+                    std::string requestId, std::string origin, std::string endpoint,
+                    std::string bodyJson, std::string httpMethod, std::string responseBody,
+                    CefRefPtr<CefFrame> capturedFrame, int browserId
+                ) {
+                    ModalContext modalCtx{origin, httpMethod, endpoint, bodyJson};
+                    ResumeContext resume;
+                    resume.frame = capturedFrame;
+                    resume.browserId = browserId;
+                    resume.httpMethod = httpMethod;
+                    if (!tryHandlePendingResponse(202, responseBody, modalCtx, resume)) {
+                        LOG_WARNING_HTTP("🛡️ IPC privacy-perimeter 202 from Rust failed envelope handling — forwarding raw body");
+                        sendWalletResponseIpc(capturedFrame, requestId, true, responseBody);
+                    }
+                }, requestId, origin, endpoint, bodyJson, httpMethod, responseBody,
+                   capturedFrame, browserId));
+                return;
+            }
+
+            bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+            std::string payload = buildIpcResponsePayload(resp, ok);
+            CefPostTask(TID_UI, base::BindOnce([](
+                std::string requestId, bool ok, std::string payload,
+                CefRefPtr<CefFrame> capturedFrame
+            ) {
+                sendWalletResponseIpc(capturedFrame, requestId, ok, payload);
+            }, requestId, ok, payload, capturedFrame));
+        }, requestId, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId));
+        return;
+    }
+
     hodos::GateCallbacks cb;
 
     // Silent path — post to worker, run HTTP, fire indicator + wallet_response.
@@ -2817,144 +2874,24 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         // PHASE_2_6_ENGINE_TO_RUST.md §LD5. Lifecycle: Rust-side shadow
         // infrastructure deleted together in 2.6-H final cleanup.
 
-        // Phase 2.5-B sub-step 5.c — identity-key reveal gate now flows
-        // through the shared RunPermissionGate helper. Behavior is identical
-        // to the prior Phase 1.5 Step 6 Commit C implementation; the
-        // reorganization is prep work for Commit 6 (IPC bridge consuming
-        // the same helper) per PHASE_2_5_IPC_REFACTOR.md.
-        //
-        // The C++ side still owns:
-        //   1. The endpoint+body classification (the outer if-check
-        //      narrows us to identity-key-style /getPublicKey).
-        //   2. Modal dispatch via triggerIdentityKeyRevealModal +
-        //      postAuthTimeout (wired into the openModal callback).
-        //   3. Auto-approve fast path: identityKeyApproved_ +
-        //      StartAsyncHTTPRequestTask (wired into the forwardToWallet
-        //      callback). identityKeyApproved_ is the header-injection
-        //      flag StartAsyncHTTPRequestTask reads to add the
-        //      X-Identity-Key-Approved header on the wallet request,
-        //      which Rust's get_public_key handler requires (Phase 1.5
-        //      Step 1).
-        // The engine owns Silent / Deny / Prompt based on the persistent
-        // V17 column (perm.identityKeyDisclosureAllowed) and the in-memory
-        // session opt-in cache (IdentityKeyApprovalCache), both of which
-        // buildPermissionContext populates.
-        if (isGetPublicKeyEndpoint(endpoint_) && isIdentityKeyStyleGetPublicKey(body_)) {
-            // Payment fields unused for identity-key reveal; pass 0s. The
-            // engine never reads them when callKind != Payment.
-            hodos::PermissionContext ctx = buildPermissionContext(
-                requestDomain_, endpoint_, body_, perm,
-                /*requestedCents=*/0, /*sessionSpentCents=*/0,
-                /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
-                /*bsvPriceAvailable=*/true);
+        // Phase 2.6-C.4 — identity-key reveal gate DELETED. The
+        // /getPublicKey {identityKey:true} path is now Rust-authoritative
+        // (C.2). C++ falls through to the catch-all forward below; Rust's
+        // dispatch_privacy_perimeter runs the engine, returns 200 OK or 202
+        // PENDING per LD2, and C.3's AsyncHTTPClient::OnRequestComplete
+        // intercepts a 202 to open the identity_key_reveal modal via
+        // tryHandlePendingResponse → resumeInternalResponse on user resolution.
+        // Kickoff Q1: no fallback path; the inline cascade is gone.
 
-            hodos::GateCallbacks cb;
-            cb.forwardToWallet = [this, &handle_request]() {
-                LOG_DEBUG_HTTP("🛡️ identity-key reveal silently approved for " + requestDomain_);
-                identityKeyApproved_ = true;
-                handle_request = true;
-                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-            };
-            // Defensive: DecidePrivacyPerimeter does not return Deny for
-            // IdentityKeyReveal today, but if a future engine version does
-            // (e.g. a blocked-identity-key list), surface the reason
-            // cleanly instead of falling through to a prompt.
-            cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
-                LOG_DEBUG_HTTP("🛡️ identity-key reveal denied for " + requestDomain_);
-                onHTTPResponseReceived(errorJson);
-                handle_request = true;
-            };
-            cb.openModal = [this, &handle_request](
-                const std::string& /*promptType*/,
-                const std::string& /*emptyExtraParams*/) {
-                LOG_DEBUG_HTTP("🛡️ identity-key reveal prompt required for " + requestDomain_);
-                triggerIdentityKeyRevealModal(requestDomain_);
-                postAuthTimeout(kPromptAuthTimeoutMs,
-                    "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
-                handle_request = true;
-            };
-
-            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
-            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
-
-            LOG_DEBUG_HTTP(std::string("🛡️ Identity-key engine decision: ")
-                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
-                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
-                + " promptType=" + gateResult.promptType
-                + " | persistent_grant=" + (perm.identityKeyDisclosureAllowed ? "1" : "0")
-                + " session_optin=" + (IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
-                + " | reason=" + gateResult.reason);
-
-            return true;
-        }
-
-        // Phase 2.5-B sub-step 5.d — key-linkage reveal gate now flows
-        // through the shared RunPermissionGate helper. Behavior is identical
-        // to the prior Phase 1.5 Step 6 Commit D implementation; the
-        // reorganization mirrors 5.c's identity-key migration.
-        //
-        // /revealCounterpartyKeyLinkage and /revealSpecificKeyLinkage are
-        // always privacy-perimeter: never silent-pass without the cached
-        // session opt-in (BRC-72 has no equivalent of identity-key's
-        // persistent V17 column today — only the in-memory opt-in cache).
-        // buildPermissionContext populates ctx.keyLinkageSessionOptIn from
-        // KeyLinkageApprovalCache; the engine's DecidePrivacyPerimeter
-        // branch for CounterpartyKeyLinkage/SpecificKeyLinkage covers
-        // Silent vs Prompt based on that single field.
-        //
-        // keyLinkageApproved_ is the header-injection flag StartAsyncHTTPRequestTask
-        // reads to add X-Key-Linkage-Approved on the wallet request, which
-        // Rust's reveal_*_key_linkage handlers require (Phase 1.5 Step 1
-        // defense-in-depth).
-        if (isKeyLinkageEndpoint(endpoint_)) {
-            hodos::PermissionContext ctx = buildPermissionContext(
-                requestDomain_, endpoint_, body_, perm,
-                /*requestedCents=*/0, /*sessionSpentCents=*/0,
-                /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
-                /*bsvPriceAvailable=*/true);
-
-            hodos::GateCallbacks cb;
-            cb.forwardToWallet = [this, &handle_request]() {
-                LOG_DEBUG_HTTP("🛡️ key-linkage reveal silently approved for " + requestDomain_);
-                keyLinkageApproved_ = true;
-                handle_request = true;
-                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-            };
-            // Defensive: DecidePrivacyPerimeter does not return Deny for
-            // key-linkage kinds today. Surfacing the reason here keeps
-            // future engine extensions (e.g. blocked-verifier list)
-            // self-consistent rather than collapsing to a prompt.
-            cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
-                LOG_DEBUG_HTTP("🛡️ key-linkage reveal denied for " + requestDomain_);
-                onHTTPResponseReceived(errorJson);
-                handle_request = true;
-            };
-            // Prompt branch passes endpoint + body through so the modal can
-            // surface which linkage kind (counterparty vs specific) and the
-            // verifier identity the page is asking about. The trigger fn
-            // captures requestDomain_, endpoint_, body_ via this closure.
-            cb.openModal = [this, &handle_request](
-                const std::string& /*promptType*/,
-                const std::string& /*emptyExtraParams*/) {
-                LOG_DEBUG_HTTP("🛡️ key-linkage reveal prompt required for " + requestDomain_);
-                triggerKeyLinkageRevealModal(requestDomain_, endpoint_, body_);
-                postAuthTimeout(kPromptAuthTimeoutMs,
-                    "{\"error\":\"key_linkage_reveal timeout\",\"status\":\"error\"}");
-                handle_request = true;
-            };
-
-            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
-            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
-
-            LOG_DEBUG_HTTP(std::string("🛡️ Key-linkage engine decision: ")
-                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
-                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
-                + " promptType=" + gateResult.promptType
-                + " | session_optin=" + (KeyLinkageApprovalCache::GetInstance().isApproved(requestDomain_) ? "1" : "0")
-                + " | reason=" + gateResult.reason);
-
-            return true;
-        }
+        // Phase 2.6-C.4 — key-linkage reveal gate DELETED. Same migration as
+        // identity-key: /revealCounterpartyKeyLinkage and /revealSpecificKeyLinkage
+        // are now Rust-authoritative (C.2), modal opens via C.3's 202
+        // intercept path. BRC-72 session opt-in lived in C++'s
+        // KeyLinkageApprovalCache; until that cache migrates to Rust
+        // (follow-up work), the engine prompts every call from any domain
+        // without a persistent grant — matches Rust's
+        // build_privacy_perimeter_context default
+        // (key_linkage_session_opt_in: false).
 
         // Phase 2.5-B sub-step 5.f — cert-disclosure gate now flows through
         // the shared RunPermissionGate helper. This sub-step ALSO wires the
@@ -2972,19 +2909,36 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         // requested-vs-approved field set check and override the field
         // BEFORE calling RunPermissionGate.
         //
-        // Phase 2.6-C.1 closed the prior sensitive-field gap: classifyCallKind
-        // now inspects the /proveCertificate body and routes any request
-        // touching a sensitive field (SSN, passport, DOB, residential address,
-        // biometric, financial-account identifier — see
-        // include/core/SensitiveCertFields.h) to SensitiveCertField. The
-        // engine's DecidePrivacyPerimeter branch (PermissionEngine.cpp:43-51)
-        // forces a prompt every time for that kind, ignoring scopedGrantExists.
-        // For non-sensitive cert fields the branch below still consults the
-        // cert_field_permissions table for pre-approval (allApproved → Silent).
+        // Phase 2.6-C.1 closed the prior sensitive-field gap: the classifier
+        // (cef-native/include/core/SensitiveCertFields.h) flags requests
+        // touching SSN / passport / DOB / residential address / biometric /
+        // financial-account identifiers.
+        //
+        // Phase 2.6-C.4 forks this gate:
+        //   - SensitiveCertField → Rust-authoritative (C.2). C++ skips the
+        //     inline cascade and falls through to the catch-all forward;
+        //     Rust returns 202 PENDING which C.3 intercepts to open the
+        //     certificate_disclosure modal. No SubmitShadowComparison wire
+        //     for sensitive paths — Rust is now ground truth.
+        //   - CertificateDisclosure (non-sensitive) → inline cascade stays
+        //     (migrates to Rust in 2.6-F). Still consults
+        //     cert_field_permissions for pre-approval (allApproved → Silent)
+        //     and fires SubmitShadowComparison so the shadow log keeps
+        //     tracking C++↔Rust agreement on this CallKind until the flip.
         if (isProveCertificateEndpoint(endpoint_)) {
             auto certInfo = extractCertDisclosureInfo(body_);
-            if (certInfo.valid && !certInfo.certType.empty()) {
-                LOG_DEBUG_HTTP("📋 proveCertificate from " + requestDomain_ + " — checking field permissions");
+            const bool isSensitiveCertField = certInfo.valid
+                && hodos::AnyRequestedCertFieldSensitive(
+                    certInfo.certType, certInfo.fieldsToReveal);
+            if (isSensitiveCertField) {
+                LOG_DEBUG_HTTP("📋 SensitiveCertField from " + requestDomain_
+                    + " — Rust-authoritative, falling through to forward");
+                // Fall through to the catch-all forward below. Rust's
+                // prove_certificate (C.2) detects the sensitive fields via
+                // the same classifier and returns 202 PENDING; C.3's HTTP
+                // intercept opens the certificate_disclosure modal.
+            } else if (certInfo.valid && !certInfo.certType.empty()) {
+                LOG_DEBUG_HTTP("📋 proveCertificate (non-sensitive) from " + requestDomain_ + " — checking field permissions");
 
                 // Fetch already-approved fields from DB
                 auto approvedFields = fetchCertFieldsFromBackend(requestDomain_, certInfo.certType);
@@ -3044,9 +2998,10 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                     + " | reason=" + gateResult.reason);
 
                 return true;
+            } else {
+                // Invalid or empty fields — fall through to normal forwarding.
+                LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
             }
-            // Invalid or empty fields — fall through to normal forwarding
-            LOG_DEBUG_HTTP("📋 proveCertificate with no/empty fields — forwarding directly");
         }
 
         // Phase 2.5-B sub-step 5.e — scoped-grant gate for non-payment,
@@ -4395,32 +4350,15 @@ private:
 void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     LOG_DEBUG_HTTP("🌐 Starting async HTTP request to: " + endpoint_);
 
-    // Phase 1.5 Step 1 — privacy-perimeter safety net for drain-forwarded
-    // siblings (and any other code path that lands here without going through
-    // Open()'s gate). If this is an identity-key-style /getPublicKey for an
-    // external domain that has NEITHER the persistent grant nor the in-memory
-    // cache hit, we must trigger the privacy-perimeter prompt -- forwarding
-    // the bare request to Rust would just return identity_key_prompt_required
-    // and break the page. The "unchecked bundle checkbox" flow lands here.
-    if (!requestDomain_.empty()
-        && isGetPublicKeyEndpoint(endpoint_)
-        && isIdentityKeyStyleGetPublicKey(body_)
-        && !identityKeyApproved_) {
-        bool persistent_grant =
-            DomainPermissionCache::GetInstance()
-                .getPermission(requestDomain_)
-                .identityKeyDisclosureAllowed;
-        bool cache_grant =
-            IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_);
-        if (!persistent_grant && !cache_grant) {
-            LOG_DEBUG_HTTP("🛡️ identity-key-style /getPublicKey bypassed Open() for "
-                + requestDomain_ + " (drain-forward or sibling-forward) — firing "
-                + "identity_key_reveal prompt instead of sending a doomed request to Rust");
-            triggerIdentityKeyRevealModal(requestDomain_);
-            postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"identity_key_reveal timeout\",\"status\":\"error\"}");
-            return;
-        }
-    }
+    // Phase 2.6-C.4 — DELETED: the Phase 1.5 Step 1 drain-forward safety net
+    // that fired triggerIdentityKeyRevealModal here when an identity-key
+    // /getPublicKey reached startAsyncHTTPRequest without going through the
+    // (now-removed) Open() gate. Post-C.2, Rust's privacy-perimeter handler
+    // is authoritative — bare identity-key requests return a 202 PENDING
+    // envelope (not the old 403 identity_key_prompt_required), and C.3's
+    // AsyncHTTPClient::OnRequestComplete opens the modal from that envelope.
+    // Keeping the safety net would cause a double-modal race with C.3's
+    // intercept path.
 
     // Create CEF HTTP request
     CefRefPtr<CefRequest> httpRequest = CefRequest::Create();
