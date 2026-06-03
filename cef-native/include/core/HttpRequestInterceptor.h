@@ -217,6 +217,16 @@ struct ResumeContext {
     int browserId = 0;
     std::map<std::string, std::string> headersOnApprove;
     std::string httpMethod = "POST";
+
+    // Phase 2.6-C.3 — set true when the modal was opened because Rust returned
+    // a 202 PENDING envelope (i.e. the Rust engine produced the decision, not
+    // the C++ inline cascade). buildPendingAuthRequest sets resumeKind =
+    // kInternal in that case so handleAuthResponse routes resolution through
+    // resumeInternalResponse, which re-issues the wallet call with the
+    // X-User-Approved header derived from the 202 envelope's `approvalId`.
+    // When false (default), resumeKind continues to be selected from
+    // handler/frame presence per Phase 2.5 Commit 6 semantics.
+    bool isInternalResume = false;
 };
 
 // Modal openers, one per gate type. Each enrolls the PendingAuthRequest and

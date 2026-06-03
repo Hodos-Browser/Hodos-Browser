@@ -1447,6 +1447,11 @@ struct CertDisclosureInfo {
 // ResumeContext + a type string. The resume discriminator chooses kHttpCallback
 // when a handler is set, kIpcResponse when a frame is set (and no handler).
 // Defaults to kHttpCallback for safety if both are unset (caller error).
+//
+// Phase 2.6-C.3: if resume.isInternalResume is set, override resumeKind to
+// kInternal — handler / frame fields stay populated so resumeInternalResponse
+// can dispatch resolution to whichever path is wired (HTTP handler or IPC
+// frame). The kInternal arm exists for logging clarity per kickoff Q6.
 static PendingAuthRequest buildPendingAuthRequest(
     const std::string& type,
     const ModalContext& ctx,
@@ -1459,7 +1464,9 @@ static PendingAuthRequest buildPendingAuthRequest(
     req.body = ctx.body;
     req.type = type;
     req.handler = resume.handler;
-    if (resume.handler) {
+    if (resume.isInternalResume) {
+        req.resumeKind = ResumeKind::kInternal;
+    } else if (resume.handler) {
         req.resumeKind = ResumeKind::kHttpCallback;
     } else if (resume.frame) {
         req.resumeKind = ResumeKind::kIpcResponse;
@@ -2103,9 +2110,18 @@ public:
     bool getWasAutoApprovedPayment() const { return wasAutoApprovedPayment_; }
     int getBrowserId() const { return browser_ ? browser_->GetIdentifier() : 0; }
     const std::string& getRequestDomain() const { return requestDomain_; }
+    // Phase 2.6-C.3 — needed by AsyncHTTPClient::OnRequestComplete to build
+    // the ModalContext on a 202 PENDING response from Rust.
+    const std::string& getMethod() const { return method_; }
+    const std::string& getEndpoint() const { return endpoint_; }
+    const std::string& getBody() const { return body_; }
+
+    // Phase 2.6-C.3 — promoted to public so tryHandlePendingResponse can arm
+    // the prompt-modal timeout when intercepting a 202 PENDING from Rust on
+    // the HTTP path (matches what the inline cascade does inline today).
+    void postAuthTimeout(int delayMs, const std::string& errorJson);
 
 private:
-    void postAuthTimeout(int delayMs, const std::string& errorJson);
     void postHttpTimeout();
 
     // Request data
@@ -2142,6 +2158,19 @@ private:
     IMPLEMENT_REFCOUNTING(AsyncWalletResourceHandler);
     DISALLOW_COPY_AND_ASSIGN(AsyncWalletResourceHandler);
 };
+
+// ============================================================================
+// Phase 2.6-C.3 — forward declarations for the 202 PENDING envelope handler.
+// Definitions live near resumeIpcResponse (~L3760). The IPC bridge silent-
+// forward worker below needs to call tryHandlePendingResponse on TID_UI, so
+// the symbol must be visible at that earlier file position. File scope so the
+// forward decls match the definitions' internal linkage.
+// ============================================================================
+struct PendingEnvelope;  // defined alongside the helpers
+static bool tryHandlePendingResponse(int statusCode,
+                                     const std::string& responseBody,
+                                     const ModalContext& modalCtx,
+                                     ResumeContext resume);
 
 // ============================================================================
 // Phase 2.5 Commit 6 sub-step 6.d.A — IPC bridge engine cascade helpers
@@ -2402,6 +2431,34 @@ void runIpcEngineCascade(const std::string& requestId,
 
             std::string url = "http://127.0.0.1:31301" + endpoint;
             HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
+
+            // Phase 2.6-C.3 — intercept 202 PENDING on IPC path. Hop to TID_UI
+            // (modal dispatch needs UI thread), parse the envelope, enroll a
+            // kInternal PendingAuthRequest with the IPC-flavored ResumeContext
+            // (frame + browserId + httpMethod). If the envelope is malformed,
+            // fall through to normal response delivery so the renderer sees
+            // the raw body rather than hanging.
+            if (resp.statusCode == 202) {
+                std::string responseBody = resp.body;
+                CefPostTask(TID_UI, base::BindOnce([](
+                    std::string requestId, std::string origin, std::string endpoint,
+                    std::string bodyJson, std::string httpMethod, std::string responseBody,
+                    CefRefPtr<CefFrame> capturedFrame, int browserId
+                ) {
+                    ModalContext modalCtx{origin, httpMethod, endpoint, bodyJson};
+                    ResumeContext resume;
+                    resume.frame = capturedFrame;
+                    resume.browserId = browserId;
+                    resume.httpMethod = httpMethod;
+                    if (!tryHandlePendingResponse(202, responseBody, modalCtx, resume)) {
+                        LOG_WARNING_HTTP("🛡️ IPC 202 from Rust failed envelope handling — forwarding raw body");
+                        sendWalletResponseIpc(capturedFrame, requestId, true, responseBody);
+                    }
+                }, requestId, origin, endpoint, bodyJson, httpMethod, responseBody,
+                   capturedFrame, browserId));
+                return;
+            }
+
             bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
             std::string payload = buildIpcResponsePayload(resp, ok);
 
@@ -3626,6 +3683,331 @@ void warmDomainPermissionCache(const std::string& domain) {
     DomainPermissionCache::GetInstance().getPermission(domain);
 }
 
+// ============================================================================
+// Phase 2.6-C.3 — 202 PENDING envelope handling
+// ============================================================================
+//
+// LD2 wire contract: Rust handlers return 202 Accepted carrying a JSON envelope
+// when the permission engine wants the user to resolve a prompt. C++ intercepts
+// the 202 before the response reaches the renderer, opens the matching modal,
+// then on user approval re-issues the original wallet call with
+// `X-User-Approved: <approvalId>` so Rust's request_gate consumes the approval
+// + sha256-verifies the body + processes the call (200 OK).
+//
+// Used by both the HTTP path (AsyncHTTPClient::OnRequestComplete) and the IPC
+// path (runIpcEngineCascade's silent-forward worker). Per kickoff Q4, the
+// helper is shared between both call sites.
+
+// Parsed 202 envelope contents per LD2 §LD2 schema (PHASE_2_6_ENGINE_TO_RUST.md).
+struct PendingEnvelope {
+    std::string approvalId;
+    std::string promptType;
+    std::string engineReason;
+    int64_t ttlMs = 0;
+    nlohmann::json promptPayload;  // may be absent / null / object
+};
+
+// Parse a 202 PENDING envelope from Rust. Returns true and populates `out` on
+// success; false on any JSON parse error, missing required field, or non-
+// "pending" status.
+static bool parsePendingEnvelope(const std::string& body, PendingEnvelope& out) {
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (!j.is_object()) return false;
+        auto status = j.value("status", std::string());
+        if (status != "pending") return false;
+        out.approvalId = j.value("approvalId", std::string());
+        out.promptType = j.value("promptType", std::string());
+        out.engineReason = j.value("engineReason", std::string());
+        out.ttlMs = j.value("ttlMs", static_cast<int64_t>(0));
+        if (j.contains("promptPayload")) out.promptPayload = j["promptPayload"];
+        return !out.approvalId.empty() && !out.promptType.empty();
+    } catch (...) {
+        return false;
+    }
+}
+
+// Build the modal opener's `extraParams` query string from the 202 envelope's
+// `promptPayload`, dispatching by `promptType`. Mirrors the field shapes the
+// inline cascade builds at runIpcEngineCascade L2487-2517 so the React modal
+// sees the same parameter set regardless of which engine produced the prompt.
+// Returns an empty string for promptTypes whose modal needs no extra params
+// (identity_key_reveal, domain_approval, brc100_auth) or whose payload is
+// non-string-encodable (certificate_disclosure — handled separately).
+static std::string buildExtraParamsFromPayload(
+    const std::string& promptType,
+    const nlohmann::json& payload
+) {
+    if (!payload.is_object()) return "";
+    auto getStr = [&](const char* k) -> std::string {
+        if (payload.contains(k) && payload[k].is_string()) return payload[k].get<std::string>();
+        return "";
+    };
+    auto getI64 = [&](const char* k) -> int64_t {
+        if (!payload.contains(k)) return 0;
+        const auto& v = payload[k];
+        if (v.is_number_integer()) return v.get<int64_t>();
+        if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+        return 0;
+    };
+
+    if (promptType == "payment_confirmation" || promptType == "rate_limit_exceeded") {
+        std::string s = "&satoshis=" + std::to_string(getI64("satoshis"))
+                      + "&cents=" + std::to_string(getI64("cents"))
+                      + "&exceededLimit=" + getStr("exceededLimit")
+                      + "&perTxLimit=" + std::to_string(getI64("perTxLimit"))
+                      + "&perSessionLimit=" + std::to_string(getI64("perSessionLimit"))
+                      + "&sessionSpent=" + std::to_string(getI64("sessionSpent"));
+        if (promptType == "rate_limit_exceeded") {
+            s += "&rateLimit=" + std::to_string(getI64("rateLimit"))
+               + "&maxTxPerSession=" + std::to_string(getI64("maxTxPerSession"));
+        }
+        return s;
+    }
+    if (promptType == "protocol_permission_prompt") {
+        return "&protocolLevel=" + std::to_string(getI64("protocolLevel"))
+             + "&protocolName=" + getStr("protocolName")
+             + "&protocolKeyId=" + getStr("protocolKeyId")
+             + "&protocolCounterparty=" + getStr("protocolCounterparty");
+    }
+    if (promptType == "basket_permission_prompt") {
+        return "&basket=" + getStr("basket")
+             + "&basketAccess=" + getStr("basketAccess");
+    }
+    if (promptType == "counterparty_permission_prompt") {
+        return "&counterparty=" + getStr("counterparty");
+    }
+    if (promptType == "key_linkage_reveal") {
+        // `protocol` may be null or an array; serialize verbatim so the React
+        // modal sees the same shape Rust emitted.
+        std::string protocolStr = (payload.contains("protocol") && !payload["protocol"].is_null())
+            ? payload["protocol"].dump()
+            : std::string("null");
+        return "&kind=" + getStr("kind")
+             + "&verifier=" + getStr("verifier")
+             + "&counterparty=" + getStr("counterparty")
+             + "&protocol=" + protocolStr
+             + "&keyID=" + getStr("keyID");
+    }
+    // identity_key_reveal, domain_approval, brc100_auth — no extra params.
+    // certificate_disclosure — typed payload, handled by tryHandlePendingResponse directly.
+    return "";
+}
+
+// Attempt to handle a wallet HTTP response as a 202 PENDING envelope. MUST be
+// called on TID_UI (modal dispatch + PendingRequestManager). Returns true if
+// the response was an LD2 envelope and the modal was opened — in that case the
+// caller MUST NOT deliver any response back to the renderer; the modal flow
+// will eventually call resumeInternalResponse which re-issues the request with
+// X-User-Approved and delivers the 200 result. Returns false otherwise; the
+// caller delivers the response as it would normally.
+//
+// The supplied `resume` is taken by value because we mutate isInternalResume +
+// headersOnApprove before passing it to the opener.
+static bool tryHandlePendingResponse(
+    int statusCode,
+    const std::string& responseBody,
+    const ModalContext& modalCtx,
+    ResumeContext resume
+) {
+    if (statusCode != 202) return false;
+    PendingEnvelope env;
+    if (!parsePendingEnvelope(responseBody, env)) {
+        LOG_WARNING_HTTP("tryHandlePendingResponse: 202 with un-parseable envelope from "
+            + modalCtx.domain + " endpoint=" + modalCtx.endpoint);
+        return false;
+    }
+
+    // Mark the new pending request as kInternal so handleAuthResponse routes
+    // resolution through resumeInternalResponse. Inject the approval id so the
+    // resume re-issue carries the X-User-Approved header that Rust's
+    // request_gate consumes (consume_and_verify + sha256 body check per LD2).
+    resume.isInternalResume = true;
+    resume.headersOnApprove["X-User-Approved"] = env.approvalId;
+
+    std::string newRequestId;
+    if (env.promptType == "certificate_disclosure") {
+        // Typed payload — direct opener call. The Rust /proveCertificate gate
+        // (C.2) populates promptPayload as {certType, certifier, fields:[]}.
+        CertDisclosureInfo info;
+        if (env.promptPayload.is_object()) {
+            if (env.promptPayload.contains("certType") && env.promptPayload["certType"].is_string()) {
+                info.certType = env.promptPayload["certType"].get<std::string>();
+            }
+            if (env.promptPayload.contains("certifier") && env.promptPayload["certifier"].is_string()) {
+                info.certifier = env.promptPayload["certifier"].get<std::string>();
+            }
+            if (env.promptPayload.contains("fields") && env.promptPayload["fields"].is_array()) {
+                for (const auto& f : env.promptPayload["fields"]) {
+                    if (f.is_string()) info.fieldsToReveal.push_back(f.get<std::string>());
+                }
+            }
+            info.valid = !info.fieldsToReveal.empty();
+        }
+        newRequestId = openCertificateDisclosureModal(modalCtx, resume, info);
+    } else if (env.promptType == "manifest_connect_bundle") {
+        // Manifest connect bundle from Rust isn't wired yet — the Rust gate
+        // would need to embed the manifest as a JSON string in promptPayload.
+        // Wire when a Rust-authoritative call site emits this promptType.
+        LOG_WARNING_HTTP(
+            "tryHandlePendingResponse: manifest_connect_bundle from Rust not yet supported");
+        return false;
+    } else {
+        std::string extraParams = buildExtraParamsFromPayload(env.promptType, env.promptPayload);
+        newRequestId = OpenPromptModal(env.promptType, modalCtx, resume, extraParams);
+    }
+
+    if (newRequestId.empty()) {
+        LOG_WARNING_HTTP("tryHandlePendingResponse: opener returned empty requestId for promptType '"
+            + env.promptType + "' from " + modalCtx.domain);
+        return false;
+    }
+
+    LOG_DEBUG_HTTP("🛡️ 202 PENDING intercepted — modal opened (requestId="
+        + newRequestId + ", promptType=" + env.promptType + ", approvalId=" + env.approvalId
+        + ", reason=" + env.engineReason + ", domain=" + modalCtx.domain + ")");
+
+    // Arm a timeout so the original wallet call doesn't hang forever if the
+    // user dismisses the modal without clicking anything. Mirrors the inline
+    // cascade's timeout discipline.
+    std::string timeoutMsg = "{\"error\":\"Approval timeout\",\"status\":\"error\",\"reason\":\"timeout\"}";
+    if (resume.frame) {
+        postIpcAuthTimeout(newRequestId, resume.frame, timeoutMsg, kPromptAuthTimeoutMs);
+    } else if (resume.handler) {
+        auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(resume.handler.get());
+        if (walletHandler) {
+            walletHandler->postAuthTimeout(kPromptAuthTimeoutMs, timeoutMsg);
+        }
+    }
+
+    return true;
+}
+
+// Phase 2.6-C.3 — resume path for a kInternal PendingAuthRequest (one that was
+// enrolled from a 202 PENDING envelope returned by Rust). Mirrors
+// resumeIpcResponse but dispatches the final result back to whichever resume
+// path is populated on the stored request — handler for HTTP path,
+// frame for IPC path. Per kickoff Q6 the resume body is structurally identical
+// to resumeIpcResponse; the kInternal arm exists so handleAuthResponse can
+// route through the correct delivery without sniffing handler/frame presence.
+//
+// On user Deny (responseData contains "error"): deliver the error verbatim to
+// the original handler or frame; no wallet call is made.
+// On user Approve: post to TID_FILE_USER_BLOCKING worker; inject
+// headersOnApprove (which includes X-User-Approved: <approvalId>) +
+// X-Requesting-Domain; dispatch via SyncHttpClient; hop back to TID_UI for
+// delivery. Payment-indicator green-dot fires for auto-approved payments via
+// OnWalletCallSuccess on the IPC side (HTTP side fires from
+// AsyncHTTPClient::OnRequestComplete after onAuthResponseReceived returns the
+// new payload through the original resource handler).
+static void resumeInternalResponse(const PendingAuthRequest& req,
+                                   const std::string& responseData) {
+    bool isRejection = false;
+    try {
+        auto parsed = nlohmann::json::parse(responseData);
+        isRejection = parsed.contains("error");
+    } catch (...) {}
+
+    if (isRejection) {
+        LOG_DEBUG_HTTP("🔐 kInternal resume: deny for " + req.requestId
+                       + " endpoint=" + req.endpoint);
+        if (req.handler) {
+            auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(req.handler.get());
+            if (walletHandler) walletHandler->onAuthResponseReceived(responseData);
+        } else if (req.frame) {
+            sendWalletResponseIpc(req.frame, req.requestId, false, responseData);
+        }
+        return;
+    }
+
+    LOG_DEBUG_HTTP("🔐 kInternal resume: approve for " + req.requestId
+                   + " endpoint=" + req.endpoint
+                   + " injectedHeaders=" + std::to_string(req.headersOnApprove.size()));
+
+    std::string requestId = req.requestId;
+    std::string domain = req.domain;
+    std::string endpoint = req.endpoint;
+    std::string body = req.body;
+    std::string httpMethod = req.httpMethod.empty() ? "POST" : req.httpMethod;
+    std::map<std::string, std::string> headersOnApprove = req.headersOnApprove;
+    CefRefPtr<CefResourceHandler> handler = req.handler;
+    CefRefPtr<CefFrame> frame = req.frame;
+    int browserId = req.browserId;
+
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string requestId, std::string domain, std::string endpoint,
+        std::string body, std::string httpMethod,
+        std::map<std::string, std::string> headersOnApprove,
+        CefRefPtr<CefResourceHandler> handler,
+        CefRefPtr<CefFrame> frame, int browserId
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
+        for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
+
+        std::string url = "http://127.0.0.1:31301" + endpoint;
+        HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
+        bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+        std::string payload = buildIpcResponsePayload(resp, ok);
+
+        // Payment-indicator state for IPC path (HTTP path's
+        // AsyncHTTPClient::OnRequestComplete already handles the indicator
+        // when it sees a fresh response come back via onAuthResponseReceived;
+        // the handler's own flow re-runs the OnWalletCallSuccess derivation).
+        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
+        int64_t cents = 0;
+        if (isPaymentKind) {
+            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
+            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+            if (bsvPrice > 0 && satoshis > 0) {
+                cents = static_cast<int64_t>(
+                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+            }
+        }
+        bool isErrorInResponse = false;
+        if (ok && isPaymentKind) {
+            try {
+                auto rj = nlohmann::json::parse(payload);
+                isErrorInResponse = rj.contains("error");
+            } catch (...) {}
+        }
+        const bool wasAutoApprovedPayment =
+            ok && isPaymentKind && !isErrorInResponse;
+
+        CefPostTask(TID_UI, base::BindOnce([](
+            std::string requestId, bool ok, std::string payload,
+            CefRefPtr<CefResourceHandler> handler,
+            CefRefPtr<CefFrame> frame, int browserId,
+            std::string domain, std::string endpoint, int64_t cents,
+            bool wasAutoApprovedPayment
+        ) {
+            if (handler) {
+                // HTTP path: deliver re-issue result through the original
+                // resource handler. The handler's payment indicator fires via
+                // its own AsyncHTTPClient::OnRequestComplete chain on a fresh
+                // request — for kInternal we deliver directly because the
+                // resume bypasses the URLRequest flow.
+                auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(handler.get());
+                if (walletHandler) {
+                    if (wasAutoApprovedPayment) {
+                        OnWalletCallSuccess(walletHandler->getBrowserId(), domain,
+                                            cents, true, endpoint);
+                    }
+                    walletHandler->onAuthResponseReceived(payload);
+                }
+            } else if (frame) {
+                if (wasAutoApprovedPayment) {
+                    OnWalletCallSuccess(browserId, domain, cents, true, endpoint);
+                }
+                sendWalletResponseIpc(frame, requestId, ok, payload);
+            }
+        }, requestId, ok, payload, handler, frame, browserId,
+           domain, endpoint, cents, wasAutoApprovedPayment));
+    }, requestId, domain, endpoint, body, httpMethod, headersOnApprove,
+       handler, frame, browserId));
+}
+
 // Function to handle auth response and send it back to the original request
 // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC-path resume after modal resolution.
 // Mirror of the HTTP-path resume but ending in wallet_response IPC instead
@@ -3770,6 +4152,17 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
             LOG_DEBUG_HTTP("🔐 IPC resume for primary requestId " + requestId
                            + " domain=" + req.domain);
             resumeIpcResponse(req, responseData);
+        } else if (req.resumeKind == ResumeKind::kInternal) {
+            // Phase 2.6-C.3 — kInternal resume branch. The request was
+            // enrolled when Rust returned a 202 PENDING envelope; on user
+            // resolution we re-issue the wallet call with X-User-Approved
+            // header injected via headersOnApprove (which carries the
+            // approvalId from the original envelope). resumeInternalResponse
+            // dispatches the result to handler (HTTP path) or frame (IPC
+            // path) based on which field is populated on the stored req.
+            LOG_DEBUG_HTTP("🔐 kInternal resume for primary requestId " + requestId
+                           + " domain=" + req.domain);
+            resumeInternalResponse(req, responseData);
         } else {
             LOG_DEBUG_HTTP("🔐 Pending request had no handler (overlay-initiated flow)");
         }
@@ -3825,6 +4218,11 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
                 LOG_DEBUG_HTTP("🔐 IPC resume for queued sibling " + sibling.requestId
                                + " endpoint=" + sibling.endpoint);
                 resumeIpcResponse(sibling, responseData);
+            } else if (sibling.resumeKind == ResumeKind::kInternal) {
+                // Phase 2.6-C.3 — kInternal sibling resume.
+                LOG_DEBUG_HTTP("🔐 kInternal resume for queued sibling " + sibling.requestId
+                               + " endpoint=" + sibling.endpoint);
+                resumeInternalResponse(sibling, responseData);
             }
         }
     }
@@ -3890,32 +4288,74 @@ public:
 
         LOG_DEBUG_HTTP("🌐 AsyncHTTPClient::OnRequestComplete called, response size: " + std::to_string(responseData_.length()));
 
+        if (!parent_) return;
+
+        // Phase 2.6-C.3 — intercept 202 PENDING envelopes from Rust before
+        // forwarding to the renderer. tryHandlePendingResponse parses the
+        // envelope, enrolls a kInternal PendingAuthRequest, and fires the
+        // matching modal. We DO NOT touch onHTTPResponseReceived in that case
+        // — the modal resolution flow (handleAuthResponse → resumeInternalResponse)
+        // re-issues the call with X-User-Approved and delivers the eventual
+        // 200 result through the same handler.
+        //
+        // Hop to TID_UI because tryHandlePendingResponse fires modal-opening
+        // tasks that expect UI-thread access. OnRequestComplete itself runs
+        // on the IO thread.
+        auto resp = request->GetResponse();
+        int statusCode = resp ? resp->GetStatus() : 0;
+        if (statusCode == 202) {
+            ModalContext modalCtx{
+                parent_->getRequestDomain(),
+                parent_->getMethod(),
+                parent_->getEndpoint(),
+                parent_->getBody(),
+            };
+            ResumeContext resume;
+            resume.handler = parent_;
+            resume.httpMethod = parent_->getMethod();
+            // isInternalResume + headersOnApprove are populated inside
+            // tryHandlePendingResponse.
+            std::string responseBody = responseData_;
+            CefPostTask(TID_UI, base::BindOnce([](
+                int statusCode, std::string responseBody,
+                ModalContext modalCtx, ResumeContext resume,
+                CefRefPtr<AsyncWalletResourceHandler> parent
+            ) {
+                if (!tryHandlePendingResponse(statusCode, responseBody, modalCtx, resume)) {
+                    // Envelope malformed or unsupported promptType — fall back
+                    // to delivering the raw 202 body to the renderer so the
+                    // caller can see the error rather than hang.
+                    LOG_WARNING_HTTP("🛡️ 202 from Rust failed envelope handling — forwarding raw body");
+                    if (parent) parent->onHTTPResponseReceived(responseBody);
+                }
+            }, statusCode, responseBody, modalCtx, resume, parent_));
+            return;
+        }
+
         // Phase 2.5 Commit 6 sub-step 6.b — record spending + fire green-dot
         // animation via the shared OnWalletCallSuccess helper. The error-check
         // stays at the caller because OnWalletCallSuccess doesn't have access
         // to the response body; the wasAutoApprovedPayment flag is gated to
         // false on an error response so the helper's internal guard does the
         // rest.
-        if (parent_) {
-            CefURLRequest::Status status = request->GetRequestStatus();
-            int64_t cents = parent_->getPreCalculatedCents();
-            const bool wasAutoApprovedPayment = parent_->getWasAutoApprovedPayment();
-            bool successAndNotError = false;
-            if (status == UR_SUCCESS && wasAutoApprovedPayment) {
-                bool isError = false;
-                try {
-                    auto rj = nlohmann::json::parse(responseData_);
-                    isError = rj.contains("error");
-                } catch (...) {}
-                successAndNotError = !isError;
-            }
-            OnWalletCallSuccess(parent_->getBrowserId(),
-                                parent_->getRequestDomain(),
-                                cents,
-                                /*wasAutoApprovedPayment=*/successAndNotError,
-                                /*endpoint=*/"createAction");
-            parent_->onHTTPResponseReceived(responseData_);
+        CefURLRequest::Status status = request->GetRequestStatus();
+        int64_t cents = parent_->getPreCalculatedCents();
+        const bool wasAutoApprovedPayment = parent_->getWasAutoApprovedPayment();
+        bool successAndNotError = false;
+        if (status == UR_SUCCESS && wasAutoApprovedPayment) {
+            bool isError = false;
+            try {
+                auto rj = nlohmann::json::parse(responseData_);
+                isError = rj.contains("error");
+            } catch (...) {}
+            successAndNotError = !isError;
         }
+        OnWalletCallSuccess(parent_->getBrowserId(),
+                            parent_->getRequestDomain(),
+                            cents,
+                            /*wasAutoApprovedPayment=*/successAndNotError,
+                            /*endpoint=*/"createAction");
+        parent_->onHTTPResponseReceived(responseData_);
     }
 
     void OnUploadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {
