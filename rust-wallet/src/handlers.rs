@@ -8656,7 +8656,7 @@ fn pubkey_to_address(pubkey: &[u8]) -> Result<String, String> {
 }
 
 // ============================================================================
-// Yours-legacy v1 address derivation (Phase 2 Step 3b.1)
+// Yours-legacy v1 address derivation (Phase 2 Step 3b.1; engine-gated in 2.6-C.2)
 // ============================================================================
 //
 // `POST /wallet/yours-legacy-addresses` consolidates the three derivations that
@@ -8665,20 +8665,29 @@ fn pubkey_to_address(pubkey: &[u8]) -> Result<String, String> {
 //
 //   * `bsvAddress`  — BRC-42 child of master, protocol "2-yours-legacy-receive",
 //                     counterparty=self, keyID="yours-{origin}", then mainnet
-//                     P2PKH (silent — BRC-42 child key derivation does not
-//                     reveal the identity key).
+//                     P2PKH. Per-domain child key (does not reveal identity by
+//                     itself), but the bundled response below ALSO carries the
+//                     identity address — the privacy posture of the whole call
+//                     is therefore "identity-revealing" and the engine gates it
+//                     as such.
 //   * `ordAddress`  — same as bsvAddress with the "2-yours-legacy-ord-receive"
 //                     protocol. Phase 3 ordinal logic will key off UTXOs landing
 //                     at this address.
-//   * `identityAddress` — mainnet P2PKH of the master identity public key. This
-//                     reveals cross-site correlation and is gated by the SAME
-//                     identity-key disclosure check that `/getPublicKey` applies
-//                     for identityKey-style requests; when disclosure is denied
-//                     for the calling domain, the identity slot is returned as
-//                     `null` and the other two slots are still populated. The
-//                     shim's `getAddresses` caller tolerates a null identity
-//                     slot — dApps that need the identity address can prompt
-//                     explicitly via `canonical.getPublicKey({ identityKey: true })`.
+//   * `identityAddress` — mainnet P2PKH of the master identity public key.
+//                     Reveals cross-site correlation.
+//
+// Phase 2.6-C.2 follow-up: the whole endpoint is now routed through the same
+// privacy-perimeter engine path as `/getPublicKey {identityKey:true}` — single
+// CallKind::IdentityKeyReveal gate, single modal on cold call (at most one),
+// 200 OK returns all three slots populated. Engine Deny → 403, and the shim's
+// error handler (`CWIShimScript.h::getAddresses`) already degrades to
+// `{bsvAddress:null, ordAddress:null, identityAddress:null}` on any non-OK
+// response, so the legacy dApp's tolerance for missing fields is preserved.
+//
+// The prior soft-deny pattern (200 with bsv+ord and `identityAddress:null`
+// when disclosure was missing) is gone. Rationale: an unapproved site silently
+// getting two thirds of a "give me your addresses" response is hand-wavy UX;
+// a single explicit modal tells the user what's being asked.
 //
 // The protocol-id + keyID convention MUST stay in sync with the JS side
 // (`CWIShimScript.h` → `YOURS_LEGACY_V1`), otherwise the addresses Hodos emits
@@ -8755,17 +8764,56 @@ pub struct YoursLegacyAddressesResponse {
 pub async fn yours_legacy_addresses(
     state: web::Data<AppState>,
     http_req: HttpRequest,
-    body: web::Json<YoursLegacyAddressesRequest>,
+    body: web::Bytes,
 ) -> HttpResponse {
+    // Phase 2.6-C.2 follow-up — extractor refactored from
+    // web::Json<YoursLegacyAddressesRequest> to web::Bytes so the
+    // privacy-perimeter gate can inspect headers (X-Requesting-Domain,
+    // X-User-Approved) and compute the request body sha256 for replay
+    // verification, matching the C.2 pattern used by `prove_certificate`.
+    let req: YoursLegacyAddressesRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   JSON parse error: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid JSON: {}", e)
+            }));
+        }
+    };
+
     log::info!(
         "🔑 /wallet/yours-legacy-addresses called for origin='{}'",
-        body.origin
+        req.origin
     );
 
-    if body.origin.is_empty() {
+    if req.origin.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "origin is required"
         }));
+    }
+
+    // Phase 2.6-C.2 follow-up privacy-perimeter gate. The response bundles the
+    // identity address with two per-domain BRC-42 child keys; the whole call
+    // is identity-revealing in aggregate. Routing this as
+    // CallKind::IdentityKeyReveal mirrors `/getPublicKey {identityKey:true}` —
+    // single engine decision, single modal on cold call, single 200/202/403.
+    //
+    // Internal calls (no X-Requesting-Domain header) bypass the engine
+    // entirely; that path is handled inside `dispatch_privacy_perimeter`.
+    let outcome = crate::permission_service::dispatch_privacy_perimeter(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/wallet/yours-legacy-addresses",
+        hodos_permission_engine::CallKind::IdentityKeyReveal,
+        // identity_key_reveal modal renders from origin alone — no extra
+        // promptPayload fields per LD2.
+        || serde_json::json!({}),
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // Pull master keys in a single short-lived DB lock so the derivation work
@@ -8793,62 +8841,20 @@ pub async fn yours_legacy_addresses(
         (privkey, pubkey)
     };
 
-    let (bsv_addr, ord_addr, identity_addr_unfiltered) =
-        derive_yours_legacy_addresses_core(&master_privkey, &master_pubkey, &body.origin);
-
-    // Identity-key disclosure gate — mirror /getPublicKey. The bsv/ord
-    // derivations stay silent (they are BRC-42 child keys, not the master
-    // identity key); the identity slot reveals cross-site correlation and
-    // therefore respects the same per-domain grant + header pre-approval that
-    // `/getPublicKey` uses. On denial we return `null` for the identity slot
-    // rather than 403-ing the whole call, so bsv/ord still flow through.
-    let requesting_domain = http_req
-        .headers()
-        .get("X-Requesting-Domain")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let pre_approved_header = http_req
-        .headers()
-        .get("X-Identity-Key-Approved")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let identity_address = if let Some(ref domain) = requesting_domain {
-        let persistent_grant = {
-            let db = state.database.lock().unwrap();
-            let repo = crate::database::DomainPermissionRepository::new(db.connection());
-            match repo.get_by_domain(state.current_user_id, domain) {
-                Ok(Some(perm)) => perm.identity_key_disclosure_allowed,
-                _ => false,
-            }
-        };
-        if pre_approved_header || persistent_grant {
-            identity_addr_unfiltered
-        } else {
-            log::warn!(
-                "🛡️ /wallet/yours-legacy-addresses identity slot withheld for external domain '{}' — no disclosure grant",
-                domain
-            );
-            None
-        }
-    } else {
-        // No X-Requesting-Domain header → internal call (wallet UI, scripts, etc.) → silent pass.
-        identity_addr_unfiltered
-    };
+    let (bsv_addr, ord_addr, identity_addr) =
+        derive_yours_legacy_addresses_core(&master_privkey, &master_pubkey, &req.origin);
 
     log::info!(
         "   ✅ Derived yours-legacy addresses (bsv={}, ord={}, identity={})",
         bsv_addr.is_some(),
         ord_addr.is_some(),
-        identity_address.is_some(),
+        identity_addr.is_some(),
     );
 
     HttpResponse::Ok().json(YoursLegacyAddressesResponse {
         bsv_address: bsv_addr,
         ord_address: ord_addr,
-        identity_address,
+        identity_address: identity_addr,
     })
 }
 
