@@ -240,3 +240,58 @@ pub async fn session_approve(
         "kind": req.kind
     }))
 }
+
+// ============================================================================
+// Phase 2.6-C.4 follow-up — POST /wallet/session-revoke
+// ============================================================================
+//
+// Parallel to /wallet/session-approve. Called fire-and-forget from C++'s
+// revokeIdentityKeyApprovalForDomain + revokeKeyLinkageApprovalForDomain
+// (HttpRequestInterceptor.cpp), which fire when the user revokes a domain's
+// permissions from the wallet UI or right-click "Manage Site Permissions".
+//
+// Drops BOTH session cache entries for the supplied domain — matches the C++
+// side where the `domain_permission_invalidate` IPC always invokes both
+// revoke functions together (the cache choice is at the engine level, not
+// per-revoke). Idempotent: revoking a never-approved domain is a 200.
+//
+// Wire shape:
+//   POST /wallet/session-revoke
+//   Content-Type: application/json
+//   { "domain": "example.com" }
+
+#[derive(Debug, Deserialize)]
+pub struct SessionRevokeRequest {
+    pub domain: String,
+}
+
+/// `POST /wallet/session-revoke`. See module-level comment for wire shape.
+pub async fn session_revoke(
+    permission: web::Data<Arc<PermissionService>>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let req: SessionRevokeRequest = match serde_json::from_value(body.into_inner()) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid body: {}", e),
+                "status": "bad_request"
+            }));
+        }
+    };
+    if req.domain.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain is required",
+            "status": "bad_request"
+        }));
+    }
+    permission.revoke_session_approvals_for_domain(&req.domain);
+    log::info!(
+        "🛡️ session-revoke: dropped identity_key + key_linkage session approvals for {} (Rust caches cleared)",
+        req.domain
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "revoked",
+        "domain": req.domain
+    }))
+}

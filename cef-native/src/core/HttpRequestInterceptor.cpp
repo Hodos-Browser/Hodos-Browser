@@ -1372,6 +1372,31 @@ void fireSessionApproveToRust(const std::string& domain, const char* kind) {
         }
     }, body));
 }
+
+// Phase 2.6-C.4 follow-up — drop both Rust session caches for a domain.
+// Called from revokeIdentityKeyApprovalForDomain / revokeKeyLinkageApprovalForDomain
+// (both fire on the same `domain_permission_invalidate` IPC chain on the C++
+// side, so back-to-back POSTs here are intentional and idempotent on the
+// Rust side).
+void fireSessionRevokeToRust(const std::string& domain) {
+    if (domain.empty()) return;
+    std::string body = std::string("{\"domain\":\"") + domain + "\"}";
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string body
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        HttpResponse resp = SyncHttpClient::Post(
+            "http://127.0.0.1:31301/wallet/session-revoke",
+            body, headers, /*timeoutMs=*/3000);
+        if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
+            LOG_DEBUG_HTTP(std::string("🛡️ session-revoke POST failed (statusCode=")
+                + std::to_string(resp.statusCode) + ") — Rust session cache "
+                + "may still hold stale opt-in; next call from origin would "
+                + "silently pass instead of re-prompting");
+        }
+    }, body));
+}
 } // namespace
 
 void MarkIdentityKeyRevealApproved(const std::string& domain) {
@@ -3648,9 +3673,17 @@ void clearDomainPermissionCache() {
 // any prior session-only opt-in should be re-confirmed.
 void revokeIdentityKeyApprovalForDomain(const std::string& domain) {
     IdentityKeyApprovalCache::GetInstance().revoke(domain);
+    // Phase 2.6-C.4 follow-up — also clear the Rust session cache. Same
+    // fire-and-forget pattern as MarkIdentityKeyRevealApproved. Note: the
+    // domain_permission_invalidate IPC at simple_handler.cpp:4411 calls
+    // BOTH revoke functions, so this fires twice (identity_key + key_linkage).
+    // That's fine — revoke_session_approvals_for_domain clears both caches
+    // in one call, so the second POST is a cheap no-op.
+    fireSessionRevokeToRust(domain);
 }
 void revokeKeyLinkageApprovalForDomain(const std::string& domain) {
     KeyLinkageApprovalCache::GetInstance().revoke(domain);
+    fireSessionRevokeToRust(domain);
 }
 void invalidateSubPermissionCacheForDomain(const std::string& domain) {
     SubPermissionCache::GetInstance().invalidate(domain);

@@ -949,6 +949,7 @@ async fn main() -> std::io::Result<()> {
             // OFF, returns 204 No Content immediately.
             .route("/engine/shadow-decide", web::post().to(permission_service::handlers::shadow_decide))
             .route("/wallet/session-approve", web::post().to(permission_service::handlers::session_approve))
+            .route("/wallet/session-revoke", web::post().to(permission_service::handlers::session_revoke))
 
             // NOTE: Adblock per-site toggles moved to C++ AdblockCache (JSON file in profile dir).
             // No longer served by wallet backend — see AdblockCache.h.
