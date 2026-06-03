@@ -3,6 +3,7 @@
 #include "../../include/core/ManifestFetcher.h"
 #include "../../include/core/PermissionEngine.h"
 #include "../../include/core/PermissionGate.h"
+#include "../../include/core/EngineShadow.h"
 #include "../../include/core/SyncHttpClient.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
@@ -2498,6 +2499,13 @@ void runIpcEngineCascade(const std::string& requestId,
     };
 
     hodos::GateDecision result = hodos::RunPermissionGate(ctx, cb);
+
+    // Phase 2.6-B.3 — first shadow-comparison call site. Fire-and-forget; the
+    // helper is gated by HODOS_ENGINE_SHADOW_LOG on the C++ side AND by the
+    // matching Rust-side flag on the receiving handler. With the flag OFF on
+    // either end this is effectively a no-op (env-var check returns false
+    // before any allocation). See cef-native/include/core/EngineShadow.h.
+    hodos::SubmitShadowComparison(ctx, result);
 
     LOG_DEBUG_HTTP(std::string("🛡️ IPC engine decision for ") + origin
         + " endpoint=" + endpoint
