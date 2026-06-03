@@ -114,6 +114,21 @@ public:
         return true;
     }
 
+    // Phase 2.6-C.5 fix — update the body of an in-flight request in place.
+    // Used by simple_handler's brc100_auth_response dispatcher: when the user
+    // approves a certificate_disclosure modal with a subset of fields, the
+    // body's fieldsToReveal array is reduced before the wallet call re-runs.
+    // Returns true if the entry existed and was updated.
+    bool updateRequestBody(const std::string& requestId, const std::string& newBody) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = requests_.find(requestId);
+        if (it == requests_.end()) {
+            return false;
+        }
+        it->second.body = newBody;
+        return true;
+    }
+
     // Check if any request is pending for a domain (for duplicate modal suppression)
     bool hasPendingForDomain(const std::string& domain) {
         std::lock_guard<std::mutex> lock(mutex_);

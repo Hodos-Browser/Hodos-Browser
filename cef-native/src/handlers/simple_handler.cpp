@@ -4165,76 +4165,53 @@ bool SimpleHandler::OnProcessMessageReceived(
                             return true;
                         }
 
-                        // For certificate_disclosure: if user selected a subset of fields,
-                        // modify the request body to only reveal those fields
+                        // Phase 2.6-C.5 fix — for certificate_disclosure with
+                        // selectedFields, persist the reduced fieldsToReveal
+                        // into the PendingRequestManager entry so the resume
+                        // path's SyncHttpClient::Post re-issues with the user-
+                        // approved subset. Previously this only mutated a
+                        // local copy of the pendingReq, which the URLRequest
+                        // (now replaced) used; the IPC-path resumeIpcResponse
+                        // re-reads from PendingRequestManager so the local
+                        // mutation was lost.
                         if (pendingReq.type == "certificate_disclosure" &&
                             responseData.contains("selectedFields") &&
                             responseData["selectedFields"].is_array()) {
                             try {
                                 auto bodyJson = nlohmann::json::parse(pendingReq.body);
                                 bodyJson["fieldsToReveal"] = responseData["selectedFields"];
-                                pendingReq.body = bodyJson.dump();
-                                LOG_DEBUG_BROWSER("📋 Modified proveCertificate body — fieldsToReveal reduced to "
-                                    + std::to_string(responseData["selectedFields"].size()) + " field(s)");
+                                std::string newBody = bodyJson.dump();
+                                if (PendingRequestManager::GetInstance().updateRequestBody(requestId, newBody)) {
+                                    LOG_DEBUG_BROWSER("📋 Updated PendingRequestManager body — fieldsToReveal reduced to "
+                                        + std::to_string(responseData["selectedFields"].size()) + " field(s)");
+                                }
                             } catch (const std::exception& e) {
                                 LOG_DEBUG_BROWSER("📋 Failed to modify cert body: " + std::string(e.what()));
                             }
                         }
 
-                        // Create HTTP request to generate authentication response
-                        CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-                        cefRequest->SetURL("http://localhost:31301" + pendingReq.endpoint);
-                        cefRequest->SetMethod(pendingReq.method);
-                        cefRequest->SetHeaderByName("Content-Type", "application/json", true);
-
-                        if (!pendingReq.body.empty()) {
-                            CefRefPtr<CefPostData> postData = CefPostData::Create();
-                            CefRefPtr<CefPostDataElement> element = CefPostDataElement::Create();
-                            element->SetToBytes(pendingReq.body.length(), pendingReq.body.c_str());
-                            postData->AddElement(element);
-                            cefRequest->SetPostData(postData);
-                        }
-
-                        // Capture requestId for the async callback
-                        std::string capturedRequestId = requestId;
-
-                        class AuthResponseHandler : public CefURLRequestClient {
-                        public:
-                            AuthResponseHandler(const std::string& reqId) : requestId_(reqId) {}
-
-                            void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
-                                CefURLRequest::Status status = request->GetRequestStatus();
-                                if (status == UR_SUCCESS && !responseData_.empty()) {
-                                    LOG_DEBUG_BROWSER("🔐 Authentication response generated successfully");
-                                    extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
-                                    handleAuthResponse(requestId_, responseData_);
-                                } else {
-                                    LOG_DEBUG_BROWSER("🔐 Failed to generate authentication response (status: " + std::to_string(status) + ")");
-                                }
-                            }
-
-                            void OnDownloadData(CefRefPtr<CefURLRequest> request, const void* data, size_t data_length) override {
-                                responseData_.append(static_cast<const char*>(data), data_length);
-                            }
-
-                            void OnUploadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
-                            void OnDownloadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
-                            bool GetAuthCredentials(bool isProxy, const CefString& host, int port, const CefString& realm, const CefString& scheme, CefRefPtr<CefAuthCallback> callback) override { return false; }
-
-                        private:
-                            std::string requestId_;
-                            std::string responseData_;
-                            IMPLEMENT_REFCOUNTING(AuthResponseHandler);
-                            DISALLOW_COPY_AND_ASSIGN(AuthResponseHandler);
-                        };
-
-                        CefRefPtr<CefURLRequest> authRequest = CefURLRequest::Create(
-                            cefRequest,
-                            new AuthResponseHandler(capturedRequestId),
-                            nullptr
-                        );
-
-                        LOG_DEBUG_BROWSER("🔐 Authentication request sent to wallet at localhost:31301");
+                        // Phase 2.6-C.5 fix — replaced the legacy CefURLRequest
+                        // / AuthResponseHandler dispatch with a direct call to
+                        // handleAuthResponse, passing an "approved" stub
+                        // envelope. handleAuthResponse routes to the matching
+                        // resume function (resumeHttpCallbackResponse /
+                        // resumeIpcResponse / resumeInternalResponse), each of
+                        // which re-issues the wallet call via
+                        // SyncHttpClient::Post on TID_FILE_USER_BLOCKING and
+                        // delivers the actual wallet response to either the
+                        // resource handler or the renderer frame.
+                        //
+                        // The CefURLRequest path was unreliable under CEF 136:
+                        // it routinely returned status=UR_SUCCESS with empty
+                        // bodies (likely a CefRefPtr lifetime / null
+                        // request_context interaction), leaving teragun's
+                        // protocol_permission_prompt and socialcert's
+                        // certificate_disclosure approvals stuck spinning.
+                        extern void handleAuthResponse(
+                            const std::string& requestId,
+                            const std::string& responseData);
+                        handleAuthResponse(requestId, "{\"status\":\"approved\"}");
+                        LOG_DEBUG_BROWSER("🔐 Approve dispatched via handleAuthResponse for " + pendingReq.domain);
                     } else {
                         LOG_DEBUG_BROWSER("🔐 No pending auth request found for requestId: " + requestId);
                     }
@@ -4306,19 +4283,25 @@ bool SimpleHandler::OnProcessMessageReceived(
                                                 bool identityKeyDisclosureAllowed);
                 addDomainPermission(domain, identityKeyDisclosureAllowed);
 
-                // Drain pending requests for this domain. Two kinds queue up here:
-                //   1. Wallet-style entries with a real AsyncWalletResourceHandler --
-                //      forward each to Rust so the page's pending promise resolves.
-                //      Previously these were dropped on the floor and the page hung
-                //      (the brc100_auth_response IPC arrives AFTER this drain, so
-                //      its replay path never finds the primary).
-                //   2. BRC-121 entries with a nullptr handler -- handled elsewhere via
-                //      TriggerPendingBrc121Reloads; we don't try to forward them here.
+                // Drain pending requests for this domain. Three kinds queue here:
+                //   1. HTTP-path entries (handler set, resumeKind=kHttpCallback) —
+                //      forwarded via ForwardPendingWalletRequest (StartAsyncHTTPRequestTask
+                //      → Open() re-run; Open() now sees the freshly-approved
+                //      trust_level and falls through to the catch-all forward).
+                //   2. IPC-path entries (resumeKind=kIpcResponse, frame set) and
+                //      kInternal entries — Phase 2.6-C.5 fix routes these
+                //      through ResumeDrainedApprovedRequest which dispatches to
+                //      resumeIpcResponse / resumeInternalResponse with a
+                //      synthetic "approved" envelope. Previously these were
+                //      silently dropped here (assumed to all be BRC-121).
+                //   3. True BRC-121 entries (nullptr handler, http:// endpoint) —
+                //      handled separately via TriggerPendingBrc121Reloads below.
                 auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
                 int forwarded = 0;
                 int brc121_entries = 0;
+                extern bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req);
                 for (auto& entry : drained) {
-                    if (ForwardPendingWalletRequest(entry.handler)) {
+                    if (ResumeDrainedApprovedRequest(entry)) {
                         forwarded++;
                     } else {
                         brc121_entries++;
@@ -4327,7 +4310,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 if (!drained.empty()) {
                     LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
                                       + " pending request(s) for " + domain + " after approval ("
-                                      + std::to_string(forwarded) + " forwarded, "
+                                      + std::to_string(forwarded) + " resumed, "
                                       + std::to_string(brc121_entries) + " BRC-121)");
                 }
 
@@ -4376,14 +4359,16 @@ bool SimpleHandler::OnProcessMessageReceived(
                     rateLimitPerMin, maxTxPerSession, identityKeyDisclosureAllowed);
 
                 // Drain pending entries (see add_domain_permission for full rationale).
-                // Real-handler entries forward via startAsyncHTTPRequest so the page's
-                // pending promise resolves; nullptr-handler (BRC-121) entries are
-                // handled by TriggerPendingBrc121Reloads below.
+                // Phase 2.6-C.5 fix: ResumeDrainedApprovedRequest dispatches
+                // per resumeKind so HTTP, IPC, and kInternal entries all
+                // resume (the legacy code path only handled HTTP entries with
+                // ForwardPendingWalletRequest and silently dropped the rest).
                 auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
                 int forwarded = 0;
                 int brc121_entries = 0;
+                extern bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req);
                 for (auto& entry : drained) {
-                    if (ForwardPendingWalletRequest(entry.handler)) {
+                    if (ResumeDrainedApprovedRequest(entry)) {
                         forwarded++;
                     } else {
                         brc121_entries++;
@@ -4392,7 +4377,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 if (!drained.empty()) {
                     LOG_DEBUG_BROWSER("🔐 Drained " + std::to_string(drained.size())
                                       + " pending request(s) for " + domain + " after advanced-approval ("
-                                      + std::to_string(forwarded) + " forwarded, "
+                                      + std::to_string(forwarded) + " resumed, "
                                       + std::to_string(brc121_entries) + " BRC-121)");
                 }
 

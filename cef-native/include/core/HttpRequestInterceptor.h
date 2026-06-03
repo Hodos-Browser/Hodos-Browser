@@ -262,6 +262,18 @@ std::string OpenPromptModal(const std::string& promptType,
                             const ResumeContext& resume,
                             const std::string& extraParams = "");
 
+// Phase 2.6-C.5 fix — resume a pending request that was drained by
+// `popAllForDomain` after a domain_approval Approve, dispatching to the
+// matching resume function based on `resumeKind`. Used by simple_handler's
+// add_domain_permission handler to re-issue IPC + kInternal pending entries
+// that were previously silently dropped (only the kHttpCallback path was
+// handled via ForwardPendingWalletRequest). Returns true if a resume function
+// fired; false if the entry shape was unrecognized (e.g. BRC-121 entries with
+// an http:// endpoint, which are handled separately via
+// TriggerPendingBrc121Reloads).
+struct PendingAuthRequest;  // forward decl; full type in core/PendingAuthRequest.h
+bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req);
+
 // ============================================================================
 // Phase 2.5 Commit 6 sub-step 6.d — IPC path support helpers
 // ============================================================================

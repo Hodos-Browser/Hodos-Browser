@@ -1185,6 +1185,15 @@ static hodos::PermissionCallKind classifyCallKind(
     }
 
     // Scoped grants — order: counterparty (more specific) before protocol.
+    //
+    // Phase 2.6-C.5 fix: BRC-43 SecurityLevel 0 means "no permission needed"
+    // (the protocol is always-available, no gate). Short-circuit to
+    // GenericApproved so the engine returns Silent rather than firing a
+    // protocol_permission_prompt for a level the spec says is open. Resolves
+    // the "Level 0 modal" carry-forward issue tracked in the 2.6-C kickoff
+    // memory. Counterparty-bound level-0 protocols also short-circuit —
+    // counterparty scoping is independent of the level/permission gate.
+    if (proto.valid && proto.level == 0) return K::GenericApproved;
     if (proto.valid && !proto.counterparty.empty()) return K::CounterpartyUse;
     if (proto.valid) return K::ProtocolUse;
     if (basket.valid) return K::BasketAccess;
@@ -3671,6 +3680,33 @@ void clearDomainPermissionCache() {
 // save, etc.). Dropping all session-scoped trust on the invalidate edge is
 // the right default — the user just touched this domain's permissions, so
 // any prior session-only opt-in should be re-confirmed.
+// Phase 2.6-C.5 fix — drained-pending resume helper. Routes per resumeKind:
+//   kHttpCallback → ForwardPendingWalletRequest (existing path through
+//                   StartAsyncHTTPRequestTask + Open() re-run; Open() now
+//                   sees the freshly-approved trust_level and falls through
+//                   to the catch-all forward).
+//   kIpcResponse  → resumeIpcResponse with a synthetic "approved" envelope.
+//                   The function ignores the envelope on non-error and
+//                   re-issues via SyncHttpClient::Post with X-Requesting-Domain.
+//   kInternal     → resumeInternalResponse, same pattern.
+// Returns false for entries whose shape doesn't match any resume path —
+// caller treats those as BRC-121 (TriggerPendingBrc121Reloads handles them).
+bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req) {
+    static constexpr const char* kApprovedStub = "{\"status\":\"approved\"}";
+    if (req.handler && req.resumeKind == ResumeKind::kHttpCallback) {
+        return ForwardPendingWalletRequest(req.handler);
+    }
+    if (req.resumeKind == ResumeKind::kIpcResponse && req.frame) {
+        resumeIpcResponse(req, kApprovedStub);
+        return true;
+    }
+    if (req.resumeKind == ResumeKind::kInternal && (req.handler || req.frame)) {
+        resumeInternalResponse(req, kApprovedStub);
+        return true;
+    }
+    return false;
+}
+
 void revokeIdentityKeyApprovalForDomain(const std::string& domain) {
     IdentityKeyApprovalCache::GetInstance().revoke(domain);
     // Phase 2.6-C.4 follow-up — also clear the Rust session cache. Same
@@ -4030,6 +4066,112 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
        handler, frame, browserId));
 }
 
+// Phase 2.6-C.5 fix — kHttpCallback resume after modal resolution. Mirrors
+// resumeIpcResponse but delivers the wallet response to the original
+// resource handler instead of via wallet_response IPC. Replaces the legacy
+// AuthResponseHandler URLRequest in simple_handler.cpp's brc100_auth_response
+// dispatcher (which was returning status=UR_SUCCESS with empty bodies in
+// CEF 136, leaving HTTP-path pages stuck waiting for ReadResponse).
+//
+// On user Deny (responseData contains "error"): deliver the error envelope
+// verbatim to the resource handler; no wallet call is made.
+// On user Approve: post to TID_FILE_USER_BLOCKING worker; inject
+// headersOnApprove (legacy X-Identity-Key-Approved / X-Key-Linkage-Approved
+// kept here for kHttpCallback path — those header injections were the
+// pre-C.2 fast-path; Rust ignores them post-C.2 but the inline cascade may
+// still set them via openIdentityKeyRevealModal et al.); SyncHttpClient::Post;
+// hop back to TID_UI for OnWalletCallSuccess (if payment) +
+// walletHandler->onAuthResponseReceived. The resource handler's atomic
+// httpCompleted_ claim guards against double-delivery.
+static void resumeHttpCallbackResponse(const PendingAuthRequest& req,
+                                       const std::string& responseData) {
+    if (!req.handler) {
+        LOG_DEBUG_HTTP("resumeHttpCallbackResponse: no handler for requestId " + req.requestId);
+        return;
+    }
+
+    bool isRejection = false;
+    try {
+        auto parsed = nlohmann::json::parse(responseData);
+        isRejection = parsed.contains("error");
+    } catch (...) {}
+
+    if (isRejection) {
+        LOG_DEBUG_HTTP("🔐 HTTP-callback resume: deny for " + req.requestId
+                       + " endpoint=" + req.endpoint);
+        auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(req.handler.get());
+        if (walletHandler) walletHandler->onAuthResponseReceived(responseData);
+        return;
+    }
+
+    LOG_DEBUG_HTTP("🔐 HTTP-callback resume: approve for " + req.requestId
+                   + " endpoint=" + req.endpoint
+                   + " injectedHeaders=" + std::to_string(req.headersOnApprove.size()));
+
+    std::string requestId = req.requestId;
+    std::string domain = req.domain;
+    std::string endpoint = req.endpoint;
+    std::string body = req.body;
+    std::string httpMethod = req.httpMethod.empty() ? req.method : req.httpMethod;
+    if (httpMethod.empty()) httpMethod = "POST";
+    std::map<std::string, std::string> headersOnApprove = req.headersOnApprove;
+    CefRefPtr<CefResourceHandler> handler = req.handler;
+
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string requestId, std::string domain, std::string endpoint,
+        std::string body, std::string httpMethod,
+        std::map<std::string, std::string> headersOnApprove,
+        CefRefPtr<CefResourceHandler> handler
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
+        for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
+
+        std::string url = "http://127.0.0.1:31301" + endpoint;
+        HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
+        bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
+        std::string payload = buildIpcResponsePayload(resp, ok);
+
+        // Payment indicator: same derivation as resumeIpcResponse. The
+        // handler's pre-calculated cents may be stale (price moved between
+        // modal-open and modal-approve), so re-extract here.
+        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
+        int64_t cents = 0;
+        if (isPaymentKind) {
+            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
+            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+            if (bsvPrice > 0 && satoshis > 0) {
+                cents = static_cast<int64_t>(
+                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+            }
+        }
+        bool isErrorInResponse = false;
+        if (ok && isPaymentKind) {
+            try {
+                auto rj = nlohmann::json::parse(payload);
+                isErrorInResponse = rj.contains("error");
+            } catch (...) {}
+        }
+        const bool wasAutoApprovedPayment =
+            ok && isPaymentKind && !isErrorInResponse;
+
+        CefPostTask(TID_UI, base::BindOnce([](
+            std::string payload, CefRefPtr<CefResourceHandler> handler,
+            std::string domain, std::string endpoint, int64_t cents,
+            bool wasAutoApprovedPayment
+        ) {
+            auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(handler.get());
+            if (!walletHandler) return;
+            if (wasAutoApprovedPayment) {
+                OnWalletCallSuccess(walletHandler->getBrowserId(), domain,
+                                    cents, true, endpoint);
+            }
+            walletHandler->onAuthResponseReceived(payload);
+        }, payload, handler, domain, endpoint, cents, wasAutoApprovedPayment));
+    }, requestId, domain, endpoint, body, httpMethod, headersOnApprove, handler));
+}
+
 // Function to handle auth response and send it back to the original request
 // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC-path resume after modal resolution.
 // Mirror of the HTTP-path resume but ending in wallet_response IPC instead
@@ -4146,11 +4288,20 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
     PendingAuthRequest req;
     if (PendingRequestManager::GetInstance().popRequest(requestId, req)) {
         domain = req.domain;
-        if (req.handler) {
-            LOG_DEBUG_HTTP("🔐 Found pending auth request for domain: " + req.domain);
-            AsyncWalletResourceHandler* walletHandler = static_cast<AsyncWalletResourceHandler*>(req.handler.get());
+        if (req.handler && req.resumeKind == ResumeKind::kHttpCallback) {
+            // Phase 2.6-C.5 fix — HTTP-path resume now mirrors the IPC path:
+            // re-issue the wallet call via SyncHttpClient::Post on a worker
+            // thread, then deliver the response to the resource handler.
+            // The legacy AuthResponseHandler URLRequest in simple_handler.cpp
+            // was unreliable under CEF 136 (status=UR_SUCCESS with empty
+            // bodies — see resumeHttpCallbackResponse docstring).
+            LOG_DEBUG_HTTP("🔐 Found pending HTTP auth request for domain: " + req.domain);
+            // Record spending for user-approved payment confirmations BEFORE
+            // re-issue. Matches pre-fix behavior where this fired on the
+            // way out of handleAuthResponse.
+            AsyncWalletResourceHandler* walletHandler =
+                static_cast<AsyncWalletResourceHandler*>(req.handler.get());
             if (walletHandler) {
-                // Record spending for user-approved payment confirmations
                 int64_t cents = walletHandler->getPreCalculatedCents();
                 if (cents > 0) {
                     bool respIsError = false;
@@ -4161,12 +4312,13 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
                     if (!respIsError) {
                         int browserId = walletHandler->getBrowserId();
                         SessionManager::GetInstance().recordSpending(browserId, cents);
-                        LOG_DEBUG_HTTP("💰 Recorded user-approved spending: " + std::to_string(cents) + " cents for browser " + std::to_string(browserId));
+                        LOG_DEBUG_HTTP("💰 Recorded user-approved spending: "
+                            + std::to_string(cents) + " cents for browser "
+                            + std::to_string(browserId));
                     }
                 }
-                walletHandler->onAuthResponseReceived(responseData);
-                LOG_DEBUG_HTTP("🔐 Auth response sent to original HTTP request");
             }
+            resumeHttpCallbackResponse(req, responseData);
         } else if (req.resumeKind == ResumeKind::kIpcResponse) {
             // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC resume branch.
             // HTTP path's branch above is unchanged; IPC requests (no
@@ -4220,18 +4372,26 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
                            (isRejection ? " (rejected)" : " (approved)"));
         }
         for (auto& sibling : siblings) {
-            if (sibling.handler) {
-                AsyncWalletResourceHandler* walletHandler = static_cast<AsyncWalletResourceHandler*>(sibling.handler.get());
-                if (walletHandler) {
-                    if (isRejection) {
-                        // Rejection: send error to all queued siblings (don't forward to Rust)
-                        walletHandler->onAuthResponseReceived(responseData);
-                        LOG_DEBUG_HTTP("🔐 Sent rejection to queued request " + sibling.requestId + " for " + sibling.endpoint);
-                    } else {
-                        // Approval: forward siblings to Rust backend
-                        CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(walletHandler));
-                        LOG_DEBUG_HTTP("🔐 Forwarded queued request " + sibling.requestId + " for " + sibling.endpoint);
-                    }
+            if (sibling.handler && sibling.resumeKind == ResumeKind::kHttpCallback) {
+                // Phase 2.6-C.5 fix — sibling HTTP resume goes through the
+                // same SyncHttpClient-based re-fetch as the primary. The old
+                // StartAsyncHTTPRequestTask path went through
+                // AsyncWalletResourceHandler::Open() which would re-run the
+                // engine cascade (now mostly gone post-C.4) and could in
+                // principle return another 202 — which would have driven
+                // C.3's intercept path. resumeHttpCallbackResponse keeps the
+                // behavior consistent with the primary path: re-fetch via
+                // SyncHttpClient + deliver to the resource handler.
+                if (isRejection) {
+                    auto* walletHandler =
+                        static_cast<AsyncWalletResourceHandler*>(sibling.handler.get());
+                    if (walletHandler) walletHandler->onAuthResponseReceived(responseData);
+                    LOG_DEBUG_HTTP("🔐 Sent rejection to queued HTTP request "
+                                   + sibling.requestId + " for " + sibling.endpoint);
+                } else {
+                    LOG_DEBUG_HTTP("🔐 HTTP-callback resume for queued sibling "
+                                   + sibling.requestId + " endpoint=" + sibling.endpoint);
+                    resumeHttpCallbackResponse(sibling, responseData);
                 }
             } else if (sibling.resumeKind == ResumeKind::kIpcResponse) {
                 // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC sibling resume.
