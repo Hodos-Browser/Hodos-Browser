@@ -1,5 +1,10 @@
 # Browser Extensions Research
 
+> ⚠️ **UNTRUSTED — VERIFY EVERY CLAIM AGAINST PRIMARY SOURCE.** These docs predate the 0.4.0
+> planning session and have not been fact-checked. Treat all assertions (APIs, CEF capabilities,
+> security models, implementation steps) as unverified leads, not ground truth. This is B4
+> background only; the authoritative item doc is `../B4-extensions.md`. Relocated here 2026-06-01.
+
 Research, planning, and security documentation for browser extension support in Hodos.
 
 ## Documents

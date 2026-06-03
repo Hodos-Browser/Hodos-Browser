@@ -3,7 +3,7 @@
 **Status:** RESEARCH (per `marketing/intelligence/FEATURE_PRIORITY.md`)
 **Effort:** L (per `marketing/intelligence/EFFORT_MATRIX.md#oauth-connected-personal-data-agent`)
 **First logged:** 2026-05-11
-**Parent direction:** Builds on `DOLPHIN_MILK_INTEGRATION.md` — same agent runtime, different capability surface.
+**Parent direction:** Builds on `../Dolphin Milk + Edwin Integration/DOLPHIN_MILK_INTEGRATION.md` — same agent runtime, different capability surface.
 
 ---
 
@@ -186,7 +186,7 @@ The "AI does things to your accounts" pattern can go wrong fast if it's not tran
 
 ### 4. Wallet API compatibility (carried over from Dolphin Milk doc)
 
-This feature depends on `DOLPHIN_MILK_INTEGRATION.md` actually shipping — the agent runtime needs to be in-browser before OAuth tools can be added to it. The wallet-API-compat audit between Hodos's BRC-100 wallet and Dolphin Milk's expected `bsv-wallet-cli` surface remains the blocking dependency.
+This feature depends on `../Dolphin Milk + Edwin Integration/DOLPHIN_MILK_INTEGRATION.md` actually shipping — the agent runtime needs to be in-browser before OAuth tools can be added to it. The wallet-API-compat audit between Hodos's BRC-100 wallet and Dolphin Milk's expected `bsv-wallet-cli` surface remains the blocking dependency.
 
 ### 5. Reply considerations — should we reply to Bridget's post?
 
@@ -212,7 +212,7 @@ This is a design question to resolve before commitment.
 
 | Depends on | Why |
 |---|---|
-| `DOLPHIN_MILK_INTEGRATION.md` | Agent runtime must be in-browser before we can plug OAuth tools into it |
+| `../Dolphin Milk + Edwin Integration/DOLPHIN_MILK_INTEGRATION.md` | Agent runtime must be in-browser before we can plug OAuth tools into it |
 | Wallet backup compatibility | OAuth refresh tokens need to round-trip through `backup.rs` (similar to local-only `paid_url` field pattern) |
 | Existing `crypto/brc2.rs` BRC-2 encryption | Reused for refresh-token encryption at rest |
 | Existing CEF browser auth UI patterns | OAuth consent screen handling, redirect URL interception |
@@ -231,7 +231,7 @@ This is a design question to resolve before commitment.
 
 - `marketing/profiles/bsv/hbgnostic.md` — Bridget Doran profile (the demand signal)
 - `marketing/profiles/bsv/ruthheasman.md` — Ruth Heasman profile (the "must try this" reply)
-- `development-docs/Possible-MVP-Features/DOLPHIN_MILK_INTEGRATION.md` — parent feature; this depends on it
+- `development-docs/Dolphin Milk + Edwin Integration/DOLPHIN_MILK_INTEGRATION.md` — parent feature; this depends on it
 - `marketing/intelligence/FEATURE_PRIORITY.md` — bucket assignment
 - `marketing/intelligence/EFFORT_MATRIX.md#oauth-connected-personal-data-agent` — full effort scoring
 - `marketing/intelligence/ECOSYSTEM_PULSE.md` — week-of-2026-05-11 entry with the YT reorg signal

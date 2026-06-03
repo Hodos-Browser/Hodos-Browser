@@ -1,10 +1,10 @@
-# HeliOps Audit Brief — Hodos Browser
+# HelicOps Audit Brief — Hodos Browser
 
-> A scoped introduction to this repo for the HeliOps review team.
+> A scoped introduction to this repo for the HelicOps review team.
 
 ## 1. Intro — why we're sending this to you
 
-Hi HeliOps team,
+Hi HelicOps team,
 
 We met at a local tech meetup recently and talked about your code-review / audit product. Thanks for agreeing to look at this repo — this document is meant to orient your auditors to the stack, set clear scope, and flag where off-the-shelf rulesets land well vs. where the BSV / BRC-100 surface has no established rules.
 
@@ -319,7 +319,7 @@ This is probably the most interesting section for your product, so we've been mo
 - Our own BRC research files: `archived-docs/BRC*.md` — your auditors may find these useful as a starting point, with the §1 caveat about doc freshness
 - Alternate-implementation cross-references: BSV Desktop SDK (ts-sdk), MetaNet Desktop client
 
-**Honest observation for your product team.** There is no consolidated public ruleset for the BRC family today — implementations are scattered across TS / Go / Rust SDKs. If HeliOps builds even a modest ruleset for BRC-42/43/52/100/29/2/103, that is market-differentiating work. We're genuinely interested in whether that's something your product is positioned to do.
+**Honest observation for your product team.** There is no consolidated public ruleset for the BRC family today — implementations are scattered across TS / Go / Rust SDKs. If HelicOps builds even a modest ruleset for BRC-42/43/52/100/29/2/103, that is market-differentiating work. We're genuinely interested in whether that's something your product is positioned to do.
 
 ---
 
@@ -357,7 +357,7 @@ Prereqs and detailed setup:
 
 We'd like findings filed as **GitHub issues on this repo** — one issue per finding, not a single mega-report. Suggested conventions:
 
-- Label: `audit/heliops`
+- Label: `audit/helicops`
 - Severity tag in the title: `[critical]`, `[high]`, `[medium]`, `[low]`, `[informational]`
 - File + line references (e.g. `rust-wallet/src/handlers.rs:4484`)
 - Reproduction steps or a pointer to the code path when applicable

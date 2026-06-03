@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Hodos 5.b Smoke — Payment Gate</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 18px; }
+    button { font: inherit; padding: 10px 16px; margin: 6px 0; cursor: pointer; }
+    pre { background: #f4f4f4; padding: 12px; overflow: auto; max-height: 320px; }
+    .ok { color: #185c2b; }
+    .err { color: #a4321a; }
+    .row { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
+    .row > div:first-child { font-weight: 600; min-width: 140px; }
+  </style>
+</head>
+<body>
+  <h1>Hodos 5.b — Payment branch smoke</h1>
+  <p>This page exercises <code>window.CWI.createAction</code> on the
+     <code>hodos-test.local</code> origin so the C++ payment gate path
+     (<code>AsyncWalletResourceHandler::Open()</code> → <code>RunPermissionGate</code>) fires.</p>
+
+  <p>Prerequisites (one-time):</p>
+  <ol>
+    <li>Hosts entry: <code>127.0.0.1 hodos-test.local</code> in <code>C:\Windows\System32\drivers\etc\hosts</code></li>
+    <li>Static server: <code>python -m http.server 8000 --bind 127.0.0.1</code> from this dir</li>
+    <li>Open <code>http://hodos-test.local:8000/payment.html</code> in Hodos</li>
+    <li>Approve the domain when the first modal fires (Always Allow)</li>
+    <li>Set the per-tx limit to <strong>1000 cents</strong> in the domain permission row
+        so the over-cap test below fires the modal</li>
+  </ol>
+
+  <div class="row">
+    <div>Test recipient:</div>
+    <input id="recipient" value="" style="flex:1; padding:6px;" placeholder="bsv address (paste from wallet)">
+  </div>
+
+  <div class="row">
+    <div>Low payment (silent):</div>
+    <button id="btn-low">createAction 100 sats</button>
+  </div>
+  <div class="row">
+    <div>High payment (modal):</div>
+    <button id="btn-high">createAction 50,000,000 sats</button>
+  </div>
+
+  <h2>Expected behavior</h2>
+  <ul>
+    <li><strong>Low payment</strong>: NO modal, response within seconds, <strong>green-dot animation on the tab</strong>. Verify the tab badge.</li>
+    <li><strong>High payment</strong>: <code>payment_confirmation</code> modal fires; click Approve; response arrives; green-dot animation fires (same chain).</li>
+    <li>Hodos log file <code>cef-native/build/bin/Release/debug_output.log</code> shows <code>💰 Payment engine decision: Silent</code> for low + <code>💰 Payment engine decision: Prompt</code> for high.</li>
+  </ul>
+
+  <h2>Response</h2>
+  <pre id="out">(no calls yet)</pre>
+
+<script>
+  const out = document.getElementById('out');
+  const recip = document.getElementById('recipient');
+
+  function log(label, payload, error) {
+    const ts = new Date().toLocaleTimeString();
+    const tag = error ? 'err' : 'ok';
+    const body = JSON.stringify(payload, null, 2);
+    out.innerHTML = `<div class="${tag}">[${ts}] ${label}</div>` + body + '\n\n' + out.innerHTML;
+  }
+
+  function makeOutputs(sats) {
+    if (!recip.value) {
+      throw new Error('Paste a recipient bsv address first');
+    }
+    return [{
+      satoshis: sats,
+      lockingScript: '',  // wallet derives P2PKH from address-to-script for canonical createAction
+      outputDescription: 'Hodos 5.b smoke payment'
+    }];
+  }
+
+  document.getElementById('btn-low').onclick = async () => {
+    try {
+      const result = await window.CWI.createAction({
+        description: '5.b smoke — low payment',
+        outputs: [{
+          satoshis: 100,
+          lockingScript: '',
+          outputDescription: 'low'
+        }]
+      });
+      log('Low payment OK', result);
+    } catch (e) {
+      log('Low payment FAILED', { error: e.message, status: e.status, code: e.code }, true);
+    }
+  };
+
+  document.getElementById('btn-high').onclick = async () => {
+    try {
+      const result = await window.CWI.createAction({
+        description: '5.b smoke — high payment',
+        outputs: [{
+          satoshis: 50000000,
+          lockingScript: '',
+          outputDescription: 'high'
+        }]
+      });
+      log('High payment OK', result);
+    } catch (e) {
+      log('High payment FAILED', { error: e.message, status: e.status, code: e.code }, true);
+    }
+  };
+</script>
+</body>
+</html>
