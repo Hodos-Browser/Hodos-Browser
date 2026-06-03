@@ -2709,48 +2709,16 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     if (perm.trustLevel == "approved") {
         LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is approved, checking spending limits");
 
-        // ====================================================================
-        // Phase 1.5 Step 6 — Commit A: shadow-mode PermissionEngine logging.
-        // ====================================================================
-        // The engine runs alongside the inline gates and logs its decision so
-        // we can verify agreement before any branch is migrated. Behavior is
-        // unchanged — only logging. Inline gates below stay in full control.
-        //
-        // For Payment kind we precompute satoshis/cents so the engine sees the
-        // same input the inline gates will. For non-Payment kinds requestedCents
-        // stays 0; the engine ignores it for those branches.
-        {
-            const int browserIdShadow = browser_ ? browser_->GetIdentifier() : 0;
-            int64_t shadowRequestedCents = 0;
-            if (isPaymentEndpoint(endpoint_)) {
-                const int64_t shadowSats = extractOutputSatoshis(body_);
-                const double shadowPrice = BSVPriceCache::GetInstance().getPrice();
-                if (shadowPrice > 0 && shadowSats > 0) {
-                    shadowRequestedCents = static_cast<int64_t>(
-                        (static_cast<double>(shadowSats) / 100000000.0) * shadowPrice * 100.0);
-                }
-            }
-            const int64_t shadowSessionSpent =
-                SessionManager::GetInstance().getSpentCents(browserIdShadow, requestDomain_);
-            const int shadowRateCount =
-                SessionManager::GetInstance().getRateCounter(browserIdShadow, requestDomain_);
-            const int shadowPayCount =
-                SessionManager::GetInstance().getPaymentCount(browserIdShadow, requestDomain_);
-
-            hodos::PermissionContext shadowCtx = buildPermissionContext(
-                requestDomain_, endpoint_, body_, perm,
-                shadowRequestedCents, shadowSessionSpent,
-                shadowRateCount, shadowPayCount);
-            hodos::PermissionDecision shadowDecision =
-                hodos::PermissionEngine::Decide(shadowCtx);
-
-            LOG_INFO_HTTP(std::string("🧪 [engine-shadow] domain=") + requestDomain_
-                + " endpoint=" + endpoint_
-                + " callKind=" + callKindToString(shadowCtx.callKind)
-                + " engineDecision=" + decisionKindToString(shadowDecision.kind)
-                + " promptType=" + shadowDecision.promptType
-                + " reason=" + shadowDecision.reason);
-        }
+        // Phase 2.6-B.5 (2026-06-03): the Phase 1.5 Step 6 Commit A in-process
+        // engine-shadow log that lived here (a payment-branch-only
+        // PermissionEngine::Decide() called for logging side-effects) has been
+        // deleted. The full-coverage replacement is the Rust-side shadow log
+        // — every RunPermissionGate site (1 IPC + 5 HTTP) now calls
+        // hodos::SubmitShadowComparison(ctx, gateResult) which fire-and-forgets
+        // a POST to /engine/shadow-decide. The Rust handler logs both sides of
+        // the comparison to the engine_shadow_log SQLite table. See
+        // PHASE_2_6_ENGINE_TO_RUST.md §LD5. Lifecycle: Rust-side shadow
+        // infrastructure deleted together in 2.6-H final cleanup.
 
         // Phase 2.5-B sub-step 5.c — identity-key reveal gate now flows
         // through the shared RunPermissionGate helper. Behavior is identical
