@@ -227,6 +227,13 @@ struct ResumeContext {
     // When false (default), resumeKind continues to be selected from
     // handler/frame presence per Phase 2.5 Commit 6 semantics.
     bool isInternalResume = false;
+
+    // Phase 2.6-C.5 fix — for IPC paths, the page-supplied requestId from the
+    // original `wallet_call` IPC. buildPendingAuthRequest propagates this into
+    // PendingAuthRequest::originalIpcRequestId so resumeIpcResponse +
+    // resumeInternalResponse can send wallet_response back with the id the
+    // page's CWI-shim promise is waiting on. Empty for HTTP paths.
+    std::string originalIpcRequestId;
 };
 
 // Modal openers, one per gate type. Each enrolls the PendingAuthRequest and

@@ -1547,6 +1547,7 @@ static PendingAuthRequest buildPendingAuthRequest(
     req.browserId = resume.browserId;
     req.headersOnApprove = resume.headersOnApprove;
     req.httpMethod = resume.httpMethod;
+    req.originalIpcRequestId = resume.originalIpcRequestId;
     return req;
 }
 
@@ -2340,7 +2341,7 @@ void runIpcCallDirect(const std::string& requestId,
 // Unknown-trust path — fetch manifest on a worker thread, then dispatch the
 // appropriate modal on the UI thread (manifest_connect_bundle if declared
 // permissions exist; domain_approval fallback). Mirrors Open()'s L1923-1971.
-void handleIpcUnknownTrust(const std::string& /*requestId*/,
+void handleIpcUnknownTrust(const std::string& requestId,
                             const std::string& methodName,
                             const std::string& endpoint,
                             const std::string& bodyJson,
@@ -2349,7 +2350,7 @@ void handleIpcUnknownTrust(const std::string& /*requestId*/,
                             CefRefPtr<CefFrame> capturedFrame,
                             int browserId) {
     CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
-        std::string methodName, std::string endpoint,
+        std::string requestId, std::string methodName, std::string endpoint,
         std::string bodyJson, std::string httpMethod, std::string origin,
         CefRefPtr<CefFrame> capturedFrame, int browserId
     ) {
@@ -2362,8 +2363,8 @@ void handleIpcUnknownTrust(const std::string& /*requestId*/,
                 || manifest.spending.perTransactionUsd > 0);
 
         CefPostTask(TID_UI, base::BindOnce([](
-            std::string methodName, std::string endpoint, std::string bodyJson,
-            std::string httpMethod, std::string origin,
+            std::string requestId, std::string methodName, std::string endpoint,
+            std::string bodyJson, std::string httpMethod, std::string origin,
             CefRefPtr<CefFrame> capturedFrame, int browserId,
             hodos::Manifest manifest, bool hasDeclaredPerms
         ) {
@@ -2372,6 +2373,10 @@ void handleIpcUnknownTrust(const std::string& /*requestId*/,
             resume.frame = capturedFrame;
             resume.browserId = browserId;
             resume.httpMethod = httpMethod;
+            // Phase 2.6-C.5 fix — propagate page-supplied IPC requestId so
+            // resumeIpcResponse delivers wallet_response with the id the
+            // page's CWI shim is waiting on.
+            resume.originalIpcRequestId = requestId;
 
             std::string newRequestId;
             if (hasDeclaredPerms) {
@@ -2388,9 +2393,9 @@ void handleIpcUnknownTrust(const std::string& /*requestId*/,
                     "{\"error\":\"Approval timeout\",\"status\":\"error\"}",
                     kPromptAuthTimeoutMs);
             }
-        }, methodName, endpoint, bodyJson, httpMethod, origin,
+        }, requestId, methodName, endpoint, bodyJson, httpMethod, origin,
            capturedFrame, browserId, manifest, hasDeclaredPerms));
-    }, methodName, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId));
+    }, requestId, methodName, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId));
 }
 
 // Approved-trust path — build PermissionContext + run RunPermissionGate
@@ -2492,6 +2497,10 @@ void runIpcEngineCascade(const std::string& requestId,
                     resume.frame = capturedFrame;
                     resume.browserId = browserId;
                     resume.httpMethod = httpMethod;
+                    // Phase 2.6-C.5 fix — propagate page-supplied IPC requestId
+                    // so resumeInternalResponse delivers wallet_response with
+                    // the id the page's CWI shim is waiting on.
+                    resume.originalIpcRequestId = requestId;
                     if (!tryHandlePendingResponse(202, responseBody, modalCtx, resume)) {
                         LOG_WARNING_HTTP("🛡️ IPC privacy-perimeter 202 from Rust failed envelope handling — forwarding raw body");
                         sendWalletResponseIpc(capturedFrame, requestId, true, responseBody);
@@ -2575,6 +2584,8 @@ void runIpcEngineCascade(const std::string& requestId,
                     resume.frame = capturedFrame;
                     resume.browserId = browserId;
                     resume.httpMethod = httpMethod;
+                    // Phase 2.6-C.5 fix — see C.4 early-return for rationale.
+                    resume.originalIpcRequestId = requestId;
                     if (!tryHandlePendingResponse(202, responseBody, modalCtx, resume)) {
                         LOG_WARNING_HTTP("🛡️ IPC 202 from Rust failed envelope handling — forwarding raw body");
                         sendWalletResponseIpc(capturedFrame, requestId, true, responseBody);
@@ -2626,7 +2637,7 @@ void runIpcEngineCascade(const std::string& requestId,
     // Prompt path — enroll IPC-flavored PendingAuthRequest (via the matching
     // opener), arm IPC-side timeout.
     cb.openModal =
-        [methodName, endpoint, bodyJson, httpMethod, origin,
+        [requestId, methodName, endpoint, bodyJson, httpMethod, origin,
          capturedFrame, browserId, perm, isPaymentKind, satoshis, cents, bsvPrice,
          priceAvailable, sessionSpent, rateCount, txCount, certInfo, certValid](
             const std::string& promptType, const std::string& /*engineExtraParams*/) {
@@ -2636,6 +2647,12 @@ void runIpcEngineCascade(const std::string& requestId,
         modalResume.frame = capturedFrame;
         modalResume.browserId = browserId;
         modalResume.httpMethod = httpMethod;
+        // Phase 2.6-C.5 fix — propagate page-supplied IPC requestId so
+        // resumeIpcResponse delivers wallet_response back with the id the
+        // page's CWI shim is waiting on. Pre-fix the resume sent back the
+        // C++-generated PendingRequestManager id which the shim ignored,
+        // leaving the page promise unresolved.
+        modalResume.originalIpcRequestId = requestId;
         if (promptType == "identity_key_reveal") {
             modalResume.headersOnApprove["X-Identity-Key-Approved"] = "true";
         } else if (promptType == "key_linkage_reveal") {
@@ -3980,7 +3997,11 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
             auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(req.handler.get());
             if (walletHandler) walletHandler->onAuthResponseReceived(responseData);
         } else if (req.frame) {
-            sendWalletResponseIpc(req.frame, req.requestId, false, responseData);
+            // Phase 2.6-C.5 fix — use page-supplied IPC requestId so the
+            // CWI shim's promise (keyed by that id) actually resolves.
+            const std::string& ipcId = !req.originalIpcRequestId.empty()
+                ? req.originalIpcRequestId : req.requestId;
+            sendWalletResponseIpc(req.frame, ipcId, false, responseData);
         }
         return;
     }
@@ -3989,7 +4010,8 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
                    + " endpoint=" + req.endpoint
                    + " injectedHeaders=" + std::to_string(req.headersOnApprove.size()));
 
-    std::string requestId = req.requestId;
+    std::string requestId = !req.originalIpcRequestId.empty()
+        ? req.originalIpcRequestId : req.requestId;
     std::string domain = req.domain;
     std::string endpoint = req.endpoint;
     std::string body = req.body;
@@ -4205,22 +4227,32 @@ static void resumeIpcResponse(const PendingAuthRequest& req,
         isRejection = parsed.contains("error");
     } catch (...) {}
 
+    // Phase 2.6-C.5 fix — use page-supplied IPC requestId (the one the CWI
+    // shim is waiting on) for sendWalletResponseIpc. Fall back to the C++
+    // internal id for entries enrolled before this field was threaded
+    // through (defense-in-depth — pre-fix entries that survive into a
+    // post-fix process would otherwise have an empty id).
+    const std::string ipcId = !req.originalIpcRequestId.empty()
+        ? req.originalIpcRequestId : req.requestId;
+
     if (isRejection) {
         // User Denied — surface the error envelope directly. No wallet call.
         LOG_DEBUG_HTTP("🔐 IPC resume: deny for " + req.requestId
-                       + " endpoint=" + req.endpoint);
-        sendWalletResponseIpc(req.frame, req.requestId, false, responseData);
+                       + " endpoint=" + req.endpoint
+                       + " (ipcId=" + ipcId + ")");
+        sendWalletResponseIpc(req.frame, ipcId, false, responseData);
         return;
     }
 
     // User Approved — re-issue the wallet call with headersOnApprove injected.
     LOG_DEBUG_HTTP("🔐 IPC resume: approve for " + req.requestId
                    + " endpoint=" + req.endpoint
-                   + " injectedHeaders=" + std::to_string(req.headersOnApprove.size()));
+                   + " injectedHeaders=" + std::to_string(req.headersOnApprove.size())
+                   + " (ipcId=" + ipcId + ")");
 
     // Capture all needed state by-value into the worker lambda. req is by
     // const ref here so we copy the fields we need.
-    std::string requestId = req.requestId;
+    std::string requestId = ipcId;
     std::string domain = req.domain;
     std::string endpoint = req.endpoint;
     std::string body = req.body;

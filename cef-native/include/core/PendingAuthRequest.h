@@ -44,6 +44,16 @@ struct PendingAuthRequest {
     int browserId = 0;                                    // valid iff resumeKind == kIpcResponse
     std::map<std::string, std::string> headersOnApprove;  // injected by handleAuthResponse on Approve
     std::string httpMethod = "POST";                      // for IPC re-issue ("GET"/"POST"/"DELETE"/"PUT"/"PATCH")
+
+    // Phase 2.6-C.5 fix — page-supplied requestId from the original wallet_call
+    // IPC message. The CWI shim (and other wallet shims) register a JS-side
+    // promise callback keyed by this id; on resume, sendWalletResponseIpc MUST
+    // use this id rather than the C++-generated `requestId` field above, or
+    // the page's promise never resolves and the page hangs. Empty when the
+    // entry was enrolled via the HTTP path (kHttpCallback) where there is no
+    // page-side IPC promise — the resource handler delivers the response
+    // directly through CEF's URLRequest pipeline.
+    std::string originalIpcRequestId;
 };
 
 class PendingRequestManager {
