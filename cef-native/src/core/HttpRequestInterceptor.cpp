@@ -3691,6 +3691,13 @@ void clearDomainPermissionCache() {
 //   kInternal     → resumeInternalResponse, same pattern.
 // Returns false for entries whose shape doesn't match any resume path —
 // caller treats those as BRC-121 (TriggerPendingBrc121Reloads handles them).
+//
+// Forward declarations: resumeIpcResponse + resumeInternalResponse are
+// defined later in the file (~L4161 and ~L3934 respectively) but used here.
+static void resumeIpcResponse(const PendingAuthRequest& req,
+                              const std::string& responseData);
+static void resumeInternalResponse(const PendingAuthRequest& req,
+                                   const std::string& responseData);
 bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req) {
     static constexpr const char* kApprovedStub = "{\"status\":\"approved\"}";
     if (req.handler && req.resumeKind == ResumeKind::kHttpCallback) {
