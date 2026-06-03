@@ -2810,6 +2810,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             };
 
             hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
 
             LOG_DEBUG_HTTP(std::string("🛡️ Identity-key engine decision: ")
                 + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
@@ -2878,6 +2879,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             };
 
             hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
 
             LOG_DEBUG_HTTP(std::string("🛡️ Key-linkage engine decision: ")
                 + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
@@ -2964,6 +2966,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 };
 
                 hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+                hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
 
                 LOG_DEBUG_HTTP(std::string("📋 Cert-disclosure engine decision: ")
                     + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
@@ -3060,6 +3063,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
                 };
 
                 hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+                hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
 
                 LOG_DEBUG_HTTP(std::string("🛡️ Scoped-grant engine decision: ")
                     + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
@@ -3228,6 +3232,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             };
 
             hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
+            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
 
             LOG_DEBUG_HTTP(std::string("💰 Payment engine decision: ")
                 + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
