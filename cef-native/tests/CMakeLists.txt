@@ -34,6 +34,7 @@ add_executable(hodos_tests
     permission_engine_test.cpp
     permission_gate_test.cpp
     manifest_fetcher_test.cpp
+    sensitive_cert_fields_test.cpp
 
     # Production sources under test (built into the test exe directly).
     # PermissionEngine is pure logic with no CEF deps, so it links cleanly.
@@ -44,6 +45,7 @@ add_executable(hodos_tests
     # the linker happy without inflating the test binary, we pull in the
     # SyncHttpClient + Logger implementations too — both are small and
     # have no external deps beyond stdlib + platform HTTP libs.
+    # SensitiveCertFields.h is header-only — no production .cpp needed.
     ../src/core/PermissionEngine.cpp
     ../src/core/PermissionGate.cpp
     ../src/core/ManifestFetcher.cpp

@@ -3,6 +3,7 @@
 #include "../../include/core/ManifestFetcher.h"
 #include "../../include/core/PermissionEngine.h"
 #include "../../include/core/PermissionGate.h"
+#include "../../include/core/SensitiveCertFields.h"
 #include "../../include/core/EngineShadow.h"
 #include "../../include/core/SyncHttpClient.h"
 #include "include/wrapper/cef_helpers.h"
@@ -1133,8 +1134,47 @@ static hodos::PermissionCallKind classifyCallKind(
         return identityKeyStyle ? K::IdentityKeyReveal : K::GenericApproved;
     }
 
-    // Cert disclosure
-    if (endpoint.find("/proveCertificate") != std::string::npos) return K::CertificateDisclosure;
+    // Cert disclosure — Phase 2.6-C.1 routes sensitive-field requests to the
+    // SensitiveCertField branch (PermissionEngine.cpp:43-51, always-prompt
+    // floor). Per kickoff Q2 we err toward over-classification: when ANY
+    // requested field matches the heuristic in SensitiveCertFields.h, the
+    // entire request is routed to SensitiveCertField. Body parse mirrors
+    // AsyncWalletResourceHandler::extractCertDisclosureInfo (file scope at
+    // L2010) but is inlined here to keep classifyCallKind self-contained.
+    if (endpoint.find("/proveCertificate") != std::string::npos) {
+        std::string certType;
+        std::vector<std::string> requestedFields;
+        if (!body.empty()) {
+            try {
+                auto j = nlohmann::json::parse(body);
+                if (j.contains("fieldsToReveal") && j["fieldsToReveal"].is_array()) {
+                    for (const auto& f : j["fieldsToReveal"]) {
+                        if (f.is_string()) {
+                            requestedFields.push_back(f.get<std::string>());
+                        }
+                    }
+                }
+                if (j.contains("certificate") && j["certificate"].is_object()) {
+                    auto& cert = j["certificate"];
+                    if (cert.contains("type") && cert["type"].is_string()) {
+                        certType = cert["type"].get<std::string>();
+                    }
+                }
+                if (certType.empty() && j.contains("certType") && j["certType"].is_string()) {
+                    certType = j["certType"].get<std::string>();
+                }
+            } catch (...) {
+                // Malformed body — fall through with empty fields; classifier
+                // will return CertificateDisclosure. The actual cert flow's
+                // own body parser (extractCertDisclosureInfo) will catch the
+                // parse failure separately.
+            }
+        }
+        if (hodos::AnyRequestedCertFieldSensitive(certType, requestedFields)) {
+            return K::SensitiveCertField;
+        }
+        return K::CertificateDisclosure;
+    }
 
     // Payment endpoints (createAction / acquireCertificate / sendMessage).
     // Existing isPaymentEndpoint logic.
@@ -2875,12 +2915,15 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         // requested-vs-approved field set check and override the field
         // BEFORE calling RunPermissionGate.
         //
-        // Known gap not addressed in 5.f: classifyCallKind does NOT detect
-        // sensitive fields (email, dob, etc.) and route them to
-        // SensitiveCertField. The engine's DecidePrivacyPerimeter branch
-        // for SensitiveCertField is wired but unreachable today via the
-        // classifier. Flagged as a separate follow-up gap; tracked in
-        // memory project_sensitive_cert_field_classifier_gap.
+        // Phase 2.6-C.1 closed the prior sensitive-field gap: classifyCallKind
+        // now inspects the /proveCertificate body and routes any request
+        // touching a sensitive field (SSN, passport, DOB, residential address,
+        // biometric, financial-account identifier — see
+        // include/core/SensitiveCertFields.h) to SensitiveCertField. The
+        // engine's DecidePrivacyPerimeter branch (PermissionEngine.cpp:43-51)
+        // forces a prompt every time for that kind, ignoring scopedGrantExists.
+        // For non-sensitive cert fields the branch below still consults the
+        // cert_field_permissions table for pre-approval (allApproved → Silent).
         if (isProveCertificateEndpoint(endpoint_)) {
             auto certInfo = extractCertDisclosureInfo(body_);
             if (certInfo.valid && !certInfo.certType.empty()) {

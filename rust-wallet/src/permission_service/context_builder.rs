@@ -1,14 +1,19 @@
 //! Context builder — assembles a `PermissionContext` from AppState + request data.
 //!
-//! Phase 2.6-A.5 status: **placeholder**. Real per-CallKind construction lands
-//! in 2.6-C (privacy perimeter) through 2.6-G (domain trust). Each sub-phase
-//! adds the body-parsing and DB-reading logic for its CallKind class.
+//! Phase 2.6-A.5 status: **placeholder** for `build_context`. Real per-CallKind
+//! construction lands in 2.6-C (privacy perimeter) through 2.6-G (domain trust).
+//! Each sub-phase adds the body-parsing and DB-reading logic for its CallKind class.
 //!
-//! The interface is shaped now so the 2.6-B shadow infrastructure can call it
-//! to build contexts for comparison without waiting on the full per-CallKind
-//! logic.
+//! Phase 2.6-C.1: `sensitive_cert_fields` sub-module landed. Pure classifier
+//! that mirrors `cef-native/include/core/SensitiveCertFields.h` 1:1. Used to
+//! route /proveCertificate requests with sensitive fields to
+//! `CallKind::SensitiveCertField` (always-prompt). Dormant in the live wallet
+//! handlers until 2.6-C.2 wires the Rust prove_certificate path through
+//! `PermissionService::decide()`.
 
 use hodos_permission_engine::{CallKind, PermissionContext, TrustLevel};
+
+pub mod sensitive_cert_fields;
 
 /// Inputs to `build_context`. Carries what the request handler already has —
 /// the domain, the endpoint, the parsed body (as raw bytes or a serde::Value),
