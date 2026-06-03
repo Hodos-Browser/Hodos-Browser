@@ -165,3 +165,78 @@ pub async fn shadow_decide(
         }
     }
 }
+
+// ============================================================================
+// Phase 2.6-C.4 follow-up — POST /wallet/session-approve
+// ============================================================================
+//
+// Mirrors the C++ Mark*RevealApproved entry points (cef-native/src/core/
+// HttpRequestInterceptor.cpp:1345-1350). Called fire-and-forget from C++ after
+// the user clicks Approve on an identity_key_reveal / key_linkage_reveal
+// modal. Updates the matching in-memory session cache on PermissionService
+// so build_privacy_perimeter_context returns Silent on subsequent calls
+// from the same origin within the same wallet-process lifetime.
+//
+// Wire shape:
+//   POST /wallet/session-approve
+//   Content-Type: application/json
+//   { "domain": "example.com", "kind": "identity_key" | "key_linkage" }
+//
+// Response: 200 with { "status": "approved" } on success, 400 on malformed
+// body or unknown kind. No auth (localhost-only callable, matches the rest of
+// the wallet API surface).
+
+#[derive(Debug, Deserialize)]
+pub struct SessionApproveRequest {
+    pub domain: String,
+    pub kind: String,
+}
+
+/// `POST /wallet/session-approve`. See module-level comment for wire shape.
+pub async fn session_approve(
+    permission: web::Data<Arc<PermissionService>>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let req: SessionApproveRequest = match serde_json::from_value(body.into_inner()) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid body: {}", e),
+                "status": "bad_request"
+            }));
+        }
+    };
+    if req.domain.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "domain is required",
+            "status": "bad_request"
+        }));
+    }
+    match req.kind.as_str() {
+        "identity_key" => {
+            permission.approve_identity_key_session(&req.domain);
+            log::info!(
+                "🛡️ session-approve: identity_key for {} (Rust cache updated)",
+                req.domain
+            );
+        }
+        "key_linkage" => {
+            permission.approve_key_linkage_session(&req.domain);
+            log::info!(
+                "🛡️ session-approve: key_linkage for {} (Rust cache updated)",
+                req.domain
+            );
+        }
+        other => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Unknown kind '{}', expected 'identity_key' or 'key_linkage'", other),
+                "status": "bad_request"
+            }));
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "approved",
+        "domain": req.domain,
+        "kind": req.kind
+    }))
+}

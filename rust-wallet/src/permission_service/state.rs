@@ -11,7 +11,7 @@
 //! infrastructure lands in 2.6-B, real per-CallKind dispatch lands in 2.6-C
 //! through 2.6-G.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use hodos_permission_engine::{decide as engine_decide, PermissionContext, PermissionDecision};
@@ -83,6 +83,22 @@ pub struct PermissionService {
     /// (lookup on X-User-Approved re-issue) are far more common than writes
     /// (initial mint + atomic consume on re-issue).
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+
+    /// Per-domain session-level "Allow once / Allow this session" opt-in for
+    /// IdentityKeyReveal. Phase 2.6-C.4 follow-up: migrated from C++'s
+    /// IdentityKeyApprovalCache. Populated by `POST /wallet/session-approve`
+    /// (called from C++ MarkIdentityKeyRevealApproved); consulted in
+    /// build_privacy_perimeter_context so the engine returns Silent on
+    /// subsequent identity-key calls from the same origin without
+    /// re-prompting. Cleared on wallet restart (in-memory only — session
+    /// scope by design).
+    identity_key_session_approvals: Arc<RwLock<HashSet<String>>>,
+
+    /// Same as identity_key_session_approvals but for the two BRC-72 key-
+    /// linkage CallKinds (CounterpartyKeyLinkage + SpecificKeyLinkage).
+    /// Populated by `POST /wallet/session-approve` with kind=key_linkage
+    /// (called from C++ MarkKeyLinkageRevealApproved).
+    key_linkage_session_approvals: Arc<RwLock<HashSet<String>>>,
 }
 
 impl PermissionService {
@@ -92,6 +108,8 @@ impl PermissionService {
         Self {
             flags,
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            identity_key_session_approvals: Arc::new(RwLock::new(HashSet::new())),
+            key_linkage_session_approvals: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -236,6 +254,81 @@ impl PermissionService {
         let before = guard.len();
         guard.retain(|_, v| v.expires_at >= now);
         before - guard.len()
+    }
+
+    // ------------------------------------------------------------------------
+    // Phase 2.6-C.4 follow-up — session opt-in caches
+    // ------------------------------------------------------------------------
+    //
+    // Migrated from C++'s IdentityKeyApprovalCache + KeyLinkageApprovalCache so
+    // build_privacy_perimeter_context can consult them and return Silent on
+    // subsequent calls from a session-opted-in origin. Populated via
+    // `POST /wallet/session-approve` which C++ fires after the user clicks
+    // Approve on an identity_key_reveal / key_linkage_reveal modal.
+
+    /// Approve identity-key disclosure for `domain` for the rest of this
+    /// wallet session. Idempotent — repeated calls are no-ops.
+    pub fn approve_identity_key_session(&self, domain: &str) {
+        let mut guard = self
+            .identity_key_session_approvals
+            .write()
+            .expect("identity_key_session_approvals lock poisoned");
+        guard.insert(domain.to_string());
+    }
+
+    /// Returns true iff identity-key disclosure has been session-approved
+    /// for `domain`. Consulted by build_privacy_perimeter_context for the
+    /// IdentityKeyReveal CallKind.
+    pub fn is_identity_key_session_approved(&self, domain: &str) -> bool {
+        let guard = self
+            .identity_key_session_approvals
+            .read()
+            .expect("identity_key_session_approvals lock poisoned");
+        guard.contains(domain)
+    }
+
+    /// Approve BRC-72 key-linkage reveal for `domain` for the rest of this
+    /// wallet session. Covers both CounterpartyKeyLinkage and
+    /// SpecificKeyLinkage CallKinds (matches C++'s single
+    /// KeyLinkageApprovalCache scope).
+    pub fn approve_key_linkage_session(&self, domain: &str) {
+        let mut guard = self
+            .key_linkage_session_approvals
+            .write()
+            .expect("key_linkage_session_approvals lock poisoned");
+        guard.insert(domain.to_string());
+    }
+
+    /// Returns true iff key-linkage reveal has been session-approved for
+    /// `domain`. Consulted by build_privacy_perimeter_context for the
+    /// CounterpartyKeyLinkage / SpecificKeyLinkage CallKinds.
+    pub fn is_key_linkage_session_approved(&self, domain: &str) -> bool {
+        let guard = self
+            .key_linkage_session_approvals
+            .read()
+            .expect("key_linkage_session_approvals lock poisoned");
+        guard.contains(domain)
+    }
+
+    /// Drop both session-opt-in entries for `domain`. Called when a domain's
+    /// permission is revoked from the wallet UI (matches C++'s
+    /// revokeIdentityKeyApprovalForDomain + revokeKeyLinkageApprovalForDomain
+    /// semantics). Idempotent — domain absent from either cache is a no-op.
+    pub fn revoke_session_approvals_for_domain(&self, domain: &str) {
+        {
+            let mut guard = self
+                .identity_key_session_approvals
+                .write()
+                .expect("identity_key_session_approvals lock poisoned");
+            guard.remove(domain);
+        }
+        {
+            let mut guard = self
+                .key_linkage_session_approvals
+                .write()
+                .expect("key_linkage_session_approvals lock poisoned");
+            guard.remove(domain);
+        }
     }
 }
 
@@ -413,5 +506,69 @@ mod tests {
     fn ttl_constant_matches_ld2_10_minutes() {
         // Guards against silent drift from the LD2 contract.
         assert_eq!(APPROVAL_TTL_SECS, 600);
+    }
+
+    // ---------- Phase 2.6-C.4 follow-up: session opt-in caches ----------
+
+    #[test]
+    fn identity_key_session_approve_then_check() {
+        let svc = PermissionService::new(EngineFlags::default());
+        assert!(!svc.is_identity_key_session_approved("example.com"));
+        svc.approve_identity_key_session("example.com");
+        assert!(svc.is_identity_key_session_approved("example.com"));
+        // Other domains stay unaffected.
+        assert!(!svc.is_identity_key_session_approved("other.com"));
+    }
+
+    #[test]
+    fn identity_key_session_approve_is_idempotent() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.approve_identity_key_session("example.com");
+        svc.approve_identity_key_session("example.com");
+        svc.approve_identity_key_session("example.com");
+        assert!(svc.is_identity_key_session_approved("example.com"));
+    }
+
+    #[test]
+    fn key_linkage_session_approve_then_check() {
+        let svc = PermissionService::new(EngineFlags::default());
+        assert!(!svc.is_key_linkage_session_approved("example.com"));
+        svc.approve_key_linkage_session("example.com");
+        assert!(svc.is_key_linkage_session_approved("example.com"));
+        assert!(!svc.is_key_linkage_session_approved("other.com"));
+    }
+
+    #[test]
+    fn identity_key_and_key_linkage_session_caches_are_independent() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.approve_identity_key_session("example.com");
+        assert!(svc.is_identity_key_session_approved("example.com"));
+        assert!(!svc.is_key_linkage_session_approved("example.com"));
+
+        svc.approve_key_linkage_session("other.com");
+        assert!(svc.is_key_linkage_session_approved("other.com"));
+        assert!(!svc.is_identity_key_session_approved("other.com"));
+    }
+
+    #[test]
+    fn revoke_session_approvals_clears_both_caches() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.approve_identity_key_session("example.com");
+        svc.approve_key_linkage_session("example.com");
+        assert!(svc.is_identity_key_session_approved("example.com"));
+        assert!(svc.is_key_linkage_session_approved("example.com"));
+
+        svc.revoke_session_approvals_for_domain("example.com");
+        assert!(!svc.is_identity_key_session_approved("example.com"));
+        assert!(!svc.is_key_linkage_session_approved("example.com"));
+    }
+
+    #[test]
+    fn revoke_session_approvals_is_idempotent_when_domain_absent() {
+        let svc = PermissionService::new(EngineFlags::default());
+        // No prior approvals — revoke should be a no-op, not a panic.
+        svc.revoke_session_approvals_for_domain("never-approved.com");
+        assert!(!svc.is_identity_key_session_approved("never-approved.com"));
+        assert!(!svc.is_key_linkage_session_approved("never-approved.com"));
     }
 }

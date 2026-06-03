@@ -155,7 +155,21 @@ pub fn dispatch_privacy_perimeter(
         }
     };
 
-    let ctx = context_builder::build_privacy_perimeter_context(call_kind, perm_row.as_ref());
+    // Phase 2.6-C.4 follow-up — session opt-ins are now Rust-side. Pull both
+    // flags for `domain` from PermissionService's caches; only the matching
+    // CallKind branch in the engine reads them, but we populate both for
+    // schema completeness (and so an audit dump of the ctx is self-explanatory).
+    let identity_key_session_opt_in =
+        permission.is_identity_key_session_approved(&domain);
+    let key_linkage_session_opt_in =
+        permission.is_key_linkage_session_approved(&domain);
+
+    let ctx = context_builder::build_privacy_perimeter_context(
+        call_kind,
+        perm_row.as_ref(),
+        identity_key_session_opt_in,
+        key_linkage_session_opt_in,
+    );
     let decision = permission.decide(&ctx);
 
     match decision {

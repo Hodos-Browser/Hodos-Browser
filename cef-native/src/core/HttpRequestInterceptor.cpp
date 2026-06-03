@@ -1342,11 +1342,45 @@ static const char* decisionKindToString(hodos::PermissionDecision::Kind k) {
 
 // Thin entry points for simple_handler.cpp's IPC dispatchers (declared in
 // include/core/HttpRequestInterceptor.h).
+//
+// Phase 2.6-C.4 follow-up — after updating the C++-local session cache, fire
+// a one-shot POST to /wallet/session-approve on a worker thread so the Rust
+// PermissionService session cache also picks up the approval. The Rust cache
+// is what `build_privacy_perimeter_context` reads on subsequent calls; without
+// this echo, "Allow once" would only suppress one C++ inline check (now
+// deleted in C.4 — so without the echo it would suppress zero) and the next
+// call from the same origin would re-prompt. Fire-and-forget: a brief race
+// window exists between the cache update here and Rust receiving the POST
+// (sub-millisecond on localhost), which is acceptable for a session-scope
+// cache populated by a human-time interaction.
+namespace {
+void fireSessionApproveToRust(const std::string& domain, const char* kind) {
+    if (domain.empty()) return;
+    std::string body = std::string("{\"domain\":\"") + domain + "\",\"kind\":\"" + kind + "\"}";
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string body
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        HttpResponse resp = SyncHttpClient::Post(
+            "http://127.0.0.1:31301/wallet/session-approve",
+            body, headers, /*timeoutMs=*/3000);
+        if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
+            LOG_DEBUG_HTTP(std::string("🛡️ session-approve POST failed (statusCode=")
+                + std::to_string(resp.statusCode) + ") — Rust session cache "
+                + "may not be updated; harmless until next call from same origin");
+        }
+    }, body));
+}
+} // namespace
+
 void MarkIdentityKeyRevealApproved(const std::string& domain) {
     IdentityKeyApprovalCache::GetInstance().approve(domain);
+    fireSessionApproveToRust(domain, "identity_key");
 }
 void MarkKeyLinkageRevealApproved(const std::string& domain) {
     KeyLinkageApprovalCache::GetInstance().approve(domain);
+    fireSessionApproveToRust(domain, "key_linkage");
 }
 
 // Phase 2.5 Commit 6 (sub-step 6.b) — single source of truth for the

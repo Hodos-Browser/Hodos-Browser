@@ -5,11 +5,15 @@
 //!
 //! Phase 2.6-C.2: `build_privacy_perimeter_context` — reads the live
 //! `domain_permissions` row (V17 column) to populate the per-call
-//! PermissionContext for the 4 privacy-perimeter CallKinds. Session opt-in
-//! state (identity_key_session_opt_in, key_linkage_session_opt_in) defaults
-//! to `false` here because those caches still live in C++ today; the X-User-
-//! Approved replay path bypasses the engine entirely so per-call session
-//! caching is not yet required Rust-side.
+//! PermissionContext for the 4 privacy-perimeter CallKinds.
+//!
+//! Phase 2.6-C.4 follow-up: session opt-in flags are now sourced from
+//! `PermissionService`'s session caches (migrated from C++'s
+//! IdentityKeyApprovalCache + KeyLinkageApprovalCache). Caller threads them
+//! into `build_privacy_perimeter_context`; C++ keeps its own caches updated
+//! independently and additionally fires `POST /wallet/session-approve` after
+//! the user approves an identity_key / key_linkage modal so the Rust side
+//! sees Silent on subsequent calls from the same origin.
 //!
 //! Other per-CallKind construction (scoped grants, payment, cert disclosure,
 //! domain trust) lands in 2.6-D through 2.6-G.
@@ -58,13 +62,12 @@ pub fn build_context(input: &ContextBuilderInput<'_>) -> PermissionContext {
 
 /// Build a `PermissionContext` for one of the 4 privacy-perimeter CallKinds.
 ///
-/// Phase 2.6-C.2. Reads the per-domain row (V17 `identity_key_disclosure_allowed`
-/// column) and translates `trust_level` to the engine's `TrustLevel` enum.
-/// Session opt-in flags are set to `false` here — the C++ side still owns
-/// `IdentityKeyApprovalCache` / `KeyLinkageApprovalCache` in C.2, and the
-/// X-User-Approved replay path bypasses the engine cascade entirely so the
-/// Rust engine never needs to consult them. If 2.6-D+ migrates the session
-/// caches to Rust, this is where they wire in.
+/// Phase 2.6-C.2 / C.4. Reads the per-domain row (V17
+/// `identity_key_disclosure_allowed` column) and translates `trust_level` to
+/// the engine's `TrustLevel` enum. Session opt-in flags are now passed in by
+/// the caller (typically pulled from `PermissionService::is_identity_key_session_approved`
+/// / `is_key_linkage_session_approved`), per Phase 2.6-C.4 follow-up that
+/// migrated the C++ session caches into the Rust service.
 ///
 /// `domain_perm`:
 ///   - `Some(perm)` — domain row exists; trust_level is whatever the row says
@@ -75,6 +78,8 @@ pub fn build_context(input: &ContextBuilderInput<'_>) -> PermissionContext {
 pub fn build_privacy_perimeter_context(
     call_kind: CallKind,
     domain_perm: Option<&DomainPermission>,
+    identity_key_session_opt_in: bool,
+    key_linkage_session_opt_in: bool,
 ) -> PermissionContext {
     debug_assert!(
         matches!(
@@ -103,9 +108,8 @@ pub fn build_privacy_perimeter_context(
         call_kind,
         trust_level,
         identity_key_disclosure_allowed,
-        // Session opt-in caches live in C++ today (see module docstring).
-        identity_key_session_opt_in: false,
-        key_linkage_session_opt_in: false,
+        identity_key_session_opt_in,
+        key_linkage_session_opt_in,
         ..Default::default()
     }
 }
@@ -148,7 +152,11 @@ mod tests {
     #[test]
     fn privacy_perimeter_context_reads_v17_column_for_identity_key() {
         let perm = sample_perm("approved", true);
-        let ctx = build_privacy_perimeter_context(CallKind::IdentityKeyReveal, Some(&perm));
+        let ctx = build_privacy_perimeter_context(
+            CallKind::IdentityKeyReveal, Some(&perm),
+            /*identity_key_session_opt_in=*/ false,
+            /*key_linkage_session_opt_in=*/ false,
+        );
         assert_eq!(ctx.call_kind, CallKind::IdentityKeyReveal);
         assert_eq!(ctx.trust_level, TrustLevel::Approved);
         assert!(ctx.identity_key_disclosure_allowed);
@@ -158,7 +166,9 @@ mod tests {
 
     #[test]
     fn privacy_perimeter_context_translates_unknown_trust_when_no_perm_row() {
-        let ctx = build_privacy_perimeter_context(CallKind::IdentityKeyReveal, None);
+        let ctx = build_privacy_perimeter_context(
+            CallKind::IdentityKeyReveal, None, false, false,
+        );
         assert_eq!(ctx.trust_level, TrustLevel::Unknown);
         assert!(!ctx.identity_key_disclosure_allowed);
     }
@@ -166,7 +176,9 @@ mod tests {
     #[test]
     fn privacy_perimeter_context_translates_blocked_trust() {
         let perm = sample_perm("blocked", true);
-        let ctx = build_privacy_perimeter_context(CallKind::CounterpartyKeyLinkage, Some(&perm));
+        let ctx = build_privacy_perimeter_context(
+            CallKind::CounterpartyKeyLinkage, Some(&perm), false, false,
+        );
         assert_eq!(ctx.trust_level, TrustLevel::Blocked);
         // identity_key_disclosure_allowed read regardless — engine ignores it
         // for non-identity-key call kinds via the branch logic.
@@ -176,18 +188,50 @@ mod tests {
     #[test]
     fn privacy_perimeter_context_translates_unrecognized_trust_to_unknown() {
         let perm = sample_perm("future-value-not-mapped", false);
-        let ctx = build_privacy_perimeter_context(CallKind::SpecificKeyLinkage, Some(&perm));
+        let ctx = build_privacy_perimeter_context(
+            CallKind::SpecificKeyLinkage, Some(&perm), false, false,
+        );
         assert_eq!(ctx.trust_level, TrustLevel::Unknown);
     }
 
     #[test]
     fn privacy_perimeter_context_for_sensitive_cert_field() {
         let perm = sample_perm("approved", true);
-        let ctx = build_privacy_perimeter_context(CallKind::SensitiveCertField, Some(&perm));
+        let ctx = build_privacy_perimeter_context(
+            CallKind::SensitiveCertField, Some(&perm), false, false,
+        );
         assert_eq!(ctx.call_kind, CallKind::SensitiveCertField);
         assert_eq!(ctx.trust_level, TrustLevel::Approved);
         // SensitiveCertField branch always prompts regardless of these flags,
         // but we still populate them per spec.
         assert!(ctx.identity_key_disclosure_allowed);
+    }
+
+    // Phase 2.6-C.4 follow-up — session opt-in flags propagate.
+
+    #[test]
+    fn privacy_perimeter_context_propagates_identity_key_session_opt_in() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_privacy_perimeter_context(
+            CallKind::IdentityKeyReveal, Some(&perm),
+            /*identity_key_session_opt_in=*/ true,
+            /*key_linkage_session_opt_in=*/ false,
+        );
+        // V17 says NOT pre-approved, but session opt-in is set — engine
+        // returns Silent via DecidePrivacyPerimeter.
+        assert!(!ctx.identity_key_disclosure_allowed);
+        assert!(ctx.identity_key_session_opt_in);
+        assert!(!ctx.key_linkage_session_opt_in);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_propagates_key_linkage_session_opt_in() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_privacy_perimeter_context(
+            CallKind::CounterpartyKeyLinkage, Some(&perm),
+            false, true,
+        );
+        assert!(!ctx.identity_key_session_opt_in);
+        assert!(ctx.key_linkage_session_opt_in);
     }
 }

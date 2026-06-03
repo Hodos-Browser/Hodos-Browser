@@ -948,6 +948,7 @@ async fn main() -> std::io::Result<()> {
             // wires SubmitShadowComparison(...) on the C++ side. With the flag
             // OFF, returns 204 No Content immediately.
             .route("/engine/shadow-decide", web::post().to(permission_service::handlers::shadow_decide))
+            .route("/wallet/session-approve", web::post().to(permission_service::handlers::session_approve))
 
             // NOTE: Adblock per-site toggles moved to C++ AdblockCache (JSON file in profile dir).
             // No longer served by wallet backend — see AdblockCache.h.
