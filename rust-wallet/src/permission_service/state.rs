@@ -16,7 +16,36 @@ use std::sync::{Arc, RwLock};
 
 use hodos_permission_engine::{decide as engine_decide, PermissionContext, PermissionDecision};
 
+use super::audit::body_hash;
 use super::flags::EngineFlags;
+
+/// Default TTL for a minted pending approval (10 minutes).
+///
+/// Matches the C++ `kPromptAuthTimeoutMs = 600_000` in
+/// `cef-native/src/core/HttpRequestInterceptor.cpp`. Per LD2: "approvalId — …
+/// single-use, 10-minute TTL".
+pub const APPROVAL_TTL_SECS: i64 = 600;
+
+/// Outcome of `PermissionService::consume_and_verify`.
+///
+/// Maps to LD2's 403 `reason` values that the C++ side or test smoke can
+/// surface in error envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalConsumeError {
+    /// No pending approval with that ID — never minted, already consumed, or
+    /// expired and dropped by `purge_expired_approvals`. Maps to 403
+    /// `approval_expired_or_consumed`.
+    NotFound,
+    /// The approval existed but `expires_at < now`. Also dropped from the map
+    /// (single-use semantics — see `consume_pending_approval`). Maps to 403
+    /// `approval_expired_or_consumed`.
+    Expired,
+    /// The approval existed and was fresh, but the supplied body's sha256
+    /// does not match the body hash stored at mint time. Indicates the client
+    /// changed the request body between the initial Prompt and the
+    /// X-User-Approved replay — must reject. Maps to 403 `body_mismatch`.
+    BodyMismatch,
+}
 
 /// In-flight approval awaiting user resolution.
 ///
@@ -94,6 +123,77 @@ impl PermissionService {
         guard.insert(approval.approval_id.clone(), approval);
     }
 
+    /// Mint a new pending approval for a Prompt decision and return its id.
+    ///
+    /// Phase 2.6-C.2 entry point for the 4 privacy-perimeter handlers. Builds
+    /// a fresh 128-bit hex id, computes the body sha256, and inserts the
+    /// PendingApproval with a 10-minute TTL (LD2 `approvalId.ttlMs = 600000`).
+    ///
+    /// The returned id is what the 202 PENDING envelope's `approvalId` field
+    /// carries to the client. The client (C++) opens the modal, and on user
+    /// approval re-issues the original request with
+    /// `X-User-Approved: <approval_id>`. Rust's `consume_and_verify` then
+    /// looks up the entry, verifies the body hash, and atomically removes it.
+    pub fn mint_pending_approval(
+        &self,
+        domain: &str,
+        endpoint: &str,
+        body: &[u8],
+        now: i64,
+    ) -> String {
+        let approval_id = generate_approval_id();
+        let approval = PendingApproval {
+            approval_id: approval_id.clone(),
+            domain: domain.to_string(),
+            endpoint: endpoint.to_string(),
+            body_hash: body_hash(body),
+            created_at: now,
+            expires_at: now + APPROVAL_TTL_SECS,
+        };
+        self.insert_pending_approval(approval);
+        approval_id
+    }
+
+    /// Look up, verify body hash, and atomically consume a pending approval.
+    ///
+    /// Phase 2.6-C.2 entry point for the X-User-Approved replay path. Per
+    /// kickoff Q5 (a): body sha256 must match the value stored at mint time;
+    /// mismatch returns 403 `body_mismatch`. Per LD2: the approval is
+    /// single-use — a successful consume removes the entry from the map.
+    ///
+    /// Important: on `Expired` and `BodyMismatch` the entry is still removed
+    /// from the map. For Expired this matches `consume_pending_approval`'s
+    /// existing semantics (prevents replay even if the clock moves backward).
+    /// For BodyMismatch it prevents an attacker from probing for the correct
+    /// body by holding the approval_id open across many guesses.
+    pub fn consume_and_verify(
+        &self,
+        approval_id: &str,
+        body: &[u8],
+        now: i64,
+    ) -> Result<PendingApproval, ApprovalConsumeError> {
+        let mut guard = self
+            .pending_approvals
+            .write()
+            .expect("pending_approvals lock poisoned");
+        let approval = match guard.remove(approval_id) {
+            Some(a) => a,
+            None => return Err(ApprovalConsumeError::NotFound),
+        };
+        // Drop the lock once we've taken ownership of the approval — the
+        // remaining checks are pure.
+        drop(guard);
+
+        if approval.expires_at < now {
+            return Err(ApprovalConsumeError::Expired);
+        }
+        let observed_hash = body_hash(body);
+        if observed_hash != approval.body_hash {
+            return Err(ApprovalConsumeError::BodyMismatch);
+        }
+        Ok(approval)
+    }
+
     /// Look up and atomically consume a pending approval by id. Returns the
     /// approval if it exists and hasn't expired; `None` if it doesn't exist,
     /// already consumed, or has expired.
@@ -139,6 +239,16 @@ impl PermissionService {
     }
 }
 
+/// Generate a 128-bit hex-encoded approval id (32 lowercase hex chars).
+///
+/// Matches LD2: `rand::random::<u128>()` formatted as 32-char hex. CSPRNG
+/// source is whatever `rand::random` picks (typically `ThreadRng`,
+/// `getrandom` under the hood). Collision probability across the lifetime
+/// of the process is negligible.
+fn generate_approval_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,7 +268,7 @@ mod tests {
     fn new_service_has_no_pending_approvals() {
         let svc = PermissionService::new(EngineFlags::default());
         assert_eq!(svc.pending_approval_count(), 0);
-        assert!(!svc.flags().any_enabled());
+        assert!(!svc.flags().shadow_log_enabled);
     }
 
     #[test]
@@ -211,5 +321,97 @@ mod tests {
         };
         let d = svc.decide(&ctx);
         assert!(d.is_deny(), "blocked trust should deny");
+    }
+
+    // ---------- Phase 2.6-C.2: mint / consume_and_verify ----------
+
+    #[test]
+    fn generate_approval_id_is_32_hex_chars() {
+        let id = generate_approval_id();
+        assert_eq!(id.len(), 32);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn generate_approval_id_is_unique_across_calls() {
+        // Collision probability for 128 random bits across 100 draws is
+        // ~2.9e-37 — effectively zero.
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..100 {
+            assert!(ids.insert(generate_approval_id()));
+        }
+    }
+
+    #[test]
+    fn mint_pending_approval_inserts_and_returns_id() {
+        let svc = PermissionService::new(EngineFlags::default());
+        let id = svc.mint_pending_approval(
+            "example.com",
+            "/getPublicKey",
+            b"{\"identityKey\":true}",
+            1_700_000_000,
+        );
+        assert_eq!(id.len(), 32);
+        assert_eq!(svc.pending_approval_count(), 1);
+    }
+
+    #[test]
+    fn mint_then_consume_with_matching_body_succeeds() {
+        let svc = PermissionService::new(EngineFlags::default());
+        let body = b"{\"identityKey\":true}";
+        let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_700_000_000);
+        let result = svc.consume_and_verify(&id, body, 1_700_000_100);
+        let approval = result.expect("expected Ok on matching body");
+        assert_eq!(approval.approval_id, id);
+        assert_eq!(approval.domain, "example.com");
+        assert_eq!(approval.endpoint, "/getPublicKey");
+        // Single-use: second consume yields NotFound.
+        assert!(matches!(
+            svc.consume_and_verify(&id, body, 1_700_000_100),
+            Err(ApprovalConsumeError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn consume_with_mismatched_body_returns_body_mismatch() {
+        let svc = PermissionService::new(EngineFlags::default());
+        let body = b"{\"identityKey\":true}";
+        let tampered = b"{\"identityKey\":false}";
+        let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_700_000_000);
+        assert!(matches!(
+            svc.consume_and_verify(&id, tampered, 1_700_000_100),
+            Err(ApprovalConsumeError::BodyMismatch)
+        ));
+        // Approval removed even on mismatch — prevents probe-for-body attacks.
+        assert_eq!(svc.pending_approval_count(), 0);
+    }
+
+    #[test]
+    fn consume_after_expiry_returns_expired() {
+        let svc = PermissionService::new(EngineFlags::default());
+        let body = b"{}";
+        let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_000);
+        // now > created_at + APPROVAL_TTL_SECS
+        let late = 1_000 + APPROVAL_TTL_SECS + 1;
+        assert!(matches!(
+            svc.consume_and_verify(&id, body, late),
+            Err(ApprovalConsumeError::Expired)
+        ));
+        assert_eq!(svc.pending_approval_count(), 0);
+    }
+
+    #[test]
+    fn consume_unknown_id_returns_not_found() {
+        let svc = PermissionService::new(EngineFlags::default());
+        assert!(matches!(
+            svc.consume_and_verify("0".repeat(32).as_str(), b"{}", 1_700_000_100),
+            Err(ApprovalConsumeError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn ttl_constant_matches_ld2_10_minutes() {
+        // Guards against silent drift from the LD2 contract.
+        assert_eq!(APPROVAL_TTL_SECS, 600);
     }
 }

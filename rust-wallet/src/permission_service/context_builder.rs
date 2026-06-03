@@ -1,17 +1,22 @@
 //! Context builder — assembles a `PermissionContext` from AppState + request data.
 //!
-//! Phase 2.6-A.5 status: **placeholder** for `build_context`. Real per-CallKind
-//! construction lands in 2.6-C (privacy perimeter) through 2.6-G (domain trust).
-//! Each sub-phase adds the body-parsing and DB-reading logic for its CallKind class.
+//! Phase 2.6-C.1: `sensitive_cert_fields` sub-module — pure classifier that
+//! mirrors `cef-native/include/core/SensitiveCertFields.h` 1:1.
 //!
-//! Phase 2.6-C.1: `sensitive_cert_fields` sub-module landed. Pure classifier
-//! that mirrors `cef-native/include/core/SensitiveCertFields.h` 1:1. Used to
-//! route /proveCertificate requests with sensitive fields to
-//! `CallKind::SensitiveCertField` (always-prompt). Dormant in the live wallet
-//! handlers until 2.6-C.2 wires the Rust prove_certificate path through
-//! `PermissionService::decide()`.
+//! Phase 2.6-C.2: `build_privacy_perimeter_context` — reads the live
+//! `domain_permissions` row (V17 column) to populate the per-call
+//! PermissionContext for the 4 privacy-perimeter CallKinds. Session opt-in
+//! state (identity_key_session_opt_in, key_linkage_session_opt_in) defaults
+//! to `false` here because those caches still live in C++ today; the X-User-
+//! Approved replay path bypasses the engine entirely so per-call session
+//! caching is not yet required Rust-side.
+//!
+//! Other per-CallKind construction (scoped grants, payment, cert disclosure,
+//! domain trust) lands in 2.6-D through 2.6-G.
 
 use hodos_permission_engine::{CallKind, PermissionContext, TrustLevel};
+
+use crate::database::DomainPermission;
 
 pub mod sensitive_cert_fields;
 
@@ -51,9 +56,79 @@ pub fn build_context(input: &ContextBuilderInput<'_>) -> PermissionContext {
     }
 }
 
+/// Build a `PermissionContext` for one of the 4 privacy-perimeter CallKinds.
+///
+/// Phase 2.6-C.2. Reads the per-domain row (V17 `identity_key_disclosure_allowed`
+/// column) and translates `trust_level` to the engine's `TrustLevel` enum.
+/// Session opt-in flags are set to `false` here — the C++ side still owns
+/// `IdentityKeyApprovalCache` / `KeyLinkageApprovalCache` in C.2, and the
+/// X-User-Approved replay path bypasses the engine cascade entirely so the
+/// Rust engine never needs to consult them. If 2.6-D+ migrates the session
+/// caches to Rust, this is where they wire in.
+///
+/// `domain_perm`:
+///   - `Some(perm)` — domain row exists; trust_level is whatever the row says
+///     ("approved" most commonly, but also "blocked" or "unknown" if the C++
+///     side hasn't reset to approved yet).
+///   - `None` — no row for this (user, domain). Trust level is Unknown —
+///     engine's `DecideDomainTrust` will return a `DomainApproval` prompt.
+pub fn build_privacy_perimeter_context(
+    call_kind: CallKind,
+    domain_perm: Option<&DomainPermission>,
+) -> PermissionContext {
+    debug_assert!(
+        matches!(
+            call_kind,
+            CallKind::IdentityKeyReveal
+                | CallKind::CounterpartyKeyLinkage
+                | CallKind::SpecificKeyLinkage
+                | CallKind::SensitiveCertField
+        ),
+        "build_privacy_perimeter_context called with non-privacy-perimeter CallKind"
+    );
+
+    let (trust_level, identity_key_disclosure_allowed) = match domain_perm {
+        Some(perm) => (
+            match perm.trust_level.as_str() {
+                "approved" => TrustLevel::Approved,
+                "blocked" => TrustLevel::Blocked,
+                _ => TrustLevel::Unknown,
+            },
+            perm.identity_key_disclosure_allowed,
+        ),
+        None => (TrustLevel::Unknown, false),
+    };
+
+    PermissionContext {
+        call_kind,
+        trust_level,
+        identity_key_disclosure_allowed,
+        // Session opt-in caches live in C++ today (see module docstring).
+        identity_key_session_opt_in: false,
+        key_linkage_session_opt_in: false,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_perm(trust: &str, identity_key_allowed: bool) -> DomainPermission {
+        DomainPermission {
+            id: Some(1),
+            user_id: 1,
+            domain: "example.com".to_string(),
+            trust_level: trust.to_string(),
+            per_tx_limit_cents: 100,
+            per_session_limit_cents: 1000,
+            rate_limit_per_min: 30,
+            max_tx_per_session: 100,
+            identity_key_disclosure_allowed: identity_key_allowed,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
 
     #[test]
     fn placeholder_returns_unknown_trust() {
@@ -68,5 +143,51 @@ mod tests {
         assert_eq!(ctx.trust_level, TrustLevel::Unknown);
         // bsv_price_available default preserved.
         assert!(ctx.bsv_price_available);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_reads_v17_column_for_identity_key() {
+        let perm = sample_perm("approved", true);
+        let ctx = build_privacy_perimeter_context(CallKind::IdentityKeyReveal, Some(&perm));
+        assert_eq!(ctx.call_kind, CallKind::IdentityKeyReveal);
+        assert_eq!(ctx.trust_level, TrustLevel::Approved);
+        assert!(ctx.identity_key_disclosure_allowed);
+        assert!(!ctx.identity_key_session_opt_in);
+        assert!(!ctx.key_linkage_session_opt_in);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_translates_unknown_trust_when_no_perm_row() {
+        let ctx = build_privacy_perimeter_context(CallKind::IdentityKeyReveal, None);
+        assert_eq!(ctx.trust_level, TrustLevel::Unknown);
+        assert!(!ctx.identity_key_disclosure_allowed);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_translates_blocked_trust() {
+        let perm = sample_perm("blocked", true);
+        let ctx = build_privacy_perimeter_context(CallKind::CounterpartyKeyLinkage, Some(&perm));
+        assert_eq!(ctx.trust_level, TrustLevel::Blocked);
+        // identity_key_disclosure_allowed read regardless — engine ignores it
+        // for non-identity-key call kinds via the branch logic.
+        assert!(ctx.identity_key_disclosure_allowed);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_translates_unrecognized_trust_to_unknown() {
+        let perm = sample_perm("future-value-not-mapped", false);
+        let ctx = build_privacy_perimeter_context(CallKind::SpecificKeyLinkage, Some(&perm));
+        assert_eq!(ctx.trust_level, TrustLevel::Unknown);
+    }
+
+    #[test]
+    fn privacy_perimeter_context_for_sensitive_cert_field() {
+        let perm = sample_perm("approved", true);
+        let ctx = build_privacy_perimeter_context(CallKind::SensitiveCertField, Some(&perm));
+        assert_eq!(ctx.call_kind, CallKind::SensitiveCertField);
+        assert_eq!(ctx.trust_level, TrustLevel::Approved);
+        // SensitiveCertField branch always prompts regardless of these flags,
+        // but we still populate them per spec.
+        assert!(ctx.identity_key_disclosure_allowed);
     }
 }

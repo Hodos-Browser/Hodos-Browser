@@ -6,7 +6,7 @@
 //! - proveCertificate (Call Code 19)
 //! - relinquishCertificate (Call Code 20)
 
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::AppState;
@@ -3160,15 +3160,69 @@ pub struct ProveCertificateResponse {
 /// 4. Return keyring with only revealed fields
 pub async fn prove_certificate(
     state: web::Data<AppState>,
-    req: web::Json<ProveCertificateRequest>,
+    http_req: HttpRequest,
+    body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /proveCertificate called");
+
+    // Phase 2.6-C.2 — extractor refactored from web::Json<ProveCertificateRequest>
+    // to (HttpRequest, web::Bytes) so the privacy-perimeter gate can inspect
+    // headers (X-Requesting-Domain, X-User-Approved) and compute body sha256
+    // for replay verification.
+    let req: ProveCertificateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   JSON parse error: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid JSON: {}", e)
+            }));
+        }
+    };
 
     // Validate inputs
     if req.fields_to_reveal.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "fieldsToReveal must not be empty"
         }));
+    }
+
+    // Phase 2.6-C.2 sensitive-cert-field privacy gate. The classifier
+    // (Phase 2.6-C.1, mirror of cef-native/include/core/SensitiveCertFields.h)
+    // decides whether any requested field is sensitive. Sensitive →
+    // SensitiveCertField CallKind → engine always prompts. Non-sensitive →
+    // bypass this gate; non-sensitive CertificateDisclosure migrates to Rust
+    // in 2.6-F per the kickoff plan.
+    let cert_type_for_classifier = req
+        .certificate
+        .type_
+        .clone()
+        .unwrap_or_default();
+    if crate::permission_service::context_builder::sensitive_cert_fields
+        ::any_requested_cert_field_sensitive(
+            &cert_type_for_classifier,
+            &req.fields_to_reveal,
+        )
+    {
+        let cert_type_payload = cert_type_for_classifier.clone();
+        let certifier_payload = req.certificate.certifier.clone().unwrap_or_default();
+        let fields_payload = req.fields_to_reveal.clone();
+        let outcome = crate::permission_service::dispatch_privacy_perimeter(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/proveCertificate",
+            hodos_permission_engine::CallKind::SensitiveCertField,
+            || serde_json::json!({
+                "certType": cert_type_payload,
+                "certifier": certifier_payload,
+                "fields": fields_payload,
+            }),
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
     }
 
     // Decode verifier public key

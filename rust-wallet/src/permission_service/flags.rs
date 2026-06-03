@@ -1,48 +1,45 @@
-//! `EngineFlags` — per-CallKind-class feature flags for the Phase 2.6 migration.
+//! `EngineFlags` — process-wide engine config.
 //!
-//! Five flags, one per CallKind class. Each flag controls whether that class's
-//! wallet calls flow through the Rust engine (flag ON) or stay on the C++
-//! engine (flag OFF). All flags default OFF in every commit until sub-phase
-//! 2.6-H final cleanup deletes the flag system entirely along with the C++
-//! engine.
+//! Phase 2.6-A through 2.6-B carried a 5-flag-per-CallKind-class struct here
+//! (`HODOS_ENGINE_RUST_<CLASS>` env vars). Phase 2.6-C kickoff dropped that
+//! migration model: each class becomes Rust-authoritative the instant its
+//! sub-commit lands, with no env-var fallback path. See memory
+//! `phase26-2-6-c-kickoff-2026-06-03` Q1.
 //!
-//! No production rollout model — Hodos ships as a desktop installer; there's
-//! no "10% of users on the new path." Flags are dev-time testing scaffolding
-//! only.
+//! What survives in this struct:
+//!   - `shadow_log_enabled` — diagnostic only (Phase 2.6-B). When true,
+//!     `/engine/shadow-decide` writes rows to `engine_shadow_log`. Independent
+//!     of any class flag; turning it on does NOT make any Rust engine path
+//!     authoritative. Env var: `HODOS_ENGINE_SHADOW_LOG`.
 //!
-//! Env var naming: `HODOS_ENGINE_RUST_<CLASS>` matching the dev runbook
-//! `HODOS_DEV=1` precedent. Values "1" or "true" (case-insensitive) enable;
-//! anything else (including unset) disables.
+//! What was removed in 2.6-C.2 cleanup:
+//!   - `privacy_perimeter`, `scoped_grant`, `payment`, `cert_disclosure`,
+//!     `domain_trust` — the 5 per-class booleans and their env-var readers.
+//!   - `any_enabled()`, `is_enabled_for(CallKind)` — gating accessors.
+//!   - `HODOS_ENGINE_RUST_*` env vars.
 //!
-//! See: PHASE_2_6_ENGINE_TO_RUST.md §LD3.
+//! The CallKind → flag-class string mapping survives as a free function so
+//! `permission_service::audit::build_shadow_entry` keeps a stable
+//! `call_kind_class` column value during the shadow-log lifetime.
+//!
+//! See: PHASE_2_6_ENGINE_TO_RUST.md §LD3 (now superseded by kickoff Q1).
 
 use hodos_permission_engine::CallKind;
 
 #[derive(Debug, Clone, Copy)]
 pub struct EngineFlags {
-    pub privacy_perimeter: bool,
-    pub scoped_grant: bool,
-    pub payment: bool,
-    pub cert_disclosure: bool,
-    pub domain_trust: bool,
     /// Phase 2.6-B: when true, `/engine/shadow-decide` accepts comparison POSTs
     /// from the C++ engine and writes rows to `engine_shadow_log`. When false,
     /// the handler short-circuits with 204 No Content so even a misconfigured
-    /// C++ client with shadow ON can't pollute the table. Independent from the
-    /// 5 CallKind-class flags — shadow is diagnostic infrastructure, not a
-    /// production engine path. Env var: `HODOS_ENGINE_SHADOW_LOG`.
+    /// C++ client with shadow ON can't pollute the table. Env var:
+    /// `HODOS_ENGINE_SHADOW_LOG`.
     pub shadow_log_enabled: bool,
 }
 
 impl Default for EngineFlags {
-    /// All flags OFF — production-safe default per LD3.
+    /// Shadow OFF — diagnostic infrastructure stays opt-in.
     fn default() -> Self {
         Self {
-            privacy_perimeter: false,
-            scoped_grant: false,
-            payment: false,
-            cert_disclosure: false,
-            domain_trust: false,
             shadow_log_enabled: false,
         }
     }
@@ -50,48 +47,15 @@ impl Default for EngineFlags {
 
 impl EngineFlags {
     /// Read flags from environment variables at process start.
-    ///
-    /// All default to false unless the matching env var is "1" or "true"
-    /// (case-insensitive).
     pub fn from_env() -> Self {
         Self {
-            privacy_perimeter: read_bool_env("HODOS_ENGINE_RUST_PRIVACY_PERIMETER"),
-            scoped_grant: read_bool_env("HODOS_ENGINE_RUST_SCOPED_GRANT"),
-            payment: read_bool_env("HODOS_ENGINE_RUST_PAYMENT"),
-            cert_disclosure: read_bool_env("HODOS_ENGINE_RUST_CERT_DISCLOSURE"),
-            domain_trust: read_bool_env("HODOS_ENGINE_RUST_DOMAIN_TRUST"),
             shadow_log_enabled: read_bool_env("HODOS_ENGINE_SHADOW_LOG"),
         }
     }
 
-    /// Returns true iff any **CallKind-class** flag is ON. The shadow flag is
-    /// intentionally excluded — turning on the shadow log does not make any
-    /// Rust engine path authoritative, so the startup banner should not call
-    /// it out as "Rust engine ENABLED".
-    pub fn any_enabled(&self) -> bool {
-        self.privacy_perimeter
-            || self.scoped_grant
-            || self.payment
-            || self.cert_disclosure
-            || self.domain_trust
-    }
-
-    /// Returns true iff the flag for the CallKind's class is ON.
-    ///
-    /// This is the per-request gate: at each wallet endpoint that the engine
-    /// owns, the handler calls `flags.is_enabled_for(call_kind)` and chooses
-    /// between the C++ engine path (false) and the Rust engine path (true).
-    pub fn is_enabled_for(&self, kind: CallKind) -> bool {
-        match Self::class_for(kind) {
-            FlagClass::PrivacyPerimeter => self.privacy_perimeter,
-            FlagClass::ScopedGrant => self.scoped_grant,
-            FlagClass::Payment => self.payment,
-            FlagClass::CertDisclosure => self.cert_disclosure,
-            FlagClass::DomainTrust => self.domain_trust,
-        }
-    }
-
-    /// Map a CallKind to its flag class name (kebab-case for audit/shadow logs).
+    /// CallKind → flag class name (kebab-case for audit/shadow logs). The
+    /// class taxonomy survives the per-class flag removal because the shadow
+    /// log table still groups disagreements by class for diagnostics.
     pub fn class_name_for(kind: CallKind) -> &'static str {
         match Self::class_for(kind) {
             FlagClass::PrivacyPerimeter => "privacy_perimeter",
@@ -102,8 +66,7 @@ impl EngineFlags {
         }
     }
 
-    /// CallKind → flag class mapping. Single source of truth — referenced by
-    /// both is_enabled_for and class_name_for so the two cannot drift.
+    /// CallKind → flag class mapping. Single source of truth.
     fn class_for(kind: CallKind) -> FlagClass {
         match kind {
             CallKind::IdentityKeyReveal
@@ -143,25 +106,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_all_off() {
+    fn default_has_shadow_off() {
         let f = EngineFlags::default();
-        assert!(!f.privacy_perimeter);
-        assert!(!f.scoped_grant);
-        assert!(!f.payment);
-        assert!(!f.cert_disclosure);
-        assert!(!f.domain_trust);
         assert!(!f.shadow_log_enabled);
-        assert!(!f.any_enabled());
-    }
-
-    #[test]
-    fn shadow_flag_does_not_count_toward_any_enabled() {
-        // Shadow flag turned on alone should NOT trip any_enabled — that flag
-        // is reserved for "some Rust engine path is authoritative" semantics.
-        let mut f = EngineFlags::default();
-        f.shadow_log_enabled = true;
-        assert!(f.shadow_log_enabled);
-        assert!(!f.any_enabled());
     }
 
     #[test]
@@ -186,16 +133,5 @@ mod tests {
         // Domain trust (2 kinds)
         assert_eq!(EngineFlags::class_name_for(CallKind::DomainTrust), "domain_trust");
         assert_eq!(EngineFlags::class_name_for(CallKind::GenericApproved), "domain_trust");
-    }
-
-    #[test]
-    fn is_enabled_for_respects_class_mapping() {
-        let mut f = EngineFlags::default();
-        f.payment = true;
-
-        assert!(f.is_enabled_for(CallKind::Payment));
-        assert!(!f.is_enabled_for(CallKind::IdentityKeyReveal));
-        assert!(!f.is_enabled_for(CallKind::ProtocolUse));
-        assert!(f.any_enabled());
     }
 }

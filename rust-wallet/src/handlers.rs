@@ -238,15 +238,24 @@ pub async fn get_version(_body: web::Bytes) -> HttpResponse {
 // Returns the master identity key when identityKey=true or no protocol params,
 // otherwise derives a child public key using BRC-42 key derivation.
 //
-// Phase 1.5 Step 1 privacy perimeter:
+// Phase 2.6-C.2 privacy-perimeter gate:
 // Requests from external sites (X-Requesting-Domain present) that ask for the
 // raw identity key (identityKey=true OR a getPublicKey call with no protocol
-// params, which the existing code already routes to the master key path) return
-// a structured `identity_key_prompt_required` error so the C++ layer can fire
-// the `identity_key_reveal` prompt. After user approval, C++ replays the
-// request with `X-Identity-Key-Approved: true` and Rust passes through.
+// params, which the existing code already routes to the master key path) flow
+// through `permission_service::dispatch_privacy_perimeter`:
+//   - If the engine returns Silent (V17 `identity_key_disclosure_allowed=1`),
+//     proceed.
+//   - If the engine returns Prompt, return 202 PENDING with an approvalId; the
+//     C++ side opens the modal and re-issues with `X-User-Approved: <id>`.
+//   - On the X-User-Approved re-issue, the dispatch helper consumes the
+//     approval (body-sha256 verify) and proceeds.
 // Internal requests (no domain header — wallet UI, header-bar bootstrap) bypass
-// the gate entirely. Persistent "Always allow" storage lands in Step 2.
+// the gate entirely.
+//
+// The legacy `X-Identity-Key-Approved` header is no longer consulted here —
+// post-C.2 Rust trusts only its own approval mechanism (kickoff Q1: single
+// path, no fallback). C++ may still inject the header during the C.2→C.4 gap
+// but Rust ignores it.
 pub async fn get_public_key(
     state: web::Data<AppState>,
     http_req: HttpRequest,
@@ -274,6 +283,29 @@ pub async fn get_public_key(
     let key_id = req.get("keyID").and_then(|v| v.as_str());
     let for_self = req.get("forSelf").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // Phase 2.6-C.2 privacy-perimeter gate — applies only to identityKey-style
+    // requests (the codepath that today returns the master pubkey). Derived
+    // child keys (BRC-42 path below) bypass this gate; their own
+    // protocol/basket gates fire via createHmac/createSignature endpoints.
+    let wants_identity_key = identity_key || protocol_id.is_none() || key_id.is_none();
+    if wants_identity_key {
+        let outcome = crate::permission_service::dispatch_privacy_perimeter(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/getPublicKey",
+            hodos_permission_engine::CallKind::IdentityKeyReveal,
+            // identity_key_reveal modal renders from origin alone — no extra
+            // promptPayload fields per LD2.
+            || serde_json::json!({}),
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
     // Get master public key (always needed)
     let db = state.database.lock().unwrap();
     let master_pubkey = match crate::database::get_master_public_key_from_db(&db) {
@@ -286,70 +318,6 @@ pub async fn get_public_key(
         }
     };
     drop(db);
-
-    // Phase 1.5 Step 1 privacy-perimeter gate: external sites cannot silently
-    // pull the master identity key.
-    //
-    // Triggers on the EXACT codepath that today returns the master pubkey:
-    // identityKey=true OR (no protocolID) OR (no keyID). For derived child keys
-    // (the BRC-42 path below) we let the existing domain-approval check fire
-    // when those endpoints are routed through createHmac/createSignature/etc.;
-    // raw getPublicKey for a derived (counterparty + protocol + keyID) tuple
-    // does not by itself expose the identity key, so it stays silent.
-    //
-    // The gate passes when ANY of the following is true:
-    //   1. No X-Requesting-Domain header (internal call from wallet UI).
-    //   2. X-Identity-Key-Approved: true header (C++ pre-approved this request
-    //      via the in-memory IdentityKeyApprovalCache that holds the user's
-    //      one-shot or session-scoped approval).
-    //   3. domain_permissions.identity_key_disclosure_allowed = 1 for this
-    //      domain (persistent grant from the domain_approval checkbox).
-    let wants_identity_key = identity_key || protocol_id.is_none() || key_id.is_none();
-    if wants_identity_key {
-        let requesting_domain = http_req
-            .headers()
-            .get("X-Requesting-Domain")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        let pre_approved_header = http_req
-            .headers()
-            .get("X-Identity-Key-Approved")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if let Some(ref domain) = requesting_domain {
-            // Check the persistent grant column. We re-lock the DB briefly here
-            // because the earlier `db` lock was dropped above.
-            let persistent_grant = {
-                let db = state.database.lock().unwrap();
-                let repo = crate::database::DomainPermissionRepository::new(db.connection());
-                match repo.get_by_domain(state.current_user_id, domain) {
-                    Ok(Some(perm)) => perm.identity_key_disclosure_allowed,
-                    _ => false,
-                }
-            };
-
-            if !pre_approved_header && !persistent_grant {
-                log::warn!(
-                    "🛡️ /getPublicKey identityKey-style request from external domain '{}' — returning identity_key_prompt_required so C++ can fire the privacy-perimeter prompt",
-                    domain
-                );
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "identity_key_prompt_required",
-                    "code": "ERR_IDENTITY_KEY_PROMPT_REQUIRED",
-                    "domain": domain,
-                }));
-            }
-            log::info!(
-                "🛡️ /getPublicKey identityKey-style request from '{}' approved (header={}, db={}) — passing through",
-                domain, pre_approved_header, persistent_grant,
-            );
-        }
-        // No X-Requesting-Domain header = internal call (wallet UI etc.) — silent pass-through.
-    }
 
     // If identityKey=true or no protocol params, return master identity key
     if wants_identity_key {
@@ -2258,6 +2226,36 @@ pub async fn reveal_counterparty_key_linkage(
         }
     };
 
+    // Phase 2.6-C.2 privacy-perimeter gate. BRC-72 counterparty linkage reveals
+    // the ECDH shared secret between us and the named counterparty — privacy
+    // sensitive even for an approved domain, so the engine always prompts
+    // unless the session opt-in cache says otherwise (C.2: cache is empty
+    // because it still lives in C++; engine prompts every time, which matches
+    // pre-C.2 behavior via the C++ inline cascade).
+    {
+        let req_verifier = req.verifier.clone();
+        let req_counterparty = req.counterparty.clone();
+        let outcome = crate::permission_service::dispatch_privacy_perimeter(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/revealCounterpartyKeyLinkage",
+            hodos_permission_engine::CallKind::CounterpartyKeyLinkage,
+            || serde_json::json!({
+                "kind": "counterparty",
+                "verifier": req_verifier,
+                "counterparty": req_counterparty,
+                "protocol": serde_json::Value::Null,
+                "keyID": serde_json::Value::Null,
+            }),
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
     // Forbid counterparty='self' per the @bsv/sdk KeyDeriver contract.
     if let serde_json::Value::String(s) = &req.counterparty {
         if s == "self" {
@@ -2413,6 +2411,36 @@ pub async fn reveal_specific_key_linkage(
             }));
         }
     };
+
+    // Phase 2.6-C.2 privacy-perimeter gate. BRC-72 specific-linkage reveals
+    // the HMAC keyed by the protocolID/keyID tuple — same privacy posture as
+    // counterparty linkage (always-prompt unless session opt-in). Same Rust
+    // engine path as `reveal_counterparty_key_linkage` above.
+    {
+        let req_verifier = req.verifier.clone();
+        let req_counterparty = req.counterparty.clone();
+        let req_protocol_id = req.protocol_id.clone();
+        let req_key_id = req.key_id.clone();
+        let outcome = crate::permission_service::dispatch_privacy_perimeter(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/revealSpecificKeyLinkage",
+            hodos_permission_engine::CallKind::SpecificKeyLinkage,
+            || serde_json::json!({
+                "kind": "specific",
+                "verifier": req_verifier,
+                "counterparty": req_counterparty,
+                "protocol": req_protocol_id,
+                "keyID": req_key_id,
+            }),
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
 
     // Validate verifier as a hex pubkey we can encrypt to.
     let verifier_pubkey = match hex::decode(&req.verifier) {

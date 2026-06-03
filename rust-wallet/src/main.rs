@@ -525,23 +525,20 @@ async fn main() -> std::io::Result<()> {
     let ship_cache = overlay::ship_cache::ShipDiscoveryCache::new();
     println!("✅ SHIP discovery cache initialized (SWR: 5-min fresh, 30-min stale)");
 
-    // Phase 2.6-A.6: build permission_service from env-derived flags.
-    // All 5 flags default OFF (production safe); enabled per class only when
-    // HODOS_ENGINE_RUST_<CLASS>=1 is exported. Service stays DORMANT until
-    // sub-phase 2.6-B wires shadow infrastructure and 2.6-C+ flips flags
-    // during developer testing. Memory `phase26_plan_drafted_2026_06_02`.
+    // Phase 2.6-A.6 / C.2: build permission_service.
+    //
+    // Phase 2.6-C dropped the per-class env-var fallback model (kickoff Q1) —
+    // each CallKind class becomes Rust-authoritative the instant its sub-commit
+    // lands, with no runtime opt-out. C.2 makes Privacy Perimeter authoritative:
+    //   - /getPublicKey identityKey-style requests
+    //   - /revealCounterpartyKeyLinkage
+    //   - /revealSpecificKeyLinkage
+    //   - /proveCertificate touching a sensitive field (per C.1 classifier)
+    //
+    // Only HODOS_ENGINE_SHADOW_LOG (diagnostic) survives as a flag.
     let engine_flags = permission_service::EngineFlags::from_env();
     let permission = Arc::new(permission_service::PermissionService::new(engine_flags));
-    if engine_flags.any_enabled() {
-        println!("⚠️  Phase 2.6 Rust engine flags ENABLED (dev mode):");
-        if engine_flags.privacy_perimeter { println!("   - HODOS_ENGINE_RUST_PRIVACY_PERIMETER"); }
-        if engine_flags.scoped_grant      { println!("   - HODOS_ENGINE_RUST_SCOPED_GRANT");      }
-        if engine_flags.payment           { println!("   - HODOS_ENGINE_RUST_PAYMENT");           }
-        if engine_flags.cert_disclosure   { println!("   - HODOS_ENGINE_RUST_CERT_DISCLOSURE");   }
-        if engine_flags.domain_trust      { println!("   - HODOS_ENGINE_RUST_DOMAIN_TRUST");      }
-    } else {
-        println!("✅ Permission engine: C++ authoritative (all Rust engine flags OFF)");
-    }
+    println!("✅ Permission engine: Privacy Perimeter is Rust-authoritative (Phase 2.6-C.2)");
     if engine_flags.shadow_log_enabled {
         println!("🧪 Permission engine shadow log: ENABLED (HODOS_ENGINE_SHADOW_LOG=1) — /engine/shadow-decide writes to engine_shadow_log");
     }
