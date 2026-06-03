@@ -1,12 +1,167 @@
 //! HTTP handlers exposed by the permission_service module.
 //!
-//! Phase 2.6-A.5: **placeholder**. The real handlers land later:
-//!   - `POST /engine/shadow-decide` in 2.6-B (shadow comparison endpoint)
-//!   - `GET /engine/audit-stats` in 2.6-A.6+ (optional CLI-friendly summary)
+//! Phase 2.6-B.2: **`/engine/shadow-decide`** lands here.
 //!
-//! Routes are NOT registered in main.rs yet — that happens in 2.6-A.6 (with
-//! the shadow-decide route gated behind a feature/setting since it shouldn't
-//! be reachable until 2.6-B's writer lands).
+//! Wire shape (must stay in lockstep with C++ caller at
+//! `cef-native/src/core/EngineShadow.cpp`):
+//!
+//! ```text
+//! POST /engine/shadow-decide
+//! Content-Type: application/json
+//! {
+//!   "context": { /* PermissionContext, snake_case */ },
+//!   "cpp_decision": "silent" | "prompt" | "deny",
+//!   "cpp_prompt_type": "<string>" | null,
+//!   "cpp_reason": "<string>" | null
+//! }
+//! ```
+//!
+//! Response: always `200 OK` (or `204 No Content` when the shadow flag is
+//! OFF). The C++ side is fire-and-forget and **discards the body** — we still
+//! emit a tiny JSON envelope for any future curl-based debugging.
+//!
+//! Hard invariants:
+//!   1. Never returns an error status. C++ doesn't read the body; bubbling 4xx
+//!      or 5xx up to the worker thread would only confuse log output.
+//!   2. Off-by-default behind `HODOS_ENGINE_SHADOW_LOG=1`. When the flag is
+//!      OFF, the handler short-circuits BEFORE the JSON deserialize — a
+//!      malformed body in shadow-OFF state is still 204, not 400.
+//!   3. All DB errors are logged and swallowed. A failing SQLite write must
+//!      not block a future shadow POST or the C++ wallet call that triggered it.
+//!
+//! The handler is dormant from a production-traffic perspective in 2.6-B.2 —
+//! the C++ caller exists (2.6-B.1) but no production code site fires it yet
+//! (that's 2.6-B.3). End-to-end smoke is via `curl` with a hand-crafted body.
 
-// Intentionally empty for 2.6-A.5. Documented placeholder so the module
-// structure is in place when 2.6-B starts.
+use std::sync::{Arc, Mutex};
+
+use actix_web::{web, HttpResponse, Responder};
+use serde::Deserialize;
+
+use hodos_permission_engine::PermissionContext;
+
+use crate::database::{EngineShadowRepository, WalletDatabase};
+
+use super::audit;
+use super::state::PermissionService;
+
+/// POST body for `/engine/shadow-decide`. Mirrors the JSON envelope built by
+/// `cef-native/src/core/EngineShadow.cpp::buildEnvelope`.
+#[derive(Debug, Deserialize)]
+pub struct ShadowDecideRequest {
+    pub context: PermissionContext,
+    pub cpp_decision: String,
+    #[serde(default)]
+    pub cpp_prompt_type: Option<String>,
+    #[serde(default)]
+    pub cpp_reason: Option<String>,
+}
+
+/// `POST /engine/shadow-decide` handler. Per the contract above, ALWAYS
+/// returns a 2xx. Errors are logged and dropped so the C++ critical path is
+/// never affected by Rust-side issues.
+///
+/// Takes `permission` and `database` as individual `web::Data` extractors
+/// (rather than going through `AppState`) so this module can live in `lib.rs`
+/// without forcing `AppState` to move into the lib crate. main.rs registers
+/// matching `.app_data(...)` entries alongside the existing AppState data.
+pub async fn shadow_decide(
+    permission: web::Data<Arc<PermissionService>>,
+    database: web::Data<Arc<Mutex<WalletDatabase>>>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    // Gate 1: shadow flag must be ON. When OFF we short-circuit BEFORE any
+    // JSON validation — the C++ side may have HODOS_ENGINE_SHADOW_LOG set
+    // even when the Rust side hasn't been restarted with it; that mismatch
+    // must be a silent no-op, not a 400.
+    if !permission.flags().shadow_log_enabled {
+        return HttpResponse::NoContent().finish();
+    }
+
+    // Gate 2: parse the envelope. A malformed body when shadow is ON is a
+    // genuine wire-shape bug — log it loudly but still return 200 so the
+    // worker thread doesn't see a failure.
+    let req: ShadowDecideRequest = match serde_json::from_value(body.into_inner()) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "🧪 [engine-shadow] malformed POST envelope: {} — dropping",
+                e
+            );
+            return HttpResponse::Ok().json(serde_json::json!({"status": "malformed"}));
+        }
+    };
+
+    // Run the Rust engine against the same context the C++ engine just
+    // consumed. This is the entire reason the endpoint exists.
+    let rust_decision = permission.decide(&req.context);
+
+    // Build the row that goes into engine_shadow_log. `build_shadow_entry`
+    // already encapsulates the agreement-vs-disagreement logic and was
+    // unit-tested in 2.6-A.5.
+    let entry = audit::build_shadow_entry(
+        &req.cpp_decision,
+        req.cpp_prompt_type.as_deref(),
+        req.cpp_reason.as_deref(),
+        &rust_decision,
+        req.context.call_kind,
+        &req.context,
+        // C++ doesn't echo domain/endpoint in the shadow envelope (LD2 — Rust
+        // is supposed to derive these from the request the user already has on
+        // the C++ side). Until 2.6-B.3 wires real call sites that thread these
+        // in, the shadow entry records empty placeholders. Disagreement
+        // analytics (`call_kind_class`, `agreement`, `context_hash`) still
+        // work; only the per-domain/per-endpoint breakdown is unavailable.
+        "",
+        "",
+        chrono::Utc::now().timestamp(),
+    );
+
+    // Persist. SQLite write happens under the database mutex; lock scope is
+    // tight — no `.await` while holding it. Any error is logged and dropped.
+    let insert_result = {
+        let db = match database.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::warn!(
+                    "🧪 [engine-shadow] database mutex poisoned: {} — dropping write",
+                    poisoned
+                );
+                return HttpResponse::Ok().json(serde_json::json!({"status": "db_lock_poisoned"}));
+            }
+        };
+        let repo = EngineShadowRepository::new(db.connection());
+        repo.insert(&entry)
+    };
+
+    match insert_result {
+        Ok(rowid) => {
+            // Disagreements are the diagnostic signal — log them at INFO so
+            // a `grep engine-shadow.*disagree` finds them in dev logs.
+            // Agreements stay at DEBUG to keep the steady-state log volume low.
+            if entry.agreement == 0 {
+                log::info!(
+                    "🧪 [engine-shadow] DISAGREE class={} cpp={} rust={} (cpp_reason={:?} rust_reason={:?}) rowid={}",
+                    entry.call_kind_class,
+                    entry.cpp_decision,
+                    entry.rust_decision,
+                    entry.cpp_reason,
+                    entry.rust_reason,
+                    rowid,
+                );
+            } else {
+                log::debug!(
+                    "🧪 [engine-shadow] agree class={} decision={} rowid={}",
+                    entry.call_kind_class,
+                    entry.cpp_decision,
+                    rowid,
+                );
+            }
+            HttpResponse::Ok().json(serde_json::json!({"status": "logged", "rowid": rowid}))
+        }
+        Err(e) => {
+            log::warn!("🧪 [engine-shadow] insert failed: {} — dropping", e);
+            HttpResponse::Ok().json(serde_json::json!({"status": "db_error"}))
+        }
+    }
+}

@@ -542,6 +542,9 @@ async fn main() -> std::io::Result<()> {
     } else {
         println!("✅ Permission engine: C++ authoritative (all Rust engine flags OFF)");
     }
+    if engine_flags.shadow_log_enabled {
+        println!("🧪 Permission engine shadow log: ENABLED (HODOS_ENGINE_SHADOW_LOG=1) — /engine/shadow-decide writes to engine_shadow_log");
+    }
 
     // Create app state
     let app_state = web::Data::new(AppState {
@@ -785,6 +788,12 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(app_state.clone())
+            // Phase 2.6-B.2 — individual extractors for permission_service::handlers
+            // (lives in lib.rs so it can't import the binary-only AppState struct).
+            // Cloning the Arc fields is cheap; both AppState and the new Data<T>
+            // entries point at the same backing objects.
+            .app_data(web::Data::new(app_state.permission.clone()))
+            .app_data(web::Data::new(app_state.database.clone()))
             .app_data(web::JsonConfig::default()
                 .limit(10 * 1024 * 1024)  // 10MB limit for BEEF transactions
                 .error_handler(|err, _req| {
@@ -936,6 +945,12 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/counterparty", web::post().to(handlers::grant_counterparty_permission))
             .route("/domain/permissions/counterparty", web::delete().to(handlers::revoke_counterparty_permission))
             .route("/domain/permissions/counterparty", web::get().to(handlers::list_counterparty_permissions))
+
+            // Phase 2.6-B.2 — engine shadow comparison endpoint. Dormant until
+            // HODOS_ENGINE_SHADOW_LOG=1 is exported AND a caller in 2.6-B.3+
+            // wires SubmitShadowComparison(...) on the C++ side. With the flag
+            // OFF, returns 204 No Content immediately.
+            .route("/engine/shadow-decide", web::post().to(permission_service::handlers::shadow_decide))
 
             // NOTE: Adblock per-site toggles moved to C++ AdblockCache (JSON file in profile dir).
             // No longer served by wallet backend — see AdblockCache.h.

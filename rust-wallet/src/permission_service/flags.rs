@@ -25,6 +25,13 @@ pub struct EngineFlags {
     pub payment: bool,
     pub cert_disclosure: bool,
     pub domain_trust: bool,
+    /// Phase 2.6-B: when true, `/engine/shadow-decide` accepts comparison POSTs
+    /// from the C++ engine and writes rows to `engine_shadow_log`. When false,
+    /// the handler short-circuits with 204 No Content so even a misconfigured
+    /// C++ client with shadow ON can't pollute the table. Independent from the
+    /// 5 CallKind-class flags — shadow is diagnostic infrastructure, not a
+    /// production engine path. Env var: `HODOS_ENGINE_SHADOW_LOG`.
+    pub shadow_log_enabled: bool,
 }
 
 impl Default for EngineFlags {
@@ -36,6 +43,7 @@ impl Default for EngineFlags {
             payment: false,
             cert_disclosure: false,
             domain_trust: false,
+            shadow_log_enabled: false,
         }
     }
 }
@@ -52,11 +60,14 @@ impl EngineFlags {
             payment: read_bool_env("HODOS_ENGINE_RUST_PAYMENT"),
             cert_disclosure: read_bool_env("HODOS_ENGINE_RUST_CERT_DISCLOSURE"),
             domain_trust: read_bool_env("HODOS_ENGINE_RUST_DOMAIN_TRUST"),
+            shadow_log_enabled: read_bool_env("HODOS_ENGINE_SHADOW_LOG"),
         }
     }
 
-    /// Returns true iff any flag is ON. Useful for the wallet startup log
-    /// to surface that some Rust engine paths are live.
+    /// Returns true iff any **CallKind-class** flag is ON. The shadow flag is
+    /// intentionally excluded — turning on the shadow log does not make any
+    /// Rust engine path authoritative, so the startup banner should not call
+    /// it out as "Rust engine ENABLED".
     pub fn any_enabled(&self) -> bool {
         self.privacy_perimeter
             || self.scoped_grant
@@ -139,6 +150,17 @@ mod tests {
         assert!(!f.payment);
         assert!(!f.cert_disclosure);
         assert!(!f.domain_trust);
+        assert!(!f.shadow_log_enabled);
+        assert!(!f.any_enabled());
+    }
+
+    #[test]
+    fn shadow_flag_does_not_count_toward_any_enabled() {
+        // Shadow flag turned on alone should NOT trip any_enabled — that flag
+        // is reserved for "some Rust engine path is authoritative" semantics.
+        let mut f = EngineFlags::default();
+        f.shadow_log_enabled = true;
+        assert!(f.shadow_log_enabled);
         assert!(!f.any_enabled());
     }
 
