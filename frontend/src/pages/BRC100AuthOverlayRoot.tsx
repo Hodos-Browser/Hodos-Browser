@@ -524,6 +524,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       return `You've spent ${formatUsdCents(sessionSpent)} this session. This payment of ${formatUsdCents(paymentCents)} would exceed your session limit of ${formatUsdCents(perSessionLimit)}.`;
     } else if (exceededLimit === 'both') {
       return `This payment of ${formatUsdCents(paymentCents)} exceeds both your per-transaction limit (${formatUsdCents(perTxLimit)}) and session limit (${formatUsdCents(perSessionLimit)}).`;
+    } else if (exceededLimit === 'price_unavailable') {
+      // Engine fell back to Prompt because the BSV/USD price feed is down,
+      // so spending caps can't be evaluated automatically. The cents
+      // display above will show $0.00 (no price → no conversion); the
+      // satoshi amount below it is the real number to verify.
+      return `The BSV/USD price feed is currently unavailable, so we can't evaluate spending caps automatically. Verify the satoshi amount above before approving, or deny to retry once the price feed is back.`;
     }
     return 'This payment exceeds your auto-approve limits for this site.';
   };
@@ -1122,7 +1128,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </div>
           </div>
 
-          {/* Amount display */}
+          {/* Amount display
+              When BSV/USD price is unavailable, the engine sends cents=0 —
+              the big "$0.00" misleads users into thinking the payment is free.
+              In that case, lead with satoshis (the real number) and show
+              "Price unavailable" in the USD slot. */}
           <div style={{
             background: COLORS.subduedGold,
             borderRadius: '10px',
@@ -1130,20 +1140,41 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             marginBottom: '18px',
             textAlign: 'center',
           }}>
-            <div style={{
-              fontSize: '28px',
-              fontWeight: 700,
-              color: COLORS.textDark,
-              marginBottom: '4px',
-            }}>
-              {formatUsdCents(paymentCents)}
-            </div>
-            <div style={{
-              fontSize: '14px',
-              color: COLORS.textMuted,
-            }}>
-              {formatSatoshis(paymentSatoshis)}
-            </div>
+            {exceededLimit === 'price_unavailable' ? (
+              <>
+                <div style={{
+                  fontSize: '28px',
+                  fontWeight: 700,
+                  color: COLORS.textDark,
+                  marginBottom: '4px',
+                }}>
+                  {formatSatoshis(paymentSatoshis)}
+                </div>
+                <div style={{
+                  fontSize: '14px',
+                  color: COLORS.textMuted,
+                }}>
+                  USD price unavailable
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{
+                  fontSize: '28px',
+                  fontWeight: 700,
+                  color: COLORS.textDark,
+                  marginBottom: '4px',
+                }}>
+                  {formatUsdCents(paymentCents)}
+                </div>
+                <div style={{
+                  fontSize: '14px',
+                  color: COLORS.textMuted,
+                }}>
+                  {formatSatoshis(paymentSatoshis)}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Limit explanation */}

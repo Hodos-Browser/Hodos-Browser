@@ -1093,8 +1093,10 @@ pub fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
 /// 2. `engine_shadow_log` — short-lived shadow comparison surface used during
 ///    the Phase 2.6 migration window. Records every C++ vs Rust engine
 ///    disagreement so we can verify the port is correct before flipping flags
-///    in 2.6-C through 2.6-G. Dropped entirely in the V21 cleanup migration
-///    that lands as part of sub-phase 2.6-H alongside C++ engine deletion.
+///    in 2.6-C through 2.6-G. Will be dropped in the eventual 2.6-H cleanup
+///    migration (originally planned as V21; bumped to a later version since
+///    V21 was used 2026-06-09 by the BSV-price persistence change — see
+///    `migrate_v20_to_v21` below).
 ///
 /// Idempotent: uses `CREATE TABLE IF NOT EXISTS` so re-running on a
 /// partially-migrated DB is safe.
@@ -1146,5 +1148,45 @@ pub fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
     )?;
 
     info!("   ✅ V20 migration applied (permission_audit_log + engine_shadow_log)");
+    Ok(())
+}
+
+/// V20 → V21 — 2026-06-09 BSV price-cache persistence.
+///
+/// Adds the `bsv_price_cache` table so the wallet has a fallback BSV/USD
+/// price across process restarts. Pre-this-migration, `price_cache.rs` was
+/// in-memory only — when both upstream price sources (CryptoCompare and
+/// CoinGecko's old `bitcoin-sv` slug) broke under us on the same day, every
+/// cold-start wallet had no fallback and every payment had to prompt with
+/// `engineReason=price_unavailable`. With this migration, the last known good
+/// price + timestamp + source survives restart; the in-memory cache loads
+/// from the table at startup and persists back on every successful live
+/// fetch.
+///
+/// Schema:
+///   - `id INTEGER PRIMARY KEY CHECK (id = 1)` — single-row pattern. The
+///     CHECK enforces it so an accidental INSERT can't create a second row.
+///   - `price_usd REAL NOT NULL` — last known good price.
+///   - `fetched_at INTEGER NOT NULL` — Unix epoch seconds when fetched.
+///     Lets the engine + frontend show "(price is N hours old)" warnings.
+///   - `source TEXT NOT NULL` — which upstream provided the value
+///     ("whatsonchain" / "coingecko" / "mexc"). Useful for diagnosing
+///     a stuck-but-persistent stale value.
+///
+/// Idempotent: `CREATE TABLE IF NOT EXISTS`. Re-running on an already-V21
+/// DB is a no-op.
+pub fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
+    info!("   Creating bsv_price_cache table (V21)...");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bsv_price_cache (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            price_usd   REAL    NOT NULL,
+            fetched_at  INTEGER NOT NULL,
+            source      TEXT    NOT NULL
+        );"
+    )?;
+
+    info!("   ✅ V21 migration applied (bsv_price_cache table)");
     Ok(())
 }

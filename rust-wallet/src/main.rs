@@ -84,7 +84,7 @@ pub struct AppState {
     pub auth_sessions: Arc<AuthSessionManager>,
     pub balance_cache: Arc<balance_cache::BalanceCache>,  // In-memory balance cache
     pub fee_rate_cache: Arc<fee_rate_cache::FeeRateCache>,  // ARC-sourced dynamic fee rate
-    pub price_cache: Arc<price_cache::PriceCache>,  // BSV/USD exchange rate (CryptoCompare + CoinGecko)
+    pub price_cache: Arc<price_cache::PriceCache>,  // BSV/USD exchange rate (WhatsOnChain + CoinGecko + MEXC; persisted to V21 bsv_price_cache)
     pub services: Arc<services::WalletServices>,  // Phase 1.6d.B: WalletServices facade (dormant — 1.6d.C wires call sites)
     pub ship_cache: Arc<overlay::ship_cache::ShipDiscoveryCache>,  // Phase 1.6d polish Step 1: SWR cache for SHIP host discovery
     pub utxo_selection_lock: Arc<tokio::sync::Mutex<()>>,  // Prevents concurrent UTXO selection race conditions
@@ -508,9 +508,13 @@ async fn main() -> std::io::Result<()> {
     let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());
     println!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
 
-    // Initialize BSV/USD price cache (CryptoCompare + CoinGecko fallback)
-    let price_cache = Arc::new(price_cache::PriceCache::new());
-    println!("✅ Price cache initialized (BSV/USD, 5-min TTL)");
+    // Initialize BSV/USD price cache (2026-06-09: WhatsOnChain primary,
+    // CoinGecko fallback, MEXC final fallback). Loads the last known good
+    // price from `bsv_price_cache` SQLite table (V21) so cold-start has a
+    // fallback when all three live sources are down.
+    let price_cache = Arc::new(price_cache::PriceCache::new(Some(database.clone())));
+    price_cache.load_persisted();
+    println!("✅ Price cache initialized (BSV/USD, 5-min TTL, restart-survival via V21)");
 
     // Create shutdown token for graceful shutdown (Phase 8D)
     let shutdown_token = tokio_util::sync::CancellationToken::new();

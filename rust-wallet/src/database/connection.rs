@@ -925,6 +925,18 @@ impl WalletDatabase {
             info!("   ✅ Schema V20 applied");
         }
 
+        if current_version < 21 {
+            // 2026-06-09: bsv_price_cache table for restart-survival of the
+            // last known good BSV/USD price. Necessary after both upstream
+            // sources (CryptoCompare auth-walled, CoinGecko slug renamed)
+            // broke simultaneously and the in-memory-only cache left every
+            // cold-start wallet with no fallback.
+            info!("   Applying migration V21 (bsv_price_cache)...");
+            migrations::migrate_v20_to_v21(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (21)", [])?;
+            info!("   ✅ Schema V21 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.
