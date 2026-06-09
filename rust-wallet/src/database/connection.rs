@@ -937,6 +937,18 @@ impl WalletDatabase {
             info!("   ✅ Schema V21 applied");
         }
 
+        if current_version < 22 {
+            // 2026-06-09: Phase 2.6-D Fix #4 — bundled_scope_grant column on
+            // domain_permissions. Lets users opt in to "trust this site for
+            // all wallet operations" on the connect modal, silencing
+            // ProtocolUse/BasketAccess prompts (CounterpartyUse already
+            // silent for approved domains via Fix #3).
+            info!("   Applying migration V22 (bundled_scope_grant column)...");
+            migrations::migrate_v21_to_v22(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (22)", [])?;
+            info!("   ✅ Schema V22 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

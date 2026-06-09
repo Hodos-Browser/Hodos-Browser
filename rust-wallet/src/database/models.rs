@@ -255,6 +255,12 @@ pub struct DomainPermission {
     /// ticked (default ON). Default false ensures pre-existing rows still
     /// prompt the first time.
     pub identity_key_disclosure_allowed: bool,
+    /// Phase 2.6-D Fix #4 — when true, the engine silences ProtocolUse and
+    /// BasketAccess scoped-grant prompts for this domain. Set when the user
+    /// ticks "Allow this site to perform wallet operations without prompting
+    /// each time" on the connect modal. Protected baskets still prompt even
+    /// under this flag (`dispatch_scoped_grant` overrides).
+    pub bundled_scope_grant: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -276,6 +282,7 @@ impl DomainPermission {
             rate_limit_per_min: 30,
             max_tx_per_session: 100,
             identity_key_disclosure_allowed: false,
+            bundled_scope_grant: false,
             created_at: now,
             updated_at: now,
         }

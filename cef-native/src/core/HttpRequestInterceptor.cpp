@@ -2461,18 +2461,21 @@ void runIpcEngineCascade(const std::string& requestId,
     // Capture engine-decision-time state for callbacks.
     const hodos::PermissionCallKind callKind = ctx.callKind;
 
-    // Phase 2.6-C.4 — Privacy-perimeter CallKinds are now Rust-authoritative
-    // (kickoff Q1). Skip the inline cascade AND the shadow comparison: the
-    // C++ engine no longer produces ground truth for these kinds. Forward
-    // directly to Rust; the worker hops to TID_UI on 202 to open the matching
-    // modal via tryHandlePendingResponse → resumeInternalResponse on user
-    // resolution (C.3 path, same as the HTTP-path silent-forward worker
-    // below for non-privacy-perimeter kinds).
+    // Phase 2.6-C.4 + D.4 — privacy-perimeter AND scoped-grant CallKinds are
+    // now Rust-authoritative. Skip the inline cascade AND the shadow
+    // comparison: the C++ engine no longer produces ground truth for these
+    // kinds. Forward directly to Rust; the worker hops to TID_UI on 202 to
+    // open the matching modal via tryHandlePendingResponse →
+    // resumeInternalResponse on user resolution (C.3 path, same as the
+    // HTTP-path silent-forward worker below).
     if (callKind == hodos::PermissionCallKind::IdentityKeyReveal
         || callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage
         || callKind == hodos::PermissionCallKind::SpecificKeyLinkage
-        || callKind == hodos::PermissionCallKind::SensitiveCertField) {
-        LOG_DEBUG_HTTP("🚪 IPC: privacy-perimeter forward to Rust (no inline gate, no shadow) for "
+        || callKind == hodos::PermissionCallKind::SensitiveCertField
+        || callKind == hodos::PermissionCallKind::ProtocolUse
+        || callKind == hodos::PermissionCallKind::BasketAccess
+        || callKind == hodos::PermissionCallKind::CounterpartyUse) {
+        LOG_DEBUG_HTTP("🚪 IPC: Rust-authoritative kind, forward to Rust (no inline gate, no shadow) for "
                        + origin + " endpoint=" + endpoint);
         CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
             std::string requestId, std::string endpoint, std::string bodyJson,
@@ -3089,106 +3092,26 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             }
         }
 
-        // Phase 2.5-B sub-step 5.e — scoped-grant gate for non-payment,
-        // non-perimeter, non-cert endpoints now flows through the shared
-        // RunPermissionGate helper. Behavior is identical to the prior
-        // Phase 1.5 Step 6 Commit E implementation; the reorganization
-        // mirrors 5.b-5.d.
+        // Phase 2.6-D — scoped-grant cascade deleted. The inline
+        // RunPermissionGate path (Protocol / Basket / Counterparty) that
+        // used to live here was authoritative through Step 6 Commit E
+        // (sub-step 5.e) but is now superseded by Rust's
+        // `dispatch_scoped_grant` in `permission_service::request_gate`.
         //
-        // Targets endpoints like /createSignature, /createHmac, /encrypt,
-        // /decrypt, /listOutputs that carry a protocolID / basket /
-        // counterparty body field. The engine's DecideScopedGrant returns
-        // Silent when a matching V18 grant or one-shot approval exists,
-        // else Prompt with the appropriate promptType
-        // (protocol_permission_prompt / basket_permission_prompt /
-        // counterparty_permission_prompt).
+        // The Rust handler returns 202 PENDING with the matching promptType
+        // (`protocol_permission_prompt` / `basket_permission_prompt` /
+        // `counterparty_permission_prompt`); `tryHandlePendingResponse`
+        // (below) intercepts that response, opens the modal via
+        // `buildExtraParamsFromPayload`, and re-issues the call with
+        // `X-User-Approved` so Rust's gate consumes the approval +
+        // body-sha256-verifies + processes the call.
         //
-        // Important behavior preserved: Silent falls THROUGH to the
-        // catch-all "Non-payment endpoint from approved domain — forward
-        // immediately" forwarding below, NOT through forwardToWallet here.
-        // The callback is intentionally left unset for Silent; that path
-        // takes no action so the outer code's catch-all forward runs.
-        // Prompt and Deny return true after the matching callback fires.
+        // The inline cascade also called `SubmitShadowComparison` for the
+        // 2.6-B shadow log; that comparison is no longer meaningful once
+        // the engine path is authoritative.
         //
-        // Payment endpoints (createAction etc.) are handled below by the
-        // existing payment branch, which also surfaces missing-scope
-        // prompts via PermissionContext.paymentScopeKindMissing before the
-        // cap check fires (Commit E v1 deferred Payment-scope sequencing).
-        if (!isPaymentEndpoint(endpoint_)
-            && !isGetPublicKeyEndpoint(endpoint_)
-            && !isKeyLinkageEndpoint(endpoint_)
-            && !isProveCertificateEndpoint(endpoint_)) {
-            ProtocolScope proto_scope = extractProtocolScope(endpoint_, body_);
-            BasketScope basket_scope = extractBasketScope(endpoint_, body_);
-            const bool hasScope = proto_scope.valid || basket_scope.valid;
-            if (hasScope) {
-                hodos::PermissionContext ctx = buildPermissionContext(
-                    requestDomain_, endpoint_, body_, perm,
-                    /*requestedCents=*/0, /*sessionSpentCents=*/0,
-                    /*paymentRequestsThisMinute=*/0, /*paymentCountThisSession=*/0,
-                    /*bsvPriceAvailable=*/true);
-
-                hodos::GateCallbacks cb;
-                // Silent case: forwardToWallet intentionally LEFT UNSET so
-                // RunPermissionGate's Silent branch is a no-op; the outer
-                // code's catch-all forwarding below handles the request.
-                // This preserves the prior "Silent — fall through to normal
-                // forwarding below" comment's semantics exactly.
-                cb.denyWithError = [this, &handle_request](const std::string& errorJson) {
-                    LOG_DEBUG_HTTP("🛡️ Scoped grant denied for " + requestDomain_);
-                    onHTTPResponseReceived(errorJson);
-                    handle_request = true;
-                };
-                cb.openModal = [this, &proto_scope, &basket_scope, &handle_request](
-                    const std::string& promptType,
-                    const std::string& /*emptyExtraParams*/) {
-                    // Build extraParams so the React modal can render the
-                    // specific scope being requested. The scope fields are
-                    // distinct per kind; React reads only the ones it needs
-                    // for the current promptType.
-                    std::string extraParams;
-                    if (promptType == "protocol_permission_prompt") {
-                        // Level/keyId/counterparty default-safe if unset.
-                        extraParams = "&protocolLevel=" + std::to_string(proto_scope.level)
-                                    + "&protocolName=" + proto_scope.name
-                                    + "&protocolKeyId=" + proto_scope.keyId
-                                    + "&protocolCounterparty=" + proto_scope.counterparty;
-                    } else if (promptType == "basket_permission_prompt") {
-                        extraParams = "&basket=" + basket_scope.basket
-                                    + "&basketAccess=" + basket_scope.requiredAccess;
-                    } else if (promptType == "counterparty_permission_prompt") {
-                        extraParams = "&counterparty=" + proto_scope.counterparty;
-                    }
-                    LOG_DEBUG_HTTP("🛡️ Scoped grant prompt required for " + requestDomain_
-                                   + " (" + promptType + ")");
-                    PendingRequestManager::GetInstance().addRequest(
-                        requestDomain_, method_, endpoint_, body_, this, promptType);
-                    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-                        promptType, requestDomain_, extraParams));
-                    postAuthTimeout(kPromptAuthTimeoutMs,
-                        "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
-                    handle_request = true;
-                };
-
-                hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
-                hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
-
-                LOG_DEBUG_HTTP(std::string("🛡️ Scoped-grant engine decision: ")
-                    + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
-                       : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
-                    + " promptType=" + gateResult.promptType
-                    + " callKind=" + callKindToString(ctx.callKind)
-                    + " | reason=" + gateResult.reason);
-
-                // Prompt and Deny set handle_request inside their callbacks
-                // and require return-true so the catch-all forward below
-                // doesn't fire. Silent intentionally falls through.
-                if (gateResult.action != hodos::GateDecision::Action::Silent) {
-                    return true;
-                }
-                // Silent — fall through to normal forwarding below.
-            }
-        }
+        // Payment endpoints (createAction etc.) are still handled inline
+        // below by the existing payment branch (2.6-E migrates this).
 
         if (isPaymentEndpoint(endpoint_)) {
             // Phase 2.5-B sub-step 5.b — payment gate now flows through the
@@ -3492,8 +3415,10 @@ private:
 // Task class for creating domain permission request on UI thread
 class DomainPermissionTask : public CefTask {
 public:
-    DomainPermissionTask(const std::string& domain, bool identityKeyDisclosureAllowed = false)
-        : domain_(domain), identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed) {}
+    DomainPermissionTask(const std::string& domain, bool identityKeyDisclosureAllowed = false,
+                        bool bundledScopeGrant = false)
+        : domain_(domain), identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed),
+          bundledScopeGrant_(bundledScopeGrant) {}
 
     void Execute() override {
         LOG_DEBUG_HTTP("🔐 DomainPermissionTask executing on UI thread for domain: " + domain_);
@@ -3504,11 +3429,13 @@ public:
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
-        // Create JSON body — Phase 1.5 Step 1 adds identityKeyDisclosureAllowed
+        // Create JSON body — Phase 1.5 Step 1 adds identityKeyDisclosureAllowed,
+        // Phase 2.6-D Fix #4 adds bundledScopeGrant.
         nlohmann::json bodyJson;
         bodyJson["domain"] = domain_;
         bodyJson["trustLevel"] = "approved";
         bodyJson["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed_;
+        bodyJson["bundledScopeGrant"] = bundledScopeGrant_;
         std::string jsonBody = bodyJson.dump();
         LOG_DEBUG_HTTP("🔐 Domain permission JSON body: " + jsonBody);
 
@@ -3537,6 +3464,7 @@ public:
 private:
     std::string domain_;
     bool identityKeyDisclosureAllowed_;
+    bool bundledScopeGrant_;
     IMPLEMENT_REFCOUNTING(DomainPermissionTask);
     DISALLOW_COPY_AND_ASSIGN(DomainPermissionTask);
 };
@@ -3547,11 +3475,13 @@ public:
     AdvancedDomainPermissionTask(const std::string& domain, int64_t perTxLimitCents,
                                   int64_t perSessionLimitCents, int64_t rateLimitPerMin,
                                   int64_t maxTxPerSession,
-                                  bool identityKeyDisclosureAllowed = false)
+                                  bool identityKeyDisclosureAllowed = false,
+                                  bool bundledScopeGrant = false)
         : domain_(domain), perTxLimitCents_(perTxLimitCents),
           perSessionLimitCents_(perSessionLimitCents), rateLimitPerMin_(rateLimitPerMin),
           maxTxPerSession_(maxTxPerSession),
-          identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed) {}
+          identityKeyDisclosureAllowed_(identityKeyDisclosureAllowed),
+          bundledScopeGrant_(bundledScopeGrant) {}
 
     void Execute() override {
         LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
@@ -3569,6 +3499,7 @@ public:
         body["rateLimitPerMin"] = rateLimitPerMin_;
         body["maxTxPerSession"] = maxTxPerSession_;
         body["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed_;
+        body["bundledScopeGrant"] = bundledScopeGrant_;
         std::string jsonBody = body.dump();
 
         CefRefPtr<CefPostData> postData = CefPostData::Create();
@@ -3592,6 +3523,7 @@ private:
     int64_t rateLimitPerMin_;
     int64_t maxTxPerSession_;
     bool identityKeyDisclosureAllowed_;
+    bool bundledScopeGrant_;
     IMPLEMENT_REFCOUNTING(AdvancedDomainPermissionTask);
     DISALLOW_COPY_AND_ASSIGN(AdvancedDomainPermissionTask);
 };
@@ -3599,14 +3531,19 @@ private:
 // Function to add domain permission with advanced settings.
 // Phase 1.5 Step 1: identityKeyDisclosureAllowed bundles the privacy-perimeter
 // grant into the same site approval, eliminating a second prompt on first connect.
+// Phase 2.6-D Fix #4: bundledScopeGrant bundles the V22
+// `bundled_scope_grant` column write so the engine can silence ProtocolUse +
+// BasketAccess prompts for this domain.
 void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCents,
                                   int64_t perSessionLimitCents, int64_t rateLimitPerMin,
                                   int64_t maxTxPerSession,
-                                  bool identityKeyDisclosureAllowed) {
+                                  bool identityKeyDisclosureAllowed,
+                                  bool bundledScopeGrant) {
     LOG_DEBUG_HTTP("🔐 Adding advanced domain permission: " + domain +
         " (tx=" + std::to_string(perTxLimitCents) + ", session=" + std::to_string(perSessionLimitCents) +
         ", rate=" + std::to_string(rateLimitPerMin) + ", maxTxPerSession=" + std::to_string(maxTxPerSession) +
-        ", identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") + ")");
+        ", identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") +
+        ", bundledScopeGrant=" + (bundledScopeGrant ? "1" : "0") + ")");
 
     // Set cache immediately with full settings — synchronous, so the next request
     // from this domain sees both "approved" trust AND the identity-key grant
@@ -3630,7 +3567,7 @@ void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCe
     // Post async DB write
     CefPostTask(TID_UI, new AdvancedDomainPermissionTask(
         domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin,
-        maxTxPerSession, identityKeyDisclosureAllowed));
+        maxTxPerSession, identityKeyDisclosureAllowed, bundledScopeGrant));
 }
 
 // Phase 1.5 Step 1 — defined here (after AsyncWalletResourceHandler +
@@ -3647,9 +3584,13 @@ bool ForwardPendingWalletRequest(CefRefPtr<CefResourceHandler> handler) {
 // Function to add domain permission (sets "approved" trust level).
 // Phase 1.5 Step 1: bundles the identity-key privacy-perimeter grant via the
 // optional second arg so the simple-approval modal can ship both grants in one click.
-void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAllowed) {
+// Phase 2.6-D Fix #4: third arg bundles the V22 bundled_scope_grant column so
+// the engine can silence ProtocolUse + BasketAccess on this domain.
+void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAllowed,
+                         bool bundledScopeGrant) {
     LOG_DEBUG_HTTP("🔐 Adding domain permission: " + domain +
-        " (identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") + ")");
+        " (identityKeyDisclosure=" + (identityKeyDisclosureAllowed ? "1" : "0") +
+        ", bundledScopeGrant=" + (bundledScopeGrant ? "1" : "0") + ")");
 
     // Set the cache immediately so the next request sees "approved" without waiting
     // for the async DB write to complete (prevents modal loop race condition)
@@ -3663,7 +3604,8 @@ void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAl
     }
 
     // Post task to UI thread for the async DB write
-    CefPostTask(TID_UI, new DomainPermissionTask(domain, identityKeyDisclosureAllowed));
+    CefPostTask(TID_UI, new DomainPermissionTask(domain, identityKeyDisclosureAllowed,
+                                                 bundledScopeGrant));
     LOG_DEBUG_HTTP("🔐 Domain permission task posted to UI thread");
 }
 

@@ -531,6 +531,87 @@ pub struct AuthRequest {
 use crate::database::DomainPermissionRepository;
 use crate::database::models::DomainPermission;
 
+// ===========================================================================
+// Phase 2.6-D scoped-grant body peek helpers
+// ===========================================================================
+//
+// Each scoped-grant handler must hand the engine the protocol/basket scope it's
+// about to operate on. These helpers extract the scope from the raw body bytes
+// WITHOUT consuming the body — the handler still does its own typed parse
+// afterwards.
+//
+// Mirrors `extractProtocolScope` / `extractBasketScope` in
+// `cef-native/src/core/HttpRequestInterceptor.cpp:1053-1100` exactly, so the
+// Rust gate's classification matches the C++ inline cascade it replaces.
+
+/// Peek protocol scope from a BRC-100 call body for the scoped-grant gate.
+///
+/// Returns `Some((level, name, key_id, counterparty))` when the body parses and
+/// carries a usable `protocolID`. `counterparty` is `None` for `self`/`anyone`
+/// and `Some(hex)` for a specific party — matching the C++ semantics where
+/// only specific counterparties produce a CounterpartyUse classification.
+///
+/// Returns `None` for malformed bodies or bodies missing `protocolID`; the
+/// caller should skip the engine and let `check_domain_approved` + the handler's
+/// own typed-body parse surface the error.
+fn peek_scoped_grant_scope_protocol(
+    body: &[u8],
+) -> Option<(u8, String, String, Option<String>)> {
+    if body.is_empty() {
+        return None;
+    }
+    let j: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let proto = j.get("protocolID")?;
+
+    // protocolID: [level, name] OR string (rare, treated as level-2 with empty name).
+    let (level, name) = match proto {
+        serde_json::Value::Array(arr) if arr.len() == 2 => {
+            let l = arr[0].as_u64()? as u8;
+            let n = arr[1].as_str()?.to_string();
+            (l, n)
+        }
+        serde_json::Value::String(s) => (2u8, s.clone()),
+        _ => return None,
+    };
+
+    let key_id = j
+        .get("keyID")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "*".to_string());
+
+    let counterparty = j
+        .get("counterparty")
+        .and_then(|v| v.as_str())
+        .and_then(|cp| {
+            if cp == "self" || cp == "anyone" || cp.is_empty() {
+                None
+            } else {
+                Some(cp.to_string())
+            }
+        });
+
+    Some((level, name, key_id, counterparty))
+}
+
+/// Peek basket scope from a BRC-100 call body for the scoped-grant gate.
+///
+/// Returns `Some((basket, access))` when the body carries a non-empty `basket`
+/// string. `access` is determined by the caller: `listOutputs` passes `"read"`,
+/// `relinquishOutput` passes `"read_write"`.
+fn peek_scoped_grant_scope_basket(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let j: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let basket = j.get("basket")?.as_str()?.to_string();
+    if basket.is_empty() {
+        None
+    } else {
+        Some(basket)
+    }
+}
+
 /// Check if the requesting domain is approved.
 ///
 /// Returns:
@@ -846,6 +927,29 @@ pub async fn create_hmac(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createHmac called");
+
+    // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
+    if let Some((level, name, key_id, counterparty)) =
+        peek_scoped_grant_scope_protocol(&body)
+    {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/createHmac",
+            crate::permission_service::ScopedCall::Protocol {
+                level,
+                name: &name,
+                key_id: &key_id,
+                counterparty: counterparty.as_deref(),
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
 
     // Defense-in-depth: verify domain is approved
     {
@@ -1548,9 +1652,41 @@ fn parse_byte_data(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 // /encrypt - BRC-100 endpoint for encrypting data (Call Code 11)
 pub async fn encrypt(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /encrypt called");
+
+    // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
+    if let Some((level, name, key_id, counterparty)) =
+        peek_scoped_grant_scope_protocol(&body)
+    {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/encrypt",
+            crate::permission_service::ScopedCall::Protocol {
+                level,
+                name: &name,
+                key_id: &key_id,
+                counterparty: counterparty.as_deref(),
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
 
     // Parse request body
     let body_str = String::from_utf8_lossy(&body).to_string();
@@ -1730,9 +1866,41 @@ pub async fn encrypt(
 // /decrypt - BRC-100 endpoint for decrypting data (Call Code 12)
 pub async fn decrypt(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /decrypt called");
+
+    // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
+    if let Some((level, name, key_id, counterparty)) =
+        peek_scoped_grant_scope_protocol(&body)
+    {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/decrypt",
+            crate::permission_service::ScopedCall::Protocol {
+                level,
+                name: &name,
+                key_id: &key_id,
+                counterparty: counterparty.as_deref(),
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
 
     // Parse request body
     let body_str = String::from_utf8_lossy(&body).to_string();
@@ -3482,6 +3650,33 @@ pub async fn create_signature(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createSignature called");
+
+    // Phase 2.6-D scoped-grant gate. Runs BEFORE check_domain_approved (mirrors
+    // C++ inline cascade: extractProtocolScope at HttpRequestInterceptor.cpp:1053).
+    // The dispatch helper handles the X-User-Approved replay path and the
+    // engine's Silent/Prompt/Deny decision. Defense-in-depth: check_domain_approved
+    // still runs after Proceed.
+    if let Some((level, name, key_id, counterparty)) =
+        peek_scoped_grant_scope_protocol(&body)
+    {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/createSignature",
+            crate::permission_service::ScopedCall::Protocol {
+                level,
+                name: &name,
+                key_id: &key_id,
+                counterparty: counterparty.as_deref(),
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
 
     // Defense-in-depth: verify domain is approved
     {
@@ -9675,6 +9870,12 @@ pub struct SetDomainPermissionRequest {
     /// getPublicKey({identityKey:true}) from this domain bypasses the
     /// privacy-perimeter prompt. None = leave existing value untouched.
     pub identity_key_disclosure_allowed: Option<bool>,
+    /// Phase 2.6-D Fix #4 — when ticked at domain approval time, the engine
+    /// silences ProtocolUse + BasketAccess scoped-grant prompts for this
+    /// domain. CounterpartyUse is already silent for approved domains via
+    /// Fix #3. Protected baskets still prompt regardless. None = leave
+    /// existing value untouched.
+    pub bundled_scope_grant: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9713,6 +9914,7 @@ pub async fn get_domain_permission(
             "rateLimitPerMin": perm.rate_limit_per_min,
             "maxTxPerSession": perm.max_tx_per_session,
             "identityKeyDisclosureAllowed": perm.identity_key_disclosure_allowed,
+            "bundledScopeGrant": perm.bundled_scope_grant,
             "createdAt": perm.created_at,
             "updatedAt": perm.updated_at,
         })),
@@ -9798,8 +10000,13 @@ pub async fn set_domain_permission(
     if let Some(v) = req.identity_key_disclosure_allowed {
         perm.identity_key_disclosure_allowed = v;
     }
-    // Note: identity_key_disclosure_allowed is preserved via the existing-row
-    // fallback above when the request omits the field.
+    if let Some(v) = req.bundled_scope_grant {
+        perm.bundled_scope_grant = v;
+    }
+    // Note: identity_key_disclosure_allowed and bundled_scope_grant are
+    // preserved via the existing-row fallback above when the request omits
+    // the field. New domains land with bundled_scope_grant=false by default;
+    // the React modal must explicitly include it in the POST.
     match repo.upsert(&perm) {
         Ok(id) => {
             // Re-read for full response
@@ -9813,6 +10020,7 @@ pub async fn set_domain_permission(
                     "rateLimitPerMin": saved.rate_limit_per_min,
                     "maxTxPerSession": saved.max_tx_per_session,
                     "identityKeyDisclosureAllowed": saved.identity_key_disclosure_allowed,
+                    "bundledScopeGrant": saved.bundled_scope_grant,
                     "createdAt": saved.created_at,
                     "updatedAt": saved.updated_at,
                 })),
@@ -9920,6 +10128,7 @@ pub async fn list_domain_permissions(
                     "rateLimitPerMin": p.rate_limit_per_min,
                     "maxTxPerSession": p.max_tx_per_session,
                     "identityKeyDisclosureAllowed": p.identity_key_disclosure_allowed,
+                    "bundledScopeGrant": p.bundled_scope_grant,
                     "createdAt": p.created_at,
                     "updatedAt": p.updated_at,
                     "certFieldPermissions": cert_fields,
@@ -10351,6 +10560,28 @@ pub async fn grant_basket_permission(
     if req.access != "read" && req.access != "read_write" {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "access must be 'read' or 'read_write'"}));
     }
+
+    // Phase 2.6-D D.3: protected basket guardrail.
+    //
+    // Defense-in-depth: the React frontend disables checkboxes for protected
+    // baskets in the Connect modal's Customize subview (Phase 1.5 Step 5), and
+    // `dispatch_scoped_grant` force-prompts when a runtime call requests a
+    // protected basket. This endpoint is the third layer — even a direct grant
+    // (CLI, malicious dApp bypassing the modal, future internal tooling) is
+    // rejected here. `default`, `backup-*`, and `admin *` never receive a
+    // domain grant under any code path.
+    if crate::permission_service::is_protected_basket(&req.basket.trim().to_lowercase()) {
+        log::warn!(
+            "🛡️ grant_basket_permission denied — domain={} basket='{}' is protected",
+            req.domain,
+            req.basket,
+        );
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Basket name is reserved and cannot be granted to any domain",
+            "reason": "protected_basket",
+        }));
+    }
+
     {
         let db = state.database.lock().unwrap();
         if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
@@ -15164,17 +15395,59 @@ pub struct WalletOutput {
 /// Lists spendable outputs within a specific basket
 pub async fn list_outputs(
     state: web::Data<AppState>,
-    req: web::Json<ListOutputsRequest>,
+    http_req: HttpRequest,
+    body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /listOutputs called");
+
+    // Phase 2.6-D scoped-grant gate (basket access, read).
+    if let Some(basket_name) = peek_scoped_grant_scope_basket(&body) {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/listOutputs",
+            crate::permission_service::ScopedCall::Basket {
+                basket: &basket_name,
+                access: "read",
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    // Parse the body once the gate has cleared.
+    let req: ListOutputsRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse ListOutputsRequest: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid request: {}", e)
+            }));
+        }
+    };
+
     log::info!("   Basket: {}", req.basket);
     log::info!("   Tags: {:?}", req.tags);
     log::info!("   Tag query mode: {:?}", req.tag_query_mode);
 
-    // Validate basket name (must not be "default" per BRC-100 spec)
-    if req.basket.trim().to_lowercase() == "default" {
+    // Phase 2.6-D D.3: protected basket guardrail (defense-in-depth in the
+    // endpoint itself). The engine ALSO blocks but the endpoint enforces too.
+    // BRC-100 spec also prohibits "default" as a user-facing listOutputs target.
+    if crate::permission_service::is_protected_basket(&req.basket.trim().to_lowercase()) {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Basket name 'default' is prohibited by BRC-100 specification"
+            "error": "Basket name is reserved and cannot be accessed via listOutputs",
         }));
     }
 
@@ -15455,11 +15728,57 @@ pub struct RelinquishOutputRequest {
 /// Removes an output from a basket (stops tracking it)
 pub async fn relinquish_output(
     state: web::Data<AppState>,
-    req: web::Json<RelinquishOutputRequest>,
+    http_req: HttpRequest,
+    body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /relinquishOutput called");
+
+    // Phase 2.6-D scoped-grant gate (basket access, read_write — destructive).
+    if let Some(basket_name) = peek_scoped_grant_scope_basket(&body) {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/relinquishOutput",
+            crate::permission_service::ScopedCall::Basket {
+                basket: &basket_name,
+                access: "read_write",
+            },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
+    // Defense-in-depth: verify domain is approved
+    {
+        let db = state.database.lock().unwrap();
+        if let Err(resp) = check_domain_approved(&http_req, db.connection(), state.current_user_id) {
+            return resp;
+        }
+    }
+
+    let req: RelinquishOutputRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("   Failed to parse RelinquishOutputRequest: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid request: {}", e)
+            }));
+        }
+    };
+
     log::info!("   Basket: {}", req.basket);
     log::info!("   Output: {}", req.output);
+
+    // Phase 2.6-D D.3: protected basket guardrail in the endpoint itself.
+    if crate::permission_service::is_protected_basket(&req.basket.trim().to_lowercase()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Basket name is reserved and cannot be modified via relinquishOutput",
+        }));
+    }
 
     // Parse outpoint
     let parts: Vec<&str> = req.output.split('.').collect();

@@ -1190,3 +1190,47 @@ pub fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
     info!("   ✅ V21 migration applied (bsv_price_cache table)");
     Ok(())
 }
+
+/// V21 → V22 — 2026-06-09 bundled scope grant column on `domain_permissions`.
+///
+/// Phase 2.6-D Fix #4: when the user ticks "Allow this site to perform wallet
+/// operations without prompting each time" on the connect modal
+/// (`domain_approval` / `manifest_connect_bundle`), this column is set to 1.
+/// The Rust permission engine then returns `Silent(SilentBundledScopeGrant)`
+/// for ProtocolUse and BasketAccess calls from that domain, regardless of
+/// whether a matching V18 row exists.
+///
+/// Protected baskets (`default` / `backup-*` / `admin *`) are NOT silenced
+/// even with `bundled_scope_grant=1` — `dispatch_scoped_grant` overrides the
+/// flag to false before calling the engine for those targets.
+///
+/// CounterpartyUse is already silenced by Fix #3 in the engine and does not
+/// consult this column.
+///
+/// Idempotent: adds the column only if missing, so re-running on an
+/// already-V22 DB is a no-op.
+pub fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
+    info!("   Adding bundled_scope_grant column to domain_permissions (V22)...");
+
+    let has_column = {
+        let mut stmt = conn.prepare("PRAGMA table_info(domain_permissions)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "bundled_scope_grant")
+    };
+
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE domain_permissions
+             ADD COLUMN bundled_scope_grant INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        info!("   ✅ V22 migration applied (bundled_scope_grant column)");
+    } else {
+        info!("   ℹ️  V22 migration: bundled_scope_grant column already exists, skipping");
+    }
+
+    Ok(())
+}

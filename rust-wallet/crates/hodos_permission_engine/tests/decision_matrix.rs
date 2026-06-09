@@ -45,6 +45,7 @@ fn baseline_approved() -> PermissionContext {
         requested_cents: 0,
         bsv_price_available: true,
         scoped_grant_exists: false,
+        bundled_scope_grant: false,
         call_kind: CallKind::GenericApproved,
         payment_scope_kind_missing: None,
     }

@@ -121,6 +121,19 @@ pub enum EngineReason {
     SilentSessionOptIn,
     /// Scoped grant exists for the requested protocol/basket/counterparty.
     SilentScopedGrantExists,
+    /// CounterpartyUse on an approved domain is silent by design — BRC-42
+    /// counterparty key derivation is mathematically one-sided (the
+    /// counterparty learns nothing) and only reveals what the requesting
+    /// dApp already knows (it provided the counterparty pubkey). Avoids the
+    /// "prompt-per-recipient" UX collapse seen with token-issuing dApps like
+    /// todo.metanet.app. Phase 2.6-D Fix #3 (2026-06-09).
+    SilentCounterpartyDefault,
+    /// Bundle-grant on first connect covers this scoped call. The user
+    /// approved an "allow this site to perform wallet operations without
+    /// prompting each time" checkbox on the connect modal, which sets
+    /// domain_permissions.bundled_scope_grant=1. Protected baskets still
+    /// prompt regardless (dispatch overrides). Phase 2.6-D Fix #4.
+    SilentBundledScopeGrant,
     /// Cert disclosure: every requested field has a matching permission row.
     SilentAllCertFieldsApproved,
     /// Generic approved-domain call with no extra gate. The catch-all silent

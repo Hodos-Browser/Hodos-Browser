@@ -4275,13 +4275,23 @@ bool SimpleHandler::OnProcessMessageReceived(
                 bool identityKeyDisclosureAllowed =
                     permData.value("identityKeyDisclosureAllowed", true);
 
+                // Phase 2.6-D Fix #4 — bundledScopeGrant. Default true so the
+                // simple Allow path on the React modal automatically silences
+                // ProtocolUse + BasketAccess prompts for the rest of the
+                // session (CounterpartyUse already silent via Fix #3).
+                // Protected baskets still prompt regardless.
+                bool bundledScopeGrant =
+                    permData.value("bundledScopeGrant", true);
+
                 LOG_DEBUG_BROWSER("🔐 Setting domain permission - Domain: " + domain +
-                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed));
+                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed) +
+                    " bundledScopeGrant=" + std::to_string(bundledScopeGrant));
 
                 // Call the domain permission API
                 extern void addDomainPermission(const std::string& domain,
-                                                bool identityKeyDisclosureAllowed);
-                addDomainPermission(domain, identityKeyDisclosureAllowed);
+                                                bool identityKeyDisclosureAllowed,
+                                                bool bundledScopeGrant);
+                addDomainPermission(domain, identityKeyDisclosureAllowed, bundledScopeGrant);
 
                 // Drain pending requests for this domain. Three kinds queue here:
                 //   1. HTTP-path entries (handler set, resumeKind=kHttpCallback) —
@@ -4345,18 +4355,27 @@ bool SimpleHandler::OnProcessMessageReceived(
                 bool identityKeyDisclosureAllowed =
                     permData.value("identityKeyDisclosureAllowed", true);
 
+                // Phase 2.6-D Fix #4 — default true; advanced-path users can
+                // uncheck the bundle in the advanced form if they want
+                // per-scope prompts.
+                bool bundledScopeGrant =
+                    permData.value("bundledScopeGrant", true);
+
                 LOG_DEBUG_BROWSER("🔐 Setting advanced domain permission - Domain: " + domain +
                     " tx=" + std::to_string(perTxLimitCents) +
                     " session=" + std::to_string(perSessionLimitCents) +
                     " rate=" + std::to_string(rateLimitPerMin) +
                     " maxTxPerSession=" + std::to_string(maxTxPerSession) +
-                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed));
+                    " identityKeyDisclosure=" + std::to_string(identityKeyDisclosureAllowed) +
+                    " bundledScopeGrant=" + std::to_string(bundledScopeGrant));
 
                 extern void addDomainPermissionAdvanced(const std::string& domain,
                     int64_t perTxLimitCents, int64_t perSessionLimitCents, int64_t rateLimitPerMin,
-                    int64_t maxTxPerSession, bool identityKeyDisclosureAllowed);
+                    int64_t maxTxPerSession, bool identityKeyDisclosureAllowed,
+                    bool bundledScopeGrant);
                 addDomainPermissionAdvanced(domain, perTxLimitCents, perSessionLimitCents,
-                    rateLimitPerMin, maxTxPerSession, identityKeyDisclosureAllowed);
+                    rateLimitPerMin, maxTxPerSession, identityKeyDisclosureAllowed,
+                    bundledScopeGrant);
 
                 // Drain pending entries (see add_domain_permission for full rationale).
                 // Phase 2.6-C.5 fix: ResumeDrainedApprovedRequest dispatches

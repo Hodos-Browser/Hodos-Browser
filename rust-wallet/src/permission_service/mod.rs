@@ -34,5 +34,8 @@ pub mod request_gate;
 pub mod state;
 
 pub use flags::EngineFlags;
-pub use request_gate::{dispatch_privacy_perimeter, GateOutcome};
+pub use request_gate::{
+    dispatch_privacy_perimeter, dispatch_scoped_grant, is_protected_basket, GateOutcome,
+    ScopedCall,
+};
 pub use state::{ApprovalConsumeError, PendingApproval, PermissionService};

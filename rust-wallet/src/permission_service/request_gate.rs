@@ -1,9 +1,18 @@
-//! Per-request gate dispatch for privacy-perimeter wallet endpoints.
+//! Per-request gate dispatch for privacy-perimeter + scoped-grant wallet
+//! endpoints.
 //!
 //! Phase 2.6-C.2. Provides `dispatch_privacy_perimeter`, the helper each of
 //! the 4 privacy-perimeter handlers (`get_public_key` identityKey path,
 //! `reveal_counterparty_key_linkage`, `reveal_specific_key_linkage`,
 //! `prove_certificate` sensitive-field path) calls before its handler body.
+//!
+//! Phase 2.6-D. Adds `dispatch_scoped_grant` for the 10+ scoped-grant
+//! handlers (`create_signature`, `create_hmac`, `verify_hmac`, `encrypt`,
+//! `decrypt`, `encrypt_bie1`, `decrypt_bie1`, `list_outputs`,
+//! `relinquish_output`, `list_messages`, `acknowledge_message`). Same wire
+//! contract (LD2). Engine handles ProtocolUse / BasketAccess /
+//! CounterpartyUse classification based on the `ScopedCall` shape the caller
+//! passes in (which the caller derives from its already-parsed body).
 //!
 //! The helper implements the LD2 wire contract:
 //!   - `X-User-Approved: <id>` header → atomic consume + body-sha256 verify;
@@ -219,6 +228,290 @@ pub fn dispatch_privacy_perimeter(
     }
 }
 
+// ============================================================================
+// Phase 2.6-D — scoped-grant dispatch
+// ============================================================================
+
+/// Shape of a scoped-grant call. The caller (each scoped-grant handler) parses
+/// its body once and threads the relevant scope fields through. Two variants
+/// because that's the BRC-100 surface: protocol calls (which may carry a
+/// specific counterparty) and basket calls.
+///
+/// CallKind classification:
+///   - `Protocol { counterparty: Some(_) }` → `CallKind::CounterpartyUse`
+///   - `Protocol { counterparty: None }`    → `CallKind::ProtocolUse`
+///   - `Basket { .. }`                       → `CallKind::BasketAccess`
+#[derive(Debug, Clone)]
+pub enum ScopedCall<'a> {
+    Protocol {
+        level: u8,
+        name: &'a str,
+        key_id: &'a str,
+        counterparty: Option<&'a str>,
+    },
+    Basket {
+        basket: &'a str,
+        access: &'a str, // "read" | "read_write"
+    },
+}
+
+impl<'a> ScopedCall<'a> {
+    fn call_kind(&self) -> hodos_permission_engine::CallKind {
+        use hodos_permission_engine::CallKind;
+        match self {
+            ScopedCall::Protocol { counterparty: Some(_), .. } => CallKind::CounterpartyUse,
+            ScopedCall::Protocol { counterparty: None, .. } => CallKind::ProtocolUse,
+            ScopedCall::Basket { .. } => CallKind::BasketAccess,
+        }
+    }
+}
+
+/// Hardcoded protected basket names — never auto-grant, always prompt.
+///
+/// Phase 2.6-D defense-in-depth, mirrors Phase 1.5 Step 5 (commit `b1d85c8`)
+/// where the React Customize subview disables checkboxes for these names.
+/// Backend was missing the enforcement; D.3 adds it on BOTH sides.
+///
+/// Rule:
+///   - `default` — the wallet's catch-all basket containing every untagged
+///     output. Auto-grant = blanket UTXO disclosure.
+///   - `backup-*` (any name starting with `backup-`) — the wallet's own
+///     backup baskets used for the on-chain wallet-backup feature.
+///   - `admin *` (any name starting with `admin `) — administrative scoped
+///     baskets reserved for wallet-management calls.
+pub fn is_protected_basket(name: &str) -> bool {
+    name == "default" || name.starts_with("backup-") || name.starts_with("admin ")
+}
+
+/// Dispatch the engine gate for a scoped-grant CallKind. Mirrors
+/// `dispatch_privacy_perimeter` exactly except for context construction.
+///
+/// Steps:
+///   1. No `X-Requesting-Domain` → internal call → `Proceed` immediately.
+///   2. `X-User-Approved` present → consume + body-sha256 verify → `Proceed`
+///      on success, 403 envelope on failure.
+///   3. Look up `domain_permissions` row.
+///   4. Compute `scoped_grant_exists` from V18 sub-permission tables.
+///      - For ProtocolUse: `is_protocol_granted`
+///      - For CounterpartyUse: `is_counterparty_granted` OR `is_protocol_granted`
+///        (either match silences — broader trust signal first per memory
+///        `phase15_step6_commit_e`)
+///      - For BasketAccess: `is_basket_granted`, UNLESS basket name is
+///        protected (`is_protected_basket`) — protected baskets force
+///        `scoped_grant_exists = false` so engine always prompts (D.3
+///        defense-in-depth)
+///   5. Build context, run engine, translate decision to 200 / 202 / 403.
+///
+/// Defense-in-depth: caller still runs `check_domain_approved` after
+/// `Proceed` (same as privacy-perimeter dispatch).
+pub fn dispatch_scoped_grant(
+    permission: &Arc<PermissionService>,
+    database: &Arc<Mutex<WalletDatabase>>,
+    current_user_id: i64,
+    http_req: &HttpRequest,
+    body: &[u8],
+    endpoint: &str,
+    scoped_call: ScopedCall<'_>,
+) -> GateOutcome {
+    let domain = match http_req
+        .headers()
+        .get(X_REQUESTING_DOMAIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        Some(d) => d.to_string(),
+        None => return GateOutcome::Proceed,
+    };
+
+    // X-User-Approved replay path (same as privacy perimeter).
+    if let Some(approval_id) = http_req
+        .headers()
+        .get(X_USER_APPROVED)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        let now = chrono::Utc::now().timestamp();
+        match permission.consume_and_verify(approval_id, body, now) {
+            Ok(approval) => {
+                log::info!(
+                    "🔐 X-User-Approved consumed (scoped) for domain={} endpoint={} id={}",
+                    approval.domain, approval.endpoint, approval_id,
+                );
+                return GateOutcome::Proceed;
+            }
+            Err(ApprovalConsumeError::BodyMismatch) => {
+                log::warn!(
+                    "🛡️ X-User-Approved body sha256 mismatch (scoped, domain={} id={})",
+                    domain, approval_id,
+                );
+                return GateOutcome::EarlyReturn(forbidden_envelope("body_mismatch"));
+            }
+            Err(ApprovalConsumeError::Expired) | Err(ApprovalConsumeError::NotFound) => {
+                log::warn!(
+                    "🛡️ X-User-Approved not consumable (scoped, domain={} id={})",
+                    domain, approval_id,
+                );
+                return GateOutcome::EarlyReturn(forbidden_envelope(
+                    "approval_expired_or_consumed",
+                ));
+            }
+        }
+    }
+
+    let perm_row = {
+        let db_guard = match database.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!(
+                    "🛡️ database mutex poisoned in dispatch_scoped_grant: {} — denying",
+                    poisoned
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_mutex_poisoned"));
+            }
+        };
+        let repo = DomainPermissionRepository::new(db_guard.connection());
+        match repo.get_by_domain(current_user_id, &domain) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!(
+                    "🛡️ DomainPermissionRepository::get_by_domain('{}') failed: {} — denying",
+                    domain, e
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_read_error"));
+            }
+        }
+    };
+
+    // Compute scoped_grant_exists from V18 lookup (under a fresh lock).
+    let scoped_grant_exists = if let Some(ref perm) = perm_row {
+        let dp_id = perm.id.unwrap_or(0);
+        if dp_id == 0 {
+            // No id means the row hasn't been persisted yet — treat as no grant.
+            false
+        } else {
+            let db_guard = match database.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    return GateOutcome::EarlyReturn(internal_error_envelope("db_mutex_poisoned"));
+                }
+            };
+            let repo = DomainPermissionRepository::new(db_guard.connection());
+            match &scoped_call {
+                ScopedCall::Protocol { level, name, key_id, counterparty: None } => {
+                    repo.is_protocol_granted(dp_id, *level, name, key_id, None)
+                        .unwrap_or(false)
+                }
+                ScopedCall::Protocol {
+                    level,
+                    name,
+                    key_id,
+                    counterparty: Some(cp),
+                } => {
+                    // CounterpartyUse — either match silences the gate.
+                    repo.is_counterparty_granted(dp_id, cp).unwrap_or(false)
+                        || repo
+                            .is_protocol_granted(dp_id, *level, name, key_id, Some(*cp))
+                            .unwrap_or(false)
+                }
+                ScopedCall::Basket { basket, access } => {
+                    // Phase 2.6-D protected-basket guardrail — force-Prompt by
+                    // pretending no grant exists, regardless of what V18 says.
+                    if is_protected_basket(basket) {
+                        false
+                    } else {
+                        repo.is_basket_granted(dp_id, basket, access).unwrap_or(false)
+                    }
+                }
+            }
+        }
+    } else {
+        false
+    };
+
+    let call_kind = scoped_call.call_kind();
+    // Phase 2.6-D Fix #4 — protected-basket override.
+    //
+    // The V22 `bundled_scope_grant` column normally silences ProtocolUse +
+    // BasketAccess for the domain. For BasketAccess against a protected
+    // basket (`default` / `backup-*` / `admin *`), we must NOT let the bundle
+    // grant silence the engine — protected baskets ALWAYS prompt. So we pass
+    // `Some(false)` as the override, which pins ctx.bundled_scope_grant=false
+    // regardless of what the perm row says.
+    //
+    // For everything else, pass `None` so the builder reads the column from
+    // the perm row directly.
+    let bundled_override = match &scoped_call {
+        ScopedCall::Basket { basket, .. } if is_protected_basket(basket) => Some(false),
+        _ => None,
+    };
+    let ctx = context_builder::build_scoped_grant_context(
+        call_kind,
+        perm_row.as_ref(),
+        scoped_grant_exists,
+        bundled_override,
+    );
+    let decision = permission.decide(&ctx);
+
+    match decision {
+        PermissionDecision::Silent { .. } => {
+            log::debug!(
+                "🔓 engine Silent (scoped) for domain={} endpoint={} kind={:?}",
+                domain, endpoint, call_kind,
+            );
+            GateOutcome::Proceed
+        }
+        PermissionDecision::Prompt { ref prompt_type, ref reason } => {
+            let now = chrono::Utc::now().timestamp();
+            let approval_id = permission.mint_pending_approval(&domain, endpoint, body, now);
+            let prompt_payload = build_scoped_prompt_payload(&scoped_call);
+            let envelope = build_pending_envelope(
+                &approval_id,
+                *prompt_type,
+                reason_to_snake_case(reason),
+                prompt_payload,
+            );
+            log::info!(
+                "🛡️ engine Prompt (scoped) minted approval id={} for domain={} endpoint={} kind={:?}",
+                approval_id, domain, endpoint, call_kind,
+            );
+            GateOutcome::EarlyReturn(HttpResponse::Accepted().json(envelope))
+        }
+        PermissionDecision::Deny { ref reason } => {
+            log::warn!(
+                "🛡️ engine Deny (scoped) for domain={} endpoint={} kind={:?} reason={:?}",
+                domain, endpoint, call_kind, reason,
+            );
+            GateOutcome::EarlyReturn(forbidden_envelope(&reason_to_snake_case(reason)))
+        }
+    }
+}
+
+/// Build the promptPayload object per LD2 for a scoped prompt. Field shapes
+/// must match `buildExtraParamsFromPayload` in C.3's
+/// `HttpRequestInterceptor.cpp` (~L3760) so the React modal renders the
+/// scope correctly.
+fn build_scoped_prompt_payload(scoped_call: &ScopedCall<'_>) -> Value {
+    match scoped_call {
+        ScopedCall::Protocol { level, name, key_id, counterparty: None } => {
+            serde_json::json!({
+                "protocolLevel": level,
+                "protocolName": name,
+                "protocolKeyId": key_id,
+                "protocolCounterparty": "",
+            })
+        }
+        ScopedCall::Protocol { counterparty: Some(cp), .. } => {
+            serde_json::json!({ "counterparty": cp })
+        }
+        ScopedCall::Basket { basket, access } => {
+            serde_json::json!({
+                "basket": basket,
+                "basketAccess": access,
+            })
+        }
+    }
+}
+
 /// Build the 202 PENDING envelope per LD2.
 fn build_pending_envelope(
     approval_id: &str,
@@ -304,5 +597,95 @@ mod tests {
     fn reason_serializes_snake_case() {
         let s = reason_to_snake_case(&EngineReason::PrivacyPerimeterNoGrant);
         assert_eq!(s, "privacy_perimeter_no_grant");
+    }
+
+    // -- Phase 2.6-D --
+
+    #[test]
+    fn scoped_call_classifies_protocol_use() {
+        let c = ScopedCall::Protocol {
+            level: 1,
+            name: "tests",
+            key_id: "1",
+            counterparty: None,
+        };
+        assert!(matches!(c.call_kind(), CallKind::ProtocolUse));
+    }
+
+    #[test]
+    fn scoped_call_classifies_counterparty_use() {
+        let c = ScopedCall::Protocol {
+            level: 2,
+            name: "tests",
+            key_id: "1",
+            counterparty: Some("02abc"),
+        };
+        assert!(matches!(c.call_kind(), CallKind::CounterpartyUse));
+    }
+
+    #[test]
+    fn scoped_call_classifies_basket_access() {
+        let c = ScopedCall::Basket { basket: "test-basket", access: "read" };
+        assert!(matches!(c.call_kind(), CallKind::BasketAccess));
+    }
+
+    #[test]
+    fn protected_basket_default() {
+        assert!(is_protected_basket("default"));
+    }
+
+    #[test]
+    fn protected_basket_backup_prefix() {
+        assert!(is_protected_basket("backup-2025-06-09"));
+        assert!(is_protected_basket("backup-"));
+    }
+
+    #[test]
+    fn protected_basket_admin_prefix() {
+        assert!(is_protected_basket("admin certificates"));
+        assert!(is_protected_basket("admin "));
+    }
+
+    #[test]
+    fn protected_basket_user_named_is_not() {
+        assert!(!is_protected_basket("my-basket"));
+        assert!(!is_protected_basket("admin-basket")); // dash, no space → user-named
+        assert!(!is_protected_basket("backupthing")); // no dash
+        assert!(!is_protected_basket(""));
+    }
+
+    #[test]
+    fn scoped_prompt_payload_protocol_use() {
+        let c = ScopedCall::Protocol {
+            level: 1,
+            name: "tests",
+            key_id: "1",
+            counterparty: None,
+        };
+        let p = build_scoped_prompt_payload(&c);
+        assert_eq!(p["protocolLevel"], 1);
+        assert_eq!(p["protocolName"], "tests");
+        assert_eq!(p["protocolKeyId"], "1");
+        assert_eq!(p["protocolCounterparty"], "");
+    }
+
+    #[test]
+    fn scoped_prompt_payload_counterparty_use() {
+        let c = ScopedCall::Protocol {
+            level: 2,
+            name: "tests",
+            key_id: "1",
+            counterparty: Some("02abc"),
+        };
+        let p = build_scoped_prompt_payload(&c);
+        assert_eq!(p["counterparty"], "02abc");
+    }
+
+    #[test]
+    fn scoped_prompt_payload_basket_access() {
+        let c = ScopedCall::Basket { basket: "tasks", access: "read_write" };
+        let p = build_scoped_prompt_payload(&c);
+        assert_eq!(p["basket"], "tasks");
+        assert_eq!(p["basketAccess"], "read_write");
     }
 }

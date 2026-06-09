@@ -44,6 +44,8 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
               // Phase 1.5 Step 5 — pass through current V17 column value so
               // the form shows the actual setting, not the default.
               identityKeyDisclosureAllowed: data.identityKeyDisclosureAllowed ?? true,
+              // Phase 2.6-D Fix #4 — pass through V22 column value.
+              bundledScopeGrant: data.bundledScopeGrant ?? false,
             });
           }
         }
@@ -68,6 +70,8 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
           maxTxPerSession: settings.maxTxPerSession,
           // Phase 1.5 Step 5 — Personal Info Disclosure toggle persistence.
           identityKeyDisclosureAllowed: settings.identityKeyDisclosureAllowed,
+          // Phase 2.6-D Fix #4 — Quiet-mode toggle persistence (V22 column).
+          bundledScopeGrant: settings.bundledScopeGrant,
         }),
       });
     } catch (err) {
@@ -289,6 +293,15 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // the identity-key reveal. Power users can untick to keep the prompt.
   const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(true);
 
+  // Phase 2.6-D Fix #4 — "Allow this site to perform wallet operations
+  // without prompting each time" checkbox. Defaults ON for UX (per CLAUDE.md:
+  // UX wins ties when no privacy/security cost is at stake). When ticked,
+  // the engine silences ProtocolUse + BasketAccess prompts for this domain.
+  // CounterpartyUse is already silent for approved domains via Fix #3.
+  // Protected baskets (default/backup-*/admin *) still prompt regardless —
+  // those forced-prompt paths run before this flag is consulted.
+  const [allowBundledScope, setAllowBundledScope] = useState<boolean>(true);
+
   // Phase 1.5 Step 5 — user's saved default for the bundle checkbox (V19
   // settings column). applyParams reads this ref so each fresh notification
   // initializes to the user's preference rather than hardcoded true. Ref
@@ -325,6 +338,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [manifestSelectedCertificates, setManifestSelectedCertificates] = useState<Set<number>>(new Set());
   const [manifestSelectedCounterparties, setManifestSelectedCounterparties] = useState<Set<number>>(new Set());
   const [manifestAllowIdentityKey, setManifestAllowIdentityKey] = useState<boolean>(true);
+  // Phase 2.6-D Fix #4 — bundled scope grant for the manifest connect path.
+  // Same semantics as the domain_approval modal's allowBundledScope: when
+  // ticked, the engine silences ProtocolUse + BasketAccess prompts for this
+  // domain (CounterpartyUse silent by Fix #3, protected baskets always
+  // prompt). Default ON.
+  const [manifestAllowBundledScope, setManifestAllowBundledScope] = useState<boolean>(true);
   // Customize subview payment caps (start from manifest's recommendation, fall back to wallet defaults).
   const [manifestPerTxCents, setManifestPerTxCents] = useState<number>(100);
   const [manifestPerSessionCents, setManifestPerSessionCents] = useState<number>(1000);
@@ -541,10 +560,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         // Set domain permission to "approved" (sets cache + DB write).
         // Phase 1.5 Step 1: bundle identityKeyDisclosureAllowed via the
         // "Allow this site to identify you" checkbox state.
+        // Phase 2.6-D Fix #4: bundle bundledScopeGrant via the "Allow this
+        // site to perform wallet operations" checkbox state.
         window.cefMessage.send('add_domain_permission', [
           JSON.stringify({
             domain: notificationDomain,
             identityKeyDisclosureAllowed: allowIdentityKey,
+            bundledScopeGrant: allowBundledScope,
           }),
         ]);
         // Tell the interceptor to forward the pending request
@@ -570,6 +592,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             rateLimitPerMin: settings.rateLimitPerMin,
             maxTxPerSession: settings.maxTxPerSession,
             identityKeyDisclosureAllowed: allowIdentityKey,
+            // Phase 2.6-D Fix #4 — bundle the V22 column write through the
+            // advanced path too.
+            bundledScopeGrant: allowBundledScope,
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
@@ -912,6 +937,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           rateLimitPerMin: rate,
           maxTxPerSession: maxTx,
           identityKeyDisclosureAllowed: manifestAllowIdentityKey,
+          // Phase 2.6-D Fix #4 — bundle the V22 column write. Manifest path
+          // also writes per-scope V18 rows below; the bundle flag is an
+          // extra silencer above those (engine returns SilentBundledScopeGrant
+          // before consulting V18).
+          bundledScopeGrant: manifestAllowBundledScope,
         })]);
       }
 
@@ -1929,7 +1959,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               fontSize: '13px',
               color: COLORS.textDark,
               cursor: 'pointer',
-              marginBottom: '16px',
+              marginBottom: '10px',
               userSelect: 'none',
             }}>
               <input
@@ -1940,6 +1970,27 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               />
               Allow this site to identify you
               <InfoIcon />
+            </label>
+
+            {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '13px',
+              color: COLORS.textDark,
+              cursor: 'pointer',
+              marginBottom: '16px',
+              userSelect: 'none',
+            }}>
+              <input
+                type="checkbox"
+                checked={manifestAllowBundledScope}
+                onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
+                style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+              />
+              Allow this site to perform wallet operations without asking each time
+              <InfoIcon tooltip="When ticked, the wallet won't prompt you for individual protocol, basket, or counterparty grants on this site after the first connect. You can revoke this at any time from Manage Site Permissions. Sensitive operations (large payments, identity disclosure, sensitive certificate fields) always prompt regardless." />
             </label>
 
             {/* Default limits hint */}
@@ -2042,7 +2093,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           </div>
 
           {/* Identity-key toggle */}
-          <label style={{ ...customizeRowLabel, marginBottom: '14px' }}>
+          <label style={{ ...customizeRowLabel, marginBottom: '10px' }}>
             <input
               type="checkbox"
               checked={manifestAllowIdentityKey}
@@ -2051,6 +2102,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             />
             <span>
               <strong>Identity:</strong> Allow this site to identify you across the Metanet
+            </span>
+          </label>
+
+          {/* Phase 2.6-D Fix #4 — bundled scope grant toggle. Same as the
+              domain_approval modal's allowBundledScope checkbox. */}
+          <label style={{ ...customizeRowLabel, marginBottom: '14px' }}>
+            <input
+              type="checkbox"
+              checked={manifestAllowBundledScope}
+              onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
+              style={customizeCheckbox}
+            />
+            <span>
+              <strong>Quiet mode:</strong> Don't prompt for individual protocol or basket grants while connected
             </span>
           </label>
 
@@ -2221,7 +2286,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             fontSize: '13px',
             color: COLORS.textDark,
             cursor: 'pointer',
-            marginBottom: '14px',
+            marginBottom: '10px',
             userSelect: 'none',
           }}>
             <input
@@ -2232,6 +2297,30 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             />
             Allow this site to identify you
             <InfoIcon />
+          </label>
+
+          {/* Phase 2.6-D Fix #4 \u2014 bundled scope grant. Default ON; users who
+              untick get the per-call permission prompts the engine would
+              otherwise show (protocol/basket scopes the first time each one
+              is touched). Protected baskets always prompt regardless. */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '14px',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={allowBundledScope}
+              onChange={(e) => setAllowBundledScope(e.target.checked)}
+              style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+            />
+            Allow this site to perform wallet operations without asking each time
+            <InfoIcon tooltip="When ticked, the wallet won't prompt you for individual protocol, basket, or counterparty grants on this site after the first connect. You can revoke this at any time from Manage Site Permissions. Sensitive operations (large payments, identity disclosure, sensitive certificate fields) always prompt regardless." />
           </label>
 
           {/* Advanced settings toggle */}

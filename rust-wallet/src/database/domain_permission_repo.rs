@@ -40,7 +40,7 @@ impl<'a> DomainPermissionRepository<'a> {
         match self.conn.query_row(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
                     rate_limit_per_min, max_tx_per_session, identity_key_disclosure_allowed,
-                    created_at, updated_at
+                    bundled_scope_grant, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 AND domain = ?2",
             params![user_id, domain],
             |row| Ok(DomainPermission {
@@ -53,8 +53,9 @@ impl<'a> DomainPermissionRepository<'a> {
                 rate_limit_per_min: row.get(6)?,
                 max_tx_per_session: row.get(7)?,
                 identity_key_disclosure_allowed: row.get::<_, i64>(8)? != 0,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                bundled_scope_grant: row.get::<_, i64>(9)? != 0,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
             }),
         ) {
             Ok(perm) => Ok(Some(perm)),
@@ -88,8 +89,9 @@ impl<'a> DomainPermissionRepository<'a> {
                     rate_limit_per_min = ?4,
                     max_tx_per_session = ?5,
                     identity_key_disclosure_allowed = ?6,
-                    updated_at = ?7
-                 WHERE id = ?8",
+                    bundled_scope_grant = ?7,
+                    updated_at = ?8
+                 WHERE id = ?9",
                 params![
                     perm.trust_level,
                     perm.per_tx_limit_cents,
@@ -97,6 +99,7 @@ impl<'a> DomainPermissionRepository<'a> {
                     perm.rate_limit_per_min,
                     perm.max_tx_per_session,
                     if perm.identity_key_disclosure_allowed { 1_i64 } else { 0_i64 },
+                    if perm.bundled_scope_grant { 1_i64 } else { 0_i64 },
                     now,
                     id,
                 ],
@@ -107,8 +110,8 @@ impl<'a> DomainPermissionRepository<'a> {
                 "INSERT INTO domain_permissions
                  (user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
                   rate_limit_per_min, max_tx_per_session, identity_key_disclosure_allowed,
-                  created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  bundled_scope_grant, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     perm.user_id,
                     perm.domain,
@@ -118,6 +121,7 @@ impl<'a> DomainPermissionRepository<'a> {
                     perm.rate_limit_per_min,
                     perm.max_tx_per_session,
                     if perm.identity_key_disclosure_allowed { 1_i64 } else { 0_i64 },
+                    if perm.bundled_scope_grant { 1_i64 } else { 0_i64 },
                     now,
                     now,
                 ],
@@ -141,7 +145,7 @@ impl<'a> DomainPermissionRepository<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, domain, trust_level, per_tx_limit_cents, per_session_limit_cents,
                     rate_limit_per_min, max_tx_per_session, identity_key_disclosure_allowed,
-                    created_at, updated_at
+                    bundled_scope_grant, created_at, updated_at
              FROM domain_permissions WHERE user_id = ?1 ORDER BY domain"
         )?;
         let rows = stmt.query_map(params![user_id], |row| Ok(DomainPermission {
@@ -154,8 +158,9 @@ impl<'a> DomainPermissionRepository<'a> {
             rate_limit_per_min: row.get(6)?,
             max_tx_per_session: row.get(7)?,
             identity_key_disclosure_allowed: row.get::<_, i64>(8)? != 0,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
+            bundled_scope_grant: row.get::<_, i64>(9)? != 0,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         }))?.collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }

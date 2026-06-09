@@ -130,6 +130,16 @@ pub struct PermissionContext {
     // Scoped-grant evaluation (filled in by caller for ProtocolUse/BasketAccess/CounterpartyUse).
     pub scoped_grant_exists: bool,
 
+    /// Phase 2.6-D Fix #4 — `domain_permissions.bundled_scope_grant` column.
+    /// When true on an approved-trust domain, the engine returns Silent for
+    /// ProtocolUse and BasketAccess scoped-grant calls regardless of V18
+    /// row existence. CounterpartyUse already silences via Fix #3.
+    ///
+    /// `dispatch_scoped_grant` is responsible for overriding this to `false`
+    /// when the request targets a protected basket (`default` / `backup-*` /
+    /// `admin *`) so those still prompt even under a bundle grant.
+    pub bundled_scope_grant: bool,
+
     /// Phase 1.5 Step 6 Commit E: for Payment kind, if the createAction body
     /// also references a protocol/basket/counterparty scope the site does NOT
     /// have a grant for, caller sets this field. DecidePayment short-circuits
@@ -159,6 +169,7 @@ impl Default for PermissionContext {
             // existing semantics for non-payment contexts that don't set this.
             bsv_price_available: true,
             scoped_grant_exists: false,
+            bundled_scope_grant: false,
             payment_scope_kind_missing: None,
         }
     }

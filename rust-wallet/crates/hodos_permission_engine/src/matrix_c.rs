@@ -128,12 +128,38 @@ fn decide_privacy_perimeter(ctx: &PermissionContext) -> PermissionDecision {
 
 /// Branch 3 — scoped grants.
 ///
-/// If a matching V18 child-table row exists (signaled via `scoped_grant_exists`
-/// by the caller), the request is auto-approved. Otherwise the appropriate
-/// scope-permission prompt fires.
+/// Decision order on an approved-trust domain (the only trust level that
+/// reaches this branch — see `decide_domain_trust`):
+///   1. **CounterpartyUse → Silent** (Phase 2.6-D Fix #3). BRC-42 counterparty
+///      key derivation is mathematically one-sided and reveals nothing the
+///      dApp doesn't already know. Prompting per-counterparty collapses UX
+///      on token-issuing dApps that use one counterparty per recipient.
+///   2. **Bundled scope grant → Silent** (Phase 2.6-D Fix #4). If the user
+///      ticked "Allow this site to perform wallet operations without
+///      prompting each time" on the connect modal,
+///      `domain_permissions.bundled_scope_grant=1` and ProtocolUse +
+///      BasketAccess are silent. Protected baskets are NOT silenced here —
+///      `dispatch_scoped_grant` overrides `bundled_scope_grant` to false for
+///      basket access against `default`/`backup-*`/`admin *`.
+///   3. **Matching V18 row → Silent**. Per-call explicit grant from a prior
+///      "Always allow" prompt.
+///   4. Otherwise → Prompt with the appropriate scope modal.
 ///
-/// Mirrors C++ `DecideScopedGrant` (PermissionEngine.cpp:83-113).
+/// Mirrors C++ `DecideScopedGrant` (PermissionEngine.cpp:83-113) with the
+/// Fix #3 / Fix #4 deltas.
 fn decide_scoped_grant(ctx: &PermissionContext) -> PermissionDecision {
+    // Fix #3 — CounterpartyUse is silent for approved domains.
+    if ctx.call_kind == CallKind::CounterpartyUse {
+        return PermissionDecision::silent(EngineReason::SilentCounterpartyDefault);
+    }
+
+    // Fix #4 — bundle-grant covers ProtocolUse + BasketAccess on approved
+    // domains where the user opted into the bundled grant on the connect
+    // modal. dispatch_scoped_grant has already cleared protected baskets.
+    if ctx.bundled_scope_grant {
+        return PermissionDecision::silent(EngineReason::SilentBundledScopeGrant);
+    }
+
     if ctx.scoped_grant_exists {
         return PermissionDecision::silent(EngineReason::SilentScopedGrantExists);
     }
@@ -146,9 +172,11 @@ fn decide_scoped_grant(ctx: &PermissionContext) -> PermissionDecision {
             PromptType::BasketPermissionPrompt,
             EngineReason::ScopedGrantMissing,
         ),
-        CallKind::CounterpartyUse => PermissionDecision::prompt(
-            PromptType::CounterpartyPermissionPrompt,
-            EngineReason::ScopedGrantMissing,
+        // CounterpartyUse handled above; this arm is unreachable but kept
+        // for exhaustiveness if a future change moves the CounterpartyUse
+        // short-circuit behind a feature flag.
+        CallKind::CounterpartyUse => unreachable!(
+            "CounterpartyUse should have returned Silent above"
         ),
         _ => unreachable!("decide_scoped_grant called with non-scoped-grant CallKind"),
     }
@@ -456,6 +484,161 @@ mod tests {
             d,
             PermissionDecision::silent(EngineReason::SilentGenericApproved)
         );
+    }
+
+    // ── Phase 2.6-D Fix #3 — CounterpartyUse silent for approved domains ──
+
+    #[test]
+    fn fix3_counterparty_use_silent_without_grant() {
+        // No V18 row, no bundle grant — still silent. The default UX
+        // collapse: token-issuing dApps stop prompting per recipient.
+        let ctx = PermissionContext {
+            call_kind: CallKind::CounterpartyUse,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            bundled_scope_grant: false,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::silent(EngineReason::SilentCounterpartyDefault)
+        );
+    }
+
+    #[test]
+    fn fix3_counterparty_use_silent_uses_default_reason_not_grant_reason() {
+        // When BOTH paths would silence (grant exists AND fix #3 applies),
+        // the CounterpartyDefault path wins because it sits earlier in
+        // decide_scoped_grant. The reason field surfaces the actual silencing
+        // mechanism for audit/debugging.
+        let ctx = PermissionContext {
+            call_kind: CallKind::CounterpartyUse,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: true,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::silent(EngineReason::SilentCounterpartyDefault)
+        );
+    }
+
+    #[test]
+    fn fix3_counterparty_use_blocked_domain_still_denies() {
+        // Trust=Blocked never reaches scoped-grant branch — deny short-circuits
+        // first. The CounterpartyDefault silent should not override Deny.
+        let ctx = PermissionContext {
+            call_kind: CallKind::CounterpartyUse,
+            trust_level: TrustLevel::Blocked,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(d, PermissionDecision::deny(EngineReason::TrustBlocked));
+    }
+
+    // ── Phase 2.6-D Fix #4 — bundled_scope_grant covers ProtocolUse + BasketAccess ──
+
+    #[test]
+    fn fix4_bundle_grant_silences_protocol_use_without_v18_row() {
+        let ctx = PermissionContext {
+            call_kind: CallKind::ProtocolUse,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            bundled_scope_grant: true,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::silent(EngineReason::SilentBundledScopeGrant)
+        );
+    }
+
+    #[test]
+    fn fix4_bundle_grant_silences_basket_access_without_v18_row() {
+        let ctx = PermissionContext {
+            call_kind: CallKind::BasketAccess,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            bundled_scope_grant: true,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::silent(EngineReason::SilentBundledScopeGrant)
+        );
+    }
+
+    #[test]
+    fn fix4_no_bundle_falls_back_to_v18_lookup_for_protocol() {
+        // Without bundle_scope_grant + without V18 row → prompt.
+        let ctx = PermissionContext {
+            call_kind: CallKind::ProtocolUse,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            bundled_scope_grant: false,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::prompt(
+                PromptType::ProtocolPermissionPrompt,
+                EngineReason::ScopedGrantMissing
+            )
+        );
+    }
+
+    #[test]
+    fn fix4_bundle_grant_does_not_affect_unknown_or_blocked_trust() {
+        // Engine reaches decide_scoped_grant only via Approved trust per the
+        // cascade order — Unknown/Blocked short-circuit at decide_domain_trust.
+        // Verify the bundle grant doesn't leak into those branches.
+        let ctx_unknown = PermissionContext {
+            call_kind: CallKind::ProtocolUse,
+            trust_level: TrustLevel::Unknown,
+            bundled_scope_grant: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&ctx_unknown),
+            PermissionDecision::prompt(
+                PromptType::DomainApproval,
+                EngineReason::NewDomainNoManifest
+            )
+        );
+
+        let ctx_blocked = PermissionContext {
+            call_kind: CallKind::BasketAccess,
+            trust_level: TrustLevel::Blocked,
+            bundled_scope_grant: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&ctx_blocked),
+            PermissionDecision::deny(EngineReason::TrustBlocked)
+        );
+    }
+
+    #[test]
+    fn fix4_bundle_grant_does_not_affect_payment_kind() {
+        // Bundle grant is a SCOPED-GRANT cascade thing. Payment caps run in a
+        // separate branch — make sure bundle_scope_grant=true doesn't silence
+        // an over-cap payment.
+        let ctx = PermissionContext {
+            call_kind: CallKind::Payment,
+            trust_level: TrustLevel::Approved,
+            bundled_scope_grant: true,
+            per_tx_limit_cents: 100,
+            requested_cents: 5000, // over cap
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        // Should hit the per-tx cap prompt, NOT a silent bundle path.
+        assert!(matches!(d, PermissionDecision::Prompt { .. }));
     }
 
     #[test]
