@@ -4298,6 +4298,26 @@ pub async fn create_action(
         }
     };
 
+    // Phase 2.6-E — payment gate. C++ injects X-Payment-Satoshis /
+    // X-Payment-Cents / X-Bsv-Price-Available / X-Browser-Id on every
+    // payment endpoint that flows through the engine path. When absent the
+    // call is treated as internal (wallet UI calling its own backend) and
+    // the gate is skipped — same shape as scoped-grant + privacy-perimeter.
+    if let Some(payment) = crate::permission_service::PaymentCall::from_headers(&http_req) {
+        let outcome = crate::permission_service::dispatch_payment(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/createAction",
+            payment,
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
     log::info!("   Description: {:?}", req.description);
     log::info!("   Labels: {:?}", req.labels);
     log::info!("   Outputs: {}", req.outputs.len());
@@ -10841,6 +10861,25 @@ pub async fn send_message(
     req: HttpRequest,
 ) -> impl Responder {
     log::info!("📨 /sendMessage called");
+
+    // Phase 2.6-E — payment gate. C++ classifies /sendMessage as a payment
+    // endpoint (BRC-29 PeerPay delivery via MessageBox); the X-Payment-*
+    // headers gate the call through the engine. Internal calls (wallet UI
+    // → its own backend) lack the headers and skip the gate.
+    if let Some(payment) = crate::permission_service::PaymentCall::from_headers(&req) {
+        let outcome = crate::permission_service::dispatch_payment(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &req,
+            &body,
+            "/sendMessage",
+            payment,
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
 
     // Parse request body
     let request: SendMessageRequest = match serde_json::from_slice(&body) {

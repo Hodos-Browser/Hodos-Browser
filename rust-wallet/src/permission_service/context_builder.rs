@@ -139,6 +139,64 @@ pub fn build_privacy_perimeter_context(
 /// `bundled_scope_grant_override`:
 ///   - `None` — read `bundled_scope_grant` from `domain_perm` (the V22 column)
 ///   - `Some(b)` — override; used for protected-basket force-prompt
+/// Phase 2.6-E — build a PermissionContext for the Payment CallKind.
+///
+/// Mirrors the C++ inline payment branch ctx-population in
+/// `HttpRequestInterceptor.cpp` (~L1229 for the Open path, ~L2683 for the IPC
+/// path). The caller supplies `requested_cents` + `bsv_price_available`
+/// (computed locally from the request body's satoshis + the wallet's price
+/// cache) and the per-session counters (read from `PermissionService`'s
+/// SessionCounters map by the dispatch helper).
+///
+/// `payment_scope_kind_missing` is None during 2.6-E — scope-missing logic
+/// is handled by `dispatch_scoped_grant` running BEFORE `dispatch_payment`.
+/// The field stays in the context for forward-compat with a future
+/// scope-aware payment helper, but `decide_payment` short-circuits on None
+/// straight into the cap cascade.
+pub fn build_payment_context(
+    domain_perm: Option<&DomainPermission>,
+    requested_cents: i64,
+    bsv_price_available: bool,
+    session_spent_cents: i64,
+    payment_requests_this_minute: i32,
+    payment_count_this_session: i32,
+) -> PermissionContext {
+    let trust_level = match domain_perm {
+        Some(perm) => match perm.trust_level.as_str() {
+            "approved" => TrustLevel::Approved,
+            "blocked" => TrustLevel::Blocked,
+            _ => TrustLevel::Unknown,
+        },
+        None => TrustLevel::Unknown,
+    };
+
+    let (per_tx, per_session, rate, max_tx) = match domain_perm {
+        Some(p) => (
+            p.per_tx_limit_cents,
+            p.per_session_limit_cents,
+            p.rate_limit_per_min,
+            p.max_tx_per_session,
+        ),
+        None => (0, 0, 0, 0),
+    };
+
+    PermissionContext {
+        call_kind: CallKind::Payment,
+        trust_level,
+        per_tx_limit_cents: per_tx,
+        per_session_limit_cents: per_session,
+        rate_limit_per_min: rate,
+        max_tx_per_session: max_tx,
+        session_spent_cents,
+        payment_requests_this_minute,
+        payment_count_this_session,
+        requested_cents,
+        bsv_price_available,
+        payment_scope_kind_missing: None,
+        ..Default::default()
+    }
+}
+
 pub fn build_scoped_grant_context(
     call_kind: CallKind,
     domain_perm: Option<&DomainPermission>,
@@ -398,5 +456,74 @@ mod tests {
             Some(true),
         );
         assert!(ctx.bundled_scope_grant);
+    }
+
+    // ------------- Phase 2.6-E — payment context builder -------------
+
+    #[test]
+    fn payment_context_pulls_caps_from_perm_row() {
+        let mut perm = sample_perm("approved", false);
+        perm.per_tx_limit_cents = 250;
+        perm.per_session_limit_cents = 5_000;
+        perm.rate_limit_per_min = 12;
+        perm.max_tx_per_session = 80;
+        let ctx = build_payment_context(
+            Some(&perm),
+            /*requested_cents=*/ 100,
+            /*bsv_price_available=*/ true,
+            /*session_spent=*/ 0,
+            /*rate_count=*/ 0,
+            /*tx_count=*/ 0,
+        );
+        assert_eq!(ctx.call_kind, CallKind::Payment);
+        assert_eq!(ctx.trust_level, TrustLevel::Approved);
+        assert_eq!(ctx.per_tx_limit_cents, 250);
+        assert_eq!(ctx.per_session_limit_cents, 5_000);
+        assert_eq!(ctx.rate_limit_per_min, 12);
+        assert_eq!(ctx.max_tx_per_session, 80);
+        assert_eq!(ctx.requested_cents, 100);
+        assert!(ctx.bsv_price_available);
+        assert_eq!(ctx.payment_scope_kind_missing, None);
+    }
+
+    #[test]
+    fn payment_context_without_perm_row_zeros_caps_and_unknown_trust() {
+        let ctx = build_payment_context(None, 50, true, 0, 0, 0);
+        assert_eq!(ctx.trust_level, TrustLevel::Unknown);
+        assert_eq!(ctx.per_tx_limit_cents, 0);
+        assert_eq!(ctx.per_session_limit_cents, 0);
+        assert_eq!(ctx.rate_limit_per_min, 0);
+        assert_eq!(ctx.max_tx_per_session, 0);
+        // Engine sees Unknown trust + cap 0 — TrustUnknown branch fires before
+        // payment caps are evaluated.
+    }
+
+    #[test]
+    fn payment_context_propagates_session_counters() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_payment_context(Some(&perm), 25, true, 400, 5, 8);
+        assert_eq!(ctx.session_spent_cents, 400);
+        assert_eq!(ctx.payment_requests_this_minute, 5);
+        assert_eq!(ctx.payment_count_this_session, 8);
+    }
+
+    #[test]
+    fn payment_context_bsv_price_unavailable_propagates() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_payment_context(
+            Some(&perm),
+            /*requested_cents=*/ 0,
+            /*bsv_price_available=*/ false,
+            0, 0, 0,
+        );
+        assert!(!ctx.bsv_price_available);
+        assert_eq!(ctx.requested_cents, 0);
+    }
+
+    #[test]
+    fn payment_context_translates_blocked_trust() {
+        let perm = sample_perm("blocked", false);
+        let ctx = build_payment_context(Some(&perm), 50, true, 0, 0, 0);
+        assert_eq!(ctx.trust_level, TrustLevel::Blocked);
     }
 }

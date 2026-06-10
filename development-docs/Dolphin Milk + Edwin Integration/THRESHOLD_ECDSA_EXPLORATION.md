@@ -1,5 +1,7 @@
 # Threshold ECDSA — John + BINARY's Signing Network (Exploration)
 
+> 📁 Part of the **Dolphin Milk + Edwin Integration** doc set (technical half) — see `README.md` here for the full map. Pitch/product/outreach docs live in the Marston marketing intelligence vault.
+
 **Status:** Exploration / future-tracking. NOT pitch material yet. NOT committed direction.
 **Trigger:** Matt flagged @johncalhooon's X post linking to IACR ePrint 2021/060. We don't bring this up with John directly per Matt's call; we want to understand if his roadmap intersects ours.
 **Drafted:** 2026-05-30. **Updated:** 2026-05-30 (post content recovered, inference revised).

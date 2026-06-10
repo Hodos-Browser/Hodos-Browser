@@ -1,5 +1,7 @@
 # Architecture (Technical) — Dolphin Milk + Edwin + Hodos
 
+> 📁 Part of the **Dolphin Milk + Edwin Integration** doc set (technical half) — see `README.md` here for the full map. Pitch/product/outreach docs live in the Marston marketing intelligence vault.
+
 **Audience:** Jake, John, Matt — engineers who already understand BSV, BRC-100, and the basics of each project. Not the pitch audience.
 **Status:** v1, drafted 2026-05-29. Will iterate after Jake meeting.
 **Purpose:** Lock the process layout, request flow, trust boundaries, and the PermissionEngine-as-envelope-issuer synthesis.

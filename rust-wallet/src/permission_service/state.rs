@@ -26,6 +26,44 @@ use super::flags::EngineFlags;
 /// single-use, 10-minute TTL".
 pub const APPROVAL_TTL_SECS: i64 = 600;
 
+/// Rate-limit sliding window length in seconds.
+///
+/// Matches C++ SessionManager's 60s window: payment requests beyond
+/// `rate_limit_per_min` within this window trigger the rate_limit_exceeded
+/// prompt. Window resets the moment elapsed >= 60s.
+pub const RATE_LIMIT_WINDOW_SECS: i64 = 60;
+
+/// Per-(browser_id, domain) session counter snapshot.
+///
+/// Phase 2.6-E mirror of C++'s `BrowserSession` struct in
+/// `cef-native/include/core/SessionManager.h`. Keyed by browser_id in the
+/// outer map; `domain` lives inside the value and a domain change for the
+/// same browser_id resets spent/rate counters (matches C++'s `getSession`
+/// reset-on-domain-change semantics).
+///
+/// All four counter fields feed into `PermissionContext` for `decide_payment`:
+/// `spent_cents` → `session_spent_cents`, `payment_count_this_session` →
+/// same name, `payment_requests_this_minute` → same name (after window
+/// expiry check).
+#[derive(Debug, Clone, Default)]
+pub struct SessionCounters {
+    /// Domain this counter snapshot applies to. Domain-mismatch on the same
+    /// browser_id triggers a reset (mirrors C++).
+    pub domain: String,
+    /// Total USD cents spent on this (browser_id, domain) session.
+    /// Incremented by `record_spending` after Silent decisions land.
+    pub spent_cents: i64,
+    /// Total payment transactions on this (browser_id, domain) session.
+    /// Incremented alongside the rate counter.
+    pub payment_count_this_session: i32,
+    /// Payment requests issued in the current 60s rate window. Window
+    /// boundary lives in `minute_window_start`.
+    pub payment_requests_this_minute: i32,
+    /// Unix epoch seconds of the start of the current 60s rate window.
+    /// `payment_requests_this_minute` resets when (now - this) >= 60.
+    pub minute_window_start: i64,
+}
+
 /// Outcome of `PermissionService::consume_and_verify`.
 ///
 /// Maps to LD2's 403 `reason` values that the C++ side or test smoke can
@@ -99,6 +137,28 @@ pub struct PermissionService {
     /// Populated by `POST /wallet/session-approve` with kind=key_linkage
     /// (called from C++ MarkKeyLinkageRevealApproved).
     key_linkage_session_approvals: Arc<RwLock<HashSet<String>>>,
+
+    /// Phase 2.6-E — per-browser payment session counters. Migrated from
+    /// C++'s `SessionManager` singleton in
+    /// `cef-native/include/core/SessionManager.h`. Read at payment-gate
+    /// time by `build_payment_context`; written by `record_spending` and
+    /// `increment_payment_rate_counter` after Silent decisions land. Cleared
+    /// per-browser via `clear_session_for_browser` (fired from
+    /// `POST /wallet/session/close` when C++ closes a tab).
+    ///
+    /// Key is the CEF browser identifier (i32). One entry per browser;
+    /// `domain` lives inside the value and a domain mismatch on the same
+    /// browser triggers a counter reset (matches C++'s `getSession`).
+    ///
+    /// Phase 2.6-E intentionally leaves C++'s `SessionManager` alive for
+    /// the BRC-121 paid-retry path (per OQ5 in
+    /// `PHASE_2_6_ENGINE_TO_RUST.md` — BRC-121 cascade migration is post-
+    /// 2.6 polish). So this Rust map and the C++ SessionManager are
+    /// independent counter spaces during this phase. The engine-driven
+    /// path (createAction / signAction / processAction / acquireCertificate
+    /// / sendMessage / send_transaction) reads + writes Rust; the BRC-121
+    /// path keeps reading + writing C++.
+    session_counters: Arc<RwLock<HashMap<i32, SessionCounters>>>,
 }
 
 impl PermissionService {
@@ -110,6 +170,7 @@ impl PermissionService {
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             identity_key_session_approvals: Arc::new(RwLock::new(HashSet::new())),
             key_linkage_session_approvals: Arc::new(RwLock::new(HashSet::new())),
+            session_counters: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -329,6 +390,148 @@ impl PermissionService {
                 .expect("key_linkage_session_approvals lock poisoned");
             guard.remove(domain);
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Phase 2.6-E — payment session counters
+    // ------------------------------------------------------------------------
+    //
+    // Mirror of C++ SessionManager in cef-native/include/core/SessionManager.h.
+    // Read by build_payment_context, written by record_spending +
+    // increment_payment_rate_counter, cleared by clear_session_for_browser.
+
+    /// Read current counters for (browser_id, domain). Domain-mismatch on the
+    /// same browser_id returns a zeroed snapshot — matches C++'s `getSession`
+    /// behavior where navigating to a new origin resets spent/rate counters.
+    ///
+    /// Side effect: a missing entry is NOT created (engine reads are
+    /// non-mutating). Counters materialize on the first `record_spending` or
+    /// `increment_payment_rate_counter` call.
+    ///
+    /// `now` is unix epoch seconds. Used to expire the rate window.
+    pub fn get_session_counters_snapshot(
+        &self,
+        browser_id: i32,
+        domain: &str,
+        now: i64,
+    ) -> SessionCounters {
+        let guard = self
+            .session_counters
+            .read()
+            .expect("session_counters lock poisoned");
+        match guard.get(&browser_id) {
+            Some(c) if c.domain == domain => {
+                // Apply 60s rate window expiry on read so the engine sees the
+                // current count, not the pre-expiry one. Mirrors C++'s
+                // checkRateLimit + incrementRateCounter window logic.
+                let effective_rate = if now - c.minute_window_start >= RATE_LIMIT_WINDOW_SECS {
+                    0
+                } else {
+                    c.payment_requests_this_minute
+                };
+                SessionCounters {
+                    domain: c.domain.clone(),
+                    spent_cents: c.spent_cents,
+                    payment_count_this_session: c.payment_count_this_session,
+                    payment_requests_this_minute: effective_rate,
+                    minute_window_start: c.minute_window_start,
+                }
+            }
+            _ => SessionCounters {
+                domain: domain.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Record `cents` of spending for (browser_id, domain). Called after the
+    /// engine returns Silent and the wallet processes the payment. Creates a
+    /// new session entry on first call; mutates the existing one on subsequent
+    /// calls (resetting spent + rate counters if the domain changed).
+    ///
+    /// Mirrors C++'s `SessionManager::recordSpending` semantics — adds to the
+    /// existing entry without resetting. The reset-on-domain-change happens
+    /// inside `get_or_create_for_write` (called here) which mirrors C++'s
+    /// `getSession` behavior.
+    pub fn record_spending(&self, browser_id: i32, domain: &str, cents: i64, now: i64) {
+        let mut guard = self
+            .session_counters
+            .write()
+            .expect("session_counters lock poisoned");
+        let entry = Self::get_or_create_for_write(&mut guard, browser_id, domain, now);
+        entry.spent_cents += cents;
+    }
+
+    /// Increment the per-session payment count + per-minute rate counter for
+    /// (browser_id, domain). Called after the engine returns Silent for a
+    /// payment — mirrors the C++ `incrementRateCounter` + `incrementPaymentCount`
+    /// pair that fires together at gate-decision time.
+    ///
+    /// Handles the 60s rate window: if the window has expired, resets the
+    /// minute counter to 1 (this call) and restarts the window. Otherwise
+    /// increments the in-window counter.
+    pub fn increment_payment_rate_counter(&self, browser_id: i32, domain: &str, now: i64) {
+        let mut guard = self
+            .session_counters
+            .write()
+            .expect("session_counters lock poisoned");
+        let entry = Self::get_or_create_for_write(&mut guard, browser_id, domain, now);
+
+        // Rate window expiry — matches C++ SessionManager::incrementRateCounter
+        // L60-68. Window reset BEFORE the increment so this call is counted in
+        // the new window, not as the last call of the expired one.
+        if now - entry.minute_window_start >= RATE_LIMIT_WINDOW_SECS {
+            entry.payment_requests_this_minute = 0;
+            entry.minute_window_start = now;
+        }
+        entry.payment_requests_this_minute += 1;
+        entry.payment_count_this_session += 1;
+    }
+
+    /// Drop counters for `browser_id`. Fired from C++ via
+    /// `POST /wallet/session/close` when a tab closes. Mirrors C++'s
+    /// `SessionManager::clearSession` exactly.
+    pub fn clear_session_for_browser(&self, browser_id: i32) {
+        let mut guard = self
+            .session_counters
+            .write()
+            .expect("session_counters lock poisoned");
+        guard.remove(&browser_id);
+    }
+
+    /// Count of distinct browser sessions currently tracked. For dev sanity.
+    pub fn session_counter_browser_count(&self) -> usize {
+        self.session_counters
+            .read()
+            .expect("session_counters lock poisoned")
+            .len()
+    }
+
+    /// Internal helper: get-or-create a SessionCounters entry for write,
+    /// applying the C++ reset-on-domain-change semantics. Caller holds the
+    /// write lock.
+    fn get_or_create_for_write<'a>(
+        guard: &'a mut HashMap<i32, SessionCounters>,
+        browser_id: i32,
+        domain: &str,
+        now: i64,
+    ) -> &'a mut SessionCounters {
+        let entry = guard.entry(browser_id).or_insert_with(|| SessionCounters {
+            domain: domain.to_string(),
+            minute_window_start: now,
+            ..Default::default()
+        });
+        if entry.domain != domain {
+            // Domain navigated — reset spent + rate per C++'s getSession L17-21.
+            // C++ does NOT reset payment_count_this_session on domain change;
+            // matching that here. The asymmetry is a pre-existing C++ behavior
+            // worth a follow-up but not a 2.6-E regression target.
+            entry.domain = domain.to_string();
+            entry.spent_cents = 0;
+            entry.payment_requests_this_minute = 0;
+            entry.minute_window_start = now;
+        }
+        entry
     }
 }
 
@@ -570,5 +773,133 @@ mod tests {
         svc.revoke_session_approvals_for_domain("never-approved.com");
         assert!(!svc.is_identity_key_session_approved("never-approved.com"));
         assert!(!svc.is_key_linkage_session_approved("never-approved.com"));
+    }
+
+    // ---------- Phase 2.6-E: SessionCounters ----------
+
+    const T0: i64 = 1_700_000_000;
+
+    #[test]
+    fn snapshot_with_no_session_returns_zeroed_with_domain() {
+        let svc = PermissionService::new(EngineFlags::default());
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0);
+        assert_eq!(c.domain, "example.com");
+        assert_eq!(c.spent_cents, 0);
+        assert_eq!(c.payment_count_this_session, 0);
+        assert_eq!(c.payment_requests_this_minute, 0);
+        // Read does NOT create an entry.
+        assert_eq!(svc.session_counter_browser_count(), 0);
+    }
+
+    #[test]
+    fn record_spending_creates_then_accumulates() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.record_spending(42, "example.com", 50, T0);
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0);
+        assert_eq!(c.spent_cents, 50);
+        assert_eq!(svc.session_counter_browser_count(), 1);
+
+        svc.record_spending(42, "example.com", 25, T0 + 1);
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0 + 1);
+        assert_eq!(c.spent_cents, 75);
+    }
+
+    #[test]
+    fn record_spending_with_different_domain_resets_spent_and_rate() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.record_spending(42, "example.com", 100, T0);
+        svc.increment_payment_rate_counter(42, "example.com", T0);
+        // Switch domain — spent + rate reset, payment_count carries over
+        // (matches C++ behavior).
+        svc.record_spending(42, "other.com", 30, T0 + 5);
+        let c = svc.get_session_counters_snapshot(42, "other.com", T0 + 5);
+        assert_eq!(c.spent_cents, 30);
+        assert_eq!(c.payment_requests_this_minute, 0);
+        assert_eq!(c.payment_count_this_session, 1);
+        // Original domain now reads as zeroed since the entry was reassigned.
+        let c2 = svc.get_session_counters_snapshot(42, "example.com", T0 + 5);
+        assert_eq!(c2.spent_cents, 0);
+    }
+
+    #[test]
+    fn increment_rate_counter_within_window_accumulates() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.increment_payment_rate_counter(42, "example.com", T0);
+        svc.increment_payment_rate_counter(42, "example.com", T0 + 5);
+        svc.increment_payment_rate_counter(42, "example.com", T0 + 10);
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0 + 15);
+        assert_eq!(c.payment_requests_this_minute, 3);
+        assert_eq!(c.payment_count_this_session, 3);
+    }
+
+    #[test]
+    fn increment_rate_counter_after_window_expiry_resets_minute_only() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.increment_payment_rate_counter(42, "example.com", T0);
+        svc.increment_payment_rate_counter(42, "example.com", T0 + 30);
+        // 60s elapsed since window started at T0 — next increment opens a new
+        // window with this call counted as 1 in it.
+        svc.increment_payment_rate_counter(42, "example.com", T0 + 65);
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0 + 66);
+        // Window resets to 1 (this call only), but total session count keeps
+        // climbing across windows.
+        assert_eq!(c.payment_requests_this_minute, 1);
+        assert_eq!(c.payment_count_this_session, 3);
+    }
+
+    #[test]
+    fn snapshot_applies_window_expiry_on_read() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.increment_payment_rate_counter(42, "example.com", T0);
+        svc.increment_payment_rate_counter(42, "example.com", T0 + 30);
+        // Read at T0+65 — window has expired, snapshot should report 0 even
+        // though no new increment has fired the in-place reset yet.
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0 + 65);
+        assert_eq!(c.payment_requests_this_minute, 0);
+        // Total session count unaffected by window expiry.
+        assert_eq!(c.payment_count_this_session, 2);
+    }
+
+    #[test]
+    fn snapshot_with_mismatched_domain_returns_zeroed() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.record_spending(42, "example.com", 100, T0);
+        let c = svc.get_session_counters_snapshot(42, "other.com", T0 + 1);
+        assert_eq!(c.spent_cents, 0);
+        assert_eq!(c.payment_count_this_session, 0);
+        assert_eq!(c.payment_requests_this_minute, 0);
+    }
+
+    #[test]
+    fn clear_session_for_browser_drops_entry() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.record_spending(42, "example.com", 100, T0);
+        svc.record_spending(43, "other.com", 50, T0);
+        assert_eq!(svc.session_counter_browser_count(), 2);
+        svc.clear_session_for_browser(42);
+        assert_eq!(svc.session_counter_browser_count(), 1);
+        let c = svc.get_session_counters_snapshot(42, "example.com", T0 + 1);
+        assert_eq!(c.spent_cents, 0);
+        // Other browser unaffected.
+        let c2 = svc.get_session_counters_snapshot(43, "other.com", T0 + 1);
+        assert_eq!(c2.spent_cents, 50);
+    }
+
+    #[test]
+    fn clear_session_for_unknown_browser_is_noop() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.clear_session_for_browser(999);
+        assert_eq!(svc.session_counter_browser_count(), 0);
+    }
+
+    #[test]
+    fn per_browser_isolation() {
+        let svc = PermissionService::new(EngineFlags::default());
+        svc.record_spending(1, "example.com", 100, T0);
+        svc.record_spending(2, "example.com", 50, T0);
+        let c1 = svc.get_session_counters_snapshot(1, "example.com", T0);
+        let c2 = svc.get_session_counters_snapshot(2, "example.com", T0);
+        assert_eq!(c1.spent_cents, 100);
+        assert_eq!(c2.spent_cents, 50);
     }
 }

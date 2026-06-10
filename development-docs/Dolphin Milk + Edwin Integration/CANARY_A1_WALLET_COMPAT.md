@@ -1,5 +1,7 @@
 # Canary A1 — Wallet API Compatibility Report
 
+> 📁 Part of the **Dolphin Milk + Edwin Integration** doc set (technical half) — see `README.md` here for the full map. Pitch/product/outreach docs live in the Marston marketing intelligence vault.
+
 **Date:** 2026-05-29
 **Scope:** Can Hodos's Rust wallet (`localhost:31301`) serve every call Dolphin Milk's agent makes (today against `bsv-wallet-cli` on `localhost:3322`)?
 **Method:** Static analysis of both Rust codebases. No services started, no live calls made.

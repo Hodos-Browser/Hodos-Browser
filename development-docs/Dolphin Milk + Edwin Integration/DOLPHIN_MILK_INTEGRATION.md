@@ -1,5 +1,7 @@
 # Dolphin Milk Integration — Research Doc
 
+> 📁 Part of the **Dolphin Milk + Edwin Integration** doc set (technical half) — see `README.md` here for the full map. Pitch/product/outreach docs live in the Marston marketing intelligence vault.
+
 **Status:** RESEARCH (per `marketing/intelligence/FEATURE_PRIORITY.md`)
 **Effort:** L (per `marketing/intelligence/EFFORT_MATRIX.md#dolphin-milk-integration`)
 **First logged:** 2026-05-11

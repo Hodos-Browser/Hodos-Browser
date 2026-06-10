@@ -650,22 +650,29 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   };
 
   // ── Payment/Rate-Limit: Modify Limits + Approve ──
+  //
+  // Phase 2.6-E — collapsed the racy two-IPC dance into a single
+  // brc100_auth_response that bundles the new limits. The pre-2.6-E flow
+  // fired `add_domain_permission_advanced` (whose C++ handler drained
+  // PendingRequestManager via popAllForDomain) followed by
+  // `brc100_auth_response`, and the drain popped the very request the
+  // second IPC was about to look up by id → silent no-replay → user
+  // had to manually retry. Now C++ updates the perm row + caches in
+  // response to the `modifyLimits` payload BEFORE calling handleAuthResponse
+  // for the same request id, so the X-User-Approved replay always lands.
   const handleModifyLimitsAndApprove = (settings: DomainPermissionSettings) => {
     try {
       if (window.cefMessage) {
-        // Update the site's limits in DB + cache
-        window.cefMessage.send('add_domain_permission_advanced', [
-          JSON.stringify({
-            domain: notificationDomain,
-            perTxLimitCents: settings.perTxLimitCents,
-            perSessionLimitCents: settings.perSessionLimitCents,
-            rateLimitPerMin: settings.rateLimitPerMin,
-            maxTxPerSession: settings.maxTxPerSession,
-          }),
-        ]);
-        // Approve this request
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({
+            approved: true,
+            modifyLimits: {
+              perTxLimitCents: settings.perTxLimitCents,
+              perSessionLimitCents: settings.perSessionLimitCents,
+              rateLimitPerMin: settings.rateLimitPerMin,
+              maxTxPerSession: settings.maxTxPerSession,
+            },
+          }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);

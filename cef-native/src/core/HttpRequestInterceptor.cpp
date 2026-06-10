@@ -1382,6 +1382,30 @@ void fireSessionApproveToRust(const std::string& domain, const char* kind) {
     }, body));
 }
 
+// Phase 2.6-E — drop Rust payment session counters for a browser_id.
+// Called fire-and-forget from TabManager::CloseTab when a tab closes so
+// reopening the same domain in a new tab starts with fresh counters
+// (mirrors C++'s SessionManager::clearSession). Idempotent — Rust returns
+// 200 even for an unknown browser_id.
+void fireSessionCloseToRust(int browserId) {
+    std::string body = std::string("{\"browser_id\":") + std::to_string(browserId) + "}";
+    CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
+        std::string body
+    ) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+        HttpResponse resp = SyncHttpClient::Post(
+            "http://127.0.0.1:31301/wallet/session/close",
+            body, headers, /*timeoutMs=*/3000);
+        if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
+            LOG_DEBUG_HTTP(std::string("🛡️ session/close POST failed (statusCode=")
+                + std::to_string(resp.statusCode) + ") — Rust payment counters "
+                + "may still hold stale state; harmless until same browser_id "
+                + "fires another payment (rare in practice — closed tab is gone)");
+        }
+    }, body));
+}
+
 // Phase 2.6-C.4 follow-up — drop both Rust session caches for a domain.
 // Called from revokeIdentityKeyApprovalForDomain / revokeKeyLinkageApprovalForDomain
 // (both fire on the same `domain_permission_invalidate` IPC chain on the C++
@@ -1415,6 +1439,26 @@ void MarkIdentityKeyRevealApproved(const std::string& domain) {
 void MarkKeyLinkageRevealApproved(const std::string& domain) {
     KeyLinkageApprovalCache::GetInstance().approve(domain);
     fireSessionApproveToRust(domain, "key_linkage");
+}
+
+// Phase 2.6-E — public entry point for TabManager's tab-close path.
+// Drops Rust's payment session counters for the closing browser_id so a
+// reopened tab on the same domain starts with fresh caps. Mirrors C++'s
+// `SessionManager::clearSession` which fires immediately above this call
+// in TabManager::CloseTab.
+void ClearRustPaymentSessionForBrowser(int browserId) {
+    fireSessionCloseToRust(browserId);
+}
+
+// Phase 2.6-E cap-modal auto-resume — read the current identityKeyDisclosureAllowed
+// flag from the DomainPermissionCache row for `domain` so the cap-modal
+// modifyLimits handler in simple_handler.cpp can preserve it when posting an
+// updated perm row. Returns the default (false) when no cache row exists.
+// Defined here because DomainPermissionCache lives in this translation unit.
+bool GetDomainIdentityKeyDisclosureAllowed(const std::string& domain) {
+    DomainPermissionCache::Permission perm =
+        DomainPermissionCache::GetInstance().getPermission(domain);
+    return perm.identityKeyDisclosureAllowed;
 }
 
 // Phase 2.5 Commit 6 (sub-step 6.b) — single source of truth for the
@@ -2176,7 +2220,8 @@ public:
     void startAsyncHTTPRequest();
 
     int64_t getPreCalculatedCents() const { return preCalculatedCents_; }
-    bool getWasAutoApprovedPayment() const { return wasAutoApprovedPayment_; }
+    int64_t getPreCalculatedSatoshis() const { return preCalculatedSatoshis_; }
+    bool getPreCalculatedBsvPriceAvailable() const { return preCalculatedBsvPriceAvailable_; }
     int getBrowserId() const { return browser_ ? browser_->GetIdentifier() : 0; }
     const std::string& getRequestDomain() const { return requestDomain_; }
     // Phase 2.6-C.3 — needed by AsyncHTTPClient::OnRequestComplete to build
@@ -2206,9 +2251,20 @@ private:
     bool requestCompleted_;
     std::atomic<bool> httpCompleted_{false};
 
-    // Auto-approve engine: pre-calculated spending for this request
+    // Auto-approve engine: pre-calculated spending for this request.
+    // Phase 2.6-E — populated in Open() for payment endpoints from
+    // BSVPriceCache + extractOutputSatoshis(body_); read by
+    // startAsyncHTTPRequest to inject X-Payment-* headers + by
+    // AsyncHTTPClient::OnRequestComplete to derive cents for the
+    // payment_success_indicator IPC (green-dot animation).
+    //
+    // Pre-2.6-E this struct also tracked `wasAutoApprovedPayment_`, which the
+    // deleted C++ payment cascade set to true on Silent. That signal is now
+    // local-only and derived from `isPaymentEndpoint(endpoint_) && UR_SUCCESS
+    // && !response_has_error` in OnRequestComplete (LD4: derivation stays C++).
     int64_t preCalculatedCents_ = 0;
-    bool wasAutoApprovedPayment_ = false;
+    int64_t preCalculatedSatoshis_ = 0;
+    bool preCalculatedBsvPriceAvailable_ = false;
 
     // Phase 1.5 Step 1 — privacy-perimeter pre-approval flags. Set in Open() when
     // the per-domain "Always allow" cache hit lets us skip the prompt; consumed in
@@ -2461,30 +2517,44 @@ void runIpcEngineCascade(const std::string& requestId,
     // Capture engine-decision-time state for callbacks.
     const hodos::PermissionCallKind callKind = ctx.callKind;
 
-    // Phase 2.6-C.4 + D.4 — privacy-perimeter AND scoped-grant CallKinds are
-    // now Rust-authoritative. Skip the inline cascade AND the shadow
-    // comparison: the C++ engine no longer produces ground truth for these
-    // kinds. Forward directly to Rust; the worker hops to TID_UI on 202 to
-    // open the matching modal via tryHandlePendingResponse →
+    // Phase 2.6-C.4 + D.4 + E — privacy-perimeter, scoped-grant, AND payment
+    // CallKinds are now Rust-authoritative. Skip the inline cascade AND the
+    // shadow comparison: the C++ engine no longer produces ground truth for
+    // these kinds. Forward directly to Rust; the worker hops to TID_UI on 202
+    // to open the matching modal via tryHandlePendingResponse →
     // resumeInternalResponse on user resolution (C.3 path, same as the
     // HTTP-path silent-forward worker below).
+    //
+    // For Payment, C++ injects X-Browser-Id + X-Payment-Satoshis +
+    // X-Payment-Cents + X-Bsv-Price-Available so Rust's dispatch_payment
+    // can build the PermissionContext server-side. LD4 keeps satoshi/cents
+    // derivation on the C++ side (BSVPriceCache) — values already computed
+    // above at L2434-2440.
     if (callKind == hodos::PermissionCallKind::IdentityKeyReveal
         || callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage
         || callKind == hodos::PermissionCallKind::SpecificKeyLinkage
         || callKind == hodos::PermissionCallKind::SensitiveCertField
         || callKind == hodos::PermissionCallKind::ProtocolUse
         || callKind == hodos::PermissionCallKind::BasketAccess
-        || callKind == hodos::PermissionCallKind::CounterpartyUse) {
+        || callKind == hodos::PermissionCallKind::CounterpartyUse
+        || callKind == hodos::PermissionCallKind::Payment) {
         LOG_DEBUG_HTTP("🚪 IPC: Rust-authoritative kind, forward to Rust (no inline gate, no shadow) for "
                        + origin + " endpoint=" + endpoint);
         CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
             std::string requestId, std::string endpoint, std::string bodyJson,
             std::string httpMethod, std::string origin,
-            CefRefPtr<CefFrame> capturedFrame, int browserId
+            CefRefPtr<CefFrame> capturedFrame, int browserId,
+            bool isPaymentKind, int64_t satoshis, int64_t cents, bool priceAvailable
         ) {
             std::map<std::string, std::string> headers;
             headers["Content-Type"] = "application/json";
             if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
+            if (isPaymentKind) {
+                headers["X-Browser-Id"] = std::to_string(browserId);
+                headers["X-Payment-Satoshis"] = std::to_string(satoshis);
+                headers["X-Payment-Cents"] = std::to_string(cents);
+                headers["X-Bsv-Price-Available"] = priceAvailable ? "1" : "0";
+            }
             std::string url = "http://127.0.0.1:31301" + endpoint;
             HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
 
@@ -2505,7 +2575,7 @@ void runIpcEngineCascade(const std::string& requestId,
                     // the id the page's CWI shim is waiting on.
                     resume.originalIpcRequestId = requestId;
                     if (!tryHandlePendingResponse(202, responseBody, modalCtx, resume)) {
-                        LOG_WARNING_HTTP("🛡️ IPC privacy-perimeter 202 from Rust failed envelope handling — forwarding raw body");
+                        LOG_WARNING_HTTP("🛡️ IPC Rust-authoritative 202 from Rust failed envelope handling — forwarding raw body");
                         sendWalletResponseIpc(capturedFrame, requestId, true, responseBody);
                     }
                 }, requestId, origin, endpoint, bodyJson, httpMethod, responseBody,
@@ -2515,13 +2585,35 @@ void runIpcEngineCascade(const std::string& requestId,
 
             bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
             std::string payload = buildIpcResponsePayload(resp, ok);
+
+            // Phase 2.6-E — fire green-dot animation IPC on auto-approved
+            // payment success (mirrors the HTTP path's
+            // AsyncHTTPClient::OnRequestComplete derivation). Local-only:
+            // payment endpoint + UR_SUCCESS + no "error" in response body.
+            bool isErrorInResponse = false;
+            if (ok && isPaymentKind) {
+                try {
+                    auto rj = nlohmann::json::parse(payload);
+                    isErrorInResponse = rj.contains("error");
+                } catch (...) {}
+            }
+            const bool wasAutoApprovedPayment =
+                ok && isPaymentKind && !isErrorInResponse;
+
             CefPostTask(TID_UI, base::BindOnce([](
                 std::string requestId, bool ok, std::string payload,
-                CefRefPtr<CefFrame> capturedFrame
+                CefRefPtr<CefFrame> capturedFrame, int browserId,
+                std::string origin, std::string endpoint, int64_t cents,
+                bool wasAutoApprovedPayment
             ) {
+                if (wasAutoApprovedPayment) {
+                    OnWalletCallSuccess(browserId, origin, cents, true, endpoint);
+                }
                 sendWalletResponseIpc(capturedFrame, requestId, ok, payload);
-            }, requestId, ok, payload, capturedFrame));
-        }, requestId, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId));
+            }, requestId, ok, payload, capturedFrame, browserId,
+               origin, endpoint, cents, wasAutoApprovedPayment));
+        }, requestId, endpoint, bodyJson, httpMethod, origin, capturedFrame, browserId,
+           isPaymentKind, satoshis, cents, priceAvailable));
         return;
     }
 
@@ -3110,28 +3202,28 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         // 2.6-B shadow log; that comparison is no longer meaningful once
         // the engine path is authoritative.
         //
-        // Payment endpoints (createAction etc.) are still handled inline
-        // below by the existing payment branch (2.6-E migrates this).
+        // Phase 2.6-E — payment cascade deleted. The inline RunPermissionGate
+        // payment branch that used to live here (~165 LOC) is superseded by
+        // Rust's `dispatch_payment` in `permission_service::request_gate`.
+        //
+        // C++ continues to extract satoshis + cents locally (LD4: BSVPriceCache
+        // stays on C++ side to feed the green-dot indicator without an extra
+        // round-trip). The values are stashed on the handler so
+        // startAsyncHTTPRequest can inject X-Payment-* headers; Rust then
+        // builds the PermissionContext server-side and returns 200/202/403.
+        //
+        // 202 PENDING from Rust is intercepted by tryHandlePendingResponse
+        // which opens the matching modal (payment_confirmation /
+        // rate_limit_exceeded) via the standard buildExtraParamsFromPayload
+        // translator. User Approve → request re-issued with X-User-Approved
+        // → Rust gate consumes the approval → Rust processes the payment.
+        //
+        // BRC-121 paid-retry path is unchanged (per phase doc OQ5 — BRC-121
+        // cascade migration is post-2.6 polish). BRC-121 still reads + writes
+        // C++ SessionManager; engine-driven path reads + writes Rust counters.
+        // The counter spaces are independent during 2.6-E.
 
         if (isPaymentEndpoint(endpoint_)) {
-            // Phase 2.5-B sub-step 5.b — payment gate now flows through the
-            // shared RunPermissionGate helper. Behavior is identical to the
-            // Phase 1.5 Step 6 Commit B implementation; the reorganization
-            // is the prep work for Commit 6 (IPC bridge consuming the same
-            // helper) per development-docs/Sigma-BRC121-Sprint/
-            // phase-2-window-cwi-shim/PHASE_2_5_IPC_REFACTOR.md.
-            //
-            // The C++ side still owns the same four concerns:
-            //   1. State collection (satoshis/cents/sessionSpent/etc.)
-            //   2. extraParams string the React modal expects
-            //   3. PendingRequestManager queue + CreateNotificationOverlayTask
-            //   4. Session-counter increments on auto-approve
-            // Those concerns are wired into the GateCallbacks below; the gate
-            // helper picks the matching callback based on the engine's
-            // decision.
-            int browserId = browser_ ? browser_->GetIdentifier() : 0;
-            SessionManager::GetInstance().getSession(browserId, requestDomain_);
-
             int64_t satoshis = extractOutputSatoshis(body_);
             double bsvPrice = BSVPriceCache::GetInstance().getPrice();
             const bool priceAvailable = (bsvPrice > 0);
@@ -3139,144 +3231,19 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
             if (priceAvailable && satoshis > 0) {
                 cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
             }
-            const int64_t sessionSpent = SessionManager::GetInstance().getSpentCents(browserId, requestDomain_);
-            const int rateCount = SessionManager::GetInstance().getRateCounter(browserId, requestDomain_);
-            const int txCount = SessionManager::GetInstance().getPaymentCount(browserId, requestDomain_);
+            // Stash for header injection in startAsyncHTTPRequest + green-dot
+            // animation in AsyncHTTPClient::OnRequestComplete.
+            preCalculatedCents_ = cents;
+            preCalculatedSatoshis_ = satoshis;
+            preCalculatedBsvPriceAvailable_ = priceAvailable;
 
-            hodos::PermissionContext ctx = buildPermissionContext(
-                requestDomain_, endpoint_, body_, perm,
-                cents, sessionSpent, rateCount, txCount,
-                priceAvailable);
+            LOG_DEBUG_HTTP(std::string("💰 Payment endpoint ") + endpoint_
+                + " forwarding to Rust gate: " + std::to_string(satoshis)
+                + " sats = " + std::to_string(cents) + " cents"
+                + (priceAvailable ? "" : " (price unavailable)"));
 
-            // Silent path — bypass any modal, mark this as an auto-approved
-            // payment so AsyncHTTPClient::OnRequestComplete fires the
-            // payment_success_indicator IPC (green-dot animation) on the
-            // wallet's response, then forward to the wallet.
-            hodos::GateCallbacks cb;
-            cb.forwardToWallet =
-                [this, cents, browserId, &handle_request]() {
-                LOG_DEBUG_HTTP("💰 Auto-approved payment for " + requestDomain_);
-                preCalculatedCents_ = cents;
-                wasAutoApprovedPayment_ = true;
-                SessionManager::GetInstance().incrementRateCounter(browserId);
-                SessionManager::GetInstance().incrementPaymentCount(browserId);
-                handle_request = true;
-                CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
-            };
-
-            // Deny path — surface the engine-formatted error envelope.
-            cb.denyWithError =
-                [this, &handle_request](const std::string& errorJson) {
-                LOG_DEBUG_HTTP("💰 Engine denied payment for " + requestDomain_);
-                onHTTPResponseReceived(errorJson);
-                handle_request = true;
-            };
-
-            // Prompt path — build branch-specific extraParams from the
-            // promptType, register with PendingRequestManager, fire the
-            // notification overlay task, arm the auth timeout. The two
-            // sub-cases:
-            //   (a) Scope-permission prompt (Commit E v1 path, dormant in
-            //       production today because buildPermissionContext does
-            //       NOT populate paymentScopeKindMissing for Payment kind —
-            //       see PermissionEngine context builder comment).
-            //   (b) Standard payment / rate-limit prompt with the
-            //       exceededLimit string the React modal renders.
-            cb.openModal =
-                [this, satoshis, cents, bsvPrice, priceAvailable, rateCount,
-                 txCount, sessionSpent, &perm, &handle_request](
-                    const std::string& promptType,
-                    const std::string& /*emptyExtraParams*/) {
-                preCalculatedCents_ = cents;
-
-                std::string extraParams;
-                if (promptType == "protocol_permission_prompt"
-                    || promptType == "basket_permission_prompt"
-                    || promptType == "counterparty_permission_prompt") {
-                    ProtocolScope proto_scope_pay = extractProtocolScope(endpoint_, body_);
-                    BasketScope basket_scope_pay = extractBasketScope(endpoint_, body_);
-                    if (promptType == "protocol_permission_prompt") {
-                        extraParams = "&protocolLevel=" + std::to_string(proto_scope_pay.level)
-                                    + "&protocolName=" + proto_scope_pay.name
-                                    + "&protocolKeyId=" + proto_scope_pay.keyId
-                                    + "&protocolCounterparty=" + proto_scope_pay.counterparty
-                                    + "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents);
-                    } else if (promptType == "basket_permission_prompt") {
-                        extraParams = "&basket=" + basket_scope_pay.basket
-                                    + "&basketAccess=" + basket_scope_pay.requiredAccess
-                                    + "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents);
-                    } else {
-                        extraParams = "&counterparty=" + proto_scope_pay.counterparty
-                                    + "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents);
-                    }
-                    LOG_DEBUG_HTTP("🛡️ Payment scope prompt required for " + requestDomain_
-                                   + " (" + promptType + ")");
-                    PendingRequestManager::GetInstance().addRequest(
-                        requestDomain_, method_, endpoint_, body_, this, promptType);
-                    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-                        promptType, requestDomain_, extraParams));
-                    postAuthTimeout(kPromptAuthTimeoutMs,
-                        "{\"error\":\"scoped permission timeout\",\"status\":\"error\"}");
-                    handle_request = true;
-                    return;
-                }
-
-                // Standard payment / rate-limit prompt path.
-                std::string exceeded;
-                if (!priceAvailable) {
-                    exceeded = "price_unavailable";
-                } else if (rateCount >= perm.rateLimitPerMin && perm.rateLimitPerMin > 0) {
-                    exceeded = "rate_limit";
-                } else if (txCount >= perm.maxTxPerSession && perm.maxTxPerSession > 0) {
-                    exceeded = "session_tx_count";
-                } else {
-                    const bool overTx = cents > perm.perTxLimitCents;
-                    const bool overSession = (sessionSpent + cents) > perm.perSessionLimitCents;
-                    if (overTx && overSession) exceeded = "both";
-                    else if (overTx) exceeded = "per_tx";
-                    else exceeded = "per_session";
-                }
-
-                extraParams = "&satoshis=" + std::to_string(satoshis)
-                            + "&cents=" + std::to_string(cents)
-                            + "&bsvPrice=" + (priceAvailable ? std::to_string(bsvPrice) : std::string("0"))
-                            + "&exceededLimit=" + exceeded
-                            + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                            + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                            + "&sessionSpent=" + std::to_string(sessionSpent);
-                if (promptType == "rate_limit_exceeded") {
-                    extraParams += "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                                 + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
-                                 + "&txCount=" + std::to_string(txCount);
-                }
-
-                PendingRequestManager::GetInstance().addRequest(
-                    requestDomain_, method_, endpoint_, body_, this, promptType);
-                CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-                    promptType, requestDomain_, extraParams));
-                postAuthTimeout(kPromptAuthTimeoutMs,
-                    "{\"error\":\"Payment confirmation timeout\",\"status\":\"error\"}");
-                handle_request = true;
-            };
-
-            hodos::GateDecision gateResult = hodos::RunPermissionGate(ctx, cb);
-            hodos::SubmitShadowComparison(ctx, gateResult);  // Phase 2.6-B.4
-
-            LOG_DEBUG_HTTP(std::string("💰 Payment engine decision: ")
-                + (gateResult.action == hodos::GateDecision::Action::Silent ? "Silent"
-                   : gateResult.action == hodos::GateDecision::Action::Prompt ? "Prompt" : "Deny")
-                + " promptType=" + gateResult.promptType
-                + " | " + std::to_string(satoshis) + " sats = " + std::to_string(cents) + " cents"
-                + " tx_limit=" + std::to_string(perm.perTxLimitCents)
-                + " session_spent=" + std::to_string(sessionSpent)
-                + " session_limit=" + std::to_string(perm.perSessionLimitCents)
-                + " tx_count=" + std::to_string(txCount)
-                + " max_tx=" + std::to_string(perm.maxTxPerSession)
-                + " | reason=" + gateResult.reason);
-
+            handle_request = true;
+            CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
             return true;
         }
 
@@ -3294,6 +3261,7 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     handle_request = true;
     return true;
 }
+
 
 // Timeout task for delayed execution on UI thread
 class WalletTimeoutTask : public CefTask {
@@ -4498,14 +4466,21 @@ public:
         // Phase 2.5 Commit 6 sub-step 6.b — record spending + fire green-dot
         // animation via the shared OnWalletCallSuccess helper. The error-check
         // stays at the caller because OnWalletCallSuccess doesn't have access
-        // to the response body; the wasAutoApprovedPayment flag is gated to
-        // false on an error response so the helper's internal guard does the
-        // rest.
+        // to the response body.
+        //
+        // Phase 2.6-E LD4 — wasAutoApprovedPayment is derived locally now
+        // (the engine signal lived in the deleted C++ payment cascade).
+        // A payment endpoint that came back UR_SUCCESS with no error in the
+        // response body was, by definition, auto-approved by Rust's
+        // dispatch_payment Silent branch OR replayed via X-User-Approved
+        // after the user accepted the prompt. Either way the user has
+        // sanctioned the spend — green-dot fires.
         CefURLRequest::Status status = request->GetRequestStatus();
         int64_t cents = parent_->getPreCalculatedCents();
-        const bool wasAutoApprovedPayment = parent_->getWasAutoApprovedPayment();
+        const bool isPaymentKind =
+            AsyncWalletResourceHandler::isPaymentEndpoint(parent_->getEndpoint());
         bool successAndNotError = false;
-        if (status == UR_SUCCESS && wasAutoApprovedPayment) {
+        if (status == UR_SUCCESS && isPaymentKind) {
             bool isError = false;
             try {
                 auto rj = nlohmann::json::parse(responseData_);
@@ -4517,7 +4492,7 @@ public:
                             parent_->getRequestDomain(),
                             cents,
                             /*wasAutoApprovedPayment=*/successAndNotError,
-                            /*endpoint=*/"createAction");
+                            /*endpoint=*/parent_->getEndpoint());
         parent_->onHTTPResponseReceived(responseData_);
     }
 
@@ -4597,6 +4572,23 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
             && IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_));
     if (sendIdentityKeyApproved) {
         headers.insert(std::make_pair("X-Identity-Key-Approved", "true"));
+    }
+
+    // Phase 2.6-E — inject payment headers on payment endpoints so Rust's
+    // dispatch_payment can build the PermissionContext server-side. LD4 keeps
+    // satoshis + cents derivation on the C++ side (BSVPriceCache stays here);
+    // the values were stashed on the handler by Open()'s payment-endpoint
+    // branch. Missing/zero values are safe — Rust treats them as
+    // best-effort and prompts price_unavailable when X-Bsv-Price-Available=0.
+    if (isPaymentEndpoint(endpoint_)) {
+        int browserId = browser_ ? browser_->GetIdentifier() : 0;
+        headers.insert(std::make_pair("X-Browser-Id", std::to_string(browserId)));
+        headers.insert(std::make_pair("X-Payment-Satoshis",
+            std::to_string(preCalculatedSatoshis_)));
+        headers.insert(std::make_pair("X-Payment-Cents",
+            std::to_string(preCalculatedCents_)));
+        headers.insert(std::make_pair("X-Bsv-Price-Available",
+            preCalculatedBsvPriceAvailable_ ? "1" : "0"));
     }
 
     // Forward original headers (including BRC-31 Authrite headers)

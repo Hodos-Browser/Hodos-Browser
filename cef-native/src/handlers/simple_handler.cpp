@@ -4131,6 +4131,58 @@ bool SimpleHandler::OnProcessMessageReceived(
                     if (found) {
                         LOG_DEBUG_BROWSER("🔐 Found pending auth request for: " + pendingReq.domain);
 
+                        // Phase 2.6-E cap-modal auto-resume — when the user
+                        // raised caps on the payment_confirmation /
+                        // rate_limit_exceeded modal, the bundled modifyLimits
+                        // payload updates the perm row + cache BEFORE we
+                        // dispatch the replay. Pre-2.6-E React fired a
+                        // separate `add_domain_permission_advanced` IPC whose
+                        // C++ handler drained PendingRequestManager via
+                        // popAllForDomain — that drain popped the very
+                        // request the subsequent `brc100_auth_response`
+                        // lookup needed, leaving the page silently waiting.
+                        // Consolidating into this single response IPC keeps
+                        // the pending entry alive through the cap update
+                        // and into handleAuthResponse's replay path below.
+                        if (responseData.contains("modifyLimits") &&
+                            responseData["modifyLimits"].is_object()) {
+                            auto& lim = responseData["modifyLimits"];
+                            int64_t perTx = lim.value("perTxLimitCents", (int64_t)100);
+                            int64_t perSession = lim.value("perSessionLimitCents", (int64_t)1000);
+                            int64_t rate = lim.value("rateLimitPerMin", (int64_t)30);
+                            int64_t maxTx = lim.value("maxTxPerSession", (int64_t)100);
+
+                            // Preserve the existing identity-key grant on
+                            // this domain — the cap modal doesn't expose it
+                            // so we read it from the current cache row via
+                            // the extern helper defined in
+                            // HttpRequestInterceptor.cpp (DomainPermissionCache
+                            // lives in that translation unit).
+                            // bundled_scope_grant defaults ON here because
+                            // the V22 column isn't mirrored into the C++
+                            // cache row; the async DB write rebuilds it.
+                            extern bool GetDomainIdentityKeyDisclosureAllowed(
+                                const std::string& domain);
+                            bool identityKeyDisclosure =
+                                GetDomainIdentityKeyDisclosureAllowed(pendingReq.domain);
+                            bool bundledScope = true;
+
+                            LOG_DEBUG_BROWSER("🔐 Cap-modal modifyLimits — updating perm row"
+                                " for " + pendingReq.domain
+                                + " (tx=" + std::to_string(perTx)
+                                + " session=" + std::to_string(perSession)
+                                + " rate=" + std::to_string(rate)
+                                + " maxTx=" + std::to_string(maxTx) + ")");
+                            extern void addDomainPermissionAdvanced(
+                                const std::string& domain,
+                                int64_t perTxLimitCents, int64_t perSessionLimitCents,
+                                int64_t rateLimitPerMin, int64_t maxTxPerSession,
+                                bool identityKeyDisclosureAllowed, bool bundledScopeGrant);
+                            addDomainPermissionAdvanced(
+                                pendingReq.domain, perTx, perSession, rate, maxTx,
+                                identityKeyDisclosure, bundledScope);
+                        }
+
                         // B+3 polish — BRC-121 over-cap approval short-circuit.
                         // For BRC-121, pendingReq.endpoint is the article URL
                         // (e.g. "https://now.bsvblockchain.tech/articles/X"),

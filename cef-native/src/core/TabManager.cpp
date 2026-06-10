@@ -172,10 +172,18 @@ bool TabManager::CloseTab(int tab_id) {
         }
     }
 
-    // Clear session spending and notify ephemeral cookie manager
+    // Clear session spending and notify ephemeral cookie manager.
+    // Phase 2.6-E — also fire fire-and-forget POST to Rust so the migrated
+    // engine-driven payment counters (Rust SessionCounters) drop the same
+    // browser_id. C++ SessionManager continues to live for BRC-121's inline
+    // cascade (see PHASE_2_6_ENGINE_TO_RUST.md OQ5 — BRC-121 cascade
+    // migration is post-2.6 polish), so both clears happen here in tandem.
     if (tab.browser) {
-        SessionManager::GetInstance().clearSession(tab.browser->GetIdentifier());
-        EphemeralCookieManager::GetInstance().OnTabClosed(tab.browser->GetIdentifier());
+        int browserId = tab.browser->GetIdentifier();
+        SessionManager::GetInstance().clearSession(browserId);
+        extern void ClearRustPaymentSessionForBrowser(int);
+        ClearRustPaymentSessionForBrowser(browserId);
+        EphemeralCookieManager::GetInstance().OnTabClosed(browserId);
     }
 
     // Mute audio before closing to prevent background playback during async teardown

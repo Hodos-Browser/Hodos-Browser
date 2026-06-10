@@ -1,5 +1,7 @@
 # Edwin vs. Dolphin Milk — Security Model Comparison
 
+> 📁 Part of the **Dolphin Milk + Edwin Integration** doc set (technical half) — see `README.md` here for the full map. Pitch/product/outreach docs live in the Marston marketing intelligence vault.
+
 **Written for:** Matt, to build clear mental models before the Jake + John meetings and the AWS pitch.
 **Drafted:** 2026-05-29
 **Status:** Working explainer. Will become a section of the pitch deck and the technical partner briefing.

@@ -295,3 +295,49 @@ pub async fn session_revoke(
         "domain": req.domain
     }))
 }
+
+// ============================================================================
+// Phase 2.6-E — POST /wallet/session/close
+// ============================================================================
+//
+// Fired fire-and-forget from C++ when a tab closes (`TabManager::CloseTab`).
+// Drops the matching browser_id's payment session counters from
+// PermissionService — mirrors C++'s SessionManager::clearSession exactly so
+// reopening a tab to the same domain starts fresh (same UX as
+// session_spent reset on tab close that has shipped since Phase 1).
+//
+// Wire shape:
+//   POST /wallet/session/close
+//   Content-Type: application/json
+//   { "browser_id": 42 }
+//
+// Idempotent: closing an unknown browser_id is a 200.
+
+#[derive(Debug, Deserialize)]
+pub struct SessionCloseRequest {
+    pub browser_id: i32,
+}
+
+pub async fn session_close(
+    permission: web::Data<Arc<PermissionService>>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let req: SessionCloseRequest = match serde_json::from_value(body.into_inner()) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid body: {}", e),
+                "status": "bad_request"
+            }));
+        }
+    };
+    permission.clear_session_for_browser(req.browser_id);
+    log::info!(
+        "🛡️ session/close: cleared payment session counters for browser_id={} (Rust counters dropped)",
+        req.browser_id
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "closed",
+        "browser_id": req.browser_id
+    }))
+}
