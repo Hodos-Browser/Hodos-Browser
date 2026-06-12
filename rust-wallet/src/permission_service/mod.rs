@@ -36,6 +36,6 @@ pub mod state;
 pub use flags::EngineFlags;
 pub use request_gate::{
     dispatch_cert_disclosure, dispatch_payment, dispatch_privacy_perimeter, dispatch_scoped_grant,
-    is_protected_basket, GateOutcome, PaymentCall, ScopedCall, X_BROWSER_ID,
+    domain_trust_gate, is_protected_basket, GateOutcome, PaymentCall, ScopedCall, X_BROWSER_ID,
 };
 pub use state::{ApprovalConsumeError, PendingApproval, PermissionService, SessionCounters};

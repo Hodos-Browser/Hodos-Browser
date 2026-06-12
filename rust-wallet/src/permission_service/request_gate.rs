@@ -652,6 +652,147 @@ pub fn dispatch_cert_disclosure(
 }
 
 // ============================================================================
+// Phase 2.6-G — domain-trust pre-gate
+// ============================================================================
+
+/// Async pre-gate resolving the domain-trust layer (Matrix C step 1) before the
+/// kind-specific dispatch runs. Moves the unknown/blocked + manifest handling
+/// out of the C++ HandleIpcWalletCall (G.4 removes the C++ side).
+///
+/// - internal origin (no `X-Requesting-Domain`) or approved trust → `Proceed`
+///   (caller falls through to the payment/scoped/cert/privacy dispatch);
+/// - blocked trust → Deny 403;
+/// - unknown trust → fetch the dApp manifest; engine returns 202 with
+///   `domain_approval` (no manifest) or `manifest_connect_bundle` (manifest
+///   present; payload carries the served bytes verbatim).
+///
+/// Async because the unknown branch fetches the manifest. Approved/blocked
+/// domains short-circuit before any fetch, so the common path stays cheap.
+pub async fn domain_trust_gate(
+    permission: &Arc<PermissionService>,
+    database: &Arc<Mutex<WalletDatabase>>,
+    current_user_id: i64,
+    http_req: &HttpRequest,
+    body: &[u8],
+    endpoint: &str,
+) -> GateOutcome {
+    let domain = match http_req
+        .headers()
+        .get(X_REQUESTING_DOMAIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        Some(d) => d.to_string(),
+        None => return GateOutcome::Proceed,
+    };
+
+    // X-User-Approved replay — the user approved the connect; the domain row is
+    // now approved (written by the modal's add_domain_permission), so consume the
+    // approval and proceed.
+    if let Some(approval_id) = http_req
+        .headers()
+        .get(X_USER_APPROVED)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        let now = chrono::Utc::now().timestamp();
+        match permission.consume_and_verify(approval_id, body, now) {
+            Ok(approval) => {
+                log::info!(
+                    "🔐 X-User-Approved consumed (domain-trust) for domain={} endpoint={} id={}",
+                    approval.domain, approval.endpoint, approval_id,
+                );
+                return GateOutcome::Proceed;
+            }
+            Err(ApprovalConsumeError::BodyMismatch) => {
+                return GateOutcome::EarlyReturn(forbidden_envelope("body_mismatch"));
+            }
+            Err(ApprovalConsumeError::Expired) | Err(ApprovalConsumeError::NotFound) => {
+                return GateOutcome::EarlyReturn(forbidden_envelope("approval_expired_or_consumed"));
+            }
+        }
+    }
+
+    let perm_row = {
+        let db_guard = match database.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!(
+                    "🛡️ database mutex poisoned in domain_trust_gate: {} — denying",
+                    poisoned
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_mutex_poisoned"));
+            }
+        };
+        let repo = DomainPermissionRepository::new(db_guard.connection());
+        match repo.get_by_domain(current_user_id, &domain) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!(
+                    "🛡️ get_by_domain('{}') failed in domain_trust_gate: {} — denying",
+                    domain, e
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_read_error"));
+            }
+        }
+    };
+
+    let trust = perm_row.as_ref().map(|p| p.trust_level.as_str()).unwrap_or("");
+    // Approved → fall through to the kind dispatch. Short-circuit so we never
+    // fetch a manifest for an already-trusted domain.
+    if trust == "approved" {
+        return GateOutcome::Proceed;
+    }
+
+    // Unknown (not blocked) → fetch the manifest to choose the richer prompt.
+    let manifest = if trust == "blocked" {
+        None
+    } else {
+        crate::manifest::fetch_manifest(&domain).await
+    };
+    let manifest_present = manifest.is_some();
+
+    let ctx = context_builder::build_domain_trust_context(perm_row.as_ref(), manifest_present);
+    let decision = permission.decide(&ctx);
+
+    match decision {
+        PermissionDecision::Silent { .. } => GateOutcome::Proceed,
+        PermissionDecision::Prompt { ref prompt_type, ref reason } => {
+            let now = chrono::Utc::now().timestamp();
+            let approval_id = permission.mint_pending_approval(&domain, endpoint, body, now);
+            let prompt_payload = if matches!(
+                *prompt_type,
+                hodos_permission_engine::PromptType::ManifestConnectBundle
+            ) {
+                serde_json::json!({
+                    "manifest": manifest.as_ref().map(|m| m.raw_json.clone()).unwrap_or_default(),
+                })
+            } else {
+                serde_json::json!({})
+            };
+            let envelope = build_pending_envelope(
+                &approval_id,
+                *prompt_type,
+                reason_to_snake_case(reason),
+                prompt_payload,
+            );
+            log::info!(
+                "🛡️ engine Prompt (domain-trust) minted approval id={} for domain={} endpoint={} type={:?} reason={}",
+                approval_id, domain, endpoint, prompt_type, reason_to_snake_case(reason),
+            );
+            GateOutcome::EarlyReturn(HttpResponse::Accepted().json(envelope))
+        }
+        PermissionDecision::Deny { ref reason } => {
+            log::warn!(
+                "🛡️ engine Deny (domain-trust) for domain={} endpoint={} reason={:?}",
+                domain, endpoint, reason,
+            );
+            GateOutcome::EarlyReturn(forbidden_envelope(&reason_to_snake_case(reason)))
+        }
+    }
+}
+
+// ============================================================================
 // Phase 2.6-E — payment dispatch
 // ============================================================================
 

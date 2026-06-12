@@ -264,6 +264,32 @@ pub fn build_cert_disclosure_context(
     }
 }
 
+/// Phase 2.6-G — context for the domain-trust pre-gate (`DomainTrust` CallKind).
+/// `trust_level` drives the engine's step-1 `decide_domain_trust`: Blocked →
+/// Deny, Unknown → `domain_approval` (or `manifest_connect_bundle` when
+/// `manifest_present`), Approved → falls through to Silent so the gate proceeds
+/// to the kind-specific dispatch.
+pub fn build_domain_trust_context(
+    domain_perm: Option<&DomainPermission>,
+    manifest_present: bool,
+) -> PermissionContext {
+    let trust_level = match domain_perm {
+        Some(perm) => match perm.trust_level.as_str() {
+            "approved" => TrustLevel::Approved,
+            "blocked" => TrustLevel::Blocked,
+            _ => TrustLevel::Unknown,
+        },
+        None => TrustLevel::Unknown,
+    };
+
+    PermissionContext {
+        call_kind: CallKind::DomainTrust,
+        trust_level,
+        manifest_present,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +606,29 @@ mod tests {
         assert_eq!(ctx.call_kind, CallKind::CertificateDisclosure);
         assert_eq!(ctx.trust_level, TrustLevel::Unknown);
         assert!(!ctx.scoped_grant_exists);
+    }
+
+    // ---- Phase 2.6-G: build_domain_trust_context ----
+
+    #[test]
+    fn domain_trust_approved_falls_through() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_domain_trust_context(Some(&perm), false);
+        assert_eq!(ctx.call_kind, CallKind::DomainTrust);
+        assert_eq!(ctx.trust_level, TrustLevel::Approved);
+    }
+
+    #[test]
+    fn domain_trust_unknown_with_manifest_sets_flag() {
+        let ctx = build_domain_trust_context(None, true);
+        assert_eq!(ctx.trust_level, TrustLevel::Unknown);
+        assert!(ctx.manifest_present);
+    }
+
+    #[test]
+    fn domain_trust_blocked_translates() {
+        let perm = sample_perm("blocked", false);
+        let ctx = build_domain_trust_context(Some(&perm), false);
+        assert_eq!(ctx.trust_level, TrustLevel::Blocked);
     }
 }
