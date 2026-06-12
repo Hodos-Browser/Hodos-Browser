@@ -105,6 +105,14 @@ pub struct PendingApproval {
     /// Unix timestamp seconds when the approval becomes invalid.
     /// Default TTL is 10 minutes (600s) per LD2.
     pub expires_at: i64,
+    /// Phase 2.6-E.fix2 — payment amount (USD cents) this approval covers,
+    /// stashed at mint time so the X-User-Approved replay can record session
+    /// spend without the (fix1-absent) X-Payment-* headers. 0 for non-payment.
+    pub cents: i64,
+    /// Phase 2.6-E.fix2 — browser/session id, so the replay records spend in
+    /// the same (browser_id, domain) bucket as the original prompt. 0 for
+    /// non-payment approvals.
+    pub browser_id: i32,
 }
 
 /// `PermissionService` — the actix-integrated layer above the pure engine.
@@ -220,6 +228,25 @@ impl PermissionService {
         body: &[u8],
         now: i64,
     ) -> String {
+        // Non-payment approvals (scoped grant, privacy perimeter, cert) carry
+        // no spend amount — cents=0, browser_id=0.
+        self.mint_pending_payment_approval(domain, endpoint, body, now, 0, 0)
+    }
+
+    /// Phase 2.6-E.fix2 — payment variant of `mint_pending_approval` that also
+    /// stashes the payment amount (USD cents) and browser/session id on the
+    /// approval. The X-User-Approved replay path lacks the X-Payment-* headers
+    /// (fix1), so it reads these back from the approval to record session spend
+    /// + tx count for a prompted-then-approved over-cap payment (B1/B3).
+    pub fn mint_pending_payment_approval(
+        &self,
+        domain: &str,
+        endpoint: &str,
+        body: &[u8],
+        now: i64,
+        cents: i64,
+        browser_id: i32,
+    ) -> String {
         let approval_id = generate_approval_id();
         let approval = PendingApproval {
             approval_id: approval_id.clone(),
@@ -228,6 +255,8 @@ impl PermissionService {
             body_hash: body_hash(body),
             created_at: now,
             expires_at: now + APPROVAL_TTL_SECS,
+            cents,
+            browser_id,
         };
         self.insert_pending_approval(approval);
         approval_id
@@ -557,6 +586,8 @@ mod tests {
             body_hash: "0".repeat(64),
             created_at: 1_700_000_000,
             expires_at,
+            cents: 0,
+            browser_id: 0,
         }
     }
 

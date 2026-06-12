@@ -640,9 +640,16 @@ pub fn dispatch_payment(
         let now = chrono::Utc::now().timestamp();
         match permission.consume_and_verify(approval_id, body, now) {
             Ok(approval) => {
+                // Phase 2.6-E.fix2 (B1/B3): a prompted-then-approved payment was
+                // NOT counted at prompt time (only Silent decisions count). Record
+                // its spend + tx count now so cumulative session limits include
+                // user-approved over-cap payments. cents/browser_id come from the
+                // approval (stashed at mint time — the replay lacks X-Payment-*).
+                permission.record_spending(approval.browser_id, &approval.domain, approval.cents, now);
+                permission.increment_payment_rate_counter(approval.browser_id, &approval.domain, now);
                 log::info!(
-                    "🔐 X-User-Approved consumed (payment) for domain={} endpoint={} id={}",
-                    approval.domain, approval.endpoint, approval_id,
+                    "🔐 X-User-Approved consumed (payment) for domain={} endpoint={} id={} recorded_cents={}",
+                    approval.domain, approval.endpoint, approval_id, approval.cents,
                 );
                 return GateOutcome::Proceed;
             }
@@ -730,14 +737,24 @@ pub fn dispatch_payment(
             // immediately — subsequent calls in the same minute see the updated
             // count without waiting for the response cycle.
             permission.increment_payment_rate_counter(payment.browser_id, &domain, now);
+            // Phase 2.6-E.fix2 (B1): record the session spend so the cumulative
+            // per-session DOLLAR cap actually enforces (previously dead —
+            // record_spending had no production caller, so session_spent_cents
+            // stayed 0). Recorded at gate-Silent time alongside the rate/count
+            // counters — conservative: a payment that later fails to build still
+            // counts toward the cap, the safe direction for a spending guard.
+            permission.record_spending(payment.browser_id, &domain, payment.cents, now);
             log::debug!(
-                "🔓 engine Silent (payment) for domain={} endpoint={} cents={} sats={}",
+                "🔓 engine Silent (payment) for domain={} endpoint={} cents={} sats={} session_spent_now={}",
                 domain, endpoint, payment.cents, payment.satoshis,
+                permission.get_session_counters_snapshot(payment.browser_id, &domain, now).spent_cents,
             );
             GateOutcome::Proceed
         }
         PermissionDecision::Prompt { ref prompt_type, ref reason } => {
-            let approval_id = permission.mint_pending_approval(&domain, endpoint, body, now);
+            let approval_id = permission.mint_pending_payment_approval(
+                &domain, endpoint, body, now, payment.cents, payment.browser_id,
+            );
             let prompt_payload = build_payment_prompt_payload(
                 &payment,
                 &ctx,
