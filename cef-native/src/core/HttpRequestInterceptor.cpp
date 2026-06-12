@@ -2517,8 +2517,9 @@ void runIpcEngineCascade(const std::string& requestId,
     // Capture engine-decision-time state for callbacks.
     const hodos::PermissionCallKind callKind = ctx.callKind;
 
-    // Phase 2.6-C.4 + D.4 + E — privacy-perimeter, scoped-grant, AND payment
-    // CallKinds are now Rust-authoritative. Skip the inline cascade AND the
+    // Phase 2.6-C.4 + D.4 + E + F — privacy-perimeter, scoped-grant, payment,
+    // AND non-sensitive cert-disclosure CallKinds are now Rust-authoritative.
+    // Skip the inline cascade AND the
     // shadow comparison: the C++ engine no longer produces ground truth for
     // these kinds. Forward directly to Rust; the worker hops to TID_UI on 202
     // to open the matching modal via tryHandlePendingResponse →
@@ -2534,6 +2535,7 @@ void runIpcEngineCascade(const std::string& requestId,
         || callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage
         || callKind == hodos::PermissionCallKind::SpecificKeyLinkage
         || callKind == hodos::PermissionCallKind::SensitiveCertField
+        || callKind == hodos::PermissionCallKind::CertificateDisclosure
         || callKind == hodos::PermissionCallKind::ProtocolUse
         || callKind == hodos::PermissionCallKind::BasketAccess
         || callKind == hodos::PermissionCallKind::CounterpartyUse
