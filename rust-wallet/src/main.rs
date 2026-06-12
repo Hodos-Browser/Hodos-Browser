@@ -31,6 +31,7 @@ mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 
 mod overlay;  // BSV Overlay Services client for certificate publish/unpublish
 mod services;  // Phase 1.6d.B: WalletServices facade — IndexerProvider trait + provider chains
 mod permission_service;  // Phase 2.6-A.5: wrapper around hodos_permission_engine pure crate (dormant in A.5; wired into AppState in A.6)
+mod manifest;  // Phase 2.6-G: Rust port of C++ ManifestFetcher (fetch + lenient parse of .well-known/wallet-manifest.json)
 
 // Re-export for monitor tasks (avoids rust-analyzer resolution issues when only lib is checked)
 pub use cache_helpers::verify_tsc_proof_against_block;

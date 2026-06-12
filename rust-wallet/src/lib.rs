@@ -21,6 +21,8 @@ pub mod overlay;
 pub mod services;
 // Phase 2.6-A.5 — engine-to-Rust scaffolding module (dormant; wired into AppState in A.6).
 pub mod permission_service;
+// Phase 2.6-G — Rust ManifestFetcher port (dormant; wired into the unknown-domain dispatch in G.3).
+pub mod manifest;
 
 // Re-export commonly used modules for convenience
 pub use crypto::brc2;
