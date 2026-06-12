@@ -147,6 +147,12 @@ pub struct PermissionContext {
     /// prompt. After user approves the scope, request is re-issued and this
     /// field comes back `None`, so the cap checks then run.
     pub payment_scope_kind_missing: Option<PaymentScopeKind>,
+
+    /// Phase 2.6-G — set true by the caller when an unknown-trust domain serves a
+    /// valid `/.well-known/wallet-manifest.json`. `decide_domain_trust` uses it
+    /// to choose the `manifest_connect_bundle` modal (permissions declared
+    /// up-front) over plain `domain_approval`. Ignored unless trust is Unknown.
+    pub manifest_present: bool,
 }
 
 impl Default for PermissionContext {
@@ -171,6 +177,7 @@ impl Default for PermissionContext {
             scoped_grant_exists: false,
             bundled_scope_grant: false,
             payment_scope_kind_missing: None,
+            manifest_present: false,
         }
     }
 }

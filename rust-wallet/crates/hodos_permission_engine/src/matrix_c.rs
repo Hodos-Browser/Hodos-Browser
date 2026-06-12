@@ -73,10 +73,23 @@ pub(crate) fn decide(ctx: &PermissionContext) -> PermissionDecision {
 fn decide_domain_trust(ctx: &PermissionContext) -> Option<PermissionDecision> {
     match ctx.trust_level {
         TrustLevel::Blocked => Some(PermissionDecision::deny(EngineReason::TrustBlocked)),
-        TrustLevel::Unknown => Some(PermissionDecision::prompt(
-            PromptType::DomainApproval,
-            EngineReason::NewDomainNoManifest,
-        )),
+        TrustLevel::Unknown => {
+            // Phase 2.6-G — a valid wallet-manifest lets us open the richer
+            // manifest_connect_bundle modal (permissions declared up-front)
+            // instead of a bare domain_approval. The caller fetches the
+            // manifest and signals its presence via `manifest_present`.
+            if ctx.manifest_present {
+                Some(PermissionDecision::prompt(
+                    PromptType::ManifestConnectBundle,
+                    EngineReason::NewDomainWithManifest,
+                ))
+            } else {
+                Some(PermissionDecision::prompt(
+                    PromptType::DomainApproval,
+                    EngineReason::NewDomainNoManifest,
+                ))
+            }
+        }
         TrustLevel::Approved => None,
     }
 }
@@ -334,6 +347,26 @@ mod tests {
             PermissionDecision::prompt(
                 PromptType::DomainApproval,
                 EngineReason::NewDomainNoManifest
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_trust_with_manifest_prompts_connect_bundle() {
+        // Phase 2.6-G — a valid manifest upgrades the unknown-domain prompt from
+        // domain_approval to manifest_connect_bundle.
+        let ctx = PermissionContext {
+            call_kind: CallKind::Payment,
+            trust_level: TrustLevel::Unknown,
+            manifest_present: true,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::prompt(
+                PromptType::ManifestConnectBundle,
+                EngineReason::NewDomainWithManifest
             )
         );
     }
