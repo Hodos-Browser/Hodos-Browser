@@ -729,24 +729,22 @@ pub async fn acquire_certificate(
 ) -> HttpResponse {
     log::info!("📋 /acquireCertificate called");
 
-    // Phase 2.6-E — payment gate. acquireCertificate is treated as a payment
-    // endpoint by C++'s isPaymentEndpoint classifier (cert acquisition
-    // typically pays the certifier). C++ injects the X-Payment-* headers
-    // when the call left the engine path; absent headers → internal call,
-    // gate skipped. Mirrors create_action's wiring.
-    if let Some(payment) = crate::permission_service::PaymentCall::from_headers(&http_req) {
-        let outcome = crate::permission_service::dispatch_payment(
-            &state.permission,
-            &state.database,
-            state.current_user_id,
-            &http_req,
-            &body,
-            "/acquireCertificate",
-            payment,
-        );
-        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
-            return resp;
-        }
+    // Phase 2.6-E — payment gate. dispatch_payment reads X-Requesting-Domain
+    // + X-User-Approved + X-Payment-* internally. Internal calls (no
+    // X-Requesting-Domain) skip the gate; cap-modal Approve replays
+    // (X-User-Approved present, X-Payment-* missing) take the replay path
+    // and bypass cap evaluation; fresh engine-path calls take the engine
+    // path and prompt/deny based on caps.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/acquireCertificate",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // Parse request body manually to handle potential deserialization issues

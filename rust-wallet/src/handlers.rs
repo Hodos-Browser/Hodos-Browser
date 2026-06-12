@@ -4298,24 +4298,23 @@ pub async fn create_action(
         }
     };
 
-    // Phase 2.6-E — payment gate. C++ injects X-Payment-Satoshis /
-    // X-Payment-Cents / X-Bsv-Price-Available / X-Browser-Id on every
-    // payment endpoint that flows through the engine path. When absent the
-    // call is treated as internal (wallet UI calling its own backend) and
-    // the gate is skipped — same shape as scoped-grant + privacy-perimeter.
-    if let Some(payment) = crate::permission_service::PaymentCall::from_headers(&http_req) {
-        let outcome = crate::permission_service::dispatch_payment(
-            &state.permission,
-            &state.database,
-            state.current_user_id,
-            &http_req,
-            &body,
-            "/createAction",
-            payment,
-        );
-        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
-            return resp;
-        }
+    // Phase 2.6-E — payment gate. dispatch_payment reads X-Requesting-Domain
+    // (caller's origin) + X-User-Approved (modal approval replay) + the
+    // X-Payment-* headers (engine path) internally. Internal calls (no
+    // X-Requesting-Domain header) skip the gate; external calls without
+    // X-Payment-* but with X-User-Approved take the replay path and
+    // skip cap evaluation; external calls without X-User-Approved take
+    // the engine path and prompt/deny based on caps.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/createAction",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     log::info!("   Description: {:?}", req.description);
@@ -4345,43 +4344,65 @@ pub async fn create_action(
             options.randomize_outputs);
     }
 
-    // Defense-in-depth: verify domain is approved + spending limit
+    // Defense-in-depth: verify domain is approved + spending limit.
+    //
+    // Phase 2.6-E.fix1: when X-User-Approved is present, dispatch_payment
+    // already consumed it (body-sha256 bound to the modal-approved request).
+    // The user explicitly approved this exact payment in the matching modal,
+    // so the spending-limit portion of defense-in-depth is intentionally
+    // skipped — running it would 403 a legitimately approved over-cap
+    // payment. The domain-trust portion of check_domain_approved still
+    // runs so a domain that's been blocked since the modal opened can't
+    // sneak through.
+    let engine_authorized_payment = http_req
+        .headers()
+        .get("X-User-Approved")
+        .map(|h| !h.is_empty())
+        .unwrap_or(false);
+
     {
         let db = state.database.lock().unwrap();
         match check_domain_approved(&http_req, db.connection(), state.current_user_id) {
             Ok(Some(perm)) => {
-                // Check per-transaction spending limit
-                let total_sats: i64 = req.outputs.iter()
-                    .filter_map(|o| o.satoshis)
-                    .sum();
-                if total_sats > 0 {
-                    let bsv_price = state.price_cache.get_cached()
-                        .or_else(|| state.price_cache.get_stale())
-                        .unwrap_or(0.0);
-                    if bsv_price > 0.0 {
-                        let usd_cents = ((total_sats as f64 / 100_000_000.0) * bsv_price * 100.0) as i64;
-                        if usd_cents > perm.per_tx_limit_cents {
+                if !engine_authorized_payment {
+                    // Check per-transaction spending limit
+                    let total_sats: i64 = req.outputs.iter()
+                        .filter_map(|o| o.satoshis)
+                        .sum();
+                    if total_sats > 0 {
+                        let bsv_price = state.price_cache.get_cached()
+                            .or_else(|| state.price_cache.get_stale())
+                            .unwrap_or(0.0);
+                        if bsv_price > 0.0 {
+                            let usd_cents = ((total_sats as f64 / 100_000_000.0) * bsv_price * 100.0) as i64;
+                            if usd_cents > perm.per_tx_limit_cents {
+                                log::warn!(
+                                    "🛡️ createAction BLOCKED: domain '{}' spending {} cents exceeds per-tx limit of {} cents",
+                                    perm.domain, usd_cents, perm.per_tx_limit_cents
+                                );
+                                drop(db);
+                                return HttpResponse::Forbidden().json(serde_json::json!({
+                                    "error": format!("Transaction exceeds spending limit for domain '{}'", perm.domain),
+                                    "code": "ERR_SPENDING_LIMIT_EXCEEDED"
+                                }));
+                            }
+                        } else {
                             log::warn!(
-                                "🛡️ createAction BLOCKED: domain '{}' spending {} cents exceeds per-tx limit of {} cents",
-                                perm.domain, usd_cents, perm.per_tx_limit_cents
+                                "🛡️ createAction BLOCKED: no BSV price available for domain '{}', cannot verify spending limit ({} sats)",
+                                perm.domain, total_sats
                             );
                             drop(db);
                             return HttpResponse::Forbidden().json(serde_json::json!({
-                                "error": format!("Transaction exceeds spending limit for domain '{}'", perm.domain),
-                                "code": "ERR_SPENDING_LIMIT_EXCEEDED"
+                                "error": "Price data unavailable — cannot verify spending limit",
+                                "code": "ERR_PRICE_UNAVAILABLE"
                             }));
                         }
-                    } else {
-                        log::warn!(
-                            "🛡️ createAction BLOCKED: no BSV price available for domain '{}', cannot verify spending limit ({} sats)",
-                            perm.domain, total_sats
-                        );
-                        drop(db);
-                        return HttpResponse::Forbidden().json(serde_json::json!({
-                            "error": "Price data unavailable — cannot verify spending limit",
-                            "code": "ERR_PRICE_UNAVAILABLE"
-                        }));
                     }
+                } else {
+                    log::info!(
+                        "🔐 createAction: skipping spending-limit defense-in-depth for {} — X-User-Approved consumed",
+                        perm.domain
+                    );
                 }
             }
             Ok(None) => {} // Internal request — no domain header
@@ -10862,23 +10883,22 @@ pub async fn send_message(
 ) -> impl Responder {
     log::info!("📨 /sendMessage called");
 
-    // Phase 2.6-E — payment gate. C++ classifies /sendMessage as a payment
-    // endpoint (BRC-29 PeerPay delivery via MessageBox); the X-Payment-*
-    // headers gate the call through the engine. Internal calls (wallet UI
-    // → its own backend) lack the headers and skip the gate.
-    if let Some(payment) = crate::permission_service::PaymentCall::from_headers(&req) {
-        let outcome = crate::permission_service::dispatch_payment(
-            &state.permission,
-            &state.database,
-            state.current_user_id,
-            &req,
-            &body,
-            "/sendMessage",
-            payment,
-        );
-        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
-            return resp;
-        }
+    // Phase 2.6-E — payment gate. dispatch_payment reads X-Requesting-Domain
+    // + X-User-Approved + X-Payment-* internally. Internal calls (no
+    // X-Requesting-Domain) skip the gate; cap-modal Approve replays
+    // (X-User-Approved present, X-Payment-* missing) take the replay path
+    // and bypass cap evaluation; fresh engine-path calls take the engine
+    // path and prompt/deny based on caps.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &req,
+        &body,
+        "/sendMessage",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // Parse request body

@@ -589,8 +589,25 @@ impl PaymentCall {
 /// counted on the original Silent attempt the user later modified). Replay
 /// just proceeds.
 ///
+/// Phase 2.6-E.fix1: PaymentCall headers (X-Payment-Satoshis, X-Payment-Cents,
+/// X-Bsv-Price-Available, X-Browser-Id) are read INTERNALLY rather than
+/// passed in by the caller. The X-User-Approved replay path doesn't need
+/// them — the original engine decision already validated the body hash —
+/// so it short-circuits before PaymentCall is read. The engine path (no
+/// X-User-Approved header) reads PaymentCall and falls back to a
+/// price-unavailable Prompt when the headers are missing (which forces a
+/// modal so the user has the final say). Prior to .fix1, missing headers
+/// caused the caller to skip dispatch_payment entirely, leaving X-User-Approved
+/// unconsumed and the over-cap defense-in-depth check in the handler
+/// rejecting the user-approved payment with 403.
+///
 /// Defense-in-depth: caller still runs `check_domain_approved` after
-/// `Proceed` (same contract as scoped-grant and privacy-perimeter).
+/// `Proceed` (same contract as scoped-grant and privacy-perimeter). The
+/// caller MUST skip the spending-limit portion of its own defense check
+/// when `X-User-Approved` is present in the request — by the time we
+/// return Proceed via the replay path, the engine has consumed the
+/// approval (body-hash bound at mint time) and the user explicitly
+/// approved this exact payment.
 pub fn dispatch_payment(
     permission: &Arc<PermissionService>,
     database: &Arc<Mutex<WalletDatabase>>,
@@ -598,7 +615,6 @@ pub fn dispatch_payment(
     http_req: &HttpRequest,
     body: &[u8],
     endpoint: &str,
-    payment: PaymentCall,
 ) -> GateOutcome {
     let domain = match http_req
         .headers()
@@ -613,7 +629,8 @@ pub fn dispatch_payment(
     // X-User-Approved replay path. Approved payments skip the counter
     // increment because they were already counted on the original Silent
     // attempt the user then chose to modify. Replay's only purpose is to
-    // bypass the cap check that flagged the original.
+    // bypass the cap check that flagged the original. PaymentCall headers
+    // are intentionally NOT required here — only the engine path needs them.
     if let Some(approval_id) = http_req
         .headers()
         .get(X_USER_APPROVED)
@@ -647,6 +664,27 @@ pub fn dispatch_payment(
             }
         }
     }
+
+    // Engine path — fresh payment, no replay. Read PaymentCall now. When the
+    // C++ side forgot to inject the X-Payment-* headers (regression bug or
+    // direct curl), fall back to a price_unavailable shape that forces the
+    // engine to Prompt — better to ask the user than to silently bypass caps
+    // by treating the call as 0 cents.
+    let payment = match PaymentCall::from_headers(http_req) {
+        Some(p) => p,
+        None => {
+            log::warn!(
+                "🛡️ dispatch_payment: payment call from {} has no X-Payment-* headers — forcing price_unavailable prompt (C++ injection bug or non-engine caller)",
+                domain
+            );
+            PaymentCall {
+                satoshis: 0,
+                cents: 0,
+                bsv_price_available: false,
+                browser_id: 0,
+            }
+        }
+    };
 
     let perm_row = {
         let db_guard = match database.lock() {
