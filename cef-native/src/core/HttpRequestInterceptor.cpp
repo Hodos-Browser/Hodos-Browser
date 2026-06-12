@@ -2962,6 +2962,25 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         return true;
     }
 
+    // B2 lockdown (2026-06-12): external origins must use the per-frame IPC
+    // bridge (window.CWI shim → cefMessage 'wallet_call' → HandleIpcWalletCall,
+    // which attributes X-Requesting-Domain by the CALLING frame). This
+    // direct-fetch path attributes by extractDomain() = MAIN frame, so a
+    // cross-origin iframe's raw fetch to localhost:31301 would inherit the
+    // top-level approved domain's permissions (bug B2). Legit external dApps
+    // never reach here — the shim is IPC-based and raw JSON fetches are
+    // CORS-blocked (wallet CORS allowlists only localhost/127.0.0.1). Reject in
+    // C++ rather than pass through: returning the request to CEF would drop the
+    // C++-injected X-Requesting-Domain header, and Rust treats a missing
+    // X-Requesting-Domain as an INTERNAL call — granting the attacker MORE
+    // trust. Internal origins (wallet UI) hit the IsInternalOrigin bypass above.
+    LOG_INFO_HTTP("🛡️ B2 lockdown: rejecting external direct-fetch wallet call from '" +
+                  requestDomain_ + "' for " + endpoint_ + " — external callers must use the IPC bridge");
+    onHTTPResponseReceived(
+        R"({"error":"External wallet calls must use the IPC bridge, not direct fetch.","code":"ERR_DIRECT_FETCH_BLOCKED","status":"error"})");
+    handle_request = true;
+    return true;
+
     // No wallet → no point showing domain approval modal; show notification instead
     if (!WalletStatusCache::GetInstance().walletExists()) {
         LOG_DEBUG_HTTP("🔒 No wallet exists — rejecting BRC-100 request from " + requestDomain_);
