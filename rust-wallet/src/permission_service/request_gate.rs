@@ -487,6 +487,171 @@ pub fn dispatch_scoped_grant(
 }
 
 // ============================================================================
+// Phase 2.6-F — certificate disclosure dispatch (non-sensitive)
+// ============================================================================
+
+/// Dispatch the engine gate for the non-sensitive `CertificateDisclosure`
+/// CallKind (`/proveCertificate`). Mirrors `dispatch_scoped_grant`: domain
+/// header → X-User-Approved replay → perm-row read → resolve "every requested
+/// field already approved" against `cert_field_permissions` → engine decide →
+/// 200/202/403.
+///
+/// Sensitive fields never reach here — the handler routes them through
+/// `dispatch_privacy_perimeter` as `SensitiveCertField` (always prompt). The
+/// `certificate_disclosure` promptType + 202-interception already exist
+/// (built in 2.6-C for the sensitive path); this reuses them verbatim.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_cert_disclosure(
+    permission: &Arc<PermissionService>,
+    database: &Arc<Mutex<WalletDatabase>>,
+    current_user_id: i64,
+    http_req: &HttpRequest,
+    body: &[u8],
+    endpoint: &str,
+    cert_type: &str,
+    requested_fields: &[String],
+    build_prompt_payload: impl FnOnce() -> Value,
+) -> GateOutcome {
+    let domain = match http_req
+        .headers()
+        .get(X_REQUESTING_DOMAIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        Some(d) => d.to_string(),
+        None => return GateOutcome::Proceed,
+    };
+
+    // X-User-Approved replay path (same shape as scoped grant / privacy
+    // perimeter). The actual cert_field_permissions persistence happens via the
+    // modal's approve_cert_fields IPC, not here — replay just proceeds.
+    if let Some(approval_id) = http_req
+        .headers()
+        .get(X_USER_APPROVED)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        let now = chrono::Utc::now().timestamp();
+        match permission.consume_and_verify(approval_id, body, now) {
+            Ok(approval) => {
+                log::info!(
+                    "🔐 X-User-Approved consumed (cert) for domain={} endpoint={} id={}",
+                    approval.domain, approval.endpoint, approval_id,
+                );
+                return GateOutcome::Proceed;
+            }
+            Err(ApprovalConsumeError::BodyMismatch) => {
+                log::warn!(
+                    "🛡️ X-User-Approved body sha256 mismatch (cert, domain={} id={})",
+                    domain, approval_id,
+                );
+                return GateOutcome::EarlyReturn(forbidden_envelope("body_mismatch"));
+            }
+            Err(ApprovalConsumeError::Expired) | Err(ApprovalConsumeError::NotFound) => {
+                log::warn!(
+                    "🛡️ X-User-Approved not consumable (cert, domain={} id={})",
+                    domain, approval_id,
+                );
+                return GateOutcome::EarlyReturn(forbidden_envelope(
+                    "approval_expired_or_consumed",
+                ));
+            }
+        }
+    }
+
+    let perm_row = {
+        let db_guard = match database.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!(
+                    "🛡️ database mutex poisoned in dispatch_cert_disclosure: {} — denying",
+                    poisoned
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_mutex_poisoned"));
+            }
+        };
+        let repo = DomainPermissionRepository::new(db_guard.connection());
+        match repo.get_by_domain(current_user_id, &domain) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!(
+                    "🛡️ DomainPermissionRepository::get_by_domain('{}') failed: {} — denying",
+                    domain, e
+                );
+                return GateOutcome::EarlyReturn(internal_error_envelope("db_read_error"));
+            }
+        }
+    };
+
+    // Resolve "every requested field already approved" from cert_field_permissions
+    // (under a fresh lock). Empty requested_fields was rejected by the handler.
+    let all_fields_approved = if let Some(ref perm) = perm_row {
+        let dp_id = perm.id.unwrap_or(0);
+        if dp_id == 0 {
+            false
+        } else {
+            let db_guard = match database.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    return GateOutcome::EarlyReturn(internal_error_envelope("db_mutex_poisoned"));
+                }
+            };
+            let repo = DomainPermissionRepository::new(db_guard.connection());
+            match repo.get_approved_fields(dp_id, cert_type) {
+                Ok(approved) => {
+                    !requested_fields.is_empty()
+                        && requested_fields.iter().all(|f| approved.contains(f))
+                }
+                Err(e) => {
+                    log::error!(
+                        "🛡️ get_approved_fields(dp_id={}, cert_type='{}') failed: {} — treating as no grant",
+                        dp_id, cert_type, e
+                    );
+                    false
+                }
+            }
+        }
+    } else {
+        false
+    };
+
+    let ctx = context_builder::build_cert_disclosure_context(perm_row.as_ref(), all_fields_approved);
+    let decision = permission.decide(&ctx);
+
+    match decision {
+        PermissionDecision::Silent { .. } => {
+            log::debug!(
+                "🔓 engine Silent (cert) for domain={} endpoint={} cert_type={} fields={}",
+                domain, endpoint, cert_type, requested_fields.len(),
+            );
+            GateOutcome::Proceed
+        }
+        PermissionDecision::Prompt { ref prompt_type, ref reason } => {
+            let now = chrono::Utc::now().timestamp();
+            let approval_id = permission.mint_pending_approval(&domain, endpoint, body, now);
+            let envelope = build_pending_envelope(
+                &approval_id,
+                *prompt_type,
+                reason_to_snake_case(reason),
+                build_prompt_payload(),
+            );
+            log::info!(
+                "🛡️ engine Prompt (cert) minted approval id={} for domain={} endpoint={} reason={}",
+                approval_id, domain, endpoint, reason_to_snake_case(reason),
+            );
+            GateOutcome::EarlyReturn(HttpResponse::Accepted().json(envelope))
+        }
+        PermissionDecision::Deny { ref reason } => {
+            log::warn!(
+                "🛡️ engine Deny (cert) for domain={} endpoint={} reason={:?}",
+                domain, endpoint, reason,
+            );
+            GateOutcome::EarlyReturn(forbidden_envelope(&reason_to_snake_case(reason)))
+        }
+    }
+}
+
+// ============================================================================
 // Phase 2.6-E — payment dispatch
 // ============================================================================
 

@@ -3216,29 +3216,50 @@ pub async fn prove_certificate(
         .type_
         .clone()
         .unwrap_or_default();
-    if crate::permission_service::context_builder::sensitive_cert_fields
-        ::any_requested_cert_field_sensitive(
-            &cert_type_for_classifier,
-            &req.fields_to_reveal,
-        )
     {
+        // Payload shared by both gate paths. Only one branch runs; both closures
+        // move these clones, which Rust permits across exclusive if/else arms.
         let cert_type_payload = cert_type_for_classifier.clone();
         let certifier_payload = req.certificate.certifier.clone().unwrap_or_default();
         let fields_payload = req.fields_to_reveal.clone();
-        let outcome = crate::permission_service::dispatch_privacy_perimeter(
-            &state.permission,
-            &state.database,
-            state.current_user_id,
-            &http_req,
-            &body,
-            "/proveCertificate",
-            hodos_permission_engine::CallKind::SensitiveCertField,
-            || serde_json::json!({
-                "certType": cert_type_payload,
-                "certifier": certifier_payload,
-                "fields": fields_payload,
-            }),
-        );
+        let any_sensitive = crate::permission_service::context_builder::sensitive_cert_fields
+            ::any_requested_cert_field_sensitive(&cert_type_for_classifier, &req.fields_to_reveal);
+        let outcome = if any_sensitive {
+            // Sensitive → privacy perimeter (always prompts; SensitiveCertField).
+            crate::permission_service::dispatch_privacy_perimeter(
+                &state.permission,
+                &state.database,
+                state.current_user_id,
+                &http_req,
+                &body,
+                "/proveCertificate",
+                hodos_permission_engine::CallKind::SensitiveCertField,
+                || serde_json::json!({
+                    "certType": cert_type_payload,
+                    "certifier": certifier_payload,
+                    "fields": fields_payload,
+                }),
+            )
+        } else {
+            // Phase 2.6-F — non-sensitive → CertificateDisclosure gate. Silent
+            // when every requested field is already approved in
+            // cert_field_permissions; else a certificate_disclosure prompt.
+            crate::permission_service::dispatch_cert_disclosure(
+                &state.permission,
+                &state.database,
+                state.current_user_id,
+                &http_req,
+                &body,
+                "/proveCertificate",
+                &cert_type_for_classifier,
+                &req.fields_to_reveal,
+                || serde_json::json!({
+                    "certType": cert_type_payload,
+                    "certifier": certifier_payload,
+                    "fields": fields_payload,
+                }),
+            )
+        };
         if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
             return resp;
         }

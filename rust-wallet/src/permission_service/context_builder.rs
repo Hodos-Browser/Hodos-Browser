@@ -236,6 +236,34 @@ pub fn build_scoped_grant_context(
     }
 }
 
+/// Phase 2.6-F — context for the non-sensitive `CertificateDisclosure` CallKind
+/// (`/proveCertificate`). `all_fields_approved` = every requested field already
+/// has a row in `cert_field_permissions` for `(domain_perm_id, cert_type)`. The
+/// engine reads it via `scoped_grant_exists`: true → Silent, false →
+/// `certificate_disclosure` prompt (matrix_c.rs:51). Sensitive fields never
+/// reach here — they route through the privacy perimeter as `SensitiveCertField`
+/// (always prompt).
+pub fn build_cert_disclosure_context(
+    domain_perm: Option<&DomainPermission>,
+    all_fields_approved: bool,
+) -> PermissionContext {
+    let trust_level = match domain_perm {
+        Some(perm) => match perm.trust_level.as_str() {
+            "approved" => TrustLevel::Approved,
+            "blocked" => TrustLevel::Blocked,
+            _ => TrustLevel::Unknown,
+        },
+        None => TrustLevel::Unknown,
+    };
+
+    PermissionContext {
+        call_kind: CallKind::CertificateDisclosure,
+        trust_level,
+        scoped_grant_exists: all_fields_approved,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +553,32 @@ mod tests {
         let perm = sample_perm("blocked", false);
         let ctx = build_payment_context(Some(&perm), 50, true, 0, 0, 0);
         assert_eq!(ctx.trust_level, TrustLevel::Blocked);
+    }
+
+    // ---- Phase 2.6-F: build_cert_disclosure_context ----
+
+    #[test]
+    fn cert_disclosure_all_approved_silent_context() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_cert_disclosure_context(Some(&perm), /*all_fields_approved=*/ true);
+        assert_eq!(ctx.call_kind, CallKind::CertificateDisclosure);
+        assert_eq!(ctx.trust_level, TrustLevel::Approved);
+        assert!(ctx.scoped_grant_exists, "all-approved must set scoped_grant_exists");
+    }
+
+    #[test]
+    fn cert_disclosure_partial_sets_prompt_context() {
+        let perm = sample_perm("approved", false);
+        let ctx = build_cert_disclosure_context(Some(&perm), /*all_fields_approved=*/ false);
+        assert_eq!(ctx.call_kind, CallKind::CertificateDisclosure);
+        assert!(!ctx.scoped_grant_exists, "partial approval must NOT silence the gate");
+    }
+
+    #[test]
+    fn cert_disclosure_no_perm_is_unknown_trust() {
+        let ctx = build_cert_disclosure_context(None, false);
+        assert_eq!(ctx.call_kind, CallKind::CertificateDisclosure);
+        assert_eq!(ctx.trust_level, TrustLevel::Unknown);
+        assert!(!ctx.scoped_grant_exists);
     }
 }

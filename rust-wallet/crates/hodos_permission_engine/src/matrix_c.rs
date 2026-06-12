@@ -473,6 +473,26 @@ mod tests {
     }
 
     #[test]
+    fn cert_disclosure_without_grant_prompts() {
+        // Phase 2.6-F: a non-sensitive cert disclosure where not every requested
+        // field is pre-approved must prompt (certificate_disclosure modal).
+        let ctx = PermissionContext {
+            call_kind: CallKind::CertificateDisclosure,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            ..Default::default()
+        };
+        let d = decide(&ctx);
+        assert_eq!(
+            d,
+            PermissionDecision::prompt(
+                PromptType::CertificateDisclosure,
+                EngineReason::CertFieldUnapproved,
+            )
+        );
+    }
+
+    #[test]
     fn generic_approved_falls_through_to_silent() {
         let ctx = PermissionContext {
             call_kind: CallKind::GenericApproved,
