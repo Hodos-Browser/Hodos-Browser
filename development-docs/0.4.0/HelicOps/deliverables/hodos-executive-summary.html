@@ -1,0 +1,47 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>HelicOps — Hodos</title><style>
+:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--mut:#8b949e;--line:#30363d;
+--crit:#f85149;--high:#ff9e64;--med:#e3b341;--low:#58a6ff;--ok:#3fb950;--acc:#a371f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:48px 32px 80px}
+h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+h2{font-size:21px;margin:38px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:24px 0 8px;color:var(--fg)}
+p,li{color:var(--fg)}a{color:var(--low)}
+code{background:#1f2630;padding:2px 6px;border-radius:5px;font-size:13px;
+font-family:"SF Mono",ui-monospace,Menlo,monospace;color:#d2a8ff}
+pre{background:#11161d;border:1px solid var(--line);border-radius:8px;padding:14px 16px;
+overflow:auto}pre code{background:none;padding:0;color:#c9d1d9}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left}
+th{background:#1c2430;color:var(--fg)}tr:nth-child(even) td{background:#12171f}
+blockquote{margin:14px 0;padding:10px 16px;border-left:3px solid var(--acc);
+background:#15131d;border-radius:0 8px 8px 0;color:var(--mut)}
+hr{border:0;border-top:1px solid var(--line);margin:30px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.stamp{color:var(--mut);font-size:12px;margin-top:6px}
+strong{color:#fff}ul{padding-left:22px}
+</style></head><body><div class=wrap><h1>Code Audit — Hodos Browser</h1>
+<h2>Executive Summary</h2>
+<p><strong>Verdict: <code>needs_review</code>.</strong> The audit covered 108 files across four languages (Rust, TypeScript, C/C++, Python) against 42 policy checks. The headline is encouraging in one dimension and demanding in two: Hodos is a <strong>fast, well-architected runtime</strong> that is also <strong>under-tested</strong> and <strong>not yet safe to hand to autonomous tooling</strong>. None of the issues below are structural dead-ends — they are concentrated, nameable, and fixable.</p>
+<p>The single most important framing for this report: <strong>the risk is concentrated in two modules</strong> — the Rust wallet (<code>rust-wallet/</code>) and the native browser layer (<code>cef-native/</code>). That is good news. It means remediation is a focused effort, not a rewrite.</p>
+<hr>
+<h2>Readiness at a glance</h2>
+<table><thead><tr><th>Dimension</th><th>Band</th><th>Score</th><th>Why it landed here</th></tr></thead><tbody><tr><td>⚡ Performance</td><td><strong>Efficient</strong></td><td>0.98</td><td>Even the weakest signals — loop efficiency (0.97) and hot-path efficiency (0.98) — are near-perfect. Genuinely fast code.</td></tr><tr><td>🧪 Test</td><td><strong>Weak</strong></td><td>0.53</td><td>Dragged down by coverage of the highest-risk code (0.12): the dangerous code is the code with the least testing.</td></tr><tr><td>🤖 Agentic</td><td><strong>Experimental</strong></td><td>0.17</td><td>The ability for an agent to verify its own changes (0.12) and runtime observability (0.25) are both very low.</td></tr></tbody></table>
+<p><strong>The story in one line:</strong> speed is not the problem; <em>verifiable trust</em> in the code is. Performance is already excellent, so engineering effort is best spent on coverage of the risky surfaces and on the few real security defects below.</p>
+<hr>
+<h2>The 5 critical findings</h2>
+<table><thead><tr><th>#</th><th>Issue</th><th>Location</th></tr></thead><tbody><tr><td>1</td><td>Command execution via shell from a browser process (injection surface; no shell on an embedded target)</td><td><code>/tmp/hodos/cef-native/src/core/ProfileManager.cpp:437</code></td></tr><tr><td>2</td><td>Command execution via shell</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_handler.cpp:6851</code></td></tr><tr><td>3</td><td>Command execution via shell</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_handler.cpp:7105</code></td></tr><tr><td>4</td><td>SQL built by string interpolation instead of bound parameters — injection shape</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:2048</code></td></tr><tr><td>5</td><td>Hardcoded <code>api_key</code> literal in source</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:8332</code></td></tr></tbody></table>
+<p>Three of the five sit in the native layer; two sit in the wallet. All five are days-of-work fixes, not weeks.</p>
+<hr>
+<h2>What&#x27;s driving the risk (beyond the criticals)</h2>
+<p>Four high-severity themes account for the bulk of the <em>real</em> signal:</p>
+<ul><li><strong>Wallet credential hygiene.</strong> Secret material (keys/seeds/mnemonics) is written to log/output sinks — 20 findings, e.g. <code>/tmp/hodos/rust-wallet/src/handlers.rs:6483</code> — and cryptographic values are drawn from a non-cryptographic randomness source (18 findings). In a wallet, leaked or predictable key material is the highest-stakes failure mode in the entire report.</li><li><strong>Remote denial-of-service via panic.</strong> A large family of unchecked unwraps sit on request paths — 284 findings, e.g. <code>/tmp/hodos/rust-wallet/src/handlers.rs:267</code>. A single malformed request can crash the worker. This is the largest high-severity group.</li><li><strong>Renderer-input injection.</strong> Untrusted web/renderer input reaches a code-execution sink without encoding — 12 findings, e.g. <code>/tmp/hodos/cef-native/src/handlers/simple_render_process_handler.cpp:927</code> — a DOM-injection surface across the process boundary.</li><li><strong>Inconsistent neutralization.</strong> 16 native-layer call sites reach a sink <em>without</em> the neutralization step the comparable safe sites apply, e.g. <code>/tmp/hodos/cef-native/src/handlers/simple_render_process_handler.cpp:1185</code>. The codebase already knows the safe pattern; these sites simply skip it.</li></ul>
+<hr>
+<h2>Recommended next steps (in priority order)</h2>
+<ol><li><strong>Close the 5 criticals first.</strong> Parameter-bind the SQL at <code>handlers.rs:2048</code>; move the <code>api_key</code> at <code>handlers.rs:8332</code> into runtime config / a secrets manager; replace the shell-outs in the native layer with a direct process API or remove them.</li><li><strong>Harden the wallet immediately.</strong> Strip secret values from every log/output sink and move cryptographic draws onto a secure (OS) randomness source. Highest real-world stakes; do this in parallel with step 1.</li><li><strong>Stop the remote-DoS bleeding.</strong> Convert the unchecked-unwrap sites on request paths to proper error returns. Use the inconsistent-neutralization findings as a worklist — the safe pattern already exists in the codebase.</li><li><strong>Lift the score that matters.</strong> Ignore the global test number (0.53) and target coverage of the highest-risk code (0.12): write tests for the wallet handlers and the criticals <em>first</em>. Coverage on risky code moves the band far faster than coverage on safe code.</li><li><strong>Before any agentic workflow:</strong> stand up a way for changes to be automatically verified, and add structured runtime logging. Until then, the 0.17 agentic band means human-driven changes only.</li></ol>
+<hr>
+<h2>How to read the numbers</h2>
+<p>The audit surfaced 3,152 findings total. The overwhelming majority — 2,673 — are <strong>style and maintainability</strong> items (debug output, missing docs, complexity, formatting). These are deliberately set aside so they do not bury the real defects. Filtering to <strong>security, correctness, and performance</strong> leaves <strong>479</strong> findings worth acting on: 5 critical, 405 high, 69 medium. <em>That</em> 479-finding view is the one to work from; the full 3,152 is the raw, unfiltered count.</p>
+<hr>
+<p><em>Verdict <code>needs_review</code>. Every figure and file location in this document is drawn directly from the audit results and machine-checked against them — no number or location was authored by hand. The companion Technical Findings report carries the full breakdown.</em></p><hr><p class=stamp>Generated from HelicOps scan data · source_sha256 5a92db05700a6eaf · helicops 3.0.0 · verdict needs_review · grounded + code-validated</p></div></body></html>

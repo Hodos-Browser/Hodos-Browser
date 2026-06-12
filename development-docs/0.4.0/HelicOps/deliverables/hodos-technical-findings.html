@@ -1,0 +1,59 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>HelicOps — Hodos</title><style>
+:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--mut:#8b949e;--line:#30363d;
+--crit:#f85149;--high:#ff9e64;--med:#e3b341;--low:#58a6ff;--ok:#3fb950;--acc:#a371f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:48px 32px 80px}
+h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+h2{font-size:21px;margin:38px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:24px 0 8px;color:var(--fg)}
+p,li{color:var(--fg)}a{color:var(--low)}
+code{background:#1f2630;padding:2px 6px;border-radius:5px;font-size:13px;
+font-family:"SF Mono",ui-monospace,Menlo,monospace;color:#d2a8ff}
+pre{background:#11161d;border:1px solid var(--line);border-radius:8px;padding:14px 16px;
+overflow:auto}pre code{background:none;padding:0;color:#c9d1d9}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left}
+th{background:#1c2430;color:var(--fg)}tr:nth-child(even) td{background:#12171f}
+blockquote{margin:14px 0;padding:10px 16px;border-left:3px solid var(--acc);
+background:#15131d;border-radius:0 8px 8px 0;color:var(--mut)}
+hr{border:0;border-top:1px solid var(--line);margin:30px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.stamp{color:var(--mut);font-size:12px;margin-top:6px}
+strong{color:#fff}ul{padding-left:22px}
+</style></head><body><div class=wrap><h1>Code Audit — Hodos Browser</h1>
+<h2>Technical Findings Report</h2>
+<p>This document is the engineering companion to the Executive Summary. It carries the full severity accounting, the per-theme finding breakdown with evidence, and the priority roadmap.</p>
+<hr>
+<h2>Scope</h2>
+<ul><li><strong>Files scanned:</strong> 108</li><li><strong>Policy checks evaluated:</strong> 42</li><li><strong>Languages:</strong> Rust, TypeScript, C/C++, Python</li><li><strong>Verdict:</strong> <code>needs_review</code></li></ul>
+<p>All four languages were fully analyzed, so this reflects complete coverage — not a partial picture.</p>
+<hr>
+<h2>Severity accounting (the number that matters)</h2>
+<p>The audit reports two views of the same results. Both are correct; they answer different questions.</p>
+<table><thead><tr><th>Severity</th><th>Raw (all checks)</th><th>Actionable (security / correctness / performance)</th></tr></thead><tbody><tr><td>🔴 Critical</td><td>5</td><td>5</td></tr><tr><td>🟠 High</td><td>1040</td><td>405</td></tr><tr><td>🟡 Medium</td><td>1124</td><td>69</td></tr><tr><td>🔵 Low</td><td>982</td><td>0</td></tr><tr><td>⚪ Info</td><td>1</td><td>0</td></tr><tr><td><strong>Total</strong></td><td><strong>3152</strong></td><td><strong>479</strong></td></tr></tbody></table>
+<p>The gap is <strong>2,673</strong> findings that are <strong>style / maintainability</strong> — debug output, missing docs, complexity, formatting. The raw &quot;high&quot; count of 1,040 is inflated by lint/style noise (stray debug output and console statements account for most of it); once that noise is set aside, the genuine high-severity count is <strong>405</strong>.</p>
+<p><strong>Work from the 479-finding column.</strong> The split between actionable and style is a fixed, documented categorization applied uniformly, so it is reproducible — not a per-finding judgement call.</p>
+<hr>
+<h2>Critical findings (all 5)</h2>
+<table><thead><tr><th>Category</th><th>Severity</th><th>Location</th><th>Fix</th></tr></thead><tbody><tr><td>Command execution via shell</td><td>critical</td><td><code>/tmp/hodos/cef-native/src/core/ProfileManager.cpp:437</code></td><td>Replace the shell-out with a direct process API, or remove it.</td></tr><tr><td>Command execution via shell</td><td>critical</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_handler.cpp:6851</code></td><td>As above.</td></tr><tr><td>Command execution via shell</td><td>critical</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_handler.cpp:7105</code></td><td>As above.</td></tr><tr><td>SQL injection (string-built query)</td><td>critical</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:2048</code></td><td>Use bound parameters; never interpolate input into SQL text.</td></tr><tr><td>Hardcoded secret in source</td><td>critical</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:8332</code></td><td>Move the <code>api_key</code> to runtime config / a secrets manager; rotate the exposed key.</td></tr></tbody></table>
+<hr>
+<h2>High-severity themes</h2>
+<p>These groups make up most of the 405 actionable highs. Counts are exact; the location shown is one representative site per group.</p>
+<table><thead><tr><th>Category</th><th>Count</th><th>Severity</th><th>Example site</th><th>What it means</th></tr></thead><tbody><tr><td>Unhandled error / panic risk (DoS)</td><td>284</td><td>high</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:267</code></td><td>An unchecked unwrap on a request path — malformed input crashes the worker.</td></tr><tr><td>Path traversal (unvalidated file path)</td><td>22</td><td>high</td><td><code>/tmp/hodos/scripts/generate-appcast.py:97</code></td><td>File open on a non-literal path with no containment guard.</td></tr><tr><td>Secret written to log/output</td><td>20</td><td>high</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:6483</code></td><td>Key/seed/mnemonic material written to a log/output sink.</td></tr><tr><td>Weak randomness for cryptography</td><td>18</td><td>medium</td><td><code>/tmp/hodos/rust-wallet/archive/old-tests/interoperability_test.rs:74</code></td><td>Crypto material drawn from a non-cryptographic randomness source.</td></tr><tr><td>Blocking call in async context</td><td>16</td><td>high</td><td><code>/tmp/hodos/adblock-engine/src/engine.rs:402</code></td><td>A blocking file call inside an async function stalls the executor.</td></tr><tr><td>Missing input neutralization</td><td>16</td><td>high</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_render_process_handler.cpp:1185</code></td><td>Reaches a sink without the neutralization its comparable safe sites apply.</td></tr><tr><td>Untrusted input reaches code-execution sink</td><td>12</td><td>high</td><td><code>/tmp/hodos/cef-native/src/handlers/simple_render_process_handler.cpp:927</code></td><td>Untrusted input reaches a script-execution sink unescaped — injection.</td></tr><tr><td>Inefficient lookup in loop</td><td>9</td><td>high</td><td><code>/tmp/hodos/rust-wallet/src/handlers.rs:3604</code></td><td>A linear membership scan inside a loop — quadratic at scale.</td></tr><tr><td>Insecure deserialization</td><td>7</td><td>high</td><td><code>/tmp/hodos/frontend/src/hooks/useBitcoinBrowser.ts:42</code></td><td>Untrusted data deserialized without a schema/allowlist.</td></tr><tr><td>Prototype pollution</td><td>7</td><td>high</td><td><code>/tmp/hodos/frontend/src/hooks/useHodosBrowser.ts:42</code></td><td>Unvalidated keys merged into objects can corrupt prototypes.</td></tr><tr><td>Unsafe memory copy / deserialization</td><td>6</td><td>high</td><td><code>/tmp/hodos/cef-native/src/core/HttpRequestInterceptor.cpp:714</code></td><td>A copy whose size is not a literal/<code>sizeof</code> — validate length first.</td></tr></tbody></table>
+<hr>
+<h2>Cross-cutting findings</h2>
+<p>Two of the categories above come from analysis that operates <em>across</em> files rather than line-by-line — this is where the audit adds signal a conventional linter cannot:</p>
+<ul><li><strong>Untrusted input reaches code-execution sink</strong> is a data-flow result: not &quot;this line looks dangerous,&quot; but &quot;untrusted input <em>reaches</em> this sink without passing through an encoder,&quot; established by following the flow across the process boundary.</li><li><strong>Missing input neutralization</strong> compares structurally similar call sites and flags the outliers: most comparable sites apply a neutralization step before the sink; these specific sites skip it. The safe pattern already exists in the codebase, which makes these high-confidence, low-effort fixes.</li></ul>
+<hr>
+<h2>C/C++ coverage</h2>
+<p>The native layer was fully analyzed, including coding-standard conformance. Notably, that pass added <strong>no new criticals or highs</strong> — its contribution is low-severity maintainability (unscoped casts, partial special-member sets, coding-standard deviations). The reassuring result: the genuinely dangerous native-code shapes (shell execution, unchecked memory copies, path traversal) were already caught, and the conformance pass confirms the C/C++ layer carries no <em>additional</em> security surprises beyond style-tier debt.</p>
+<hr>
+<h2>Readiness methodology</h2>
+<p>Each readiness dimension is scored 0–1 from underlying signals; the two weakest of each are reported.</p>
+<ul><li><strong>Test — Weak (0.53).</strong> Weakest: coverage of the highest-risk code (0.12), and how closely tests sit to the code they exercise (0.20). The 0.53 overall is not &quot;half the lines are covered&quot; — it is &quot;some scaffolding exists, but almost none of it sits on the high-risk code.&quot; Coverage targeted at the wallet handlers and the criticals moves the band fastest.</li><li><strong>Agentic — Experimental (0.17).</strong> Weakest: the ability for an agent to verify its own changes (0.12), and runtime observability (0.25). An agent editing this repo today is flying blind.</li><li><strong>Performance — Efficient (0.98).</strong> Weakest: loop efficiency (0.97), hot-path efficiency (0.98). Both near-perfect — no meaningful performance debt.</li></ul>
+<hr>
+<h2>Remediation roadmap</h2>
+<ol><li><strong>Criticals (days):</strong> the 5 listed above.</li><li><strong>Wallet hardening (days):</strong> secret-in-log (20) and weak-randomness (18) — strip secrets from output, move crypto onto a secure randomness source.</li><li><strong>DoS sweep (1–2 sprints):</strong> the 284 unchecked-unwrap-on-request-path sites → proper error returns. Pair with the 12 injection and 16 missing-neutralization sites.</li><li><strong>Test coverage (ongoing):</strong> target coverage of the highest-risk code — risky code first.</li><li><strong>Agentic enablement (later):</strong> automated change-verification + structured logging before pointing any agent at the repo.</li><li><strong>Maintainability (background):</strong> the 2,673 style findings — burn down opportunistically; not a security priority.</li></ol>
+<hr>
+<p><em>Verdict <code>needs_review</code>. Every count and <code>file:line</code> in this report is drawn from the audit results and machine-checked against them; the narrative is written to those results under a contract that forbids any number or location not present in the data.</em></p><hr><p class=stamp>Generated from HelicOps scan data · source_sha256 5a92db05700a6eaf · helicops 3.0.0 · verdict needs_review · grounded + code-validated</p></div></body></html>

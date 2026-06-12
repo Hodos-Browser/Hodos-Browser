@@ -13,8 +13,12 @@ Driving principle: *do it the right way the first time — no re-refactor in two
 
 ## Phase / item status
 
+> 🔝 **TOP PRIORITY: HelicOps audit review** (`HelicOps/README.md`) — 479 findings to adjudicate
+> before finalizing this sprint; results may reprioritize everything. Do this first.
+
 | ID | Item | Type | Size | Status |
 |----|------|------|------|--------|
+| AUDIT | HelicOps audit review | review | large | 🚧 setup done; deep review pending (`HelicOps/`) |
 | B3 | Bookmarks functional | feature | med | ⏳ stub — can start (not Brave-gated) |
 | B4 | Extensions + wallet deconfliction | feature | large | ⏳ stub — untrusted docs relocated, need verification |
 | B1 | Farbling into Chromium source | refactor | large | 🔓 unblocked; design done (`B1-farbling-design.md`) — persistent per-profile seed |

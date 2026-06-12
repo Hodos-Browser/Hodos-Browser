@@ -74,6 +74,16 @@ is both safer and cheaper (we already have it).
 | **Later** | scheduled task / LaunchAgent | "update while app closed" (true Chrome parity) | +~1 wk |
 | **Parked** | Velopack | Revisit when it has feed signing + macOS/C++ track record | — |
 
+## 🔜 Queued follow-up deep-dive (before/with implementation) — update UX + NSIS
+Owner flagged (2026-06-09) that a clumsy update experience is unacceptable. A dedicated deep-dive must:
+- Define the **least-disruptive flow**: silent background download + **invisible apply on the user's
+  next normal restart** (Chrome's model) — NO "quit/restart now" nag. Honest limit: a browser can't
+  hot-swap its own running binary, so *some* relaunch is unavoidable; goal is to make it unnoticeable.
+- Research the **NSIS silent installer** in depth (per-user `%LOCALAPPDATA%`, `/S`, no UAC, no flashed
+  windows) — this is the Windows weak half and the make-or-break for WinSparkle vs Velopack-fallback.
+- Decide the on-relaunch UX (e.g., apply on next launch the user initiates vs a gentle "updated to
+  vX" toast after).
+
 ## Honest unknowns / hands-on items
 - **WinSparkle true-silent** needs hands-on confirmation — it's the weaker half; if it can't hit
   zero-UI, Velopack-on-Windows is the fallback (accepting its feed-signing gap, or build-our-own).
